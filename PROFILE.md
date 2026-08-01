@@ -12,6 +12,9 @@ platform implements and the conventions it layers on top. The spec itself
 lives in Google's repository; where this document and the spec disagree, the
 spec wins.
 
+For the argument behind these choices — what OKF leaves to hosts, and why the
+knowledge/memory split exists — see [the white paper](WHITE-PAPER.md).
+
 ## What is an OKF bundle here
 
 Two directories, at every scope:
