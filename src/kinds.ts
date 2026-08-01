@@ -120,25 +120,6 @@ this text is the whole of the agent's instructions.
 `,
   },
 
-  flows: {
-    kind: "flows",
-    one: "flow",
-    docType: null,
-    docKey: null,
-    scopes: ["workspace"],
-    placeholder: "publish",
-    hint: "An ordered list of agents. Same number means they run in parallel.",
-    file: (name) => `flows/${name}.md`,
-    template: (name, ctx) => `---
-name: ${name}
-description: What this flow accomplishes, end to end.
-trigger: manual
----
-
-1. [[${ctx?.firstAgent ?? "agent-name"}]] — what this step does
-`,
-  },
-
   evals: {
     kind: "evals",
     one: "eval",
@@ -162,23 +143,44 @@ expect:
 `,
   },
 
-  skills: {
-    kind: "skills",
-    one: "skill",
+  flows: {
+    kind: "flows",
+    one: "flow",
     docType: null,
     docKey: null,
-    scopes: ["account", "workspace", "agent"],
-    placeholder: "plain-english",
-    hint: "A procedure an agent loads when it needs it. Folder, not one file.",
-    file: (name) => `skills/${name}/SKILL.md`,
-    template: (name) => `---
+    scopes: ["workspace"],
+    placeholder: "publish",
+    hint: "An ordered list of agents. Same number means they run in parallel.",
+    file: (name) => `flows/${name}.md`,
+    template: (name, ctx) => `---
 name: ${name}
-description: What this skill does, and when an agent should use it.
+description: What this flow accomplishes, end to end.
+trigger: manual
 ---
 
-# ${name}
+1. [[${ctx?.firstAgent ?? "agent-name"}]] — what this step does
+`,
+  },
 
-Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any.
+  knowledge: {
+    kind: "knowledge",
+    one: "knowledge doc",
+    docType: "Reference",
+    // OKF's field and OKF's vocabulary — `Reference` is only the starting point.
+    docKey: "type",
+    scopes: ["account", "workspace", "agent"],
+    placeholder: "pricing",
+    hint: "Reference material, given not learned. Agents read it, never write it.",
+    file: (name) => `knowledge/${name}.md`,
+    // See the memory template: OKF's fields only.
+    template: (name) => `---
+type: Reference
+title: ${titleCase(name)}
+description: Reference material agents look up. Given, not learned.
+status: stable
+---
+
+The reference content. Agents read this and never rewrite it.
 `,
   },
 
@@ -209,25 +211,47 @@ The fact.
 `,
   },
 
-  knowledge: {
-    kind: "knowledge",
-    one: "knowledge doc",
-    docType: "Reference",
-    // OKF's field and OKF's vocabulary — `Reference` is only the starting point.
-    docKey: "type",
+  scripts: {
+    kind: "scripts",
+    one: "script",
+    // Code, not a document — no frontmatter to carry either field. A tool
+    // file points at it.
+    docType: null,
+    docKey: null,
     scopes: ["account", "workspace", "agent"],
-    placeholder: "pricing",
-    hint: "Reference material, given not learned. Agents read it, never write it.",
-    file: (name) => `knowledge/${name}.md`,
-    // See the memory template: OKF's fields only.
+    placeholder: "slugify",
+    hint: "Code an agent runs through a tool. Deterministic work belongs here.",
+    file: (name) => `scripts/${name}.py`,
+    template: (name) => `#!/usr/bin/env python3
+"""${name}"""
+import argparse
+
+p = argparse.ArgumentParser()
+p.add_argument("--input")
+args = p.parse_args()
+
+print(args.input)
+`,
+  },
+
+
+  skills: {
+    kind: "skills",
+    one: "skill",
+    docType: null,
+    docKey: null,
+    scopes: ["account", "workspace", "agent"],
+    placeholder: "plain-english",
+    hint: "A procedure an agent loads when it needs it. Folder, not one file.",
+    file: (name) => `skills/${name}/SKILL.md`,
     template: (name) => `---
-type: Reference
-title: ${titleCase(name)}
-description: Reference material agents look up. Given, not learned.
-status: stable
+name: ${name}
+description: What this skill does, and when an agent should use it.
 ---
 
-The reference content. Agents read this and never rewrite it.
+# ${name}
+
+Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any.
 `,
   },
 
@@ -256,31 +280,7 @@ Notes for whoever maintains this. Agents opt in with:
 use: [${name}]
 \`\`\`
 `,
-  },
-
-  scripts: {
-    kind: "scripts",
-    one: "script",
-    // Code, not a document — no frontmatter to carry either field. A tool
-    // file points at it.
-    docType: null,
-    docKey: null,
-    scopes: ["account", "workspace", "agent"],
-    placeholder: "slugify",
-    hint: "Code an agent runs through a tool. Deterministic work belongs here.",
-    file: (name) => `scripts/${name}.py`,
-    template: (name) => `#!/usr/bin/env python3
-"""${name}"""
-import argparse
-
-p = argparse.ArgumentParser()
-p.add_argument("--input")
-args = p.parse_args()
-
-print(args.input)
-`,
-  },
-};
+  },};
 
 export const ALL_KINDS = Object.keys(KINDS) as Kind[];
 

@@ -374,6 +374,27 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     );
   }
 
+  // State — data a run carries to the next one. It was a directory in the
+  // workspace list, preserved across deploys, and nothing else: never named to
+  // an agent, never loaded, never written. A promise with no implementation.
+  //
+  // Listed rather than inlined, for the same reason knowledge and memory are:
+  // an agent that needs a cursor opens it, and one that doesn't shouldn't pay
+  // for it. The difference is that state is small enough that inlining would
+  // usually be free — that is a threshold worth adding once there is a real
+  // file to size it against, not before.
+  const state = listDir(path.join(agentDir, "..", "..", "state"), "../../state/");
+  if (state.length) {
+    parts.push(
+      `# State — what you carry between runs\n\n` +
+        `Data this workspace keeps across runs: a cursor, a counter, where you got to. ` +
+        `Read and write these directly, and update them before you finish so the next ` +
+        `run starts where you left off.\n\n${state.join("\n")}\n\n` +
+        `This is not memory. A fact you learned goes in memory/, where it is indexed and ` +
+        `its provenance recorded — state is the bookmark, not the lesson.`,
+    );
+  }
+
   // APIs — the agent's own definitions, plus workspace tools it opted into
   // with `use: [name]`. Library tools are defined once and reused.
   const apis = parseApis(front.apis);

@@ -874,8 +874,11 @@ export function listWorkspaceFiles(tenant: string, workspace: string): string[] 
       (rel === "project.md" ||
         rel === "AGENTS.md" ||
         new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`).test(rel));
-    // state/ is the one place holding data rather than prose.
-    const isState = /^state\//.test(rel) && /\.(json|ya?ml|txt)$/.test(rel);
+    // state/ is the one place holding data rather than prose — but the listing
+    // admitted fewer extensions than the writer does, so `state/notes.md` could
+    // be written and then never appeared in the tree. Writable and invisible is
+    // the worst of both; one rule now decides.
+    const isState = /^state\//.test(rel) && SCRIPT_EXT.test(rel);
     if (isScript || isSkillAsset || isMarkdown || isState) out.push(rel);
   }
   return out.sort();

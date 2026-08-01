@@ -31,7 +31,7 @@ import {
 
 export type LibraryKind = "skills" | "scripts" | "memory" | "knowledge" | "tools";
 // Same order as the workspace nav and asset pages — one list, one order.
-export const LIBRARY_KINDS: LibraryKind[] = ["skills", "memory", "knowledge", "tools", "scripts"];
+export const LIBRARY_KINDS: LibraryKind[] = ["knowledge", "memory", "scripts", "skills", "tools"];
 
 export function libraryDir(tenant: string, kind?: LibraryKind) {
   // Alongside the workspace in single-workspace mode: ./library, so a shared
