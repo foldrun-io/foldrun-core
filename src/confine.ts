@@ -28,7 +28,32 @@
 // which would have blocked an agent writing outputs/index.md — a perfectly
 // ordinary deliverable — so the rule names the two directories it applies to.
 
+import fs from "node:fs";
 import path from "node:path";
+
+/**
+ * A path with its symlinks resolved, as far as it exists.
+ *
+ * Both sides of the containment check have to be resolved the same way or the
+ * comparison is between two spellings of one place. On macOS `/var` is a
+ * symlink to `/private/var`, so a workspace under a system temp directory was
+ * handed to the runtime as `/var/folders/…` while every path the agent
+ * produced came back as `/private/var/folders/…`. `path.relative` then said
+ * `..`, and the agent was told its own workspace was outside the workspace —
+ * on every write, for the whole run, while the run still reported success
+ * because the agent gave up politely.
+ *
+ * Falls back a level at a time because the path may not exist yet: a Write
+ * creating a file needs the directory resolved, not the file.
+ */
+function real(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    const parent = path.dirname(p);
+    return parent === p ? p : path.join(real(parent), path.basename(p));
+  }
+}
 
 /** Tool argument names that carry a filesystem path. */
 const PATH_KEYS = [
@@ -128,8 +153,8 @@ export function checkPaths(
   input: Record<string, unknown>,
   roots: Roots,
 ): ConfineVerdict {
-  const workspace = path.resolve(roots.workspaceRoot);
-  const library = path.resolve(roots.libraryRoot);
+  const workspace = real(path.resolve(roots.workspaceRoot));
+  const library = real(path.resolve(roots.libraryRoot));
   const isWrite = WRITE_TOOLS.has(toolName);
   let rewritten: Record<string, unknown> | undefined;
 
@@ -143,7 +168,7 @@ export function checkPaths(
     }
 
     const virtual = expandVirtual(raw, roots);
-    const abs = virtual ? virtual.abs : path.resolve(roots.agentDir, raw);
+    const abs = real(virtual ? virtual.abs : path.resolve(roots.agentDir, raw));
 
     // Knowledge is given, not learned: an agent that rewrites the price list
     // it was handed has corrupted its own source of truth. What it discovers
