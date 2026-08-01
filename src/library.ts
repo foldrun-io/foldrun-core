@@ -4,7 +4,7 @@
 //   data/<tenant>/library/
 //   ├── skills/<name>/SKILL.md   Agent Skills format, shared
 //   ├── scripts/<file>           shared executables
-//   ├── memory/MEMORY.md + *.md  organisation-wide knowledge
+//   ├── memory/*.md              organisation-wide knowledge
 //   └── tools/<name>.md          reusable API definitions (frontmatter = ApiSpec)
 //
 // Resolution is nearest-wins, the same rule OKF uses for knowledge: an agent's
@@ -112,7 +112,7 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
     if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel)) continue;
     // The memory index is generated, so it isn't an entry in its own list.
     if ((kind === "memory" || kind === "knowledge") &&
-        ["MEMORY.md", "index.md", "log.md"].includes(rel)) continue;
+        ["index.md", "log.md"].includes(rel)) continue;
     out.push({
       ...describe(full, rel),
       path: rel,

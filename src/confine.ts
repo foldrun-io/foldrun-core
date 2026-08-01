@@ -21,8 +21,8 @@
 //     by the next syncBundleFor, but until then the index says whatever it was
 //     told to say, and log.md is provenance for the same reason runs/ is.
 //
-// MEMORY.md is deliberately NOT protected: that one is the *curated* index an
-// agent is supposed to maintain. The generated one is index.md.
+// There is no curated index beside the generated one. A bundle has exactly the
+// two reserved files OKF defines, and both are generated.
 //
 // The bundle scoping matters. An earlier draft denied any index.md anywhere,
 // which would have blocked an agent writing outputs/index.md — a perfectly
@@ -171,8 +171,7 @@ export function checkPaths(
         reason:
           `${toolName} was denied: "${raw}" is a protected platform file. Secrets reach you as ` +
           `environment variables; the run journal is read-only; and a bundle's index.md and ` +
-          `log.md are generated from the files around them — write the concept file instead, ` +
-          `or MEMORY.md if you mean the curated index.`,
+          `log.md are generated from the files around them — write the concept file instead.`,
       };
     }
 
@@ -235,7 +234,7 @@ const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
     writeOnly: false,
     reason:
       "index.md and log.md are generated from the files around them — write the concept file " +
-      "instead, or MEMORY.md if you mean the curated index.",
+      "instead.",
   },
 ];
 

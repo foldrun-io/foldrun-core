@@ -25,7 +25,7 @@ import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
 import {
-  readBundle, syncIndex, appendLog, ensureMemoryType, provenanceMarks, syncWorkspaceBundles,
+  readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { starterFiles } from "./starter.ts";
@@ -110,10 +110,10 @@ export interface DeployFile {
 
 // Files whose names are part of a standard, and must be spelled exactly.
 // AGENTS.md is the Linux Foundation convention; SKILL.md is the Agent Skills
-// standard; MEMORY.md is ours. Case-insensitive filesystems (macOS, Windows)
+// standard. Case-insensitive filesystems (macOS, Windows)
 // happily accept `Skill.md` locally and then it vanishes on a Linux runtime —
 // so the wrong case is rejected here, loudly, with the right spelling.
-const CANONICAL = ["AGENTS.md", "SKILL.md", "MEMORY.md"];
+const CANONICAL = ["AGENTS.md", "SKILL.md"];
 
 /**
  * The format version this build understands.
@@ -279,23 +279,18 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
 // the spec. This builds the same listing with paths the agent can actually
 // open, plus the v0.2 signals that change how a fact should be treated: a
 // stale price list or an unverified claim should not read like a confirmed
-// one. A hand-written MEMORY.md is still honoured and placed first, so a
-// curated preamble survives.
+// one.
+//
+// There is no curated preamble. A hand-written MEMORY.md used to be read in
+// ahead of this listing, and it was a reserved name we invented inside someone
+// else's format — a consumer applying OKF's rules saw an untyped concept and
+// rejected the bundle. Shared prose belongs in AGENTS.md, which is already the
+// place for context every agent here gets.
 export function buildMemoryIndex(dir: string, prefix = ""): string | null {
   if (!fs.existsSync(dir)) return null;
 
-  // Body only. MEMORY.md needs a `type:` to be conformant — it is not one of
-  // OKF's two reserved names, so a consumer reads it as a concept — and this
-  // preamble goes straight into an agent's context, where a raw `---` block
-  // would be four lines of YAML the model has to sit through and might answer.
-  const curated = path.join(dir, "MEMORY.md");
-  const preamble = fs.existsSync(curated)
-    ? matter(fs.readFileSync(curated, "utf8")).content.trim()
-    : "";
-
   const lines: string[] = [];
   for (const doc of readBundle(dir)) {
-    if (preamble.includes(doc.file)) continue; // already curated above
     const marks = [
       doc.type && doc.type !== "Memory" ? doc.type : null,
       doc.status !== "stable" ? doc.status : null,
@@ -312,9 +307,7 @@ export function buildMemoryIndex(dir: string, prefix = ""): string | null {
     );
   }
 
-  const generated = lines.join("\n");
-  if (!preamble && !generated) return null;
-  return [preamble, generated].filter(Boolean).join("\n");
+  return lines.length ? lines.join("\n") : null;
 }
 
 // Workspace-scoped shared assets: skills/, memory/, tools/ sit beside agents/
@@ -562,7 +555,7 @@ export interface FlowInfo {
 // [[ ]] autocomplete.
 export interface AgentAssets {
   skills: string[]; // skill names (frontmatter name or filename)
-  memory: string[]; // memory file names under memory/, excluding MEMORY.md
+  memory: string[]; // memory file names under memory/
 }
 
 export function agentAssets(tenant: string, workspace: string, agent: string): AgentAssets {
@@ -594,7 +587,9 @@ export function agentAssets(tenant: string, workspace: string, agent: string): A
   const memoryDir = path.join(base, "memory");
   if (fs.existsSync(memoryDir)) {
     for (const f of fs.readdirSync(memoryDir).sort()) {
-      if (f.endsWith(".md") && f !== "MEMORY.md") memory.push(nameOf(path.join(memoryDir, f), f.replace(/\.md$/, "")));
+      if (f.endsWith(".md") && !["index.md", "log.md"].includes(f)) {
+        memory.push(nameOf(path.join(memoryDir, f), f.replace(/\.md$/, "")));
+      }
     }
   }
   return { skills, memory };
@@ -921,9 +916,6 @@ export function syncBundleFor(file: string, change?: "Creation" | "Update") {
   // A workspace- or account-level bundle is a root; an agent's own is nested
   // inside one, and the spec permits okf_version only at a bundle root.
   const isRoot = path.basename(path.resolve(dir, "..", "..")) !== "agents";
-  // Before the index, so a MEMORY.md written moments ago is conformant by the
-  // time anything reads or exports the bundle.
-  ensureMemoryType(dir);
   syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
   if (change) {
     appendLog(dir, path.relative(dir, file).split(path.sep).join("/"), change);

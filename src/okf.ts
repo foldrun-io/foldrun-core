@@ -57,17 +57,16 @@ export const isHumanActor = (actor: string) => actor.startsWith("human:");
 const OKF_RESERVED = new Set(["index.md", "log.md"]);
 
 /**
- * Files this platform presents as indexes rather than concepts, so they stay
- * out of listings: the spec's two, plus MEMORY.md, which is ours.
+ * Files that are bundle structure rather than concepts.
  *
- * Kept apart from OKF_RESERVED on purpose. Conflating them is what made a
- * bundle we emit fail somebody else's validator while passing our own:
- * MEMORY.md is hand-written and carried no frontmatter, and because it sat in
- * the same set as index.md the conformance check never looked at it. Ours is a
- * presentation decision; the spec's is a conformance rule, and only the second
- * one governs what a consumer will accept.
+ * Exactly the spec's two. There used to be a third — MEMORY.md, a curated
+ * index of ours — and inventing a reserved name inside someone else's format
+ * is what made a bundle we emit fail an outside validator while passing our
+ * own: a consumer applies the spec's set, sees a file with no `type`, and
+ * rejects the bundle over something we introduced. The lesson generalises, so
+ * this set is the spec's and stays that way.
  */
-const NOT_A_CONCEPT = new Set([...OKF_RESERVED, "MEMORY.md"]);
+const NOT_A_CONCEPT = OKF_RESERVED;
 
 export type TrustTier = "unverified" | "machine-confirmed" | "human-reviewed";
 export type OkfStatus = "draft" | "stable" | "deprecated";
@@ -439,11 +438,7 @@ export function conformanceIssues(
     if (!type) {
       out.push({
         file,
-        issue:
-          entry === "MEMORY.md"
-            ? "missing `type:` — MEMORY.md is ours, not one of OKF's two reserved names, so a " +
-              "consumer reads it as a concept and requires a type"
-            : "missing `type:` — OKF requires a non-empty type on every concept",
+        issue: "missing `type:` — OKF requires a non-empty type on every concept",
       });
     }
   }
@@ -492,41 +487,6 @@ export function buildIndex(
 }
 
 /**
- * Give MEMORY.md the `type:` a consumer needs, if it hasn't got one.
- *
- * MEMORY.md is this platform's curated index, and it is hand-written — by a
- * person or by an agent, neither of whom should have to remember a conformance
- * rule about a file the spec doesn't mention. Since it isn't one of OKF's two
- * reserved names, a consumer reads it as a concept and requires a type; without
- * one, the whole bundle is rejected over a file we introduced.
- *
- * So it is repaired on sync, exactly like index.md and log.md are generated on
- * sync. The body is untouched — only the frontmatter block is added, and only
- * when `type` is absent.
- *
- * Returns whether it wrote.
- */
-export function ensureMemoryType(dir: string, type = "Index"): boolean {
-  const file = path.join(dir, "MEMORY.md");
-  if (!fs.existsSync(file)) return false;
-
-  const raw = fs.readFileSync(file, "utf8");
-  let parsed;
-  try {
-    parsed = matter(raw);
-  } catch {
-    return false; // unparseable frontmatter is a real error; report, don't rewrite
-  }
-  const data = parsed.data as Record<string, unknown>;
-  if (typeof data.type === "string" && data.type.trim()) return false;
-
-  const front = { type, ...data, title: data.title ?? data.name ?? "Memory" };
-  const lines = Object.entries(front).map(([k, v]) => `${k}: ${JSON.stringify(v)}`);
-  fs.writeFileSync(file, `---\n${lines.join("\n")}\n---\n\n${parsed.content.trimStart()}`);
-  return true;
-}
-
-/**
  * Write index.md for a bundle and for every directory inside it. The spec puts
  * an index at each level, so a nested bundle is navigable without a full walk.
  */
@@ -567,7 +527,6 @@ export function syncIndex(dir: string, title: string, isRoot = false, depth = 0)
 export function syncWorkspaceBundles(root: string): void {
   const sync = (dir: string, kind: "knowledge" | "memory", isRoot: boolean) => {
     if (!fs.existsSync(dir)) return;
-    ensureMemoryType(dir);
     syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
   };
 
