@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { chooseExecutor, runInContainer } from "./container.ts";
+import { runInContainer } from "./container.ts";
 
 const TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 20_000;
