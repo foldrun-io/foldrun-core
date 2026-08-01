@@ -673,6 +673,12 @@ export function stampBundle(
 export function syncWorkspaceBundles(root: string): void {
   const sync = (dir: string, kind: "knowledge" | "memory", isRoot: boolean) => {
     if (!fs.existsSync(dir)) return;
+    // An index for a bundle holding nothing is a file whose entire content is
+    // "nothing here yet" — true, and noise in a repository. index.md is
+    // optional in the spec, so there is no reason to write one before there is
+    // something to list. An agent's empty memory/ is the common case, and it
+    // put three of these into the examples before anyone looked.
+    if (readBundle(dir).length === 0) return;
     syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
   };
 
