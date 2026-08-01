@@ -101,9 +101,11 @@ function runScript(
   exec: ExecutionContext | null,
 ): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    // Confine to the agent's own directory plus the workspace it belongs to —
-    // `shared/` is a symlink to <workspace>/scripts, so the workspace root has to
-    // be allowed for shared scripts to resolve.
+    // Confine to the agent's own directory plus the workspace it belongs to.
+    // The workspace root is allowed because `shared/` resolves to
+    // <workspace>/scripts — a virtual prefix expanded at resolve time, not a
+    // symlink on disk. (Symlinking it was tried and reverted: the link
+    // recursed into the workspace's own file listing.)
     const abs = resolveRunPath(cwd, spec.run, libraryScripts);
     const workspaceRoot = path.resolve(cwd, "..", "..");
     const allowedRoots = [path.resolve(cwd), workspaceRoot, libraryScripts].filter(Boolean).map((p) => {
@@ -119,7 +121,15 @@ function runScript(
     } catch {
       return resolve({ code: null, out: `script not found: ${spec.run}` });
     }
-    if (!allowedRoots.some((root) => real.startsWith(root))) {
+    // Containment, not a string prefix. `startsWith` called
+    // `<workspace>-attacker/steal.py` a path inside `<workspace>`, because it
+    // is — as text. The question is whether one path is under another, and
+    // only path.relative answers that.
+    const within = (root: string) => {
+      const rel = path.relative(root, real);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    };
+    if (!allowedRoots.some(within)) {
       return resolve({ code: null, out: `script path escapes the workspace: ${spec.run}` });
     }
 
