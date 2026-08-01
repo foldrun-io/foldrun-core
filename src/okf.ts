@@ -147,10 +147,64 @@ function parseComputation(data: Record<string, unknown>): OkfComputation | null 
   };
 }
 
+/**
+ * The signals that decide whether a concept is worth opening: who produced it,
+ * and whether anyone has confirmed it.
+ *
+ * v0.2's argument for putting these in frontmatter is that most interactions
+ * with a concept never reach its body — a consumer first has to judge relevance
+ * and trustworthiness, and should be able to do that without paying for prose.
+ * That only works if the signals actually reach the index. `generated` was
+ * parsed and stored here and then surfaced nowhere, so on disk an agent's
+ * invention and a person's verified note were distinguishable and at the moment
+ * of choosing between them they were not — which is the problem the field was
+ * added to solve.
+ *
+ * Only the machine case is named. A person writing is the default assumption,
+ * and a mark on every line costs tokens on the one thing whose whole job is to
+ * be cheap to scan.
+ *
+ * One definition, used by both index builders. They render different prose
+ * around it on purpose — the memory index speaks to a model mid-run — but they
+ * must not disagree about what the signals *are*.
+ */
+export function provenanceMarks(doc: Pick<OkfDoc, "generatedBy" | "trust">): string[] {
+  const marks: string[] = [];
+  if (doc.generatedBy?.startsWith("producer/")) marks.push("agent-written");
+  // Always stated, including the positive tiers. Marking only the bad case
+  // meant a human-reviewed fact and an unreviewed one were both rendered by
+  // saying nothing, so trust could not be filtered on — only its absence.
+  marks.push(doc.trust);
+  return marks;
+}
+
 /** Derived, never stored — the spec is explicit that consumers compute this. */
 export function trustTier(verifiedBy: string[]): TrustTier {
   if (verifiedBy.length === 0) return "unverified";
   return verifiedBy.some((a) => a.startsWith("human:")) ? "human-reviewed" : "machine-confirmed";
+}
+
+/**
+ * A date from frontmatter, as `YYYY-MM-DD`.
+ *
+ * YAML parses an unquoted `2026-12-31` into a Date, not a string — which is
+ * how the spec's own examples are written. Every date field here tested for
+ * `typeof === "string"`, so the canonical spelling was silently discarded:
+ * `stale_after: 2026-12-31` set no expiry at all, and nothing reported that a
+ * declared one had been dropped. Quoting it happened to work, which is why it
+ * survived: the tests wrote `"2026-12-31"` and the spec does not.
+ */
+function isoDay(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const s = typeof value === "string" ? value.trim() : "";
+  return s || null;
+}
+
+/** As isoDay, but keeps the time when one was given — `timestamp` is an instant. */
+function isoInstant(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  const s = typeof value === "string" ? value.trim() : "";
+  return s || null;
 }
 
 function actors(value: unknown): string[] {
@@ -163,7 +217,7 @@ function actors(value: unknown): string[] {
 export function readDoc(dir: string, file: string, today = new Date()): OkfDoc | null {
   try {
     const { data } = matter(fs.readFileSync(path.join(dir, file), "utf8"));
-    const staleAfter = typeof data.stale_after === "string" ? data.stale_after : null;
+    const staleAfter = isoDay(data.stale_after);
     const verifiedBy = actors(data.verified);
     const status: OkfStatus = ["draft", "stable", "deprecated"].includes(String(data.status))
       ? (data.status as OkfStatus)
@@ -184,13 +238,13 @@ export function readDoc(dir: string, file: string, today = new Date()): OkfDoc |
       generatedBy:
         data.generated && typeof data.generated === "object"
           ? String((data.generated as { by?: unknown }).by ?? "") || null
-          : typeof data.timestamp === "string"
+          : isoInstant(data.timestamp)
             ? "unknown (v0.1 timestamp)"
             : null,
       verifiedBy,
       trust: trustTier(verifiedBy),
       resource: typeof data.resource === "string" ? data.resource : null,
-      timestamp: typeof data.timestamp === "string" ? data.timestamp : null,
+      timestamp: isoInstant(data.timestamp),
       computation: parseComputation(data),
       sources: Array.isArray(data.sources)
         ? data.sources
@@ -201,7 +255,7 @@ export function readDoc(dir: string, file: string, today = new Date()): OkfDoc |
               title: s.title ? String(s.title) : undefined,
               author: s.author ? String(s.author) : undefined,
               usageCount: typeof s.usage_count === "number" ? s.usage_count : undefined,
-              lastModified: s.last_modified ? String(s.last_modified) : undefined,
+              lastModified: isoDay(s.last_modified) ?? undefined,
               usageWindow:
                 s.usage_window && typeof s.usage_window === "object"
                   ? {
@@ -342,7 +396,7 @@ export function buildIndex(
         const marks = [
           d.status !== "stable" ? d.status : null,
           d.stale ? `stale since ${d.staleAfter}` : null,
-          d.trust === "unverified" ? "unverified" : null,
+          ...provenanceMarks(d),
           d.computation ? "UNATTESTED — output not checked against the contract" : null,
         ].filter(Boolean);
         return `- [${d.title}](${d.file})${d.description ? ` — ${d.description}` : ""}${

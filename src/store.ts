@@ -24,7 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
-import { readBundle, syncIndex, appendLog, ensureMemoryType } from "./okf.ts";
+import { readBundle, syncIndex, appendLog, ensureMemoryType, provenanceMarks } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { starterFiles } from "./starter.ts";
 
@@ -293,7 +293,10 @@ export function buildMemoryIndex(dir: string, prefix = ""): string | null {
       doc.type && doc.type !== "Memory" ? doc.type : null,
       doc.status !== "stable" ? doc.status : null,
       doc.stale ? `STALE since ${doc.staleAfter} — confirm before relying on it` : null,
-      doc.trust === "unverified" ? "unverified" : null,
+      // Same signals as the on-disk index, one definition — see provenanceMarks.
+      // This is the copy a model reads mid-run, so it is the one that decides
+      // whether it treats its own earlier guess as a fact.
+      ...provenanceMarks(doc),
     ].filter(Boolean);
     lines.push(
       `- [${doc.title}](${prefix}${doc.file})` +
