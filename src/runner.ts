@@ -240,6 +240,20 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   );
   const parts = [body.trim()];
 
+  // Where the agent is standing. Every path below this line is relative to the
+  // agent's own directory, and a run showed why that has to be said rather
+  // than implied: told to read `../../knowledge/index.md`, the model asked for
+  // `/knowledge/index.md` twice before working it out. Two denials and a turn,
+  // for want of one sentence.
+  parts.push(
+    `# Where you are\n\n` +
+      `Your working directory is \`agents/${path.basename(agentDir)}/\` inside the ` +
+      `\`${workspace}\` workspace. Every path in this prompt is relative to it — ` +
+      `\`outputs/\` is yours, and \`../../\` is the workspace root, so the workspace's ` +
+      `own knowledge is at \`../../knowledge/\`. Absolute paths are outside the ` +
+      `workspace and will be refused.`,
+  );
+
   // Shared context before anything derived — an account or workspace rule is
   // background the rest of the prompt is read against, not an afterthought.
   const sharedContext = sharedInstructions(agentDir, tenant);
@@ -387,9 +401,12 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   if (state.length) {
     parts.push(
       `# State — what you carry between runs\n\n` +
-        `Data this workspace keeps across runs: a cursor, a counter, where you got to. ` +
+        `What this workspace keeps across runs: a count, a cursor, where you got to. ` +
         `Read and write these directly, and update them before you finish so the next ` +
         `run starts where you left off.\n\n${state.join("\n")}\n\n` +
+        `Keep a file in the format it is already in, and write markdown for anything new. ` +
+        `A count reads as well in a sentence as in JSON, and a person edits these in the ` +
+        `same editor as everything else — data formats are allowed here, not preferred.\n\n` +
         `This is not memory. A fact you learned goes in memory/, where it is indexed and ` +
         `its provenance recorded — state is the bookmark, not the lesson.`,
     );
