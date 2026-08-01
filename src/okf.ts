@@ -30,6 +30,27 @@ export const OKF_VERSION = "0.2";
 export const PRODUCER = "mdagent/0.1.0";
 
 /**
+ * Our stand-in when a v0.1 document carries only `timestamp`. Not an actor —
+ * it says we don't know who, which is different from knowing it was a machine.
+ */
+export const UNKNOWN_ACTOR = "unknown (v0.1 timestamp)";
+
+/**
+ * §7 defines three actor forms, and only one of them is a person:
+ *
+ *   human:<id>              a person          →  human
+ *   <producer>/<version>    an agent or tool  →  machine
+ *   process:<id>            an automated job  →  machine
+ *
+ * So the test is for `human:`, not for any machine form. Testing the other way
+ * round meant matching a literal "producer/" prefix — but the producer's *name*
+ * is the first segment, so the spec's own `reference_agent/gemini-2.5-pro` did
+ * not match, `process:` did not match, and neither did this platform's own
+ * PRODUCER. The mark existed and fired for nothing real.
+ */
+export const isHumanActor = (actor: string) => actor.startsWith("human:");
+
+/**
  * The spec's reserved filenames — exactly these two. A consumer treats every
  * other `.md` in the bundle as a concept and requires a `type:` on it.
  */
@@ -179,7 +200,11 @@ export function provenanceMarks(
   doc: Pick<OkfDoc, "generatedBy" | "trust"> & { verifiedAt?: string | null },
 ): string[] {
   const marks: string[] = [];
-  if (doc.generatedBy?.startsWith("producer/")) marks.push("agent-written");
+  // "machine", not "agent": `process:` is neither a person nor an agent, and
+  // the decision it drives is the same one — a person did not write this.
+  if (doc.generatedBy && doc.generatedBy !== UNKNOWN_ACTOR && !isHumanActor(doc.generatedBy)) {
+    marks.push("machine-written");
+  }
   // Always stated, including the positive tiers. Marking only the bad case
   // meant a human-reviewed fact and an unreviewed one were both rendered by
   // saying nothing, so trust could not be filtered on — only its absence.
@@ -195,7 +220,7 @@ export function provenanceMarks(
 /** Derived, never stored — the spec is explicit that consumers compute this. */
 export function trustTier(verifiedBy: string[]): TrustTier {
   if (verifiedBy.length === 0) return "unverified";
-  return verifiedBy.some((a) => a.startsWith("human:")) ? "human-reviewed" : "machine-confirmed";
+  return verifiedBy.some(isHumanActor) ? "human-reviewed" : "machine-confirmed";
 }
 
 /**
@@ -295,7 +320,7 @@ export function readDoc(dir: string, file: string, today = new Date()): OkfDoc |
       generatedBy: generated
         ? String((generated as { by?: unknown }).by ?? "") || null
         : isoInstant(data.timestamp)
-          ? "unknown (v0.1 timestamp)"
+          ? UNKNOWN_ACTOR
           : null,
       // A v0.1 document has no `generated.at`, but its `timestamp` said the
       // same thing, so an older bundle still reports when it was made.
