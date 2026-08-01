@@ -192,13 +192,12 @@ Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any
     placeholder: "house-tone",
     hint: "One durable fact, learned. Agents write here themselves.",
     file: (name) => `memory/${name}.md`,
-    // `name` is the identifier — kebab-case, matches the filename. `title` is
-    // OKF's human label, and a different thing: without one, every reader
-    // falls back to the slug, so our own index listed "house-style" where it
-    // meant "How we write", and an outside consumer saw the filename.
+    // `title` and nothing of ours. A bundle carries the format's fields, so a
+    // reader that has never heard of this platform loses nothing: `name` was
+    // ours, undefined by OKF, and an outside consumer had no reason to read
+    // it — it fell back to the filename and showed a slug.
     template: (name) => `---
 type: Fact
-name: ${name}
 title: ${titleCase(name)}
 description: One durable fact.
 status: stable
@@ -220,11 +219,9 @@ The fact.
     placeholder: "pricing",
     hint: "Reference material, given not learned. Agents read it, never write it.",
     file: (name) => `knowledge/${name}.md`,
-    // See the memory template: `name` identifies, `title` is what a person
-    // reads. OKF defines only the second.
+    // See the memory template: OKF's fields only.
     template: (name) => `---
 type: Reference
-name: ${name}
 title: ${titleCase(name)}
 description: Reference material agents look up. Given, not learned.
 status: stable

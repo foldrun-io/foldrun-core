@@ -152,12 +152,19 @@ test("only OKF bundles declare what their documents are", () => {
       continue;
     }
 
-    assert.match(body, /^name: sample$/m, `a new ${meta.one} must carry its name`);
-
     if (meta.docKey === "type") {
+      // An OKF bundle carries the format's fields and no dialect of ours:
+      // `title` is the spec's label, `name` is not a key OKF defines. Writing
+      // ours meant a reader that had never heard of this platform fell back to
+      // the filename and displayed a slug.
+      assert.match(body, /^title: /m, `a new ${meta.one} must carry OKF's title`);
+      assert.doesNotMatch(body, /^name:/m,
+        `a new ${meta.one} is an OKF concept and must not carry our own name:`);
       assert.match(body, new RegExp(`^type: ${meta.docType}$`, "m"),
         `a new ${meta.one} is an OKF concept and must declare type: ${meta.docType}`);
     } else {
+      // Everything else is ours, and identified by `name`.
+      assert.match(body, /^name: sample$/m, `a new ${meta.one} must carry its name`);
       assert.equal(meta.docType, null, `${kind} declares a noun but has no field to put it in`);
       assert.doesNotMatch(body, /^kind:/m, `a new ${meta.one} must not restate its path in kind:`);
       assert.doesNotMatch(body, /^type:/m, `a new ${meta.one} must not sit in OKF's field`);

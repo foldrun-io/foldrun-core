@@ -181,10 +181,9 @@ const FIELDS: Record<string, Completion[]> = {
   // required field, the rest are its v0.2 provenance and lifecycle signals.
   note: [
     { label: "type", insert: "type: Fact", hint: "required by OKF" },
-    { label: "name", insert: "name: " },
-    // OKF's own spelling. Both are read and `title` wins, so a bundle written
-    // to the spec and one written here are the same file.
-    { label: "title", insert: "title: ", hint: "OKF's name for `name`" },
+    // `title`, not `name`: a bundle carries the format's fields and no
+    // dialect of ours. `name` is still read from older files, never written.
+    { label: "title", insert: "title: ", hint: "the human-readable label" },
     { label: "description", insert: "description: " },
     { label: "resource", insert: "resource: ", hint: "URI of the thing this describes" },
     { label: "status", insert: "status: stable", hint: "draft | stable | deprecated" },
