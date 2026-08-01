@@ -96,7 +96,14 @@ export interface OkfDoc {
   staleAfter: string | null;
   stale: boolean;
   generatedBy: string | null;
+  /** When it was produced, from `generated.at`. */
+  generatedAt: string | null;
+  /** Every `verified` entry, with its timestamp where one was given. */
+  verified: OkfActor[];
+  /** Just the actors — what the trust tier is computed from. */
   verifiedBy: string[];
+  /** The most recent verification, or null if nobody dated theirs. */
+  verifiedAt: string | null;
   trust: TrustTier;
   /** Recommended v0.1 fields. */
   resource: string | null;
@@ -168,13 +175,20 @@ function parseComputation(data: Record<string, unknown>): OkfComputation | null 
  * around it on purpose — the memory index speaks to a model mid-run — but they
  * must not disagree about what the signals *are*.
  */
-export function provenanceMarks(doc: Pick<OkfDoc, "generatedBy" | "trust">): string[] {
+export function provenanceMarks(
+  doc: Pick<OkfDoc, "generatedBy" | "trust"> & { verifiedAt?: string | null },
+): string[] {
   const marks: string[] = [];
   if (doc.generatedBy?.startsWith("producer/")) marks.push("agent-written");
   // Always stated, including the positive tiers. Marking only the bad case
   // meant a human-reviewed fact and an unreviewed one were both rendered by
   // saying nothing, so trust could not be filtered on — only its absence.
-  marks.push(doc.trust);
+  //
+  // Dated where the bundle dated it, because "reviewed" answers a weaker
+  // question than it looks like it answers: a fact checked in 2019 and one
+  // checked last week are not the same claim, and the tier alone conflates
+  // them. The day is enough — the hour never changes a decision here.
+  marks.push(doc.verifiedAt ? `${doc.trust} ${doc.verifiedAt.slice(0, 10)}` : doc.trust);
   return marks;
 }
 
@@ -207,18 +221,46 @@ function isoInstant(value: unknown): string | null {
   return s || null;
 }
 
-function actors(value: unknown): string[] {
+/**
+ * An actor and when it acted — `{ by: human:kliu@acme, at: 2026-07-01T16:00Z }`.
+ *
+ * `at` is the difference between a fact somebody checked last week and one
+ * somebody checked in 2019. Both used to read as "human-reviewed", which makes
+ * the tier answer a weaker question than it appears to: not "can I rely on
+ * this" but "did anyone ever look".
+ */
+export interface OkfActor {
+  by: string;
+  at: string | null;
+}
+
+function actorList(value: unknown): OkfActor[] {
   const list = Array.isArray(value) ? value : value ? [value] : [];
-  return list
-    .map((v) => (v && typeof v === "object" ? (v as { by?: unknown }).by : v))
-    .filter((v): v is string => typeof v === "string" && v.length > 0);
+  return list.flatMap((v): OkfActor[] => {
+    // The spec's form is a mapping; a bare string is accepted too, since a
+    // producer that only knows who — not when — should not be unreadable.
+    if (v && typeof v === "object") {
+      const by = (v as { by?: unknown }).by;
+      return typeof by === "string" && by
+        ? [{ by, at: isoInstant((v as { at?: unknown }).at) }]
+        : [];
+    }
+    return typeof v === "string" && v ? [{ by: v, at: null }] : [];
+  });
+}
+
+/** The most recent `at` among these actors, or null if none carried one. */
+export function latestAt(list: OkfActor[]): string | null {
+  return list.reduce<string | null>((best, a) => (a.at && (!best || a.at > best) ? a.at : best), null);
 }
 
 export function readDoc(dir: string, file: string, today = new Date()): OkfDoc | null {
   try {
     const { data } = matter(fs.readFileSync(path.join(dir, file), "utf8"));
     const staleAfter = isoDay(data.stale_after);
-    const verifiedBy = actors(data.verified);
+    const verified = actorList(data.verified);
+    const verifiedBy = verified.map((a) => a.by);
+    const generated = data.generated && typeof data.generated === "object" ? data.generated : null;
     const status: OkfStatus = ["draft", "stable", "deprecated"].includes(String(data.status))
       ? (data.status as OkfStatus)
       : "stable"; // the spec's default when absent
@@ -235,13 +277,19 @@ export function readDoc(dir: string, file: string, today = new Date()): OkfDoc |
       stale: staleAfter ? today.toISOString().slice(0, 10) >= staleAfter : false,
       // A v0.1 document has no `generated`; the spec allows falling back to the
       // legacy `timestamp` so an older bundle still reports when it was made.
-      generatedBy:
-        data.generated && typeof data.generated === "object"
-          ? String((data.generated as { by?: unknown }).by ?? "") || null
-          : isoInstant(data.timestamp)
-            ? "unknown (v0.1 timestamp)"
-            : null,
+      generatedBy: generated
+        ? String((generated as { by?: unknown }).by ?? "") || null
+        : isoInstant(data.timestamp)
+          ? "unknown (v0.1 timestamp)"
+          : null,
+      // A v0.1 document has no `generated.at`, but its `timestamp` said the
+      // same thing, so an older bundle still reports when it was made.
+      generatedAt: generated
+        ? isoInstant((generated as { at?: unknown }).at)
+        : isoInstant(data.timestamp),
+      verified,
       verifiedBy,
+      verifiedAt: latestAt(verified),
       trust: trustTier(verifiedBy),
       resource: typeof data.resource === "string" ? data.resource : null,
       timestamp: isoInstant(data.timestamp),
