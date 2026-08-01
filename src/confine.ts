@@ -201,6 +201,44 @@ const BASH_ESCAPES = [
   /\$\{?[A-Z_]*(TOKEN|KEY|SECRET|PASSWORD)/, // don't let a command echo a credential out
 ];
 
+/**
+ * Shapes that modify a file, as opposed to reading one.
+ *
+ * Bash cannot be checked the way a tool call can — there is no path argument,
+ * only a string — so the protections checkPaths applies to Write and Edit have
+ * to be recognised here from the command's shape. That is why `knowledge/` is
+ * matched only alongside one of these: reading the price list is the entire
+ * reason it exists, and a blanket rule would have banned `cat`.
+ */
+const WRITES_TO_A_FILE =
+  /(>>?|\btee\b|\bsed\b[^]*?\s-i\b|\b(rm|mv|cp|truncate|dd|install|ln|chmod|chown|mkdir|rmdir|touch)\b)/;
+
+/** Protections that mirror checkPaths, per command segment. */
+const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
+  {
+    re: /(^|[\s'"(/])knowledge\//,
+    writeOnly: true,
+    reason:
+      "knowledge/ is reference material maintained by people, not by you. If you learned " +
+      "something new, write it to memory/ instead.",
+  },
+  {
+    // Not write-only: checkPaths denies reading the journal too, and a rule
+    // that differs by tool is a rule an agent can shop around for.
+    re: /(^|[\s'"(/])runs(\/|$)/,
+    writeOnly: false,
+    reason:
+      "the run journal is the audit trail for this run, and is not yours to read or rewrite.",
+  },
+  {
+    re: /(^|[\s'"(/])(knowledge|memory)\/(\S*\/)?(index|log)\.md/,
+    writeOnly: false,
+    reason:
+      "index.md and log.md are generated from the files around them — write the concept file " +
+      "instead, or MEMORY.md if you mean the curated index.",
+  },
+];
+
 export function checkBash(command: string): ConfineVerdict {
   for (const re of BASH_ESCAPES) {
     if (re.test(command)) {
@@ -210,6 +248,17 @@ export function checkBash(command: string): ConfineVerdict {
           `Bash was denied: this command reaches outside the workspace. Work with paths relative ` +
           `to your agent directory.`,
       };
+    }
+  }
+
+  // Per segment, so `cat knowledge/prices.md && echo done` is judged on the
+  // part that touches the path rather than on the whole line.
+  for (const segment of command.split(/[;|&]+|\n/)) {
+    if (!segment.trim()) continue;
+    const writes = WRITES_TO_A_FILE.test(segment);
+    for (const rule of PROTECTED_BASH) {
+      if (rule.writeOnly && !writes) continue;
+      if (rule.re.test(segment)) return { ok: false, reason: `Bash was denied: ${rule.reason}` };
     }
   }
   return { ok: true };
