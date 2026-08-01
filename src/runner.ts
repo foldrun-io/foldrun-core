@@ -1406,3 +1406,46 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
 export function reconcileAllRuns(now = Date.now()): Reconciliation[] {
   return listTenants().flatMap((tenant) => reconcileRuns(tenant, now));
 }
+
+/**
+ * Wait for a run to stop being in progress.
+ *
+ * Runs start and return immediately, which is right for a schedule and wrong
+ * for a caller putting an agent behind their own request: they want the
+ * answer, not a receipt. Polls the run record rather than holding a callback,
+ * so it works from a different process than the one doing the work.
+ *
+ * `awaiting-approval` counts as stopping. It is not finished, but it is not
+ * going to progress without a person, and a caller blocked on it would hang
+ * for as long as the approval window allows.
+ */
+export async function waitForRun(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  timeoutMs = 5 * 60_000,
+): Promise<{ run: RunRecord | null; timedOut: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const run = readRun(tenant, workspace, runId);
+    if (!run) return { run: null, timedOut: false };
+    if (run.status !== "running") return { run, timedOut: false };
+    if (Date.now() >= deadline) return { run, timedOut: true };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/**
+ * What a run produced, for a caller that wanted an answer.
+ *
+ * The last step that actually returned something: a flow's final step is the
+ * conclusion, and skipping back past steps that were skipped or produced
+ * nothing is what makes `?wait=true` useful rather than merely blocking.
+ */
+export function runResult(run: RunRecord): string | null {
+  for (let i = run.steps.length - 1; i >= 0; i--) {
+    const r = run.steps[i].result;
+    if (r && r.trim()) return r;
+  }
+  return null;
+}
