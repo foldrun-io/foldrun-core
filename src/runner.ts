@@ -209,6 +209,28 @@ export function sharedInstructions(agentDir: string, tenant: string): string | n
   );
 }
 
+/**
+ * Which of an agent's in-scope skills load for this run.
+ *
+ * Two independent gates: `skills:` in the agent's frontmatter is an allowlist
+ * (absent means everything in scope), and a skill's own `when:` names the run
+ * tags it is for (absent means every run).
+ *
+ * Note what an empty `tags` means — a skill with `when:` matches nothing, so
+ * an untagged run gets none of them. That is the intent, and it is also why
+ * failing to thread the run's tags this far made every `when:` skill
+ * permanently invisible instead of conditionally loaded.
+ */
+export function applicableSkills<T extends { name: string; when: string[] }>(
+  skills: T[],
+  only: string[],
+  tags: string[],
+): T[] {
+  return skills
+    .filter((s) => only.length === 0 || only.includes(s.name))
+    .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
+}
+
 function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
   // workspace a secret should resolve against is two levels up.
@@ -253,9 +275,7 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   // Absent, an agent inherits every skill in scope — knowledge cascades. Named,
   // it's an allowlist, which is how you keep a focused agent focused.
   const only: string[] = Array.isArray(front.skills) ? front.skills.map(String) : [];
-  const applicable = skills
-    .filter((s) => only.length === 0 || only.includes(s.name))
-    .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
+  const applicable = applicableSkills(skills, only, tags);
   const withheld = skills.length - applicable.length;
 
   if (applicable.length) {
@@ -634,7 +654,7 @@ async function runStep(
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
       providerEnv, providerLabel, formatWarning,
-    } = agentContext(agentDir, tenant);
+    } = agentContext(agentDir, tenant, tags);
 
     // Populate before the first push: everything after this point may quote a
     // credential. Short values are skipped — a two-character secret would
