@@ -10,11 +10,23 @@
 import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
-import { listWorkspaces, listFlows, type FlowInfo } from "./store.ts";
-import { startFlowRun } from "./runner.ts";
+import { listWorkspaces, listFlows, listTenants, type FlowInfo } from "./store.ts";
+import { startFlowRun, reconcileAllRuns } from "./runner.ts";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
+
+// How often the same interval also closes out abandoned runs. Reconciliation
+// used to happen only when the server booted, which assumed the only way to
+// abandon a run was for the process to die. It isn't: a step can stop
+// emitting — a container that never exits, a model call that never settles —
+// while the server carries on serving pages, and nothing then closes the run.
+// One was found five hours idle and still rendering as live.
+//
+// It reads every run file, so it does not belong on the 30s tick. A tenth of
+// them is every five minutes, well inside the 30-minute idle window.
+export const RECONCILE_EVERY = 10;
+let ticksSinceReconcile = 0;
 
 interface ScheduleState {
   // key: `${tenant}/${workspace}/${flow}` → ISO timestamp of last fire
@@ -201,20 +213,27 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
       }
     }
   }
-  return due;
-}
+  if (++ticksSinceReconcile >= RECONCILE_EVERY) {
+    ticksSinceReconcile = 0;
+    try {
+      for (const closed of reconcileAllRuns(now.getTime())) {
+        console.log(
+          `[scheduler] closed abandoned run ${closed.tenant}/${closed.workspace}/${closed.runId}` +
+            (closed.interrupted.length ? ` — interrupted: ${closed.interrupted.join(", ")}` : ""),
+        );
+      }
+    } catch (err) {
+      // A run that cannot be reconciled must not stop flows from firing.
+      console.error("[scheduler] reconcile failed:", err);
+    }
+  }
 
-function tenantDirs(): string[] {
-  const root = dataRoot();
-  if (!fs.existsSync(root)) return ["default"];
-  return fs
-    .readdirSync(root)
-    .filter((n) => !n.startsWith(".") && fs.statSync(path.join(root, n)).isDirectory());
+  return due;
 }
 
 export function tick(now = new Date()): DueFlow[] {
   const state = readState();
-  const due = findDueFlows(now, state, tenantDirs());
+  const due = findDueFlows(now, state, listTenants());
   writeState(state);
   for (const d of due) {
     try {
