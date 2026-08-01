@@ -17,6 +17,7 @@ import {
   workspaceKnowledgeIndex,
   workspaceTools,
   listWorkspaces,
+  listTenants,
   listRuns,
   syncBundleFor,
   parseToolDef,
@@ -1270,6 +1271,7 @@ function lastActivity(run: RunRecord): number {
 
 export interface Reconciliation {
   runId: string;
+  tenant: string;
   workspace: string;
   /** Steps that were mid-flight when the process went away. */
   interrupted: string[];
@@ -1324,9 +1326,20 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
       run.status = "failed";
       run.finishedAt = new Date(now).toISOString();
       writeRun(tenant, workspace.name, run);
-      closed.push({ runId: run.id, workspace: workspace.name, interrupted });
+      closed.push({ runId: run.id, tenant, workspace: workspace.name, interrupted });
     }
   }
 
   return closed;
+}
+
+/**
+ * The same, for every account this installation holds.
+ *
+ * A server reconciles on boot, and it boots for everyone — reconciling only
+ * one hard-coded account left every other account's interrupted runs marked
+ * `running` forever, with no process left to finish them.
+ */
+export function reconcileAllRuns(now = Date.now()): Reconciliation[] {
+  return listTenants().flatMap((tenant) => reconcileRuns(tenant, now));
 }

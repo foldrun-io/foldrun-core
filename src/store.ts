@@ -795,6 +795,35 @@ export interface WorkspaceSummary {
   runCount: number;
 }
 
+/**
+ * Every account this installation holds.
+ *
+ * A tenant is a directory under the data root, but not every directory there
+ * is one — `.runtimes/` sits beside them, and so do keys.json and the secret
+ * key. What makes a tenant is that it holds workspaces, so that is the test.
+ *
+ * Single-workspace mode has no accounts at all: the workspace *is* the whole
+ * installation, and there is nothing above it to enumerate.
+ */
+export function listTenants(): string[] {
+  if (singleWorkspace()) return [];
+  const root = dataRoot();
+  if (!fs.existsSync(root)) return [];
+  return fs
+    .readdirSync(root)
+    .filter((name) => SAFE_NAME.test(name))
+    .filter((name) => {
+      const dir = path.join(root, name);
+      try {
+        if (!fs.statSync(dir).isDirectory()) return false;
+      } catch {
+        return false;
+      }
+      return [WORKSPACES, LEGACY_WORKSPACES].some((w) => fs.existsSync(path.join(dir, w)));
+    })
+    .sort();
+}
+
 export function listWorkspaces(tenant: string): WorkspaceSummary[] {
   assertSafeName(tenant, "tenant");
   const dir = workspacesRoot(tenant);
