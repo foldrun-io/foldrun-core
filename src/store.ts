@@ -24,7 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
-import { readBundle, syncIndex, appendLog } from "./okf.ts";
+import { readBundle, syncIndex, appendLog, ensureMemoryType } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { starterFiles } from "./starter.ts";
 
@@ -277,8 +277,14 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
 export function buildMemoryIndex(dir: string, prefix = ""): string | null {
   if (!fs.existsSync(dir)) return null;
 
+  // Body only. MEMORY.md needs a `type:` to be conformant — it is not one of
+  // OKF's two reserved names, so a consumer reads it as a concept — and this
+  // preamble goes straight into an agent's context, where a raw `---` block
+  // would be four lines of YAML the model has to sit through and might answer.
   const curated = path.join(dir, "MEMORY.md");
-  const preamble = fs.existsSync(curated) ? fs.readFileSync(curated, "utf8").trim() : "";
+  const preamble = fs.existsSync(curated)
+    ? matter(fs.readFileSync(curated, "utf8")).content.trim()
+    : "";
 
   const lines: string[] = [];
   for (const doc of readBundle(dir)) {
@@ -905,6 +911,9 @@ export function syncBundleFor(file: string, change?: "Creation" | "Update") {
   // A workspace- or account-level bundle is a root; an agent's own is nested
   // inside one, and the spec permits okf_version only at a bundle root.
   const isRoot = path.basename(path.resolve(dir, "..", "..")) !== "agents";
+  // Before the index, so a MEMORY.md written moments ago is conformant by the
+  // time anything reads or exports the bundle.
+  ensureMemoryType(dir);
   syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
   if (change) {
     appendLog(dir, path.relative(dir, file).split(path.sep).join("/"), change);

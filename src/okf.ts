@@ -29,8 +29,24 @@ export const OKF_VERSION = "0.2";
 /** This producer's actor string, in the spec's `<producer>/<version>` form. */
 export const PRODUCER = "mdagent/0.1.0";
 
-/** Reserved filenames the spec gives structure to, not concepts. */
-const RESERVED = new Set(["index.md", "log.md", "MEMORY.md"]);
+/**
+ * The spec's reserved filenames — exactly these two. A consumer treats every
+ * other `.md` in the bundle as a concept and requires a `type:` on it.
+ */
+const OKF_RESERVED = new Set(["index.md", "log.md"]);
+
+/**
+ * Files this platform presents as indexes rather than concepts, so they stay
+ * out of listings: the spec's two, plus MEMORY.md, which is ours.
+ *
+ * Kept apart from OKF_RESERVED on purpose. Conflating them is what made a
+ * bundle we emit fail somebody else's validator while passing our own:
+ * MEMORY.md is hand-written and carried no frontmatter, and because it sat in
+ * the same set as index.md the conformance check never looked at it. Ours is a
+ * presentation decision; the spec's is a conformance rule, and only the second
+ * one governs what a consumer will accept.
+ */
+const NOT_A_CONCEPT = new Set([...OKF_RESERVED, "MEMORY.md"]);
 
 export type TrustTier = "unverified" | "machine-confirmed" | "human-reviewed";
 export type OkfStatus = "draft" | "stable" | "deprecated";
@@ -225,7 +241,7 @@ export function readBundle(dir: string, today = new Date(), prefix = "", depth =
     }
     if (stat.isDirectory()) {
       out.push(...readBundle(full, today, `${prefix}${entry}/`, depth + 1));
-    } else if (entry.endsWith(".md") && !RESERVED.has(entry)) {
+    } else if (entry.endsWith(".md") && !NOT_A_CONCEPT.has(entry)) {
       const doc = readDoc(dir, entry, today);
       if (doc) out.push({ ...doc, file: `${prefix}${entry}` });
     }
@@ -238,20 +254,64 @@ function levelDocs(dir: string, today = new Date()): OkfDoc[] {
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith(".md") && !RESERVED.has(f))
+    .filter((f) => f.endsWith(".md") && !NOT_A_CONCEPT.has(f))
     .sort()
     .map((f) => readDoc(dir, f, today))
     .filter((d): d is OkfDoc => d !== null);
 }
 
-/** Files that would fail a conformance check, with the reason. */
-export function conformanceIssues(dir: string): { file: string; issue: string }[] {
-  return readBundle(dir)
-    .filter((d) => !d.type)
-    .map((d) => ({
-      file: d.file,
-      issue: "missing `type:` — OKF requires a non-empty type on every concept",
-    }));
+/**
+ * Files that would fail somebody else's conformance check, with the reason.
+ *
+ * Deliberately walks the directory rather than readBundle(): readBundle answers
+ * "what should this platform show", and the two questions differ by exactly the
+ * files we chose not to display. A validator that isn't ours applies the spec's
+ * reserved set, so this one has to as well — otherwise the check agrees with us
+ * about a bundle a consumer will reject.
+ */
+export function conformanceIssues(
+  dir: string,
+  prefix = "",
+  depth = 0,
+): { file: string; issue: string }[] {
+  if (!fs.existsSync(dir) || depth > 6) return [];
+  const out: { file: string; issue: string }[] = [];
+
+  for (const entry of fs.readdirSync(dir).sort()) {
+    const full = path.join(dir, entry);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      out.push(...conformanceIssues(full, `${prefix}${entry}/`, depth + 1));
+      continue;
+    }
+    if (!entry.endsWith(".md") || OKF_RESERVED.has(entry)) continue;
+
+    const file = `${prefix}${entry}`;
+    let data: Record<string, unknown>;
+    try {
+      ({ data } = matter(fs.readFileSync(full, "utf8")) as { data: Record<string, unknown> });
+    } catch {
+      out.push({ file, issue: "frontmatter is not parseable YAML — OKF requires it to parse" });
+      continue;
+    }
+    const type = typeof data.type === "string" ? data.type.trim() : "";
+    if (!type) {
+      out.push({
+        file,
+        issue:
+          entry === "MEMORY.md"
+            ? "missing `type:` — MEMORY.md is ours, not one of OKF's two reserved names, so a " +
+              "consumer reads it as a concept and requires a type"
+            : "missing `type:` — OKF requires a non-empty type on every concept",
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -293,6 +353,41 @@ export function buildIndex(
     });
 
   return `${head}# ${title}\n\n${sections.join("\n\n")}${sub}\n`;
+}
+
+/**
+ * Give MEMORY.md the `type:` a consumer needs, if it hasn't got one.
+ *
+ * MEMORY.md is this platform's curated index, and it is hand-written — by a
+ * person or by an agent, neither of whom should have to remember a conformance
+ * rule about a file the spec doesn't mention. Since it isn't one of OKF's two
+ * reserved names, a consumer reads it as a concept and requires a type; without
+ * one, the whole bundle is rejected over a file we introduced.
+ *
+ * So it is repaired on sync, exactly like index.md and log.md are generated on
+ * sync. The body is untouched — only the frontmatter block is added, and only
+ * when `type` is absent.
+ *
+ * Returns whether it wrote.
+ */
+export function ensureMemoryType(dir: string, type = "Index"): boolean {
+  const file = path.join(dir, "MEMORY.md");
+  if (!fs.existsSync(file)) return false;
+
+  const raw = fs.readFileSync(file, "utf8");
+  let parsed;
+  try {
+    parsed = matter(raw);
+  } catch {
+    return false; // unparseable frontmatter is a real error; report, don't rewrite
+  }
+  const data = parsed.data as Record<string, unknown>;
+  if (typeof data.type === "string" && data.type.trim()) return false;
+
+  const front = { type, ...data, title: data.title ?? data.name ?? "Memory" };
+  const lines = Object.entries(front).map(([k, v]) => `${k}: ${JSON.stringify(v)}`);
+  fs.writeFileSync(file, `---\n${lines.join("\n")}\n---\n\n${parsed.content.trimStart()}`);
+  return true;
 }
 
 /**
