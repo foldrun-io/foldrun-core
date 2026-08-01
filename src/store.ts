@@ -24,7 +24,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
-import { readBundle, syncIndex, appendLog, ensureMemoryType, provenanceMarks } from "./okf.ts";
+import {
+  readBundle, syncIndex, appendLog, ensureMemoryType, provenanceMarks, syncWorkspaceBundles,
+} from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { starterFiles } from "./starter.ts";
 
@@ -262,6 +264,11 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     }
     fs.rmSync(snapshot, { recursive: true, force: true });
   }
+
+  // The files are conformant concepts the moment they land; the bundles around
+  // them are not bundles until their index.md exists to carry okf_version. A
+  // deploy writes straight to disk, so nothing else would generate them.
+  syncWorkspaceBundles(dir);
 
   return { preserved: preserved.length };
 }

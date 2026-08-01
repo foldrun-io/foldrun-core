@@ -182,7 +182,11 @@ const FIELDS: Record<string, Completion[]> = {
   note: [
     { label: "type", insert: "type: Fact", hint: "required by OKF" },
     { label: "name", insert: "name: " },
+    // OKF's own spelling. Both are read and `title` wins, so a bundle written
+    // to the spec and one written here are the same file.
+    { label: "title", insert: "title: ", hint: "OKF's name for `name`" },
     { label: "description", insert: "description: " },
+    { label: "resource", insert: "resource: ", hint: "URI of the thing this describes" },
     { label: "status", insert: "status: stable", hint: "draft | stable | deprecated" },
     { label: "stale_after", insert: "stale_after: ", hint: "YYYY-MM-DD — stale on or after" },
     { label: "tags", insert: "tags: []" },
@@ -191,7 +195,12 @@ const FIELDS: Record<string, Completion[]> = {
       insert: "verified:\n  - by: human:\n    at: ",
       hint: "human: makes it human-reviewed",
     },
-    { label: "sources", insert: "sources:\n  - resource: " },
+    { label: "sources", insert: "sources:\n  - resource: ", hint: "resource: is required in an entry" },
+    {
+      label: "usage_window",
+      insert: "usage_window:\n  from: \n  to: ",
+      hint: "frames every usage_count in sources",
+    },
     { label: "generated", insert: "generated:\n  by: human:\n  at: " },
   ],
   skill: [

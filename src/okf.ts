@@ -552,6 +552,39 @@ export function syncIndex(dir: string, title: string, isRoot = false, depth = 0)
 }
 
 /**
+ * Make every OKF bundle in a workspace a bundle.
+ *
+ * A concept file with a `type` is conformant on its own, but a *bundle* is
+ * only self-describing once its root index.md exists to carry `okf_version`.
+ * Both scaffold paths wrote their starter files straight to disk, so a new
+ * workspace's knowledge/ was a directory of valid concepts and nothing that
+ * said which version of the format they were written against — the one thing
+ * a consumer reads first.
+ *
+ * An agent's own pair is nested rather than a root, so it gets an index
+ * without a version, which is what the spec permits.
+ */
+export function syncWorkspaceBundles(root: string): void {
+  const sync = (dir: string, kind: "knowledge" | "memory", isRoot: boolean) => {
+    if (!fs.existsSync(dir)) return;
+    ensureMemoryType(dir);
+    syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
+  };
+
+  for (const kind of ["knowledge", "memory"] as const) {
+    sync(path.join(root, kind), kind, true);
+  }
+
+  const agentsDir = path.join(root, "agents");
+  if (!fs.existsSync(agentsDir)) return;
+  for (const agent of fs.readdirSync(agentsDir)) {
+    for (const kind of ["knowledge", "memory"] as const) {
+      sync(path.join(agentsDir, agent, kind), kind, false);
+    }
+  }
+}
+
+/**
  * log.md — the bundle's change history. The spec asks for date-grouped
  * entries, newest first, ISO 8601 headings, with the **Creation** / **Update**
  * convention. Appending here means the history is a real artifact rather than

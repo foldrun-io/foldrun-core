@@ -103,6 +103,26 @@ status: stable
     },
 
     {
+      // The other half of OKF, and the half the starter never showed. Same
+      // format as knowledge/, different write permission: an agent may add
+      // here, and when it does the runtime stamps `generated:` so a fact it
+      // worked out never looks like one you gave it.
+      path: "memory/what-worked.md",
+      content: `---
+type: Fact
+name: what-worked
+description: Something learned from a run. Agents add files here themselves.
+status: stable
+# generated: is stamped automatically when an agent writes a memory.
+# Add verified: with a \`human:\` actor once you have checked one yourself —
+# that is what moves it from unverified to human-reviewed in the index.
+---
+
+Short drafts got edited less than long ones. Prefer four paragraphs to eight.
+`,
+    },
+
+    {
       path: "evals/writer-quality.md",
       content: `---
 name: writer-quality
