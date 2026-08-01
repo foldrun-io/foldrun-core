@@ -9,7 +9,11 @@ import crypto from "node:crypto";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
 
-function installKey(): string {
+/**
+ * The install's secret key. Every derived token — flow hooks, git secrets —
+ * hangs off this one value, so rotating it invalidates all of them together.
+ */
+export function installKey(): string {
   if (process.env.MDAGENT_SECRET_KEY) return process.env.MDAGENT_SECRET_KEY;
   if (fs.existsSync(keyFile())) return fs.readFileSync(keyFile(), "utf8");
   // secrets.ts creates this on first use; fall back to a fixed dev value so
