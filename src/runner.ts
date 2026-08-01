@@ -38,7 +38,7 @@ import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
-import { stampGenerated } from "./okf.ts";
+import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
 // An MCP tool definition becomes an SDK server config. ${SECRET} placeholders
@@ -925,14 +925,24 @@ export function startFlowRun(
   // verified are indistinguishable on disk — and the reader has no way to
   // know which one they're trusting.
   const stampMemories = () => {
-    for (const agent of new Set(run.steps.map((s) => s.agent))) {
-      const dir = path.join(runRoot, "agents", agent, "memory");
-      if (!fs.existsSync(dir)) continue;
-      let changed = false;
-      for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".md") && f !== "index.md")) {
-        if (stampGenerated(path.join(dir, file), agent)) changed = true;
-      }
-      if (changed) syncBundleFor(path.join(dir, "index.md"));
+    const agents = new Set(run.steps.map((s) => s.agent));
+
+    // Every memory bundle a run can write to, not just the agent's own. The
+    // workspace bundle is writable from any step — confine only denies
+    // knowledge/ — so a fact left there was going unstamped and untyped, and
+    // the bundle stopped conforming until someone ran `mdagent check`.
+    // The account library is not here: it is read-only from a run.
+    const dirs: { dir: string; agent: string | null }[] = [
+      // Attributable only when one agent could have written it.
+      { dir: path.join(runRoot, "memory"), agent: agents.size === 1 ? [...agents][0] : null },
+      ...[...agents].map((agent) => ({
+        dir: path.join(runRoot, "agents", agent, "memory"),
+        agent,
+      })),
+    ];
+
+    for (const { dir, agent } of dirs) {
+      if (stampBundle(dir, agent)) syncBundleFor(path.join(dir, "index.md"));
     }
   };
 

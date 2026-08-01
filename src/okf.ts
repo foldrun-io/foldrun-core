@@ -614,6 +614,45 @@ export function dateIssues(
 }
 
 /**
+ * Stamp provenance on every concept in a bundle an agent has just written to.
+ *
+ * Recursive, and it skips the spec's reserved names. Doing this by hand with a
+ * flat readdir and an `!== "index.md"` filter missed every concept in a nested
+ * section, and — worse — stamped `log.md`, writing a concept's frontmatter onto
+ * a reserved file that §9 gives its own structure. Nothing reported that,
+ * because a conformance check skips reserved names by definition: the file
+ * ends up malformed in a way only its readers notice.
+ *
+ * Returns whether anything changed, so the caller knows to re-sync the index.
+ */
+export function stampBundle(
+  dir: string,
+  agent: string | null,
+  at = new Date(),
+  depth = 0,
+): boolean {
+  if (!fs.existsSync(dir) || depth > 6) return false;
+  let changed = false;
+
+  for (const entry of fs.readdirSync(dir).sort()) {
+    const full = path.join(dir, entry);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      if (stampBundle(full, agent, at, depth + 1)) changed = true;
+      continue;
+    }
+    if (!entry.endsWith(".md") || OKF_RESERVED.has(entry)) continue;
+    if (stampGenerated(full, agent, at)) changed = true;
+  }
+  return changed;
+}
+
+/**
  * Make every OKF bundle in a workspace a bundle.
  *
  * A concept file with a `type` is conformant on its own, but a *bundle* is
@@ -679,14 +718,26 @@ export function appendLog(dir: string, file: string, kind: "Creation" | "Update"
  * memory an agent wrote is attributable — without this, a fact the model
  * invented and a fact a person verified are indistinguishable on disk.
  */
-export function stampGenerated(file: string, agent: string, at = new Date()): boolean {
+export function stampGenerated(
+  file: string,
+  agent: string | null,
+  at = new Date(),
+): boolean {
   try {
     const raw = fs.readFileSync(file, "utf8");
     const parsed = matter(raw);
     if (parsed.data.generated) return false; // never overwrite a real claim
     // `by` follows the spec's actor convention; which agent wrote it is kept
     // as an extension key, which the spec explicitly permits.
-    parsed.data.generated = { by: PRODUCER, at: at.toISOString(), agent };
+    //
+    // Null where a run had several agents and the file is at workspace scope:
+    // any one of them could have written it, and naming a guess is worse than
+    // saying only what is known — that a machine produced it.
+    parsed.data.generated = {
+      by: PRODUCER,
+      at: at.toISOString(),
+      ...(agent ? { agent } : {}),
+    };
     if (!parsed.data.type) parsed.data.type = "Memory";
     fs.writeFileSync(file, matter.stringify(parsed.content, parsed.data));
     return true;
