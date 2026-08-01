@@ -39,6 +39,16 @@ Per the spec, a conformant bundle requires:
 - `index.md` carries no frontmatter, except `okf_version` at a bundle root
 - reserved filenames (`index.md`, `log.md`) follow their defined structure
 
+Reserved means exactly `index.md` and `log.md`. `MEMORY.md` — the curated
+memory index — is **ours**, so a consumer reads it as a concept and requires a
+`type` on it like any other. It is hand-written, by a person or by an agent,
+and neither should have to remember a conformance rule about a file the spec
+does not mention: `ensureMemoryType()` adds the frontmatter on sync, leaving
+the body alone, the same way `index.md` and `log.md` are generated on sync.
+This was wrong until it was tested — `MEMORY.md` had been grouped with the
+spec's two reserved names, so the conformance check skipped it and every
+bundle containing one passed here and failed elsewhere.
+
 The platform enforces the first by warning on any file without a `type`, and
 maintains both reserved files itself:
 
@@ -98,7 +108,10 @@ indistinguishable on disk. Now the first carries
 `generated.by: producer/mdagent:writer` and derives to **unverified**, and the
 reader is told which one they are trusting.
 
-Trust tiers are computed, per the spec:
+Trust tiers are computed rather than stored, from the spec's `verified` field.
+The three tier *names* below are this platform's, not vocabulary the spec
+defines — they are a presentation of `verified`, and a consumer is free to
+derive something else from the same field:
 
 | `verified` contains | tier |
 |---|---|
