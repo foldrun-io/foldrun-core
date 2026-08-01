@@ -44,6 +44,28 @@ Context every agent here shares. Prices, rules, anything they should all know.
     },
 
     {
+      // A workspace is meant to be a git repository — that is the whole pitch,
+      // that you can diff and review what an agent is. So it has to arrive
+      // knowing which of its own files must never be committed. The decisive
+      // one is `.mdagent/.secret-key`: the CLI writes the key that decrypts
+      // every secret *inside the workspace*, and without this file the first
+      // `git add -A` after setting a secret commits it.
+      path: ".gitignore",
+      content: `# The key that decrypts every secret in this workspace, plus the
+# local run store. Never commit these.
+.mdagent/
+
+# Written by runs, not by you.
+runs/
+outputs/
+
+.env
+.env.local
+.DS_Store
+`,
+    },
+
+    {
       path: "agents/researcher/agent.md",
       content: `---
 name: researcher
