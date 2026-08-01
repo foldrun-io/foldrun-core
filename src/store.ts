@@ -1077,6 +1077,16 @@ export interface StepRecord {
   attempts?: number;
   /** Why a step was skipped, shown in the trace. */
   skipReason?: string;
+  /**
+   * When a person approved this step. Set by the approval API and never
+   * cleared, because approval is a fact about the past.
+   *
+   * Status alone cannot carry it: approving flips the step back to `pending`,
+   * which is indistinguishable from never having been asked. A run that was
+   * approved and then abandoned could not be resumed without asking the same
+   * person the same question again.
+   */
+  approvedAt?: string;
   status:
     | "pending"
     | "awaiting-approval"

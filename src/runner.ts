@@ -951,8 +951,7 @@ export function startFlowRun(
       costUsd: null,
     })),
   };
-  const save = () => writeRun(tenant, workspace, run);
-  save();
+  writeRun(tenant, workspace, run);
 
   // Start every run from an empty outputs/ for each agent it will touch.
   //
@@ -960,12 +959,38 @@ export function startFlowRun(
   // run 1 left the file behind — the one check that exists to catch a model
   // claiming work it didn't do can be satisfied by a stale artifact. The
   // previous contents aren't lost: they were archived when that run finished.
+  //
+  // This is the one thing resuming must not do: a resumed run's earlier steps
+  // already wrote there, and clearing it would delete the work being resumed.
   const runRoot = workspaceDir(tenant, workspace);
   for (const agent of new Set(run.steps.map((s) => s.agent))) {
     const outputs = path.join(runRoot, "agents", agent, "outputs");
     fs.rmSync(outputs, { recursive: true, force: true });
     fs.mkdirSync(outputs, { recursive: true });
   }
+
+  driveRun(tenant, workspace, run, modelOverride, tags);
+  return run;
+}
+
+/**
+ * Drive a run to completion: groups in order, approval gates, retries.
+ *
+ * Separate from starting one so a run can be picked up again. The loop reads
+ * every decision off the run record — `pending` steps are the work left, and
+ * a completed group's results are already on it — so re-entering it on a
+ * partly-finished record continues rather than restarts.
+ */
+function driveRun(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  modelOverride?: string | null,
+  tags: string[] = [],
+): void {
+  const pDir = workspaceDir(tenant, workspace);
+  const runRoot = pDir;
+  const save = () => writeRun(tenant, workspace, run);
 
   // Provenance: a memory an agent wrote gets stamped with who wrote it, per
   // OKF v0.2. Without this a fact the model invented and a fact a person
@@ -1026,6 +1051,12 @@ export function startFlowRun(
         // Validate agents exist before launching the group.
         let missing = false;
         for (const step of group) {
+          // Only what still has work to do. This walked every step in the
+          // group regardless of status, which never showed on a fresh run
+          // because they all start pending — but on a resumed one it rewrote
+          // finished steps to `failed`, destroying the history it was
+          // resuming around.
+          if (step.status !== "pending") continue;
           const aDir = path.join(pDir, "agents", step.agent);
           if (!fs.existsSync(path.join(aDir, "agent.md"))) {
             step.status = "failed";
@@ -1064,7 +1095,11 @@ export function startFlowRun(
         // Approval gate — pause the whole run until a human decides. The run
         // record is the queue: it sits in awaiting-approval until the API
         // flips the step back to pending.
-        const needsApproval = group.filter((s) => s.status === "pending" && s.approve);
+        // `!s.approvedAt` — a step approved before the process went away is
+        // already answered. Filtering on status alone asked again.
+        const needsApproval = group.filter(
+          (s) => s.status === "pending" && s.approve && !s.approvedAt,
+        );
         if (needsApproval.length) {
           for (const step of needsApproval) {
             step.status = "awaiting-approval";
@@ -1173,8 +1208,6 @@ export function startFlowRun(
       save();
     }
   })();
-
-  return run;
 }
 
 function readFlow(tenant: string, workspace: string, flowName: string) {
@@ -1273,6 +1306,8 @@ export interface Reconciliation {
   runId: string;
   tenant: string;
   workspace: string;
+  /** What was done about it: closed as dead, or picked back up. */
+  action: "closed" | "resumed";
   /** Steps that were mid-flight when the process went away. */
   interrupted: string[];
 }
@@ -1292,17 +1327,45 @@ export interface Reconciliation {
  * so this is safe to call while runs are in flight, and deliberately
  * conservative about what it declares dead.
  *
- * `awaiting-approval` is left alone: waiting for a person is a legitimate
- * state that outlives any process, and it is the one status that should
- * survive a restart untouched.
+ * A run genuinely waiting for a person is left alone: that state legitimately
+ * outlives any process. A run whose person already answered is not waiting,
+ * and is picked back up — see below.
  */
 export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[] {
   const closed: Reconciliation[] = [];
 
   for (const workspace of listWorkspaces(tenant)) {
     for (const summary of listRuns(tenant, workspace.name)) {
-      if (summary.status !== "running") continue;
       if (now - lastActivity(summary) < ABANDONED_AFTER_MS) continue;
+
+      // Approved, then abandoned. Approval only writes to the run record; the
+      // loop that acts on it polls in memory, inside the process that started
+      // the run. If that process goes away between the click and the next
+      // poll, the decision is on disk with nobody left to read it — and the
+      // run sits in `awaiting-approval` with no step awaiting approval, so
+      // the dashboard cannot even offer the button again. Nothing else here
+      // rescues it: this status is exempt from being closed, by design.
+      if (summary.status === "awaiting-approval") {
+        const stillAsking = summary.steps.some((s) => s.status === "awaiting-approval");
+        const answered = summary.steps.some((s) => s.approvedAt && s.status === "pending");
+        if (stillAsking || !answered) continue;
+
+        const run = readRun(tenant, workspace.name, summary.id);
+        if (!run || run.status !== "awaiting-approval") continue;
+        run.status = "running";
+        writeRun(tenant, workspace.name, run);
+        driveRun(tenant, workspace.name, run, null, run.tags ?? []);
+        closed.push({
+          runId: run.id,
+          tenant,
+          workspace: workspace.name,
+          action: "resumed",
+          interrupted: [],
+        });
+        continue;
+      }
+
+      if (summary.status !== "running") continue;
 
       const run = readRun(tenant, workspace.name, summary.id);
       if (!run || run.status !== "running") continue;
@@ -1326,7 +1389,7 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
       run.status = "failed";
       run.finishedAt = new Date(now).toISOString();
       writeRun(tenant, workspace.name, run);
-      closed.push({ runId: run.id, tenant, workspace: workspace.name, interrupted });
+      closed.push({ runId: run.id, tenant, workspace: workspace.name, action: "closed", interrupted });
     }
   }
 
