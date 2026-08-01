@@ -234,6 +234,21 @@ export interface OkfActor {
   at: string | null;
 }
 
+/**
+ * A `{ from, to }` date range, or undefined.
+ *
+ * Through isoDay for the same reason every other date here is: YAML hands back
+ * a Date for the unquoted form the spec writes, and String() on one produces
+ * "Mon Jun 15 2026 10:00:00 GMT+1000" — a value nothing can compare or sort.
+ */
+function usageWindow(value: unknown): { from?: string; to?: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const from = isoDay(raw.from) ?? undefined;
+  const to = isoDay(raw.to) ?? undefined;
+  return from || to ? { from, to } : undefined;
+}
+
 function actorList(value: unknown): OkfActor[] {
   const list = Array.isArray(value) ? value : value ? [value] : [];
   return list.flatMap((v): OkfActor[] => {
@@ -304,17 +319,11 @@ export function readDoc(dir: string, file: string, today = new Date()): OkfDoc |
               author: s.author ? String(s.author) : undefined,
               usageCount: typeof s.usage_count === "number" ? s.usage_count : undefined,
               lastModified: isoDay(s.last_modified) ?? undefined,
-              usageWindow:
-                s.usage_window && typeof s.usage_window === "object"
-                  ? {
-                      from: (s.usage_window as Record<string, unknown>).from
-                        ? String((s.usage_window as Record<string, unknown>).from)
-                        : undefined,
-                      to: (s.usage_window as Record<string, unknown>).to
-                        ? String((s.usage_window as Record<string, unknown>).to)
-                        : undefined,
-                    }
-                  : undefined,
+              // Per the spec, an entry's own window overrides the document's,
+              // and an entry without one inherits it. Reading only the entry's
+              // meant a shared window declared once at the top applied to
+              // nothing, so every usage_count it framed was left unframed.
+              usageWindow: usageWindow(s.usage_window) ?? usageWindow(data.usage_window),
             }))
             .filter((s) => s.resource)
         : [],
