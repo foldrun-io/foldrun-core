@@ -232,18 +232,59 @@ export function trustTier(verifiedBy: string[]): TrustTier {
  * declared one had been dropped. Quoting it happened to work, which is why it
  * survived: the tests wrote `"2026-12-31"` and the spec does not.
  */
+/**
+ * The spec's date shapes: `YYYY-MM-DD` for a day, ISO 8601 for an instant.
+ * Anything else is not a date this platform will compare.
+ */
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * A date from frontmatter, normalised, or null if it is not one.
+ *
+ * Null rather than the raw string, because every use of these values compares
+ * them: `stale` is `today >= stale_after`, and `latestAt` picks the most recent
+ * verification with `>`. Both are string comparisons that are only meaningful
+ * on ISO. Keeping whatever was written meant `at: yesterday` sorted above every
+ * real timestamp — lowercase letters beat digits — so one sloppy value silently
+ * made "most recently verified" return the wrong entry, and the index rendered
+ * "human-reviewed yesterday".
+ *
+ * A dropped value is reported by dateIssues(), never swallowed.
+ */
 function isoDay(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   const s = typeof value === "string" ? value.trim() : "";
-  return s || null;
+  if (!s) return null;
+  if (ISO_DAY.test(s)) return s;
+  // A full instant where a day was expected is the author being more precise
+  // than asked, not an error.
+  if (ISO_INSTANT.test(s)) return s.slice(0, 10);
+  return null;
 }
 
 /** As isoDay, but keeps the time when one was given — `timestamp` is an instant. */
 function isoInstant(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString();
   const s = typeof value === "string" ? value.trim() : "";
-  return s || null;
+  if (!s) return null;
+  if (ISO_INSTANT.test(s)) {
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : new Date(t).toISOString();
+  }
+  // A bare day is a valid instant — midnight UTC, which is what YAML's own
+  // unquoted date form produces.
+  if (ISO_DAY.test(s)) return `${s}T00:00:00.000Z`;
+  return null;
 }
+
+/** Was something written here that isoDay/isoInstant refused? */
+const isUnusableDate = (value: unknown): boolean =>
+  value !== undefined &&
+  value !== null &&
+  value !== "" &&
+  !(value instanceof Date) &&
+  isoInstant(value) === null;
 
 /**
  * An actor and when it acted — `{ by: human:kliu@acme, at: 2026-07-01T16:00Z }`.
@@ -509,6 +550,67 @@ export function syncIndex(dir: string, title: string, isRoot = false, depth = 0)
   for (const child of children) {
     syncIndex(path.join(dir, child), child, false, depth + 1);
   }
+}
+
+/**
+ * Dates the platform had to drop, with where they were.
+ *
+ * Deliberately not part of conformanceIssues. That function answers one
+ * question — would an outside validator accept this bundle — and the spec's
+ * three rules say nothing about the *shape* of a date, so a bad one is
+ * conformant and still unusable here. Two questions, two functions, and the
+ * conformance answer stays exactly the spec's.
+ */
+export function dateIssues(
+  dir: string,
+  prefix = "",
+  depth = 0,
+): { file: string; field: string; value: string }[] {
+  if (!fs.existsSync(dir) || depth > 6) return [];
+  const out: { file: string; field: string; value: string }[] = [];
+
+  for (const entry of fs.readdirSync(dir).sort()) {
+    const full = path.join(dir, entry);
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      out.push(...dateIssues(full, `${prefix}${entry}/`, depth + 1));
+      continue;
+    }
+    if (!entry.endsWith(".md") || OKF_RESERVED.has(entry)) continue;
+
+    let data: Record<string, unknown>;
+    try {
+      ({ data } = matter(fs.readFileSync(full, "utf8")) as { data: Record<string, unknown> });
+    } catch {
+      continue; // unparseable frontmatter is conformanceIssues' to report
+    }
+
+    const file = `${prefix}${entry}`;
+    const check = (field: string, value: unknown) => {
+      if (isUnusableDate(value)) out.push({ file, field, value: String(value) });
+    };
+    const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+    const list = (v: unknown) => (Array.isArray(v) ? v : v ? [v] : []);
+
+    check("stale_after", data.stale_after);
+    check("timestamp", data.timestamp);
+    check("generated.at", obj(data.generated).at);
+    check("usage_window.from", obj(data.usage_window).from);
+    check("usage_window.to", obj(data.usage_window).to);
+
+    list(data.verified).forEach((v, i) => check(`verified[${i}].at`, obj(v).at));
+    list(data.sources).forEach((s, i) => {
+      check(`sources[${i}].last_modified`, obj(s).last_modified);
+      check(`sources[${i}].usage_window.from`, obj(obj(s).usage_window).from);
+      check(`sources[${i}].usage_window.to`, obj(obj(s).usage_window).to);
+    });
+  }
+  return out;
 }
 
 /**
