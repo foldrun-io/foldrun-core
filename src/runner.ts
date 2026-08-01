@@ -251,7 +251,15 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
       `\`${workspace}\` workspace. Every path in this prompt is relative to it — ` +
       `\`outputs/\` is yours, and \`../../\` is the workspace root, so the workspace's ` +
       `own knowledge is at \`../../knowledge/\`. Absolute paths are outside the ` +
-      `workspace and will be refused.`,
+      `workspace and will be refused.\n\n` +
+      // A flow's whole point is that a later step works on what an earlier one
+      // produced, and each agent writes to its own outputs/. A run showed what
+      // omitting this costs: the checker looked in its own empty outputs/ and
+      // reported the draft missing — reviewing nothing, and saying so
+      // confidently — while the publisher only found it by guessing at a glob.
+      `Each agent writes to its own \`outputs/\`, so a file an earlier step produced is ` +
+      `at \`../<that-agent>/outputs/\`, not in yours. If a previous step says it wrote ` +
+      `something, look there before concluding it does not exist.`,
   );
 
   // Shared context before anything derived — an account or workspace rule is
