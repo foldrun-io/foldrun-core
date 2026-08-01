@@ -42,8 +42,21 @@ const PATH_KEYS = [
 const DENIED_WITHIN = [
   /(^|\/)secrets\.json$/,
   /(^|\/)runs(\/|$)/,
-  /(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/,
 ];
+
+/**
+ * Generated, and therefore not an agent's to edit — but very much an agent's
+ * to read.
+ *
+ * These were denied outright, and a run proved what that costs: an agent told
+ * to start from the index asked for `knowledge/index.md`, was refused, and
+ * spent a turn recovering. The index is the navigational artifact the whole
+ * progressive-disclosure design rests on; refusing to let a reader open it is
+ * the opposite of the intent. The reason they are protected is that a
+ * generated file an agent can edit is one that can lie — which is an argument
+ * about writing, and only about writing.
+ */
+const READ_ONLY_WITHIN = [/(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/];
 
 export interface ConfineVerdict {
   ok: boolean;
@@ -170,8 +183,17 @@ export function checkPaths(
         ok: false,
         reason:
           `${toolName} was denied: "${raw}" is a protected platform file. Secrets reach you as ` +
-          `environment variables; the run journal is read-only; and a bundle's index.md and ` +
-          `log.md are generated from the files around them — write the concept file instead.`,
+          `environment variables, and the run journal is not yours to read or rewrite.`,
+      };
+    }
+
+    if (isWrite && READ_ONLY_WITHIN.some((re) => re.test(within))) {
+      return {
+        ok: false,
+        reason:
+          `${toolName} was denied: "${raw}" is generated from the files around it and will be ` +
+          `rewritten on the next write. Read it freely — to change what it says, change a ` +
+          `concept file instead.`,
       };
     }
 
@@ -231,7 +253,9 @@ const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
   },
   {
     re: /(^|[\s'"(/])(knowledge|memory)\/(\S*\/)?(index|log)\.md/,
-    writeOnly: false,
+    // Write-only, matching checkPaths. A rule that differs by tool is a rule
+    // an agent can shop around for — and reading the index is the point of it.
+    writeOnly: true,
     reason:
       "index.md and log.md are generated from the files around them — write the concept file " +
       "instead.",

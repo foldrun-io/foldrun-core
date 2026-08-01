@@ -623,16 +623,21 @@ export function dateIssues(
  * because a conformance check skips reserved names by definition: the file
  * ends up malformed in a way only its readers notice.
  *
- * Returns whether anything changed, so the caller knows to re-sync the index.
+ * Returns the bundle-relative paths it stamped, so the caller can record each
+ * one in the log. Returning a bare boolean meant the caller had nothing to
+ * name, so it re-synced the index and wrote no log entry at all — and a run
+ * that taught the agent something left no trace in the one file whose job is
+ * to say what changed and when.
  */
 export function stampBundle(
   dir: string,
   agent: string | null,
   at = new Date(),
+  prefix = "",
   depth = 0,
-): boolean {
-  if (!fs.existsSync(dir) || depth > 6) return false;
-  let changed = false;
+): string[] {
+  if (!fs.existsSync(dir) || depth > 6) return [];
+  const stamped: string[] = [];
 
   for (const entry of fs.readdirSync(dir).sort()) {
     const full = path.join(dir, entry);
@@ -643,13 +648,13 @@ export function stampBundle(
       continue;
     }
     if (stat.isDirectory()) {
-      if (stampBundle(full, agent, at, depth + 1)) changed = true;
+      stamped.push(...stampBundle(full, agent, at, `${prefix}${entry}/`, depth + 1));
       continue;
     }
     if (!entry.endsWith(".md") || OKF_RESERVED.has(entry)) continue;
-    if (stampGenerated(full, agent, at)) changed = true;
+    if (stampGenerated(full, agent, at)) stamped.push(`${prefix}${entry}`);
   }
-  return changed;
+  return stamped;
 }
 
 /**
@@ -738,6 +743,16 @@ export function stampGenerated(
       at: at.toISOString(),
       ...(agent ? { agent } : {}),
     };
+
+    // Agents write `name:` whether or not you ask them to — a real run did it
+    // one line after being told to add no frontmatter at all. It reads fine
+    // here, because readDoc falls back to it, and reads as a slug to anyone
+    // else, because OKF has no such field. A bundle carries the format's
+    // vocabulary, so the key is moved rather than left to mean nothing.
+    if (!parsed.data.title && typeof parsed.data.name === "string") {
+      parsed.data.title = parsed.data.name;
+      delete parsed.data.name;
+    }
     if (!parsed.data.type) parsed.data.type = "Memory";
     fs.writeFileSync(file, matter.stringify(parsed.content, parsed.data));
     return true;

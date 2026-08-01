@@ -963,7 +963,13 @@ export function startFlowRun(
     ];
 
     for (const { dir, agent } of dirs) {
-      if (stampBundle(dir, agent)) syncBundleFor(path.join(dir, "index.md"));
+      // Each stamped file is a Creation in the bundle's log — that is what the
+      // log is for, and an agent's writes are exactly the changes a reader
+      // most wants dated. syncBundleFor logs the file it is given, so passing
+      // index.md logged nothing about the concept that actually appeared.
+      for (const rel of stampBundle(dir, agent)) {
+        syncBundleFor(path.join(dir, rel), "Creation");
+      }
     }
   };
 
