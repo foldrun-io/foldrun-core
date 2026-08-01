@@ -93,6 +93,7 @@ Same number = at the same time. Different number = one after the other.
       content: `---
 type: Reference
 name: house-style
+title: How we write
 description: How we write. Agents read this; they never rewrite it.
 status: stable
 ---
@@ -111,6 +112,7 @@ status: stable
       content: `---
 type: Fact
 name: what-worked
+title: What worked last time
 description: Something learned from a run. Agents add files here themselves.
 status: stable
 # generated: is stamped automatically when an agent writes a memory.

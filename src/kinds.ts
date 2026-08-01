@@ -84,6 +84,18 @@ export interface TemplateContext {
 
 const envName = (name: string) => name.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 
+/**
+ * A slug as a starting display label: `house-style` → `House style`.
+ *
+ * A placeholder, not a guess to keep — the author renames it to whatever the
+ * document is actually called. Its job is to make the field present, because
+ * an absent `title` is the case that silently falls back to the slug.
+ */
+const titleCase = (slug: string) => {
+  const words = slug.replace(/[-_]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : slug;
+};
+
 export const KINDS: Record<Kind, KindMeta> = {
   agents: {
     kind: "agents",
@@ -180,9 +192,14 @@ Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any
     placeholder: "house-tone",
     hint: "One durable fact, learned. Agents write here themselves.",
     file: (name) => `memory/${name}.md`,
+    // `name` is the identifier — kebab-case, matches the filename. `title` is
+    // OKF's human label, and a different thing: without one, every reader
+    // falls back to the slug, so our own index listed "house-style" where it
+    // meant "How we write", and an outside consumer saw the filename.
     template: (name) => `---
 type: Fact
 name: ${name}
+title: ${titleCase(name)}
 description: One durable fact.
 status: stable
 ---
@@ -203,9 +220,12 @@ The fact.
     placeholder: "pricing",
     hint: "Reference material, given not learned. Agents read it, never write it.",
     file: (name) => `knowledge/${name}.md`,
+    // See the memory template: `name` identifies, `title` is what a person
+    // reads. OKF defines only the second.
     template: (name) => `---
 type: Reference
 name: ${name}
+title: ${titleCase(name)}
 description: Reference material agents look up. Given, not learned.
 status: stable
 ---
