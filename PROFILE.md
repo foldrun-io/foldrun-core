@@ -25,10 +25,17 @@ Two directories, at every scope:
 <account>/library/memory/
 ```
 
-Both are OKF bundles in the same format. They stay separate directories
-because the *write permission* differs — `knowledge/` is read-only to a
-running agent, `memory/` is where it records what it learns — not because the
-format differs.
+Both are OKF bundles in the same format. **The two directories are ours, not
+OKF's** — the spec defines a bundle and says nothing about where one sits or
+who may write to it. They stay separate because the write permission differs:
+`knowledge/` is read-only to a running agent, `memory/` is where it records
+what it learns.
+
+That separation is the platform's answer to something the spec deliberately
+leaves open. v0.2 made provenance *describable* — `generated.by` says whether a
+person or a machine produced a document — but a field is a claim, written by
+whatever wrote the file. A directory decides what may be written at all, so the
+split is what makes the same distinction *enforceable*.
 
 ## Conformance
 
@@ -39,15 +46,12 @@ Per the spec, a conformant bundle requires:
 - `index.md` carries no frontmatter, except `okf_version` at a bundle root
 - reserved filenames (`index.md`, `log.md`) follow their defined structure
 
-Reserved means exactly `index.md` and `log.md`. `MEMORY.md` — the curated
-memory index — is **ours**, so a consumer reads it as a concept and requires a
-`type` on it like any other. It is hand-written, by a person or by an agent,
-and neither should have to remember a conformance rule about a file the spec
-does not mention: `ensureMemoryType()` adds the frontmatter on sync, leaving
-the body alone, the same way `index.md` and `log.md` are generated on sync.
-This was wrong until it was tested — `MEMORY.md` had been grouped with the
-spec's two reserved names, so the conformance check skipped it and every
-bundle containing one passed here and failed elsewhere.
+Reserved means exactly `index.md` and `log.md`, and this platform adds nothing
+to that set. It used to: a curated `MEMORY.md` sat beside the generated index,
+grouped with the spec's two names, so the conformance check skipped a file
+every other consumer reads as a concept and requires a `type` on. Every bundle
+containing one passed here and failed elsewhere. The file is gone; curated
+prose belongs in `AGENTS.md`, which is not part of any bundle.
 
 The platform enforces the first by warning on any file without a `type`, and
 maintains both reserved files itself:
@@ -64,9 +68,13 @@ identity.
 
 The spec requires consumers **not** to reject a bundle for unknown frontmatter
 keys, unknown `type` values, missing optional fields, or broken cross-links.
-That is why `name:` — which predates our adoption of OKF and is used
-throughout the rest of the platform — sits alongside OKF's `title:` without
-conflict. Both are read; `title` wins when present.
+That tolerance is not a licence to use it. A bundle here carries the format's
+fields and no dialect of ours: documents declare `title`, never the `name:`
+the rest of the platform identifies things by. `name` is still *read* from
+older files, so nothing written before this breaks — it is simply never
+written. The spec gives no consumer a reason to look at a key it does not
+define, and one that never heard of this platform fell back to the filename
+and displayed a slug.
 
 ### `type` is OKF's alone
 
@@ -97,16 +105,16 @@ here: OKF's.
 | `type` | required; grouped into sections in `index.md` |
 | `status` | `draft`/`deprecated` surfaces as a badge and in the agent's index |
 | `stale_after` | a stale document is marked **STALE** in the agent's context, with an instruction to confirm before relying on it |
-| `generated.by` | stamped automatically after a run — `producer/mdagent:<agent>` for anything an agent wrote |
-| `verified` | the trust tier is derived from it, never stored |
-| `sources` | parsed, with per-source `title`, `author`, `usage_count`, `last_modified` |
+| `generated` | `by` and `at` stamped automatically after a run — `by: mdagent/0.1.0`, the spec's `<producer>/<version>` form, with the agent's name kept as an extension key |
+| `verified` | the trust tier is derived from it, never stored; `at` is kept, so the index can say *when* something was checked |
+| `sources` | parsed, with per-source `id`, `title`, `author`, `usage_count`, `last_modified`, and a `usage_window` that falls back to the document's |
 | `resource`, `timestamp` | parsed and available to consumers |
 
 The provenance fields are the reason for adopting v0.2 rather than v0.1. A
 fact an agent invented and a fact a person verified used to be
-indistinguishable on disk. Now the first carries
-`generated.by: producer/mdagent:writer` and derives to **unverified**, and the
-reader is told which one they are trusting.
+indistinguishable on disk. Now the first carries `generated.by: mdagent/0.1.0`,
+renders as *machine-written, unverified* in every index, and the reader is told
+which of the two they are trusting before opening either.
 
 Trust tiers are computed rather than stored, from the spec's `verified` field.
 The three tier *names* below are this platform's, not vocabulary the spec
@@ -134,7 +142,8 @@ other standards, or on none:
 |---|---|
 | instructions | `AGENTS.md` — Linux Foundation |
 | skills | Agent Skills — Anthropic |
-| knowledge, memory | **OKF — Google Cloud** |
+| documents in knowledge, memory | **OKF — Google Cloud** |
+| the knowledge/memory split itself | ours |
 | tools | MCP — Anthropic |
 | flows, evals | none exists; ours |
 
