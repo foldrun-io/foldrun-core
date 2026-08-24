@@ -1133,7 +1133,11 @@ export function setWorkspaceDescription(tenant: string, workspace: string, descr
  * so every workspace made from the dashboard was born in the old format.
  */
 export function templateFiles(workspace: string): DeployFile[] {
-  return starterFiles(workspace);
+  // The starter minus what only matters on a laptop's disk: .gitignore
+  // guards a local clone's secrets, but the hosted store never keeps
+  // secrets in the tree and saveWorkspace rightly refuses files outside
+  // the workspace's own vocabulary.
+  return starterFiles(workspace).filter((f) => f.path === "AGENTS.md" || IN_WORKSPACE_DIR.test(f.path));
 }
 
 // Kept as names because routes import them; the content lives in KINDS, which
