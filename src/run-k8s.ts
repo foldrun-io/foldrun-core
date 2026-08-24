@@ -37,7 +37,7 @@ const namespace = () => process.env.MDAGENT_K8S_NAMESPACE ?? "mdagent-runs";
 const SHIM = `while [ ! -f /opt/runner/job/go ]; do sleep 0.2; done
 set -a; [ -f /opt/runner/job/env.sh ] && . /opt/runner/job/env.sh; set +a
 chown -R agent:agent /workspace /library /opt/runner/job
-runuser -p -u agent -- node /opt/runner/driver.mjs
+runuser -u agent -- node /opt/runner/driver.mjs
 touch /opt/runner/job/finished
 i=0; while [ ! -f /opt/runner/job/ack ] && [ $i -lt 600 ]; do sleep 0.5; i=$((i+1)); done`;
 

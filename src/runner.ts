@@ -802,9 +802,16 @@ async function runStep(
           verify: step.verify,
         },
         env: Object.fromEntries(
-          Object.entries({ ...secretEnv, ...providerEnv }).filter(
-            (entry): entry is [string, string] => typeof entry[1] === "string",
-          ),
+          Object.entries({
+            // The platform's own model credential, when the agent names no
+            // provider of its own — this is "models included": the host
+            // process holds one key, and every isolated run borrows it.
+            // A provider: block still wins, because providerEnv is spread
+            // after and carries the agent's chosen endpoint + token.
+            ...(Object.keys(providerEnv).length === 0 ? platformModelEnv() : {}),
+            ...secretEnv,
+            ...providerEnv,
+          }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
         emit: push,
       });
@@ -866,6 +873,38 @@ async function waitForDecision(
     if (!stillWaiting) return true;
   }
   return false;
+}
+
+/**
+ * Copy a directory tree by reading and writing the bytes.
+ *
+ * Not fs.cpSync: that copies through the kernel's clone/copy_file_range
+ * path, which on a bind-mounted or network volume — exactly where a hosted
+ * install keeps its data — can report success and leave a zero-length file
+ * behind. Every archived run output was empty, and nothing failed to say
+ * so, which is the worst shape a bug can take. This works on every
+ * filesystem, and normalises the mode while it is here: what an agent
+ * produced belongs to the platform, not to the container umask that
+ * happened to create it.
+ */
+export function copyTreeBytes(from: string, to: string) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) copyTreeBytes(src, dst);
+    else if (entry.isFile()) fs.writeFileSync(dst, fs.readFileSync(src), { mode: 0o644 });
+  }
+}
+
+// Which of the host's own credentials an isolated run may borrow. Only the
+// model credential — a run gets the ability to think on the platform's
+// account, never the platform's other secrets, which is the entire reason
+// the container env is allowlisted instead of inheriting process.env.
+function platformModelEnv(): Record<string, string | undefined> {
+  const { ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN } =
+    process.env;
+  return { ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN };
 }
 
 /**
@@ -1004,9 +1043,7 @@ export function driveRun(
     for (const agent of new Set(run.steps.map((s) => s.agent))) {
       const from = path.join(runRoot, "agents", agent, "outputs");
       if (!fs.existsSync(from) || fs.readdirSync(from).length === 0) continue;
-      const to = path.join(runRoot, "runs", run.id, "outputs", agent);
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.cpSync(from, to, { recursive: true });
+      copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
     }
   };
 

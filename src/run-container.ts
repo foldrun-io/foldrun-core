@@ -110,7 +110,11 @@ try {
   const { buildScriptTools } = await import("@mdagent/core/script-tools");
 
   const agentDir = "/workspace/" + input.agentRel;
-  const env = { ...process.env };
+  // HOME is where a bare relative path lands when anything resolves one
+  // outside cwd — and root's /root is outside the workspace, so such a read
+  // was refused by confinement with a path the agent never typed. Its own
+  // directory is both the truthful answer and the safe one.
+  const env = { ...process.env, HOME: agentDir };
 
   // API and script tools, rebuilt in here from their specs. Secrets were
   // substituted into API headers before the input crossed the boundary, so
