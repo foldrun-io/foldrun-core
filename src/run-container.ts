@@ -183,13 +183,18 @@ function corePackageDir(): string {
 }
 
 export function runnerImageTag(): string {
-  const pkg = JSON.parse(fs.readFileSync(path.join(corePackageDir(), "package.json"), "utf8"));
-  const fp = crypto
-    .createHash("sha256")
-    .update(pkg.version + "\n" + DRIVER + "\n" + DOCKERFILE)
-    .digest("hex")
-    .slice(0, 12);
-  return `mdagent-runner:${fp}`;
+  // The fingerprint hashes the *built code*, not the version — a version
+  // string that nobody bumped would pin every future run to the runner
+  // image of whatever core happened to build first.
+  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + DOCKERFILE);
+  const dist = path.join(corePackageDir(), "dist");
+  if (fs.existsSync(dist)) {
+    for (const entry of fs.readdirSync(dist, { recursive: true }).sort()) {
+      const abs = path.join(dist, String(entry));
+      if (fs.statSync(abs).isFile()) hash.update(String(entry)).update(fs.readFileSync(abs));
+    }
+  }
+  return `mdagent-runner:${hash.digest("hex").slice(0, 12)}`;
 }
 
 /**
