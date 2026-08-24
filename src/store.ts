@@ -760,6 +760,56 @@ function emitFlow(head: string, preamble: string[], groups: FlowBlock[][]): stri
   return `${head}${gap}${out.join("\n")}\n`;
 }
 
+/**
+ * Rewrite a flow's trigger in place — the dashboard's trigger picker.
+ *
+ * Line-level surgery on the frontmatter, not a YAML round-trip: everything
+ * the author wrote (comments, key order, unrelated keys) survives verbatim,
+ * and the diff is exactly the lines that changed. A flow with no
+ * frontmatter gains the smallest one that can carry the trigger.
+ */
+export function setFlowTrigger(
+  raw: string,
+  opts: { trigger: "manual" | "schedule" | "webhook"; schedule?: string; timezone?: string },
+): string {
+  if (!["manual", "schedule", "webhook"].includes(opts.trigger)) {
+    throw new Error(`unknown trigger "${opts.trigger}" — manual, schedule or webhook`);
+  }
+  const wanted = new Map<string, string | null>();
+  wanted.set("trigger", opts.trigger === "manual" ? null : opts.trigger); // manual is the default — say nothing
+  if (opts.trigger === "schedule") {
+    const cron = (opts.schedule ?? "").trim();
+    // Shape only — the scheduler's parseCron is the authority, and the API
+    // route runs it; importing it here would cycle store ↔ scheduler.
+    const shaped = /^@\w+$/.test(cron) || cron.split(/\s+/).length === 5;
+    if (!cron || !shaped) {
+      throw new Error(`"${cron}" is not a cron expression (5 fields, or @daily-style)`);
+    }
+    wanted.set("schedule", `"${cron}"`);
+    wanted.set("timezone", opts.timezone?.trim() ? opts.timezone.trim() : null);
+  } else {
+    wanted.set("schedule", null);
+    wanted.set("timezone", null);
+  }
+
+  const lines = raw.split("\n");
+  const hasFront = lines[0]?.trim() === "---";
+  const close = hasFront ? lines.indexOf("---", 1) : -1;
+  const front = hasFront && close > 0 ? lines.slice(1, close) : [];
+  const body = hasFront && close > 0 ? lines.slice(close + 1) : lines;
+
+  const kept = front.filter((line) => {
+    const key = line.match(/^(\w+):/)?.[1];
+    return !(key && wanted.has(key));
+  });
+  for (const [key, value] of wanted) {
+    if (value !== null) kept.push(`${key}: ${value}`);
+  }
+
+  if (kept.length === 0) return body.join("\n").replace(/^\n+/, "");
+  return ["---", ...kept, "---", ...body].join("\n");
+}
+
 export function reorderFlowSteps(raw: string, groups: number[][]): string {
   const { head, preamble, blocks: ordered } = splitFlowBlocks(raw);
 
