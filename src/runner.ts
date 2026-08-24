@@ -9,6 +9,7 @@ import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { executeStep } from "./step-exec.ts";
 import { runStepInContainer } from "./run-container.ts";
+import { runStepInK8s } from "./run-k8s.ts";
 import {
   accountDir,
   workspaceDir,
@@ -766,12 +767,14 @@ async function runStep(
     let prompt = step.instruction || "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
 
-    if (process.env.MDAGENT_RUN_ISOLATION === "container") {
+    const isolation = process.env.MDAGENT_RUN_ISOLATION;
+    if (isolation === "container" || isolation === "k8s") {
       // The isolated path: the whole loop — model, built-in tools, scripts —
-      // runs inside a throwaway container, and only filtered file changes
-      // come back. The vault stays out here: secrets are substituted into
-      // API headers before the specs cross, and reach scripts as env.
-      push("info", "isolation: container");
+      // runs inside a throwaway container (a docker sibling, or a pod), and
+      // only filtered file changes come back. The vault stays out here:
+      // secrets are substituted into API headers before the specs cross,
+      // and reach scripts as env.
+      push("info", `isolation: ${isolation}`);
       const substitutedApis = parseApis(front.apis).map((api) => ({
         ...api,
         headers: Object.fromEntries(
@@ -781,7 +784,8 @@ async function runStep(
           ]),
         ),
       }));
-      const outcome = await runStepInContainer({
+      const runIsolated = isolation === "k8s" ? runStepInK8s : runStepInContainer;
+      const outcome = await runIsolated({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
         input: {

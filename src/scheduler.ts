@@ -232,7 +232,40 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
   return due;
 }
 
+// One scheduler per data directory, however many processes share it. The
+// lease is a file naming its holder; a holder renews by rewriting it, and
+// anyone finding it stale (no renewal for three tick intervals) takes over.
+// The take-over race is a read-then-write and deliberately so: the worst
+// case is two processes firing one tick together, once, during a handover —
+// a bounded duplicate, not a corruption — and a lock that could deadlock a
+// fleet to prevent it would be the worse trade.
+const LEASE_STALE_MS = 90_000;
+const OWNER = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
+function leaseFile() {
+  return path.join(dataRoot(), ".scheduler-lease");
+}
+
+function holdsLease(now: number): boolean {
+  const file = leaseFile();
+  try {
+    const current = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      owner: string;
+      renewedAt: number;
+    };
+    if (current.owner !== OWNER && now - current.renewedAt < LEASE_STALE_MS) return false;
+  } catch {
+    // no lease yet, or unreadable — claimable
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${OWNER}`;
+  fs.writeFileSync(tmp, JSON.stringify({ owner: OWNER, renewedAt: now }));
+  fs.renameSync(tmp, file);
+  return true;
+}
+
 export function tick(now = new Date()): DueFlow[] {
+  if (!holdsLease(now.getTime())) return [];
   const state = readState();
   const due = findDueFlows(now, state, listTenants());
   writeState(state);

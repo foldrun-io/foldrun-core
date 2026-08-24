@@ -149,18 +149,29 @@ try {
 }
 `;
 
+// docker cp writes root-owned files, so the entrypoint starts as root for
+// exactly two commands — chown the copied-in trees, drop to the agent user —
+// and the run flags grant only the three capabilities those two commands
+// need. By the time any model-directed code executes, the process is uid
+// 10001 with no capabilities at all.
 const DOCKERFILE = `FROM node:22-slim
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash \\
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
 WORKDIR /opt/runner
-COPY mdagent-core.tgz driver.mjs ./
+COPY mdagent-core.tgz driver.mjs entry.sh ./
 RUN npm init -y >/dev/null && npm install ./mdagent-core.tgz --omit=dev \\
  && mkdir -p /workspace /library /opt/runner/job \\
- && chown -R agent:agent /workspace /library /opt/runner
-USER agent
-ENTRYPOINT ["node", "/opt/runner/driver.mjs"]
+ && chown -R agent:agent /workspace /library /opt/runner \\
+ && chmod +x /opt/runner/entry.sh
+ENTRYPOINT ["/opt/runner/entry.sh"]
+`;
+
+const ENTRY = `#!/bin/sh
+set -e
+chown -R agent:agent /workspace /library /opt/runner/job
+exec runuser -u agent -- node /opt/runner/driver.mjs
 `;
 
 function corePackageDir(): string {
@@ -186,7 +197,7 @@ export function runnerImageTag(): string {
   // The fingerprint hashes the *built code*, not the version — a version
   // string that nobody bumped would pin every future run to the runner
   // image of whatever core happened to build first.
-  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + DOCKERFILE);
+  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + DOCKERFILE + "\n" + ENTRY);
   const dist = path.join(corePackageDir(), "dist");
   if (fs.existsSync(dist)) {
     for (const entry of fs.readdirSync(dist, { recursive: true }).sort()) {
@@ -219,6 +230,7 @@ export function ensureRunnerImage(): { tag: string; log: string[] } {
     const tarball = pack.stdout.trim().split("\n").at(-1)!;
     fs.renameSync(path.join(build, tarball), path.join(build, "mdagent-core.tgz"));
     fs.writeFileSync(path.join(build, "driver.mjs"), DRIVER);
+    fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
     fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
     log.push(`building runner image ${tag} (first run only)`);
     const out = spawnSync(cli(), ["build", "-t", tag, build], { encoding: "utf8" });
@@ -253,6 +265,30 @@ export function parseDriverLine(
   } catch {
     return null; // interleaved non-protocol output (npm, python) is noise
   }
+}
+
+// The network runner containers join when none is configured: a bridge with
+// inter-container traffic disabled, so two tenants' runs sharing a host
+// cannot see each other's ports — each gets the internet (the model API
+// lives there) and nothing beside it. Created once, reused forever.
+const RUN_NETWORK = "mdagent-runs";
+
+function ensureRunNetwork(): string {
+  const configured = process.env.MDAGENT_RUNNER_NETWORK;
+  if (configured) return configured;
+  const have = spawnSync(cli(), ["network", "inspect", RUN_NETWORK], { stdio: "ignore" });
+  if (have.status !== 0) {
+    spawnSync(
+      cli(),
+      [
+        "network", "create",
+        "--opt", "com.docker.network.bridge.enable_icc=false",
+        RUN_NETWORK,
+      ],
+      { stdio: "ignore" }, // a racing worker already created it — fine
+    );
+  }
+  return RUN_NETWORK;
 }
 
 export interface RunInContainerArgs {
@@ -301,7 +337,10 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
     const flags = [
       "--security-opt", "no-new-privileges",
+      // Everything dropped except what the entrypoint's chown-and-drop
+      // needs; the exec to the agent user sheds these three too.
       "--cap-drop", "ALL",
+      "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
       "--pids-limit", "512",
       "--memory", process.env.MDAGENT_RUNNER_MEMORY ?? "2g",
       "--cpus", process.env.MDAGENT_RUNNER_CPUS ?? "2",
@@ -312,9 +351,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     if (process.env.MDAGENT_RUNNER_RUNTIME) {
       flags.push("--runtime", process.env.MDAGENT_RUNNER_RUNTIME);
     }
-    if (process.env.MDAGENT_RUNNER_NETWORK) {
-      flags.push("--network", process.env.MDAGENT_RUNNER_NETWORK);
-    }
+    flags.push("--network", ensureRunNetwork());
 
     const create = spawnSync(cli(), ["create", ...flags, tag], { encoding: "utf8" });
     if (create.status !== 0) throw new Error(`container create failed:\n${create.stderr}`);
