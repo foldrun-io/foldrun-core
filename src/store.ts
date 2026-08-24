@@ -255,6 +255,10 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     // Secrets are never in git — a deploy has no business deleting them, and
     // doing so silently breaks every agent that declared one.
     rel === "secrets.json" ||
+    // Webhook rotation state and the delivery log are platform bookkeeping:
+    // losing them on deploy silently un-rotates a leaked hook URL.
+    rel === "hooks.json" ||
+    rel === "hook-deliveries.jsonl" ||
     (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
 
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
