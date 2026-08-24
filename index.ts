@@ -21,6 +21,7 @@ export * from "./src/library.ts";
 export * from "./src/secrets.ts";
 export * from "./src/scheduler.ts";
 export * from "./src/queue.ts";
+export * from "./src/ledger.ts";
 export * from "./src/webhook.ts";
 export * from "./src/deploy.ts";
 export * from "./src/tar.ts";

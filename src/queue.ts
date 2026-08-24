@@ -33,6 +33,8 @@ import {
   type RunRecord,
 } from "./store.ts";
 import { createFlowRun, driveRun } from "./runner.ts";
+import { assertFunds, recordRunCost } from "./ledger.ts";
+import { runCost } from "./store.ts";
 
 export interface QueueJob {
   tenant: string;
@@ -91,6 +93,10 @@ export function enqueueFlowRun(
   modelOverride?: string | null,
   tags: string[] = [],
 ): RunRecord {
+  // Money is checked where work is added, and only where work is added —
+  // resuming a parked run skips this on purpose. No-op unless the install
+  // enforces billing (MDAGENT_BILLING=1).
+  assertFunds(tenant);
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
   enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
   return run;
@@ -246,6 +252,13 @@ export function startWorker() {
             await driveRun(tenant, workspace, run, modelOverride, tags ?? run.tags ?? [], {
               parkOnApproval: true,
             });
+            // Settle the bill once the run is genuinely over. Idempotent by
+            // run id, so a parked run settling on its *final* drive is safe
+            // even if an earlier drive raced it.
+            const settled = readRun(tenant, workspace, runId);
+            if (settled && (settled.status === "completed" || settled.status === "failed")) {
+              recordRunCost(tenant, workspace, runId, runCost(settled));
+            }
           }
         } catch (err) {
           console.error(`[mdagent] worker: run ${claim.job.runId} threw`, err);
