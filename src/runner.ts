@@ -7,7 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { executeStep } from "./step-exec.ts";
+import { runStepInContainer } from "./run-container.ts";
 import {
   accountDir,
   workspaceDir,
@@ -38,7 +39,6 @@ import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
-import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
@@ -766,105 +766,75 @@ async function runStep(
     let prompt = step.instruction || "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
 
-    const texts: string[] = [];
-    const q = query({
-      prompt,
-      options: {
-        cwd: agentDir,
+    if (process.env.MDAGENT_RUN_ISOLATION === "container") {
+      // The isolated path: the whole loop — model, built-in tools, scripts —
+      // runs inside a throwaway container, and only filtered file changes
+      // come back. The vault stays out here: secrets are substituted into
+      // API headers before the specs cross, and reach scripts as env.
+      push("info", "isolation: container");
+      const substitutedApis = parseApis(front.apis).map((api) => ({
+        ...api,
+        headers: Object.fromEntries(
+          Object.entries(api.headers).map(([k, v]) => [
+            k,
+            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => secretEnv[name] ?? whole),
+          ]),
+        ),
+      }));
+      const outcome = await runStepInContainer({
+        workspaceRoot,
+        libraryRoot: libraryDir(tenant),
+        input: {
+          agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
+          prompt,
+          model,
+          systemPrompt,
+          allowed,
+          mcpNames,
+          mcpServers,
+          apis: substitutedApis,
+          scripts: parseScripts(front.scripts),
+          timeoutSec: step.timeout,
+          verify: step.verify,
+        },
+        env: Object.fromEntries(
+          Object.entries({ ...secretEnv, ...providerEnv }).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        ),
+        emit: push,
+      });
+      step.status = outcome.status;
+      step.result = outcome.result;
+      step.costUsd = outcome.costUsd;
+    } else {
+      const outcome = await executeStep({
+        agentDir,
+        workspaceRoot,
+        libraryRoot: libraryDir(tenant),
+        prompt,
         model,
         systemPrompt,
-        // Restrict the toolset itself, not just approval: an agent that
-        // declares no tools gets none, instead of seeing the full Claude
-        // Code toolset and burning turns on denied calls.
-        tools: allowed,
-        // Deliberately NOT allowedTools: listing them there auto-approves and
-        // skips canUseTool entirely, which is where confinement happens. The
-        // toolset is still restricted by `tools` above.
-        settingSources: [],
-        // Sandbox the shell. Argument-level path checks can't hold a shell —
-        // it can cd, glob, or pipe its way out — so bash gets OS-level
-        // isolation. failIfUnavailable: false so a host without sandbox
-        // support degrades to the pattern checks below instead of dying.
-        sandbox: {
-          enabled: true,
-          // Must stay false. Auto-allowing bash because it's sandboxed skips
-          // canUseTool entirely — and the OS sandbox blocks writes outside the
-          // tree but still permits reads, so `cat ../../secrets.json` walked
-          // straight out. Verified by probe: true leaks, false denies.
-          autoAllowBashIfSandboxed: false,
-          failIfUnavailable: false,
-        },
-        // Declared secrets reach the agent's scripts as env vars; the model
-        // only ever sees the variable names, not the values.
-        env: { ...process.env, ...secretEnv, ...providerEnv },
+        allowed,
+        mcpNames,
         mcpServers: {
           ...(apiTools.server ? { mdagent_apis: apiTools.server } : {}),
           ...(scriptTools.server ? { mdagent_scripts: scriptTools.server } : {}),
           ...mcpServers,
         },
-        canUseTool: async (toolName: string, input: Record<string, unknown>) => {
-          // The toolset was already narrowed to what the agent declared, so
-          // anything outside it is a denial with a reason the model can act on.
-          // Literal match, or a tool from a server this agent was granted.
-          const fromGrantedServer = mcpNames.some((n) => toolName.startsWith(`mcp__${n}__`));
-          if (!allowed.includes(toolName) && !fromGrantedServer) {
-            return {
-              behavior: "deny" as const,
-              message: `Tool ${toolName} is not enabled for this agent.`,
-            };
-          }
-          const verdict =
-            toolName === "Bash"
-              ? checkBash(String(input.command ?? ""))
-              : isFilesystemTool(toolName)
-                ? checkPaths(toolName, input, {
-                    agentDir,
-                    workspaceRoot,
-                    libraryRoot: libraryDir(tenant),
-                  })
-                : { ok: true as const };
-          if (!verdict.ok) {
-            push("error", verdict.reason!);
-            return { behavior: "deny" as const, message: verdict.reason! };
-          }
-          return { behavior: "allow" as const, updatedInput: verdict.updatedInput ?? input };
-        },
-      },
-    });
-
-    const deadline = step.timeout ? Date.now() + step.timeout * 1000 : null;
-
-    for await (const message of q) {
-      if (deadline && Date.now() > deadline) {
-        push("error", `step exceeded its ${step.timeout}s timeout`);
-        step.status = "failed";
-        break;
-      }
-      if (message.type === "assistant") {
-        for (const block of message.message.content) {
-          if (block.type === "text" && block.text.trim()) {
-            texts.push(block.text);
-            push("text", block.text);
-          } else if (block.type === "tool_use") {
-            push("tool", block.name);
-          }
-        }
-      } else if (message.type === "result") {
-        step.status = message.subtype === "success" ? "completed" : "failed";
-        step.costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
-      }
-    }
-    if (step.status === "running") step.status = "completed";
-    step.result = texts.join("\n").trim() || null;
-    for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
-    for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
-
-    // "Done" should mean a check passed, not that the model stopped talking.
-    if (step.status === "completed" && step.verify) {
-      const { code, out } = await verifyStep(agentDir, step.verify, secretEnv);
-      push(code === 0 ? "info" : "error", `verify \`${step.verify}\` → exit ${code ?? "error"}`);
-      if (out.trim()) push(code === 0 ? "info" : "error", out.slice(0, 1000));
-      if (code !== 0) step.status = "failed";
+        // Declared secrets reach the agent's scripts as env vars; the model
+        // only ever sees the variable names, not the values.
+        env: { ...process.env, ...secretEnv, ...providerEnv },
+        timeoutSec: step.timeout,
+        verify: step.verify,
+        verifyEnv: secretEnv,
+        emit: push,
+      });
+      step.status = outcome.status;
+      step.result = outcome.result;
+      step.costUsd = outcome.costUsd;
+      for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
+      for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
     }
   } catch (err) {
     step.status = "failed";
@@ -892,30 +862,6 @@ async function waitForDecision(
     if (!stillWaiting) return true;
   }
   return false;
-}
-
-// Verification runs in the agent's directory with its secrets available, so
-// a check can be as simple as `npm run build` or `test -s outputs/report.md`.
-function verifyStep(
-  agentDir: string,
-  command: string,
-  env: Record<string, string>,
-): Promise<{ code: number | null; out: string }> {
-  return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], {
-      cwd: agentDir,
-      env: { ...process.env, ...env },
-      timeout: 120_000,
-    });
-    let out = "";
-    const append = (c: Buffer) => {
-      if (out.length < 4000) out += c.toString();
-    };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
-    child.on("error", (e) => resolve({ code: null, out: e.message }));
-    child.on("close", (code) => resolve({ code, out }));
-  });
 }
 
 /**

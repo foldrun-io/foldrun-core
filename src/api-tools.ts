@@ -44,13 +44,25 @@ export function buildApiTools(
   tenant: string,
   apis: ApiSpec[],
   workspace?: string,
+  // The runner container passes this: secrets were resolved before the specs
+  // crossed the boundary, and there is no vault in there to ask.
+  resolved?: { env: Record<string, string | undefined>; missing: string[] },
 ): ApiToolResult {
   if (apis.length === 0) {
     return { server: null, toolNames: [], missingSecrets: [], promptLines: [], drainLog: () => [] };
   }
 
   const neededSecrets = [...new Set(apis.flatMap(secretsUsedByApi))];
-  const { env, missing } = resolveSecrets(tenant, neededSecrets, workspace);
+  const { env, missing } = resolved
+    ? {
+        env: Object.fromEntries(
+          Object.entries(resolved.env).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        ),
+        missing: resolved.missing,
+      }
+    : resolveSecrets(tenant, neededSecrets, workspace);
   const log: string[] = [];
 
   const tools = apis.map((api) =>
