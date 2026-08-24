@@ -918,20 +918,25 @@ function verifyStep(
   });
 }
 
-export function startFlowRun(
+/**
+ * Write a fresh run record and reset outputs — everything starting a run
+ * means *except* driving it. Split out so the queue can create a `queued`
+ * record for a worker to pick up, while `startFlowRun` keeps its promise of
+ * a run that is already going when it returns.
+ */
+export function createFlowRun(
   tenant: string,
   workspace: string,
   steps: FlowStep[],
   flowName: string,
-  modelOverride?: string | null,
+  status: "queued" | "running",
   tags: string[] = [],
 ): RunRecord {
-  const pDir = workspaceDir(tenant, workspace);
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     flow: flowName,
     tags,
-    status: "running",
+    status,
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -969,7 +974,19 @@ export function startFlowRun(
     fs.mkdirSync(outputs, { recursive: true });
   }
 
-  driveRun(tenant, workspace, run, modelOverride, tags);
+  return run;
+}
+
+export function startFlowRun(
+  tenant: string,
+  workspace: string,
+  steps: FlowStep[],
+  flowName: string,
+  modelOverride?: string | null,
+  tags: string[] = [],
+): RunRecord {
+  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags);
+  void driveRun(tenant, workspace, run, modelOverride, tags);
   return run;
 }
 
@@ -980,14 +997,22 @@ export function startFlowRun(
  * every decision off the run record — `pending` steps are the work left, and
  * a completed group's results are already on it — so re-entering it on a
  * partly-finished record continues rather than restarts.
+ *
+ * `parkOnApproval` — a queue worker's slot is too expensive to spend polling
+ * a file for a person who may answer tomorrow. With it set, an approval gate
+ * saves the run as parked and returns; the approval API re-enqueues it and a
+ * worker re-enters this loop, which continues where the record says it
+ * stopped. Without it (the CLI, whose process belongs to the person waiting)
+ * the gate blocks in place exactly as before.
  */
-function driveRun(
+export function driveRun(
   tenant: string,
   workspace: string,
   run: RunRecord,
   modelOverride?: string | null,
   tags: string[] = [],
-): void {
+  opts: { parkOnApproval?: boolean } = {},
+): Promise<void> {
   const pDir = workspaceDir(tenant, workspace);
   const runRoot = pDir;
   const save = () => writeRun(tenant, workspace, run);
@@ -1035,8 +1060,20 @@ function driveRun(
     }
   };
 
-  void (async () => {
+  // A parked run is paused, not finished — the completion bookkeeping in
+  // `finally` (finishedAt, archive, memory stamps) must not touch it.
+  let parked = false;
+
+  return (async () => {
     try {
+      // Entering the loop is what makes a run live, whatever state it was
+      // saved in: `queued` from the queue, `awaiting-approval` from a park.
+      if (run.status !== "running") {
+        run.status = "running";
+        run.parkedAt = null;
+        save();
+      }
+
       // Group steps by their group number, ascending.
       const groups = new Map<number, StepRecord[]>();
       for (const s of run.steps) {
@@ -1111,6 +1148,16 @@ function driveRun(
           }
           run.status = "awaiting-approval";
           save();
+
+          if (opts.parkOnApproval) {
+            // Hand the slot back. The approval API sees parkedAt and
+            // re-enqueues; re-entering this loop skips finished groups and
+            // lands back here with the decision already on the record.
+            run.parkedAt = new Date().toISOString();
+            parked = true;
+            save();
+            return;
+          }
 
           const decided = await waitForDecision(tenant, workspace, run.id, needsApproval.map((s) => run.steps.indexOf(s)));
           if (!decided) {
@@ -1196,16 +1243,19 @@ function driveRun(
         }
       });
     } finally {
-      run.finishedAt = new Date().toISOString();
-      // Archive before the next run resets outputs/ — a failed run's artifacts
-      // are usually the most interesting ones, so this runs on failure too.
-      try {
-        stampMemories();
-        archive();
-      } catch {
-        // never let bookkeeping fail a run that already finished
+      if (!parked) {
+        run.finishedAt = new Date().toISOString();
+        // Archive before the next run resets outputs/ — a failed run's
+        // artifacts are usually the most interesting ones, so this runs on
+        // failure too.
+        try {
+          stampMemories();
+          archive();
+        } catch {
+          // never let bookkeeping fail a run that already finished
+        }
+        save();
       }
-      save();
     }
   })();
 }
@@ -1354,7 +1404,10 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
         if (!run || run.status !== "awaiting-approval") continue;
         run.status = "running";
         writeRun(tenant, workspace.name, run);
-        driveRun(tenant, workspace.name, run, null, run.tags ?? []);
+        // Park at any *later* gate rather than poll: reconcile runs inside
+        // long-lived server processes, where a 24h file-poll is exactly the
+        // slot-burning the queue exists to avoid.
+        void driveRun(tenant, workspace.name, run, null, run.tags ?? [], { parkOnApproval: true });
         closed.push({
           runId: run.id,
           tenant,
@@ -1429,7 +1482,9 @@ export async function waitForRun(
   for (;;) {
     const run = readRun(tenant, workspace, runId);
     if (!run) return { run: null, timedOut: false };
-    if (run.status !== "running") return { run, timedOut: false };
+    // Queued counts as in flight — a caller asking to wait wants the result,
+    // not a report that the worker hadn't picked the job up yet.
+    if (run.status !== "running" && run.status !== "queued") return { run, timedOut: false };
     if (Date.now() >= deadline) return { run, timedOut: true };
     await new Promise((r) => setTimeout(r, 250));
   }

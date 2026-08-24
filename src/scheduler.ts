@@ -11,7 +11,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { listWorkspaces, listFlows, listTenants, type FlowInfo } from "./store.ts";
-import { startFlowRun, reconcileAllRuns } from "./runner.ts";
+import { reconcileAllRuns } from "./runner.ts";
+import { enqueueFlowRun } from "./queue.ts";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
@@ -237,8 +238,11 @@ export function tick(now = new Date()): DueFlow[] {
   writeState(state);
   for (const d of due) {
     try {
-      startFlowRun(d.tenant, d.workspace, d.flow.steps, d.flow.name);
-      console.log(`[scheduler] started ${d.tenant}/${d.workspace}/${d.flow.name}`);
+      // Through the queue, not straight to driveRun — the scheduler shares a
+      // process with the worker, and firing five flows at one minute past
+      // midnight should respect the same concurrency cap as everything else.
+      enqueueFlowRun(d.tenant, d.workspace, d.flow.steps, d.flow.name);
+      console.log(`[scheduler] queued ${d.tenant}/${d.workspace}/${d.flow.name}`);
     } catch (err) {
       console.error(`[scheduler] failed ${d.tenant}/${d.workspace}/${d.flow.name}:`, err);
     }

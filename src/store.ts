@@ -28,7 +28,7 @@ import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
-import { starterFiles } from "./starter.ts";
+import { starterFiles, accountFiles } from "./starter.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `mdagent run ./my-desk` has to mean.
@@ -101,6 +101,32 @@ export function accountDir(tenant: string) {
   if (single) return path.resolve(single, "..");
   assertSafeName(tenant, "tenant");
   return path.join(dataRoot(), tenant);
+}
+
+/**
+ * Create the account's AGENTS.md if it is missing. Returns what it wrote.
+ *
+ * Called from every path that brings a workspace into being, because there is
+ * no separate "create an account" step — the account root accumulates
+ * (`library/`, `secrets.json`) as things need it, and its AGENTS.md is one
+ * more of those things.
+ *
+ * Never overwrites, and treats the legacy `project.md` as already-present: the
+ * whole file is hand-authored config, and a deploy is not permission to touch
+ * a scope the deploy did not ship. `dir` is explicit for `mdagent init`, which
+ * writes a workspace to an arbitrary path before anything is pinned to it and
+ * so cannot ask accountDir where "up" is.
+ */
+export function ensureAccountFiles(tenant: string, dir = accountDir(tenant)): string[] {
+  const written: string[] = [];
+  for (const f of accountFiles(path.basename(path.resolve(dir)))) {
+    if (fs.existsSync(path.join(dir, f.path))) continue;
+    if (f.path === "AGENTS.md" && fs.existsSync(path.join(dir, "project.md"))) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, f.path), f.content);
+    written.push(f.path);
+  }
+  return written;
 }
 
 export interface DeployFile {
@@ -202,6 +228,11 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
   };
 
   const dir = workspaceDir(tenant, workspace);
+
+  // The scope above has to exist before anything under it runs, and this is
+  // the only chokepoint every hosted workspace passes through — the dashboard's
+  // New button, the API, and `git push` deploys all land here.
+  ensureAccountFiles(tenant);
 
   // A deploy replaces the workspace, but it must not destroy what it never
   // owned. Git is authoritative for the files it ships; the platform owns
@@ -1104,9 +1135,14 @@ export interface RunRecord {
   flow: string; // flow name, or "adhoc:<agent>" for direct agent runs
   /** Tags supplied when the run started — skills can require one. */
   tags?: string[];
-  status: "running" | "awaiting-approval" | "completed" | "failed";
+  status: "queued" | "running" | "awaiting-approval" | "completed" | "failed";
   startedAt: string;
   finishedAt: string | null;
+  /** Set when a worker parked this run at an approval gate and returned its
+   *  slot to the queue. The approval API re-enqueues exactly when this is
+   *  set — without the marker it would also re-enqueue runs whose starting
+   *  process is still alive and polling, and two drivers would race. */
+  parkedAt?: string | null;
   steps: StepRecord[];
 }
 

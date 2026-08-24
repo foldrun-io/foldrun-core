@@ -222,7 +222,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
 export function runsInFlight(tenant: string, workspace: string): string[] {
   if (!fs.existsSync(workspaceDir(tenant, workspace))) return [];
   return listRuns(tenant, workspace)
-    .filter((r) => r.status === "running" || r.status === "awaiting-approval")
+    .filter((r) => r.status === "queued" || r.status === "running" || r.status === "awaiting-approval")
     .map((r) => r.id);
 }
 

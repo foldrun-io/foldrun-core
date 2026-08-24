@@ -23,6 +23,47 @@ export interface StarterFile {
   content: string;
 }
 
+/**
+ * The account root's own files — one scope up from any workspace.
+ *
+ * The account AGENTS.md was readable from the day `workspaceFrontmatter` and
+ * `sharedInstructions` learned to look for it, and nothing ever wrote one. So
+ * the outer half of "nearest-wins" existed only for people who had read the
+ * spec closely enough to know the file could exist at all, which is the same
+ * failure as prose that reached no model: a feature nobody is told about.
+ *
+ * Deliberately near-empty. This file's frontmatter governs *every* workspace
+ * under it, so the scaffold ships the shape and a commented example rather
+ * than a live `provider:` — a starter that silently routed every future
+ * workspace somewhere would be worse than no starter.
+ */
+export function accountFiles(account: string): StarterFile[] {
+  return [
+    {
+      path: "AGENTS.md",
+      content: `---
+mdagent_version: "0.1"
+# Config here applies to every workspace under this account, and a workspace
+# that declares the same key replaces it *whole* — base_url and token never
+# merge across scopes, so a provider block belongs entirely at one level.
+#
+# provider:
+#   base_url: https://openrouter.ai/api
+#   token: \${OPENROUTER_API_KEY}
+---
+
+# ${account}
+
+Context every agent in every workspace here shares.
+
+Unlike the frontmatter above, this prose **accumulates**: a workspace's
+AGENTS.md is added to it, not swapped for it, so a rule written here cannot be
+dropped further down.
+`,
+    },
+  ];
+}
+
 export function starterFiles(workspace: string): StarterFile[] {
   return [
     {
