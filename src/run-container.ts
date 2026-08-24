@@ -24,8 +24,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { ApiSpec } from "./store.ts";
+import { isPlatformPath, type ApiSpec } from "./store.ts";
 import type { ScriptSpec } from "./script-tools.ts";
+import type { RuntimeSpec } from "./runtime.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -40,6 +41,11 @@ export interface ContainerStepInput {
   mcpServers: Record<string, McpServerConfig>;
   apis: ApiSpec[]; // headers pre-substituted from the vault, host-side
   scripts: ScriptSpec[];
+  /** The agent's `runtime:` declaration — the driver builds the venv/npm
+   *  prefix inside the container, where the network is. Without this,
+   *  dependency-using scripts worked locally and failed only in production
+   *  isolation, which is the worst place for a difference. */
+  runtime: RuntimeSpec | null;
   timeoutSec?: number;
   verify?: string;
 }
@@ -53,9 +59,10 @@ export interface ContainerStepOutcome {
 const cli = () => process.env.MDAGENT_CONTAINER_CLI ?? "docker";
 
 // Paths that must never come back from a container, whatever happened in
-// there. secrets.json and runs/ are also never copied in; knowledge/ goes in
-// (agents read it) and is dropped on the way out.
-const DENY_BACK = ["knowledge/", "secrets.json", "runs/", ".git/", ".mdagent/"];
+// there: everything platform-owned (store.ts#isPlatformPath — also never
+// copied in), plus knowledge/, which goes in for reading and is dropped on
+// the way out, and .git/.
+const DENY_BACK = ["knowledge/", ".git/"];
 // And per-agent knowledge, at any depth under agents/<name>/.
 const DENY_BACK_RE = /^agents\/[^/]+\/knowledge\//;
 
@@ -63,6 +70,7 @@ const DENY_BACK_RE = /^agents\/[^/]+\/knowledge\//;
 export function allowedBack(rel: string): boolean {
   const norm = rel.replaceAll("\\", "/");
   if (norm.includes("..")) return false;
+  if (isPlatformPath(norm)) return false;
   if (DENY_BACK.some((d) => norm === d.replace(/\/$/, "") || norm.startsWith(d))) return false;
   if (DENY_BACK_RE.test(norm)) return false;
   return true;
@@ -105,9 +113,13 @@ import fs from "node:fs";
 const input = JSON.parse(fs.readFileSync("/opt/runner/job/input.json", "utf8"));
 const emit = (type, text) => process.stdout.write(JSON.stringify({ e: "event", type, text }) + "\\n");
 try {
+  // Runtime state (venvs, npm prefixes) lands in the agent user's real home
+  // — writable, inside the container, gone with it.
+  process.env.MDAGENT_DATA = "/home/agent/.mdagent";
   const { executeStep } = await import("@mdagent/core/step-exec");
   const { buildApiTools } = await import("@mdagent/core/api-tools");
   const { buildScriptTools } = await import("@mdagent/core/script-tools");
+  const { prepareRuntime } = await import("@mdagent/core/runtime");
 
   const agentDir = "/workspace/" + input.agentRel;
   // HOME is where a bare relative path lands when anything resolves one
@@ -116,11 +128,28 @@ try {
   // directory is both the truthful answer and the safe one.
   const env = { ...process.env, HOME: agentDir };
 
+  // The declared runtime, built in here — pip and npm have the network, and
+  // the cache dies with the container (a fresh install per run is the cost
+  // of the isolation; the log says what was built and how long it took).
+  const runtime = input.runtime
+    ? prepareRuntime("runner", input.runtime)
+    : { interpreters: {}, env: {}, log: [], error: null };
+  for (const line of runtime.log) emit("info", "runtime: " + line);
+  if (runtime.error) emit("error", "runtime: " + runtime.error);
+
   // API and script tools, rebuilt in here from their specs. Secrets were
   // substituted into API headers before the input crossed the boundary, so
-  // buildApiTools gets an already-resolved environment.
+  // buildApiTools gets an already-resolved environment. (verify: needs no
+  // separate env either — the container's own environment already carries
+  // the declared secrets, which is why executeStep gets verifyEnv: {}.)
   const api = buildApiTools("", input.apis, undefined, { env, missing: [] });
-  const script = buildScriptTools(agentDir, input.scripts, env, "/library/scripts");
+  const script = buildScriptTools(
+    agentDir,
+    input.scripts,
+    { ...env, ...runtime.env },
+    "/library/scripts",
+    runtime.interpreters,
+  );
 
   const outcome = await executeStep({
     agentDir,
@@ -311,15 +340,14 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-run-"));
   let containerId = "";
   try {
-    // Stage the workspace copy minus what must not enter: the vault and the
-    // run archive. The container gets the trust boundary, not the history.
+    // Stage the workspace copy minus what the platform owns — the vault,
+    // hook state, run history. The container gets the trust boundary, not
+    // the bookkeeping. One definition of "platform-owned" for this filter,
+    // the k8s executor's, and deploys: store.ts#isPlatformPath.
     const wsIn = path.join(staging, "workspace");
     fs.cpSync(args.workspaceRoot, wsIn, {
       recursive: true,
-      filter: (src) => {
-        const rel = path.relative(args.workspaceRoot, src).replaceAll("\\", "/");
-        return !(rel === "secrets.json" || rel === "runs" || rel.startsWith("runs/") || rel === ".mdagent" || rel.startsWith(".mdagent/"));
-      },
+      filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
     });
     const libIn = path.join(staging, "library");
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });

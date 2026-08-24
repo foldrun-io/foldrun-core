@@ -22,14 +22,19 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { runInContainer } from "./container.ts";
 
 const TIMEOUT_MS = 120_000;
+const timeoutFor = (spec: ScriptSpec) => (spec.timeout ? spec.timeout * 1000 : TIMEOUT_MS);
 const MAX_OUTPUT = 20_000;
 
 export interface ScriptSpec {
   name: string;
-  run: string; // path relative to the agent dir, e.g. scripts/summary.py or shared/x.sh
+  run: string; // path relative to the agent dir, e.g. scripts/summary.py or workspace/scripts/x.sh
   description: string;
   args: Record<string, string>; // arg name → description
   interpreter?: string; // optional override, e.g. "python3", "bash"
+  /** Seconds this script may run — for the crawl that legitimately takes
+   *  five minutes. Defaults to 120, capped at 600: a limit an author can
+   *  raise is a budget; one they can remove is a hang. */
+  timeout?: number;
 }
 
 export function parseScripts(raw: unknown): ScriptSpec[] {
@@ -47,12 +52,14 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
         if (/^[a-z][a-z0-9_]*$/i.test(k)) args[k] = String(v);
       }
     }
+    const timeout = Number(e.timeout);
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
       run,
       description: typeof e.description === "string" ? e.description : "",
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
+      timeout: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 600) : undefined,
     });
   }
   return out;
@@ -164,7 +171,7 @@ function runScript(
         image: exec.image,
         argv,
         env,
-        timeoutMs: TIMEOUT_MS,
+        timeoutMs: timeoutFor(spec),
         network: exec.network,
         maxOutput: MAX_OUTPUT,
       }).then(resolve, (err) =>
@@ -176,7 +183,7 @@ function runScript(
     const child = spawn(cmd, args, {
       cwd,
       env: { ...process.env, ...env },
-      timeout: TIMEOUT_MS,
+      timeout: timeoutFor(spec),
     });
     let out = "";
     const append = (chunk: Buffer) => {

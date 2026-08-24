@@ -383,13 +383,20 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
 
   const own = listDir(path.join(agentDir, "scripts"), "scripts/");
   const shared = listDir(path.join(agentDir, "..", "..", "scripts"), "../../scripts/");
-  const global = listDir(libraryDir(tenant, "scripts"), `${libraryDir(tenant, "scripts")}/`);
+  // The library's path depends on where this run executes: isolated runs see
+  // it at /library, host runs at its real location. Printing the host path
+  // into a container's prompt handed the model files it could never open.
+  const libraryScriptsRoot =
+    process.env.MDAGENT_RUN_ISOLATION === "container" || process.env.MDAGENT_RUN_ISOLATION === "k8s"
+      ? "/library/scripts"
+      : libraryDir(tenant, "scripts");
+  const global = listDir(libraryDir(tenant, "scripts"), `${libraryScriptsRoot}/`);
 
   if (own.length || shared.length || global.length) {
     const sections = [
       own.length ? `Your own scripts:\n${own.join("\n")}` : null,
       shared.length ? `Shared across this workspace:\n${shared.join("\n")}` : null,
-      global.length ? `Shared across this workspace:\n${global.join("\n")}` : null,
+      global.length ? `From the account library (read-only):\n${global.join("\n")}` : null,
     ].filter(Boolean);
     parts.push(
       `# Scripts\n\nTooling you can run with bash from your working directory:\n\n${sections.join("\n\n")}\n\n` +
@@ -798,6 +805,7 @@ async function runStep(
           mcpServers,
           apis: substitutedApis,
           scripts: parseScripts(front.scripts),
+          runtime: parseRuntime(front.runtime),
           timeoutSec: step.timeout,
           verify: step.verify,
         },

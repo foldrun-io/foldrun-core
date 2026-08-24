@@ -201,6 +201,25 @@ export function assertCanonicalCase(rel: string) {
   }
 }
 
+/**
+ * What the platform owns inside a workspace directory, in one place.
+ *
+ * Three separate mechanisms need this exact list and drifted apart while it
+ * lived in each of them: deploys must preserve these files, and the run
+ * executors (docker and k8s) must not copy them into a sandbox. A platform
+ * file added to one list and not the others is either silently wiped by the
+ * next deploy or silently handed to every container — both invisible until
+ * someone is bitten.
+ */
+export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl"];
+
+/** True for anything the platform, not the author or the agent, writes. */
+export function isPlatformPath(rel: string): boolean {
+  const norm = rel.replaceAll("\\", "/");
+  if (PLATFORM_FILES.includes(norm)) return true;
+  return norm === "runs" || norm.startsWith("runs/") || norm === ".mdagent" || norm.startsWith(".mdagent/");
+}
+
 export function saveWorkspace(tenant: string, workspace: string, files: DeployFile[]) {
   if (files.length > 500) throw new Error("too many files");
   for (const f of files) {
@@ -250,15 +269,11 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
   // had learned.
   const shipped = new Set(files.map((f) => path.normalize(f.path)));
   const isAgentOwned = (rel: string) =>
-    /(^|\/)runs\//.test(rel) ||
+    // Platform bookkeeping (the vault, hook rotation state, the delivery
+    // log, run history) — losing any of it on deploy silently breaks
+    // something: agents lose secrets, a rotated hook un-rotates.
+    isPlatformPath(rel) ||
     /(^|\/)state\//.test(rel) ||
-    // Secrets are never in git — a deploy has no business deleting them, and
-    // doing so silently breaks every agent that declared one.
-    rel === "secrets.json" ||
-    // Webhook rotation state and the delivery log are platform bookkeeping:
-    // losing them on deploy silently un-rotates a leaked hook URL.
-    rel === "hooks.json" ||
-    rel === "hook-deliveries.jsonl" ||
     (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
 
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;

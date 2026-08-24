@@ -27,6 +27,7 @@ import {
   type ContainerStepOutcome,
   type RunInContainerArgs,
 } from "./run-container.ts";
+import { isPlatformPath } from "./store.ts";
 
 const kubectl = () => process.env.MDAGENT_KUBECTL ?? "kubectl";
 const namespace = () => process.env.MDAGENT_K8S_NAMESPACE ?? "mdagent-runs";
@@ -115,14 +116,12 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
   let created = false;
 
   try {
-    // Stage exactly what the docker path stages.
+    // Stage exactly what the docker path stages — same single definition of
+    // platform-owned, so the two executors cannot drift.
     const wsIn = path.join(staging, "workspace");
     fs.cpSync(args.workspaceRoot, wsIn, {
       recursive: true,
-      filter: (src) => {
-        const rel = path.relative(args.workspaceRoot, src).replaceAll("\\", "/");
-        return !(rel === "secrets.json" || rel === "runs" || rel.startsWith("runs/") || rel === ".mdagent" || rel.startsWith(".mdagent/"));
-      },
+      filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
     });
     const libIn = path.join(staging, "library");
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });
