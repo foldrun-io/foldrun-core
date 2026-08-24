@@ -34,6 +34,7 @@ import {
 } from "./store.ts";
 import { createFlowRun, driveRun } from "./runner.ts";
 import { assertFunds, recordRunCost } from "./ledger.ts";
+import { sendRunNotification } from "./notify.ts";
 import { runCost } from "./store.ts";
 
 export interface QueueJob {
@@ -259,6 +260,10 @@ export function startWorker() {
             if (settled && (settled.status === "completed" || settled.status === "failed")) {
               recordRunCost(tenant, workspace, runId, runCost(settled));
             }
+            // Tell whoever asked to be told. Terminal states and parks alike
+            // — "waiting for your approval" is the one message that cannot
+            // wait for someone to happen to open the dashboard.
+            if (settled) await sendRunNotification(tenant, workspace, settled);
           }
         } catch (err) {
           console.error(`[mdagent] worker: run ${claim.job.runId} threw`, err);

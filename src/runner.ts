@@ -157,7 +157,7 @@ export function discoverSkills(agentDir: string): DiscoveredSkill[] {
  * Returns null rather than throwing on unparseable YAML: a broken shared file
  * must not take down every agent under it.
  */
-function readAgentsMd(dir: string): { data: Record<string, unknown>; body: string } | null {
+export function readAgentsMd(dir: string): { data: Record<string, unknown>; body: string } | null {
   for (const name of ["AGENTS.md", "project.md"]) {
     const file = path.join(dir, name);
     if (!fs.existsSync(file)) continue;
