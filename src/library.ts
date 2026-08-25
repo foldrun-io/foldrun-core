@@ -47,7 +47,7 @@ export function libraryDir(tenant: string, kind?: LibraryKind) {
     : path.join(dataRoot(), tenant, "library");
 }
 
-const TEXT_EXT = /\.(md|py|sh|js|ts|rb|sql|txt|json|ya?ml|toml)$/i;
+const TEXT_EXT = /\.(md|py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml)$/i;
 
 function assertLibraryPath(kind: LibraryKind, rel: string) {
   const norm = path.normalize(rel);

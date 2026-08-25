@@ -79,6 +79,7 @@ function commandFor(
     ".py": "python3",
     ".sh": "bash",
     ".js": "node",
+    ".mjs": "node",
     ".ts": "node",
     ".rb": "ruby",
   };
@@ -92,6 +93,7 @@ function containerInterpreter(abs: string): string {
     ".py": "python3",
     ".sh": "bash",
     ".js": "node",
+    ".mjs": "node",
     ".ts": "node",
     ".rb": "ruby",
   };
