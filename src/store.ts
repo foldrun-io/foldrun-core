@@ -842,6 +842,61 @@ export function setFlowTrigger(
   return ["---", ...kept, "---", ...body].join("\n");
 }
 
+/**
+ * Rewrite one step's option lines — the board's step editor. Surgical, like
+ * every flow rewrite: only the managed option lines of block `index` change;
+ * the step line, its unmanaged options (approve stays the `!` marker's
+ * business), other steps, comments and frontmatter survive verbatim.
+ * `null` clears an option; values are clamped exactly as parseFlow reads
+ * them, so what the editor writes is what the runner will do.
+ */
+export function updateFlowStep(
+  raw: string,
+  index: number,
+  options: Partial<Record<"model" | "retry" | "timeout" | "verify" | "when" | "loop" | "until" | "each" | "max", string | number | null>>,
+): string {
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
+    throw new Error(`no step ${index}`);
+  }
+
+  const clamp: Record<string, (v: string) => string | null> = {
+    model: (v) => v || null,
+    verify: (v) => v || null,
+    when: (v) => v || null,
+    until: (v) => v || null,
+    retry: (v) => String(Math.min(5, Math.max(0, Number(v) || 0))),
+    timeout: (v) => (Number(v) > 0 ? String(Math.max(1, Math.floor(Number(v)))) : null),
+    loop: (v) => (Number(v) > 0 ? String(Math.min(5, Math.max(1, Math.floor(Number(v))))) : null),
+    max: (v) => (Number(v) > 0 ? String(Math.min(20, Math.max(1, Math.floor(Number(v))))) : null),
+    each: (v) => (v === "lines" ? "lines" : null),
+  };
+
+  const block = blocks[index];
+  const managed = new Set(Object.keys(options));
+  const kept = block.lines.slice(1).filter((line) => {
+    const key = line.match(OPTION_RE)?.[1];
+    return !(key && managed.has(key));
+  });
+  const added: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === null || value === undefined || !(key in clamp)) continue;
+    const cleaned = clamp[key](String(value).trim());
+    if (cleaned === null) continue;
+    added.push(`   ${key}: ${cleaned}`);
+  }
+  block.lines = [block.lines[0], ...added, ...kept];
+
+  // Reassemble the original grouping: consecutive blocks sharing a group.
+  const groups: FlowBlock[][] = [];
+  for (const b of blocks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].group === b.group) last.push(b);
+    else groups.push([b]);
+  }
+  return emitFlow(head, preamble, groups);
+}
+
 export function reorderFlowSteps(raw: string, groups: number[][]): string {
   const { head, preamble, blocks: ordered } = splitFlowBlocks(raw);
 
@@ -1177,6 +1232,49 @@ export function templateFiles(workspace: string): DeployFile[] {
 export const AGENT_TEMPLATE = (name: string) => KINDS.agents.template(name);
 export const FLOW_TEMPLATE = (name: string, firstAgent: string) =>
   KINDS.flows.template(name, { firstAgent });
+
+// The orchestration patterns a new flow can start from. Each template ships
+// the pattern's syntax filled in with real agent names, because a working
+// example in your own workspace teaches loop:/until:/each: better than any
+// reference page — you rename the instructions, not learn the shape.
+export const FLOW_PATTERNS = ["pipeline", "review-loop", "fan-out", "debate"] as const;
+export type FlowPattern = (typeof FLOW_PATTERNS)[number];
+
+export function flowPatternTemplate(pattern: FlowPattern, name: string, agents: string[]): string {
+  // Real agents where they exist, honest placeholders where they don't —
+  // `mdagent check` will point at any placeholder left unrenamed.
+  const a = (i: number, fallback: string) => agents[i] ?? agents[0] ?? fallback;
+  const head = `---\nname: ${name}\n---\n\n`;
+  switch (pattern) {
+    case "review-loop":
+      return (
+        head +
+        `1. [[${a(0, "writer")}]] — draft the deliverable\n` +
+        `2. [[${a(1, "reviewer")}]] — review it against the brief; end your reply with APPROVED when it is ready\n` +
+        `   loop: 3\n` +
+        `   until: APPROVED\n`
+      );
+    case "fan-out":
+      return (
+        head +
+        `1. [[${a(0, "lister")}]] — list the items to process, one per line\n` +
+        `2. [[${a(1, "worker")}]] — handle this one item\n` +
+        `   each: lines\n` +
+        `   max: 10\n` +
+        `3. [[${a(2, "summariser")}]] — pull every result into one summary\n`
+      );
+    case "debate":
+      return (
+        head +
+        `1. [[${a(0, "researcher")}]] — gather the facts\n` +
+        `2. [[${a(1, "advocate")}]] — argue the strongest case for, from the facts\n` +
+        `2. [[${a(2, "skeptic")}]] — argue the strongest case against, from the facts\n` +
+        `3. [[${a(3, "judge")}]] — weigh both cases and give a verdict\n`
+      );
+    default:
+      return FLOW_TEMPLATE(name, a(0, "my-agent"));
+  }
+}
 
 export interface RunEvent {
   t: string;
