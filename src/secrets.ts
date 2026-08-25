@@ -51,13 +51,17 @@ function secretsFile(tenant: string, workspace?: string) {
   return path.join(base, "secrets.json");
 }
 
+/** How the stored value is used at run time — "oauth2"/"service-account"
+ *  are refreshed into live tokens, "file"/"ssh"/"api" are materialised into
+ *  the run's scratch. Plain values have no kind. */
+export type SecretKind = "oauth2" | "service-account" | "file" | "ssh" | "api";
+
 interface StoredSecret {
   iv: string;
   tag: string;
   data: string;
   updatedAt: string;
-  /** "oauth2" marks a credential the platform refreshes before every use. */
-  kind?: "oauth2" | "service-account" | "file";
+  kind?: SecretKind;
 }
 
 type SecretsFile = Record<string, StoredSecret>;
@@ -85,7 +89,7 @@ export function setSecret(
   name: string,
   value: string,
   workspace?: string,
-  kind?: "oauth2" | "service-account" | "file",
+  kind?: SecretKind,
 ) {
   if (!SECRET_NAME.test(name)) {
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
@@ -164,8 +168,8 @@ export interface SecretEntry {
   /** An account secret this workspace overrides — worth showing, not hiding. */
   shadowed?: boolean;
   /** How this credential works: auto-refreshing oauth2, a signed service
-   *  account, a file materialised into runs — absent for static values. */
-  kind?: "oauth2" | "service-account" | "file";
+   *  account, a file/ssh/api materialised into runs — absent for static values. */
+  kind?: SecretKind;
 }
 
 // Metadata only — never values. Without a workspace this lists the account
@@ -455,8 +459,9 @@ export async function materializeSecrets(
         throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    // @file values are left as-is here; the run layer materialises them to
-    // paths, because only it knows the sandbox's writable scratch.
+    // @file/@ssh/@api values are left as-is here; the run layer materialises
+    // them (paths, wrapper scripts), because only it knows the sandbox's
+    // writable scratch.
   }
   return out;
 }
@@ -581,4 +586,92 @@ export function isFileValue(value: string): boolean {
 
 export function fileContent(value: string): string {
   return value.slice(FILE_PREFIX.length);
+}
+
+// ---------------------------------------------------------------- ssh
+
+// A whole SSH destination, stored as one connection: host, port, user, and
+// either a private key or a password. The user describes the connection the
+// way the service handed it to them; how it is plumbed (key files, sshpass,
+// ssh flags) is the platform's business — the run layer materialises the
+// config into an executable wrapper, so the agent runs `"$NAME" 'uptime'`
+// and never learns which auth flavour it is.
+
+const SSH_PREFIX = "@ssh ";
+
+export interface SshConfig {
+  host: string;
+  port?: number;
+  user: string;
+  /** Exactly one of these two. */
+  private_key?: string;
+  password?: string;
+}
+
+export function setSshSecret(tenant: string, name: string, config: SshConfig, workspace?: string) {
+  const host = config.host?.trim();
+  const user = config.user?.trim();
+  if (!host || /[\s'"`$\\]/.test(host)) throw new Error("ssh secret needs a host (no spaces or quotes)");
+  if (!user || /[\s'"`$\\]/.test(user)) throw new Error("ssh secret needs a username (no spaces or quotes)");
+  const port = config.port ?? 22;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("ssh port must be 1-65535");
+  const hasKey = Boolean(config.private_key?.trim());
+  const hasPassword = Boolean(config.password);
+  if (hasKey === hasPassword) throw new Error("ssh secret needs a private key or a password (not both)");
+  if (hasKey && !/BEGIN [A-Z ]*PRIVATE KEY/.test(config.private_key!)) {
+    throw new Error("private_key must be a PEM/OpenSSH private key");
+  }
+  if (hasPassword && /[\n\r]/.test(config.password!)) throw new Error("ssh password cannot contain newlines");
+  const stored: SshConfig = {
+    host, user, port,
+    ...(hasKey ? { private_key: config.private_key } : { password: config.password }),
+  };
+  setSecret(tenant, name, SSH_PREFIX + JSON.stringify(stored), workspace, "ssh");
+}
+
+export function isSshValue(value: string): boolean {
+  return value.startsWith(SSH_PREFIX);
+}
+
+export function sshConfigOf(value: string): SshConfig {
+  return JSON.parse(value.slice(SSH_PREFIX.length));
+}
+
+// ---------------------------------------------------------------- api
+
+// An HTTP API credential that is more than one bare token: a base URL plus
+// the headers the service wants (Cloudflare's X-Auth-Email + X-Auth-Key,
+// Stripe's Authorization + Stripe-Version, ...). Materialised as a curl
+// wrapper with the headers baked in — `"$NAME" /v1/charges` — so the secret
+// never appears in the bash command at all.
+
+const API_PREFIX = "@api ";
+
+export interface ApiConfig {
+  base_url?: string;
+  headers: Record<string, string>;
+}
+
+export function setApiSecret(tenant: string, name: string, config: ApiConfig, workspace?: string) {
+  const headers = Object.entries(config.headers ?? {});
+  if (headers.length === 0) throw new Error("api secret needs at least one header");
+  for (const [h, v] of headers) {
+    if (!/^[A-Za-z0-9-]+$/.test(h)) throw new Error(`"${h}" is not a valid header name`);
+    if (/[\n\r]/.test(v)) throw new Error(`header ${h} cannot contain newlines`);
+  }
+  const base = config.base_url?.trim();
+  if (base && !/^https?:\/\//.test(base)) throw new Error("base_url must be http(s)");
+  setSecret(
+    tenant, name,
+    API_PREFIX + JSON.stringify({ ...(base ? { base_url: base.replace(/\/+$/, "") } : {}), headers: config.headers }),
+    workspace, "api",
+  );
+}
+
+export function isApiValue(value: string): boolean {
+  return value.startsWith(API_PREFIX);
+}
+
+export function apiConfigOf(value: string): ApiConfig {
+  return JSON.parse(value.slice(API_PREFIX.length));
 }

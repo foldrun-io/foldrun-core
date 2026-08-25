@@ -212,7 +212,7 @@ try {
 // 10001 with no capabilities at all.
 const DOCKERFILE = `FROM node:22-slim
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git \\
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
 WORKDIR /opt/runner
