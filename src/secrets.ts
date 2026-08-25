@@ -331,7 +331,9 @@ export function setOAuth2Secret(
   for (const field of ["token_url", "client_id", "client_secret", "refresh_token"] as const) {
     if (!config[field]?.trim()) throw new Error(`oauth2 secret needs ${field}`);
   }
-  if (!/^https:\/\//.test(config.token_url)) {
+  // Loopback is exempt: a token endpoint on this same machine (tests, a
+  // local mock, a sidecar) crosses no wire for http to leak on.
+  if (!/^https:\/\//.test(config.token_url) && !/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(config.token_url)) {
     throw new Error("token_url must be https — a refresh token over http is a leaked one");
   }
   setSecret(tenant, name, OAUTH2_PREFIX + JSON.stringify(config), workspace, "oauth2");
