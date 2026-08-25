@@ -105,6 +105,20 @@ export function setSecret(
   write(tenant, workspace, all);
 }
 
+/** Encrypt one value under the install's master key — the same envelope
+ *  secrets use, exported so sibling stores (OAuth clients) don't invent a
+ *  second crypto path. */
+export function encryptValue(value: string): { iv: string; tag: string; data: string } {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", masterKey(), iv);
+  const enc = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return { iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: enc.toString("base64") };
+}
+
+export function decryptValue(rec: { iv: string; tag: string; data: string } | undefined): string | null {
+  return decrypt(rec as StoredSecret | undefined);
+}
+
 function decrypt(rec: StoredSecret | undefined): string | null {
   if (!rec) return null;
   try {
