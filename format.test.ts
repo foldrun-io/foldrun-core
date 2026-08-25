@@ -13,6 +13,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  writeWorkspaceFile,
+  renameWorkspaceFile,
+  readWorkspaceFile,
   parseFlow,
   parseToolDef,
   reorderFlowSteps,
@@ -484,4 +487,31 @@ test("a tool test never returns a secret value", async () => {
   // The name is useful; the value is not, and must never leave the server.
   assert.ok(r.missingSecrets.includes("A_SECRET"));
   assert.ok(!JSON.stringify(r).includes("Bearer "), "a header value leaked into the result");
+});
+
+// ---------------------------------------------------------------- rename
+
+import fs2 from "node:fs";
+import os2 from "node:os";
+import path2 from "node:path";
+
+test("rename moves a file, refuses to clobber, and stays inside the gate", () => {
+  const data = fs2.mkdtempSync(path2.join(os2.tmpdir(), "mdagent-rename-"));
+  process.env.MDAGENT_DATA = data;
+  try {
+    fs2.mkdirSync(path2.join(data, "default", "workspaces", "w", "flows"), { recursive: true });
+    writeWorkspaceFile("default", "w", "flows/old.md", "---\nname: old\n---\n");
+    renameWorkspaceFile("default", "w", "flows/old.md", "flows/new.md");
+    assert.match(readWorkspaceFile("default", "w", "flows/new.md"), /name: old/);
+    assert.throws(() => readWorkspaceFile("default", "w", "flows/old.md"));
+    // an existing target is someone's work, not a landing site
+    writeWorkspaceFile("default", "w", "flows/other.md", "---\nname: other\n---\n");
+    assert.throws(() => renameWorkspaceFile("default", "w", "flows/new.md", "flows/other.md"), /already exists/);
+    // both ends pass the editable-path gate
+    assert.throws(() => renameWorkspaceFile("default", "w", "flows/new.md", "../../escape.md"));
+    assert.throws(() => renameWorkspaceFile("default", "w", "flows/new.md", "runs/sneaky.md"));
+  } finally {
+    delete process.env.MDAGENT_DATA;
+    fs2.rmSync(data, { recursive: true, force: true });
+  }
 });

@@ -1272,6 +1272,26 @@ export function syncBundleFor(file: string, change?: "Creation" | "Update") {
   }
 }
 
+/**
+ * Rename one editable file. Both ends pass the same gate as a write — a
+ * rename must not be able to move a file somewhere a write couldn't create
+ * it — and an existing target refuses rather than silently replacing
+ * someone's work. Bundle indexes on both sides are re-synced, because a
+ * memory file leaving a bundle is as much a change to its index as one
+ * arriving.
+ */
+export function renameWorkspaceFile(tenant: string, workspace: string, from: string, to: string) {
+  const dir = workspaceDir(tenant, workspace);
+  const src = path.join(dir, assertEditablePath(from));
+  const dst = path.join(dir, assertEditablePath(to));
+  if (!fs.existsSync(src)) throw new Error(`${from} does not exist`);
+  if (fs.existsSync(dst)) throw new Error(`${to} already exists`);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.renameSync(src, dst);
+  syncBundleFor(src);
+  syncBundleFor(dst, "Update");
+}
+
 export function deleteWorkspacePath(tenant: string, workspace: string, rel: string) {
   const norm = path.normalize(rel);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
@@ -1549,6 +1569,21 @@ export function runCost(run: RunRecord): number {
 export function runDurationSecs(run: RunRecord): number | null {
   if (!run.finishedAt) return null;
   return (new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000;
+}
+
+/**
+ * Why a failed run failed, said in one line: the failing step and its last
+ * error event. The journal has the whole story; a runs *list* needs the
+ * sentence — "failed" with no reason makes every diagnosis start by opening
+ * the run, and the answer was sitting in the record all along.
+ */
+export function runFailure(run: RunRecord): { agent: string; reason: string } | null {
+  if (run.status !== "failed") return null;
+  const step = run.steps.find((s) => s.status === "failed");
+  if (!step) return null;
+  const errors = step.events.filter((e) => e.type === "error");
+  const last = errors[errors.length - 1];
+  return { agent: step.agent, reason: last?.text ?? "failed without an error event" };
 }
 
 export function listRuns(tenant: string, workspace: string): RunRecord[] {
