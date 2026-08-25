@@ -583,6 +583,19 @@ export interface FlowStep {
   retry?: number;
   /** Abandon the step after this many seconds. */
   timeout?: number;
+  /** Evaluator loop: when this step's result lacks `until:`'s marker, wind
+   *  back to the previous group and go again — at most this many extra
+   *  cycles. Bounded by declaration, so the worst-case cost is still
+   *  readable off the file. */
+  loop?: number;
+  /** The marker (case-insensitive) whose presence in this step's result ends
+   *  the loop early. Required for `loop:` to mean anything. */
+  until?: string;
+  /** Fan-out: run one instance of this step per item of the previous
+   *  group's result. `lines` is the one mode — one item per non-empty line. */
+  each?: "lines";
+  /** Fan-out cap. Items beyond it are dropped, and the run log says so. */
+  max?: number;
   /** Shell command run after the step; a non-zero exit fails the step. */
   verify?: string;
   /** 1-indexed line in the flow file. Diagnostics without a line make you
@@ -711,6 +724,10 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       else if (key === "timeout") step.timeout = Math.max(1, Number(value) || 0);
       else if (key === "verify") step.verify = value;
       else if (key === "model") step.model = value;
+      else if (key === "loop") step.loop = Math.min(5, Math.max(1, Number(value) || 0)) || undefined;
+      else if (key === "until") step.until = value;
+      else if (key === "each") step.each = value === "lines" ? "lines" : undefined;
+      else if (key === "max") step.max = Math.min(20, Math.max(1, Number(value) || 0)) || undefined;
     }
   }
   steps.sort((a, b) => a.group - b.group);
@@ -1181,6 +1198,18 @@ export interface StepRecord {
   attempts?: number;
   /** Why a step was skipped, shown in the trace. */
   skipReason?: string;
+  /** Evaluator loop, carried from the flow — see FlowStep. `loopRemaining`
+   *  counts down on the record so a resumed run knows how many cycles are
+   *  left rather than starting the budget over. */
+  loop?: number;
+  until?: string;
+  loopRemaining?: number;
+  /** Fan-out, carried from the flow — see FlowStep. */
+  each?: "lines";
+  max?: number;
+  /** Set on the instances a fan-out step expanded into: the item this one
+   *  works on. The template step itself becomes status "expanded". */
+  item?: string;
   /**
    * When a person approved this step. Set by the approval API and never
    * cleared, because approval is a fact about the past.

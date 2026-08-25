@@ -27,6 +27,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec } from "./store.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { RuntimeSpec } from "./runtime.ts";
+import type { ConsultSpec } from "./agent-tools.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -46,6 +47,10 @@ export interface ContainerStepInput {
    *  dependency-using scripts worked locally and failed only in production
    *  isolation, which is the worst place for a difference. */
   runtime: RuntimeSpec | null;
+  /** Colleagues this agent may consult — persona + model, gathered from
+   *  their agent.md files host-side. The driver rebuilds the consult tools
+   *  in here; the callees run toolless, so nothing else need cross. */
+  consults: ConsultSpec[];
   timeoutSec?: number;
   verify?: string;
 }
@@ -119,6 +124,7 @@ try {
   const { executeStep } = await import("@mdagent/core/step-exec");
   const { buildApiTools } = await import("@mdagent/core/api-tools");
   const { buildScriptTools } = await import("@mdagent/core/script-tools");
+  const { buildConsultTools } = await import("@mdagent/core/agent-tools");
   const { prepareRuntime } = await import("@mdagent/core/runtime");
 
   const agentDir = "/workspace/" + input.agentRel;
@@ -150,6 +156,7 @@ try {
     "/library/scripts",
     runtime.interpreters,
   );
+  const consult = buildConsultTools(input.consults ?? [], env, emit);
 
   const outcome = await executeStep({
     agentDir,
@@ -163,6 +170,7 @@ try {
     mcpServers: {
       ...(api.server ? { mdagent_apis: api.server } : {}),
       ...(script.server ? { mdagent_scripts: script.server } : {}),
+      ...(consult.server ? { mdagent_agents: consult.server } : {}),
       ...input.mcpServers,
     },
     env,
@@ -173,6 +181,9 @@ try {
   });
   for (const line of api.drainLog()) emit("info", "api: " + line);
   for (const line of script.drainLog()) emit("info", "script: " + line);
+  // A consult's spend belongs to the step that asked.
+  const consultCost = consult.drainCost();
+  if (consultCost > 0) outcome.costUsd = (outcome.costUsd ?? 0) + consultCost;
   process.stdout.write(JSON.stringify({ e: "done", ...outcome }) + "\\n");
   process.exit(0);
 } catch (err) {

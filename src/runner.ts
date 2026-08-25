@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { executeStep } from "./step-exec.ts";
 import { runStepInContainer } from "./run-container.ts";
 import { runStepInK8s } from "./run-k8s.ts";
+import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
 import {
   accountDir,
   workspaceDir,
@@ -703,6 +704,27 @@ async function runStep(
     save();
   };
 
+  // The test seam: MDAGENT_STUB_STEP=1 completes the step from a canned
+  // script instead of a model, so the orchestration around steps — loops,
+  // fan-out, gates — is testable at zero cost. An agent's `stub.md` holds
+  // the answers, `\n---\n`-separated, consumed one per call; the last one
+  // repeats. Never set outside a test.
+  if (process.env.MDAGENT_STUB_STEP === "1") {
+    const stubFile = path.join(agentDir, "stub.md");
+    const answers = fs.existsSync(stubFile)
+      ? fs.readFileSync(stubFile, "utf8").split(/\n---\n/)
+      : [`stub result from ${step.agent}`];
+    const call = step.events.filter((e) => e.text.startsWith("stub call")).length;
+    push("info", `stub call ${call + 1}`);
+    step.status = "completed";
+    step.result =
+      (answers[Math.min(call, answers.length - 1)] ?? "").trim() +
+      (step.item ? ` [item: ${step.item}]` : "");
+    step.costUsd = 0;
+    save();
+    return;
+  }
+
   try {
     const {
       front, systemPrompt, allowed, disabled, apiTools, scriptTools,
@@ -773,6 +795,18 @@ async function runStep(
 
     let prompt = step.instruction || "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
+    if (step.item) {
+      // A fan-out instance: same instruction as its siblings, one item each.
+      prompt += `\n\n<item>\nOf everything above, this instance of the step handles exactly one item — this one:\n${step.item}\n</item>`;
+    }
+
+    // Colleagues this agent may consult mid-turn — declared, like every
+    // other capability.
+    const { consults, missing: missingConsults } = gatherConsults(workspaceRoot, front.agents);
+    for (const m of missingConsults) {
+      push("error", `agents: "${m}" is not an agent in this workspace — no consult tool granted`);
+    }
+    const consultNames = consults.length ? [...mcpNames, "mdagent_agents"] : mcpNames;
 
     const isolation = process.env.MDAGENT_RUN_ISOLATION;
     if (isolation === "container" || isolation === "k8s") {
@@ -801,11 +835,12 @@ async function runStep(
           model,
           systemPrompt,
           allowed,
-          mcpNames,
+          mcpNames: consultNames,
           mcpServers,
           apis: substitutedApis,
           scripts: parseScripts(front.scripts),
           runtime: parseRuntime(front.runtime),
+          consults,
           timeoutSec: step.timeout,
           verify: step.verify,
         },
@@ -827,6 +862,11 @@ async function runStep(
       step.result = outcome.result;
       step.costUsd = outcome.costUsd;
     } else {
+      const consultTools = buildConsultTools(
+        consults,
+        { ...process.env, ...secretEnv, ...providerEnv },
+        (type, text) => push(type, text),
+      );
       const outcome = await executeStep({
         agentDir,
         workspaceRoot,
@@ -835,10 +875,11 @@ async function runStep(
         model,
         systemPrompt,
         allowed,
-        mcpNames,
+        mcpNames: consultNames,
         mcpServers: {
           ...(apiTools.server ? { mdagent_apis: apiTools.server } : {}),
           ...(scriptTools.server ? { mdagent_scripts: scriptTools.server } : {}),
+          ...(consultTools.server ? { mdagent_agents: consultTools.server } : {}),
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model
@@ -851,7 +892,9 @@ async function runStep(
       });
       step.status = outcome.status;
       step.result = outcome.result;
-      step.costUsd = outcome.costUsd;
+      // A consult's spend belongs to the step that asked.
+      const consultCost = consultTools.drainCost();
+      step.costUsd = outcome.costUsd === null && consultCost === 0 ? null : (outcome.costUsd ?? 0) + consultCost;
       for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
       for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
     }
@@ -946,6 +989,11 @@ export function createFlowRun(
       retry: s.retry,
       timeout: s.timeout,
       verify: s.verify,
+      loop: s.loop,
+      until: s.until,
+      loopRemaining: s.loop,
+      each: s.each,
+      max: s.max,
       attempts: 0,
       status: "pending",
       events: [],
@@ -1069,20 +1117,84 @@ export function driveRun(
         save();
       }
 
-      // Group steps by their group number, ascending.
-      const groups = new Map<number, StepRecord[]>();
-      for (const s of run.steps) {
-        const list = groups.get(s.group) ?? [];
-        list.push(s);
-        groups.set(s.group, list);
-      }
-      const ordered = [...groups.entries()].sort(([a], [b]) => a - b).map(([, g]) => g);
+      // Group steps by their group number, ascending. Rebuilt on demand
+      // because two patterns mutate the step list mid-run: fan-out expands a
+      // step into instances, and an evaluator loop winds groups back.
+      const orderedGroups = () => {
+        const groups = new Map<number, StepRecord[]>();
+        for (const s of run.steps) {
+          const list = groups.get(s.group) ?? [];
+          list.push(s);
+          groups.set(s.group, list);
+        }
+        return [...groups.entries()].sort(([a], [b]) => a - b).map(([, g]) => g);
+      };
+      let ordered = orderedGroups();
 
+      // What each finished group produced, by position — so a loop that
+      // winds back can hand the re-run the same upstream context the first
+      // pass saw, instead of its own stale output.
+      const groupResults: (string | null)[] = [];
+      const contextBefore = (gi: number) => {
+        for (let i = gi - 1; i >= 0; i--) if (groupResults[i]) return groupResults[i];
+        return null;
+      };
+
+      let gi = 0;
       let context: string | null = null;
-      for (const group of ordered) {
+      while (gi < ordered.length) {
+        const group = ordered[gi];
+        context = contextBefore(gi);
+
+        // Fan-out: a step with `each:` becomes one instance per item of the
+        // previous group's result, capped, all in this same group — the
+        // declared shape stays readable in the file, the width comes from
+        // the data. The template survives as a skipped step for the trace.
+        for (const step of [...group]) {
+          if (step.each !== "lines" || step.status !== "pending" || step.item) continue;
+          const cap = Math.min(step.max ?? 10, 20);
+          const items = (context ?? "")
+            .split("\n")
+            .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
+            .filter(Boolean)
+            .slice(0, cap + 1);
+          const dropped = items.length > cap ? "at least one" : "";
+          const used = items.slice(0, cap);
+          step.status = "skipped";
+          if (used.length === 0) {
+            step.skipReason = "each: the previous group produced no items";
+            continue;
+          }
+          step.skipReason = `expanded into ${used.length} item${used.length === 1 ? "" : "s"}`;
+          step.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text:
+              `fan-out: ${used.length} instance${used.length === 1 ? "" : "s"}` +
+              (dropped ? ` (more items existed — capped at ${cap})` : ""),
+          });
+          const at = run.steps.indexOf(step);
+          const instances: StepRecord[] = used.map((item) => ({
+            ...step,
+            each: undefined,
+            max: undefined,
+            skipReason: undefined,
+            item,
+            status: "pending",
+            events: [],
+            result: null,
+            costUsd: null,
+            attempts: 0,
+          }));
+          run.steps.splice(at + 1, 0, ...instances);
+          ordered = orderedGroups();
+        }
+        save();
+        const freshGroup = ordered[gi];
+
         // Validate agents exist before launching the group.
         let missing = false;
-        for (const step of group) {
+        for (const step of freshGroup) {
           // Only what still has work to do. This walked every step in the
           // group regardless of status, which never showed on a fresh run
           // because they all start pending — but on a resumed one it rewrote
@@ -1109,7 +1221,7 @@ export function driveRun(
         const ctx = context;
 
         // `when:` — skip a step whose condition isn't met by prior results.
-        for (const step of group) {
+        for (const step of freshGroup) {
           if (step.status !== "pending" || !step.when) continue;
           const met = (ctx ?? "").toLowerCase().includes(step.when.toLowerCase());
           if (!met) {
@@ -1129,7 +1241,7 @@ export function driveRun(
         // flips the step back to pending.
         // `!s.approvedAt` — a step approved before the process went away is
         // already answered. Filtering on status alone asked again.
-        const needsApproval = group.filter(
+        const needsApproval = freshGroup.filter(
           (s) => s.status === "pending" && s.approve && !s.approvedAt,
         );
         if (needsApproval.length) {
@@ -1169,18 +1281,19 @@ export function driveRun(
           }
           run.status = "running";
           save();
-          if (group.every((s) => s.status !== "pending")) {
+          if (freshGroup.every((s) => s.status !== "pending")) {
             // everything in this group was rejected
-            if (group.some((s) => s.status === "failed" && !s.optional)) {
+            if (freshGroup.some((s) => s.status === "failed" && !s.optional)) {
               run.status = "failed";
               break;
             }
+            gi += 1;
             continue;
           }
         }
 
         await Promise.all(
-          group
+          freshGroup
             .filter((s) => s.status === "pending")
             .map(async (step) => {
               const attempts = (step.retry ?? 0) + 1;
@@ -1211,16 +1324,65 @@ export function driveRun(
             }),
         );
 
-        const requiredFailed = group.some((s) => s.status === "failed" && !s.optional);
+        const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional);
         if (requiredFailed) {
           run.status = "failed";
           break;
         }
 
-        const results = group
+        const results = freshGroup
           .filter((s) => s.status === "completed" && s.result)
-          .map((s) => (group.length > 1 ? `## Result from ${s.agent}\n\n${s.result}` : s.result!));
-        context = results.length ? results.join("\n\n") : context;
+          .map((s) =>
+            s.item
+              ? `## Result for item: ${s.item.slice(0, 80)} (${s.agent})\n\n${s.result}`
+              : freshGroup.length > 1
+                ? `## Result from ${s.agent}\n\n${s.result}`
+                : s.result!,
+          );
+        groupResults[gi] = results.length ? results.join("\n\n") : null;
+
+        // Evaluator loop: a completed step with `loop:` whose result lacks
+        // its `until:` marker sends this group and the one before it around
+        // again — at most `loop:` times, so the worst case is still readable
+        // off the flow file. Approval marks survive the rewind: a person
+        // answered, and the question has not changed.
+        const looper = freshGroup.find((s) => s.loop && s.until && s.status === "completed");
+        if (
+          looper?.until &&
+          !(looper.result ?? "").toLowerCase().includes(looper.until.toLowerCase())
+        ) {
+          if ((looper.loopRemaining ?? 0) > 0 && gi > 0) {
+            looper.loopRemaining = (looper.loopRemaining ?? 0) - 1;
+            looper.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `loop: result does not say "${looper.until}" — winding back one group (${looper.loopRemaining} cycle${looper.loopRemaining === 1 ? "" : "s"} left)`,
+            });
+            for (const s of [...ordered[gi - 1], ...freshGroup]) {
+              if (s.status === "skipped" && s.each) continue; // an expanded template stays expanded
+              s.status = "pending";
+              s.result = null;
+            }
+            groupResults[gi] = null;
+            groupResults[gi - 1] = null;
+            save();
+            gi -= 1;
+            continue;
+          }
+          looper.status = "failed";
+          looper.events.push({
+            t: new Date().toISOString(),
+            type: "error",
+            text: `loop exhausted: after ${looper.loop} cycle${looper.loop === 1 ? "" : "s"} the result still does not say "${looper.until}"`,
+          });
+          save();
+          if (!looper.optional) {
+            run.status = "failed";
+            break;
+          }
+        }
+
+        gi += 1;
       }
 
       if (run.status === "running") run.status = "completed";
