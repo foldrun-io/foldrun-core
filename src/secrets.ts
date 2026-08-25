@@ -56,6 +56,8 @@ interface StoredSecret {
   tag: string;
   data: string;
   updatedAt: string;
+  /** "oauth2" marks a credential the platform refreshes before every use. */
+  kind?: "oauth2";
 }
 
 type SecretsFile = Record<string, StoredSecret>;
@@ -78,7 +80,13 @@ function write(tenant: string, workspace: string | undefined, data: SecretsFile)
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
 
-export function setSecret(tenant: string, name: string, value: string, workspace?: string) {
+export function setSecret(
+  tenant: string,
+  name: string,
+  value: string,
+  workspace?: string,
+  kind?: "oauth2",
+) {
   if (!SECRET_NAME.test(name)) {
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   }
@@ -92,6 +100,7 @@ export function setSecret(tenant: string, name: string, value: string, workspace
     tag: cipher.getAuthTag().toString("base64"),
     data: enc.toString("base64"),
     updatedAt: new Date().toISOString(),
+    ...(kind ? { kind } : {}),
   };
   write(tenant, workspace, all);
 }
@@ -140,6 +149,8 @@ export interface SecretEntry {
   scope: SecretScope;
   /** An account secret this workspace overrides — worth showing, not hiding. */
   shadowed?: boolean;
+  /** "oauth2" for auto-refreshing credentials; absent for static values. */
+  kind?: "oauth2";
 }
 
 // Metadata only — never values. Without a workspace this lists the account
@@ -150,6 +161,7 @@ export function listSecrets(tenant: string, workspace?: string): SecretEntry[] {
     name,
     updatedAt: rec.updatedAt,
     scope: "account" as const,
+    ...(rec.kind ? { kind: rec.kind } : {}),
   }));
   if (!workspace) return account.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -158,6 +170,7 @@ export function listSecrets(tenant: string, workspace?: string): SecretEntry[] {
     updatedAt: rec.updatedAt,
     scope: "workspace" as const,
     shadowed: account.some((a) => a.name === name),
+    ...(rec.kind ? { kind: rec.kind } : {}),
   }));
   const ownNames = new Set(own.map((s) => s.name));
   return [...own, ...account.filter((a) => !ownNames.has(a.name))].sort((a, b) =>
@@ -286,4 +299,123 @@ export function rotateMasterKey(
   }
 
   return { rewritten, unreadable };
+}
+
+// ---------------------------------------------------------------- oauth2
+
+// Auto-refreshing credentials. A static value covers most APIs; the Google
+// family (Ads, Search Console, Drive, …) hands out a long-lived refresh
+// token that must be exchanged for a short-lived access token before every
+// use. An oauth2 secret stores the exchange recipe, encrypted like any
+// value; what an agent ever sees is the fresh access token, materialised at
+// the last host-side moment before injection. The refresh credentials
+// themselves never cross into a run.
+
+export interface OAuth2Config {
+  token_url: string;
+  client_id: string;
+  client_secret: string;
+  refresh_token: string;
+  /** Extra form fields some providers want (audience, scope, …). */
+  extra?: Record<string, string>;
+}
+
+const OAUTH2_PREFIX = "@oauth2 ";
+
+export function setOAuth2Secret(
+  tenant: string,
+  name: string,
+  config: OAuth2Config,
+  workspace?: string,
+) {
+  for (const field of ["token_url", "client_id", "client_secret", "refresh_token"] as const) {
+    if (!config[field]?.trim()) throw new Error(`oauth2 secret needs ${field}`);
+  }
+  if (!/^https:\/\//.test(config.token_url)) {
+    throw new Error("token_url must be https — a refresh token over http is a leaked one");
+  }
+  setSecret(tenant, name, OAUTH2_PREFIX + JSON.stringify(config), workspace, "oauth2");
+}
+
+export function isOAuth2Value(value: string): boolean {
+  return value.startsWith(OAUTH2_PREFIX);
+}
+
+// Fresh tokens are cached until shortly before expiry, and concurrent
+// requests for the same secret share one exchange — a fan-out of twenty
+// steps must not hit Google twenty times in one second.
+const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+const inFlight = new Map<string, Promise<string>>();
+
+async function exchange(config: OAuth2Config, cacheKey: string): Promise<string> {
+  const cached = tokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
+
+  const pending = inFlight.get(cacheKey);
+  if (pending) return pending;
+
+  const flight = (async () => {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: config.refresh_token,
+      client_id: config.client_id,
+      client_secret: config.client_secret,
+      ...(config.extra ?? {}),
+    });
+    const res = await fetch(config.token_url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = (await res.json().catch(() => ({}))) as {
+      access_token?: string;
+      expires_in?: number;
+      error?: string;
+      error_description?: string;
+    };
+    if (!res.ok || !payload.access_token) {
+      throw new Error(
+        `token refresh failed (${res.status}): ${payload.error_description ?? payload.error ?? "no access_token in the reply"}`,
+      );
+    }
+    const ttl = Math.max(60, (payload.expires_in ?? 3600) - 60) * 1000;
+    tokenCache.set(cacheKey, { token: payload.access_token, expiresAt: Date.now() + ttl });
+    return payload.access_token;
+  })();
+
+  inFlight.set(cacheKey, flight);
+  try {
+    return await flight;
+  } finally {
+    inFlight.delete(cacheKey);
+  }
+}
+
+/**
+ * Swap every oauth2 recipe in an env map for a live access token. The one
+ * async moment in secret resolution, kept out of the sync paths: callers
+ * materialise right before values are injected or substituted. A failed
+ * refresh throws with the secret's name and the provider's reason — a run
+ * should fail saying "GOOGLE_ADS_TOKEN: invalid_grant", not 401 somewhere.
+ */
+export async function materializeSecrets(
+  env: Record<string, string>,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = { ...env };
+  for (const [name, value] of Object.entries(env)) {
+    if (typeof value !== "string" || !isOAuth2Value(value)) continue;
+    let config: OAuth2Config;
+    try {
+      config = JSON.parse(value.slice(OAUTH2_PREFIX.length));
+    } catch {
+      throw new Error(`secret ${name}: stored oauth2 config is unreadable`);
+    }
+    try {
+      out[name] = await exchange(config, `${name}:${config.client_id}:${config.refresh_token.slice(0, 8)}`);
+    } catch (err) {
+      throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
 }

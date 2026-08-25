@@ -9,7 +9,7 @@
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { ApiSpec } from "./store.ts";
-import { resolveSecrets } from "./secrets.ts";
+import { resolveSecrets, materializeSecrets } from "./secrets.ts";
 
 const MAX_BODY_CHARS = 20_000;
 const TIMEOUT_MS = 30_000;
@@ -80,6 +80,11 @@ export function buildApiTools(
       async (args) => {
         const started = Date.now();
         try {
+          // Per call, not per build: an oauth2 secret's recipe becomes a
+          // live access token here, so a step that runs for an hour keeps
+          // getting fresh tokens (the exchange is cached until near expiry)
+          // — and a recipe can never end up inside a header.
+          const live = await materializeSecrets(env);
           const path = args.path.startsWith("/") ? args.path : `/${args.path}`;
           const url = new URL(api.base + path);
           // Base-URL confinement: a path can't escape the declared host.
@@ -87,12 +92,12 @@ export function buildApiTools(
             throw new Error(`path escapes the declared base URL (${api.base})`);
           }
           for (const [k, v] of Object.entries(api.query)) {
-            url.searchParams.set(k, substitute(v, env));
+            url.searchParams.set(k, substitute(v, live));
           }
           for (const [k, v] of Object.entries(args.query ?? {})) url.searchParams.set(k, v);
 
           const headers: Record<string, string> = {};
-          for (const [k, v] of Object.entries(api.headers)) headers[k] = substitute(v, env);
+          for (const [k, v] of Object.entries(api.headers)) headers[k] = substitute(v, live);
           if (args.body && !headers["content-type"] && !headers["Content-Type"]) {
             headers["content-type"] = "application/json";
           }

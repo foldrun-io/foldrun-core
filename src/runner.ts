@@ -35,7 +35,7 @@ import {
   type RunRecord,
   type StepRecord,
 } from "./store.ts";
-import { resolveSecrets, getSecret } from "./secrets.ts";
+import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { buildApiTools } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
@@ -733,10 +733,18 @@ async function runStep(
       providerEnv, providerLabel, formatWarning,
     } = agentContext(agentDir, tenant, tags);
 
+    // oauth2 secrets become live access tokens here — the one async moment
+    // in secret resolution, at the last host-side point before anything is
+    // injected or substituted. The refresh recipes never leave this process:
+    // what crosses into containers, headers and env files is the token. A
+    // failed refresh fails the step naming the secret and the provider's
+    // reason, which beats a 401 three layers later.
+    const liveSecrets = await materializeSecrets(secretEnv);
+
     // Populate before the first push: everything after this point may quote a
     // credential. Short values are skipped — a two-character secret would
     // redact half the English language, and anything that short is not one.
-    redactions = Object.entries({ ...secretEnv, ...providerEnv })
+    redactions = Object.entries({ ...liveSecrets, ...providerEnv })
       .filter(([, value]) => typeof value === "string" && value.length >= 8)
       .map(([name, value]) => [value, name] as [string, string])
       // Longest first, so a value containing another is replaced whole.
@@ -821,7 +829,7 @@ async function runStep(
         headers: Object.fromEntries(
           Object.entries(api.headers).map(([k, v]) => [
             k,
-            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => secretEnv[name] ?? whole),
+            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => liveSecrets[name] ?? whole),
           ]),
         ),
       }));
@@ -852,7 +860,7 @@ async function runStep(
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
             ...(Object.keys(providerEnv).length === 0 ? platformModelEnv() : {}),
-            ...secretEnv,
+            ...liveSecrets,
             ...providerEnv,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
@@ -864,7 +872,7 @@ async function runStep(
     } else {
       const consultTools = buildConsultTools(
         consults,
-        { ...process.env, ...secretEnv, ...providerEnv },
+        { ...process.env, ...liveSecrets, ...providerEnv },
         (type, text) => push(type, text),
       );
       const outcome = await executeStep({
@@ -884,10 +892,10 @@ async function runStep(
         },
         // Declared secrets reach the agent's scripts as env vars; the model
         // only ever sees the variable names, not the values.
-        env: { ...process.env, ...secretEnv, ...providerEnv },
+        env: { ...process.env, ...liveSecrets, ...providerEnv },
         timeoutSec: step.timeout,
         verify: step.verify,
-        verifyEnv: secretEnv,
+        verifyEnv: liveSecrets,
         emit: push,
       });
       step.status = outcome.status;
