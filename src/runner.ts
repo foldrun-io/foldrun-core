@@ -36,6 +36,7 @@ import {
   type StepRecord,
 } from "./store.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
+import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
@@ -693,6 +694,7 @@ async function runStep(
   // obvious `echo $SOMETHING_TOKEN`. It exists because neither of those can
   // cover a script's own stdout.
   let redactions: [string, string][] = [];
+  let fileDir: string | null = null;
   const redact = (text: string) => {
     let out = text;
     for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
@@ -740,6 +742,10 @@ async function runStep(
     // failed refresh fails the step naming the secret and the provider's
     // reason, which beats a 401 three layers later.
     const liveSecrets = await materializeSecrets(secretEnv);
+    // @file values (SSH keys, certs) still carry their content at this point.
+    // The in-process branch materialises them to 0600 paths on this host
+    // below; the container branch passes the content across and the driver
+    // materialises inside, because a host path is meaningless in there.
 
     // Populate before the first push: everything after this point may quote a
     // credential. Short values are skipped — a two-character secret would
@@ -891,8 +897,13 @@ async function runStep(
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model
-        // only ever sees the variable names, not the values.
-        env: { ...process.env, ...liveSecrets, ...providerEnv },
+        // only ever sees the variable names, not the values. @file secrets
+        // become 0600 paths here (host run), cleaned up in the finally.
+        env: (() => {
+          const mat = materializeFileSecrets(agentDir, liveSecrets);
+          fileDir = mat.dir;
+          return { ...process.env, ...mat.env, ...providerEnv };
+        })(),
         timeoutSec: step.timeout,
         verify: step.verify,
         verifyEnv: liveSecrets,
@@ -909,6 +920,12 @@ async function runStep(
   } catch (err) {
     step.status = "failed";
     push("error", err instanceof Error ? err.message : String(err));
+  } finally {
+    try {
+      cleanupFileSecrets(fileDir);
+    } catch {
+      // best-effort — a leftover scratch file is swept with the run's outputs
+    }
   }
   save();
 }

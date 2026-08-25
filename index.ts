@@ -19,6 +19,7 @@ export * from "./src/completions.ts";
 export * from "./src/confine.ts";
 export * from "./src/library.ts";
 export * from "./src/secrets.ts";
+export * from "./src/secret-files.ts";
 export * from "./src/scheduler.ts";
 export * from "./src/queue.ts";
 export * from "./src/ledger.ts";

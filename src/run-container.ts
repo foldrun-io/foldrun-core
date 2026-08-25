@@ -68,6 +68,10 @@ const cli = () => process.env.MDAGENT_CONTAINER_CLI ?? "docker";
 // copied in), plus knowledge/, which goes in for reading and is dropped on
 // the way out, and .git/.
 const DENY_BACK = ["knowledge/", ".git/"];
+// Materialised @file secrets (SSH keys, certs) live under .secret-files/ in
+// an agent's dir while a step runs; they are live credentials and must never
+// come back to the host, whatever the step wrote there.
+const DENY_BACK_SECRET_FILES = /(^|\/)\.secret-files\//;
 // And per-agent knowledge, at any depth under agents/<name>/.
 const DENY_BACK_RE = /^agents\/[^/]+\/knowledge\//;
 
@@ -78,6 +82,7 @@ export function allowedBack(rel: string): boolean {
   if (isPlatformPath(norm)) return false;
   if (DENY_BACK.some((d) => norm === d.replace(/\/$/, "") || norm.startsWith(d))) return false;
   if (DENY_BACK_RE.test(norm)) return false;
+  if (DENY_BACK_SECRET_FILES.test(norm)) return false;
   return true;
 }
 
@@ -126,13 +131,16 @@ try {
   const { buildScriptTools } = await import("@mdagent/core/script-tools");
   const { buildConsultTools } = await import("@mdagent/core/agent-tools");
   const { prepareRuntime } = await import("@mdagent/core/runtime");
+  const { materializeFileSecrets } = await import("@mdagent/core/secret-files");
 
   const agentDir = "/workspace/" + input.agentRel;
   // HOME is where a bare relative path lands when anything resolves one
   // outside cwd — and root's /root is outside the workspace, so such a read
   // was refused by confinement with a path the agent never typed. Its own
   // directory is both the truthful answer and the safe one.
-  const env = { ...process.env, HOME: agentDir };
+  // @file secrets crossed as content; materialise them to 0600 paths inside
+  // the container (a host path from the other side would not exist here).
+  const env = materializeFileSecrets(agentDir, { ...process.env, HOME: agentDir }).env;
 
   // The declared runtime, built in here — pip and npm have the network, and
   // the cache dies with the container (a fresh install per run is the cost

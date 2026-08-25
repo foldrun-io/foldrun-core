@@ -57,7 +57,7 @@ interface StoredSecret {
   data: string;
   updatedAt: string;
   /** "oauth2" marks a credential the platform refreshes before every use. */
-  kind?: "oauth2";
+  kind?: "oauth2" | "service-account" | "file";
 }
 
 type SecretsFile = Record<string, StoredSecret>;
@@ -85,7 +85,7 @@ export function setSecret(
   name: string,
   value: string,
   workspace?: string,
-  kind?: "oauth2",
+  kind?: "oauth2" | "service-account" | "file",
 ) {
   if (!SECRET_NAME.test(name)) {
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
@@ -163,8 +163,9 @@ export interface SecretEntry {
   scope: SecretScope;
   /** An account secret this workspace overrides — worth showing, not hiding. */
   shadowed?: boolean;
-  /** "oauth2" for auto-refreshing credentials; absent for static values. */
-  kind?: "oauth2";
+  /** How this credential works: auto-refreshing oauth2, a signed service
+   *  account, a file materialised into runs — absent for static values. */
+  kind?: "oauth2" | "service-account" | "file";
 }
 
 // Metadata only — never values. Without a workspace this lists the account
@@ -329,7 +330,12 @@ export interface OAuth2Config {
   token_url: string;
   client_id: string;
   client_secret: string;
-  refresh_token: string;
+  /** Required for the refresh grant; absent for client_credentials. */
+  refresh_token?: string;
+  /** "refresh_token" (default — user-consented) or "client_credentials"
+   *  (machine-to-machine: no user, no refresh token, re-exchanged on
+   *  expiry). One machinery, two grants. */
+  grant_type?: "refresh_token" | "client_credentials";
   /** Extra form fields some providers want (audience, scope, …). */
   extra?: Record<string, string>;
 }
@@ -342,8 +348,11 @@ export function setOAuth2Secret(
   config: OAuth2Config,
   workspace?: string,
 ) {
-  for (const field of ["token_url", "client_id", "client_secret", "refresh_token"] as const) {
+  for (const field of ["token_url", "client_id", "client_secret"] as const) {
     if (!config[field]?.trim()) throw new Error(`oauth2 secret needs ${field}`);
+  }
+  if (config.grant_type !== "client_credentials" && !config.refresh_token?.trim()) {
+    throw new Error("oauth2 secret needs refresh_token (or grant_type: client_credentials)");
   }
   // Loopback is exempt: a token endpoint on this same machine (tests, a
   // local mock, a sidecar) crosses no wire for http to leak on.
@@ -372,8 +381,8 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<string>
 
   const flight = (async () => {
     const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: config.refresh_token,
+      grant_type: config.grant_type ?? "refresh_token",
+      ...(config.grant_type === "client_credentials" ? {} : { refresh_token: config.refresh_token! }),
       client_id: config.client_id,
       client_secret: config.client_secret,
       ...(config.extra ?? {}),
@@ -420,18 +429,156 @@ export async function materializeSecrets(
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = { ...env };
   for (const [name, value] of Object.entries(env)) {
-    if (typeof value !== "string" || !isOAuth2Value(value)) continue;
-    let config: OAuth2Config;
-    try {
-      config = JSON.parse(value.slice(OAUTH2_PREFIX.length));
-    } catch {
-      throw new Error(`secret ${name}: stored oauth2 config is unreadable`);
+    if (typeof value !== "string") continue;
+    if (isOAuth2Value(value)) {
+      let config: OAuth2Config;
+      try {
+        config = JSON.parse(value.slice(OAUTH2_PREFIX.length));
+      } catch {
+        throw new Error(`secret ${name}: stored oauth2 config is unreadable`);
+      }
+      try {
+        out[name] = await exchange(config, `${name}:${config.client_id}:${(config.refresh_token ?? config.grant_type ?? "").slice(0, 8)}`);
+      } catch (err) {
+        throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (value.startsWith(SERVICE_ACCOUNT_PREFIX)) {
+      let config: ServiceAccountConfig;
+      try {
+        config = JSON.parse(value.slice(SERVICE_ACCOUNT_PREFIX.length));
+      } catch {
+        throw new Error(`secret ${name}: stored service account config is unreadable`);
+      }
+      try {
+        out[name] = await exchangeServiceAccount(config, `sa:${name}:${config.issuer}`);
+      } catch (err) {
+        throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-    try {
-      out[name] = await exchange(config, `${name}:${config.client_id}:${config.refresh_token.slice(0, 8)}`);
-    } catch (err) {
-      throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // @file values are left as-is here; the run layer materialises them to
+    // paths, because only it knows the sandbox's writable scratch.
   }
   return out;
+}
+
+// ---------------------------------------------------------------- service account
+
+// Signed-key credentials: a Google service account, or anything that mints a
+// token by self-signing a JWT with a private key and exchanging it. No user,
+// no browser, no refresh token — the key IS the identity. Better than the
+// consent flow for server-side access: no consent to expire, IAM per service.
+//
+// Stored as the JSON key, encrypted. Materialised the same way oauth2 is: a
+// live access token appears at the last host-side moment, cached until expiry.
+
+const SERVICE_ACCOUNT_PREFIX = "@service-account ";
+
+export interface ServiceAccountConfig {
+  token_url: string; // where the signed JWT is exchanged
+  issuer: string; // JWT iss/sub — the service account's email
+  private_key: string; // PEM
+  scope: string; // space-separated
+  /** JWT audience — usually the same as token_url. */
+  audience?: string;
+}
+
+export function setServiceAccountSecret(
+  tenant: string,
+  name: string,
+  config: ServiceAccountConfig,
+  workspace?: string,
+) {
+  for (const field of ["token_url", "issuer", "private_key", "scope"] as const) {
+    if (!config[field]?.trim()) throw new Error(`service account secret needs ${field}`);
+  }
+  if (!/BEGIN [A-Z ]*PRIVATE KEY/.test(config.private_key)) {
+    throw new Error("private_key must be a PEM key (from the service account JSON)");
+  }
+  setSecret(tenant, name, SERVICE_ACCOUNT_PREFIX + JSON.stringify(config), workspace, "service-account");
+}
+
+function base64url(input: Buffer | string): string {
+  return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function exchangeServiceAccount(config: ServiceAccountConfig, cacheKey: string): Promise<string> {
+  const cached = tokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
+  const pending = inFlight.get(cacheKey);
+  if (pending) return pending;
+
+  const flight = (async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+    const claim = base64url(
+      JSON.stringify({
+        iss: config.issuer,
+        sub: config.issuer,
+        scope: config.scope,
+        aud: config.audience ?? config.token_url,
+        iat: now,
+        exp: now + 3600,
+      }),
+    );
+    const signer = crypto.createSign("RSA-SHA256");
+    signer.update(`${header}.${claim}`);
+    const signature = base64url(signer.sign(config.private_key));
+    const jwt = `${header}.${claim}.${signature}`;
+
+    const res = await fetch(config.token_url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion: jwt,
+      }).toString(),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = (await res.json().catch(() => ({}))) as {
+      access_token?: string;
+      expires_in?: number;
+      error?: string;
+      error_description?: string;
+    };
+    if (!res.ok || !payload.access_token) {
+      throw new Error(
+        `service account exchange failed (${res.status}): ${payload.error_description ?? payload.error ?? "no access_token"}`,
+      );
+    }
+    const ttl = Math.max(60, (payload.expires_in ?? 3600) - 60) * 1000;
+    tokenCache.set(cacheKey, { token: payload.access_token, expiresAt: Date.now() + ttl });
+    return payload.access_token;
+  })();
+
+  inFlight.set(cacheKey, flight);
+  try {
+    return await flight;
+  } finally {
+    inFlight.delete(cacheKey);
+  }
+}
+
+// ---------------------------------------------------------------- file secrets
+
+// Some credentials are files, not strings: an SSH private key ssh insists on
+// reading at 0600, a client certificate + key for mTLS. The value is stored
+// like any secret; what differs is delivery — the run materialises it to a
+// path and the agent's env var holds the *path*, not the bytes. The
+// materialising happens in the sandbox layer (run-container/host), which is
+// the only place that knows where a run's writable scratch is; here we only
+// mark the kind and carry the content.
+
+const FILE_PREFIX = "@file ";
+
+export function setFileSecret(tenant: string, name: string, content: string, workspace?: string) {
+  if (!content) throw new Error("a file secret needs content");
+  setSecret(tenant, name, FILE_PREFIX + content, workspace, "file");
+}
+
+export function isFileValue(value: string): boolean {
+  return value.startsWith(FILE_PREFIX);
+}
+
+export function fileContent(value: string): string {
+  return value.slice(FILE_PREFIX.length);
 }
