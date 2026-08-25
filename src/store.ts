@@ -1047,7 +1047,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
 
 // Editable paths: project.md, .md files under agents/ or flows/, and an
 // agent's own scripts (text source files it runs with bash).
-const SCRIPT_EXT = /\.(py|sh|js|ts|rb|sql|txt|json|ya?ml|toml|env|md)$/i;
+const SCRIPT_EXT = /\.(py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml|env|md)$/i;
 
 function assertEditablePath(rel: string) {
   const norm = path.normalize(rel);
