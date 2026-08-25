@@ -577,8 +577,15 @@ export interface FlowStep {
   model?: string;
   /** Pause for a human before running this step. */
   approve?: boolean;
-  /** Run only if the previous results contain this text (case-insensitive). */
+  /** Run only if the previous results contain this text (case-insensitive).
+   *  Independent: every matching `when:` step in a group runs. */
   when?: string;
+  /** Exclusive routing: of a group's `case:` steps, only the FIRST whose
+   *  text appears in the previous results runs; the rest are routed past. */
+  case?: string;
+  /** The route of last resort: runs only when none of its group's `case:`
+   *  steps matched. */
+  else?: boolean;
   /** Attempts on failure, beyond the first. */
   retry?: number;
   /** Abandon the step after this many seconds. */
@@ -720,6 +727,8 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       const value = rawValue.trim().replace(/^["']|["']$/g, "");
       if (key === "approve") step.approve = value !== "false";
       else if (key === "when") step.when = value;
+      else if (key === "case") step.case = value;
+      else if (key === "else") step.else = value !== "false";
       else if (key === "retry") step.retry = Math.min(5, Math.max(0, Number(value) || 0));
       else if (key === "timeout") step.timeout = Math.max(1, Number(value) || 0);
       else if (key === "verify") step.verify = value;
@@ -853,7 +862,7 @@ export function setFlowTrigger(
 export function updateFlowStep(
   raw: string,
   index: number,
-  options: Partial<Record<"model" | "retry" | "timeout" | "verify" | "when" | "loop" | "until" | "each" | "max", string | number | null>>,
+  options: Partial<Record<"model" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max", string | number | null>>,
 ): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
@@ -864,6 +873,8 @@ export function updateFlowStep(
     model: (v) => v || null,
     verify: (v) => v || null,
     when: (v) => v || null,
+    case: (v) => v || null,
+    else: (v) => (v === "true" || v === "1" ? "true" : null),
     until: (v) => v || null,
     retry: (v) => String(Math.min(5, Math.max(0, Number(v) || 0))),
     timeout: (v) => (Number(v) > 0 ? String(Math.max(1, Math.floor(Number(v)))) : null),
@@ -1237,7 +1248,7 @@ export const FLOW_TEMPLATE = (name: string, firstAgent: string) =>
 // the pattern's syntax filled in with real agent names, because a working
 // example in your own workspace teaches loop:/until:/each: better than any
 // reference page — you rename the instructions, not learn the shape.
-export const FLOW_PATTERNS = ["pipeline", "review-loop", "fan-out", "debate"] as const;
+export const FLOW_PATTERNS = ["pipeline", "review-loop", "fan-out", "debate", "router"] as const;
 export type FlowPattern = (typeof FLOW_PATTERNS)[number];
 
 export function flowPatternTemplate(pattern: FlowPattern, name: string, agents: string[]): string {
@@ -1262,6 +1273,17 @@ export function flowPatternTemplate(pattern: FlowPattern, name: string, agents: 
         `   each: lines\n` +
         `   max: 10\n` +
         `3. [[${a(2, "summariser")}]] — pull every result into one summary\n`
+      );
+    case "router":
+      return (
+        head +
+        `1. [[${a(0, "classifier")}]] — classify the request: reply with exactly one word, BUG or QUESTION\n` +
+        `2. [[${a(1, "debugger")}]] — investigate and fix the bug\n` +
+        `   case: BUG\n` +
+        `2. [[${a(2, "writer")}]] — answer the question clearly\n` +
+        `   case: QUESTION\n` +
+        `2. [[${a(3, "triager")}]] — neither label fit; say what is missing\n` +
+        `   else: true\n`
       );
     case "debate":
       return (
@@ -1289,6 +1311,8 @@ export interface StepRecord {
   optional: boolean;
   approve?: boolean;
   when?: string;
+  case?: string;
+  else?: boolean;
   retry?: number;
   timeout?: number;
   verify?: string;

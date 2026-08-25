@@ -986,6 +986,8 @@ export function createFlowRun(
       optional: s.optional ?? false,
       approve: s.approve,
       when: s.when,
+      case: s.case,
+      else: s.else,
       retry: s.retry,
       timeout: s.timeout,
       verify: s.verify,
@@ -1235,6 +1237,40 @@ export function driveRun(
           }
         }
         save();
+
+        // `case:`/`else:` — exclusive routing. Of this group's case steps,
+        // the FIRST whose text appears in the previous results runs; the
+        // rest are routed past. `else:` runs only when no case matched.
+        // (`when:` above stays independent — every matching when runs —
+        // which is why routing is its own vocabulary instead of a mode.)
+        const caseSteps = freshGroup.filter((s) => s.status === "pending" && s.case);
+        if (caseSteps.length || freshGroup.some((s) => s.status === "pending" && s.else)) {
+          let matchedCase: StepRecord | null = null;
+          for (const step of caseSteps) {
+            if (!matchedCase && (ctx ?? "").toLowerCase().includes(step.case!.toLowerCase())) {
+              matchedCase = step;
+              continue;
+            }
+            step.status = "skipped";
+            step.skipReason = matchedCase
+              ? `routed past — "${matchedCase.case}" matched first`
+              : `case not matched: "${step.case}"`;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: step.skipReason,
+            });
+          }
+          for (const step of freshGroup) {
+            if (step.status !== "pending" || !step.else) continue;
+            if (matchedCase) {
+              step.status = "skipped";
+              step.skipReason = `routed past — "${matchedCase.case}" matched`;
+              step.events.push({ t: new Date().toISOString(), type: "info", text: step.skipReason });
+            }
+          }
+          save();
+        }
 
         // Approval gate — pause the whole run until a human decides. The run
         // record is the queue: it sits in awaiting-approval until the API
