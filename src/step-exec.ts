@@ -136,7 +136,17 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
       costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
     }
   }
-  if (status === "running") status = "completed";
+  // The SDK ends a healthy run with a `result` message. A stream that just
+  // stops — subprocess OOM-killed, crashed, or torn down — used to fall
+  // through as "completed", which reported a run that produced nothing as a
+  // success. Silence is not success.
+  if (status === "running") {
+    status = "failed";
+    emit(
+      "error",
+      "the model stream ended without a result — the model process likely died (out of memory?)",
+    );
+  }
   const result = texts.join("\n").trim() || null;
 
   // "Done" should mean a check passed, not that the model stopped talking.
