@@ -58,6 +58,15 @@ export const WORKSPACE_DIRS = [
 
 const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
 
+// Where the file store mirrors its bytes for a run to read. Deliberately not
+// in WORKSPACE_DIRS: that list is the workspace's *source*, and everything
+// derived from it — the file tree, the git export, what a deploy may carry —
+// treats membership as "this is reviewable text". Blobs are not. Declared
+// here rather than in files.ts because saveWorkspace has to know the name to
+// preserve it, and store.ts is the module files.ts depends on, not the
+// reverse. See files.ts for the whole argument.
+export const FILES_DIR = "files";
+
 // Where an account keeps its workspaces. Renamed from "projects" once the
 // concept settled on *workspace* everywhere else; the old directory is still
 // read so an existing install keeps working without a migration step.
@@ -259,6 +268,9 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
   //
   //   runs/            always kept — the audit trail
   //   state/           always kept — what an agent carries between runs
+  //   files/           always kept — the file store's run mirror, which no
+  //                    deploy can ship (a deploy carries source, and bytes
+  //                    are not source) and every run expects to find
   //   memory/*.md      kept when the deploy doesn't ship that file
   //
   // That last rule is the subtle one. Memory is written from both sides: a
@@ -274,6 +286,8 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     // something: agents lose secrets, a rotated hook un-rotates.
     isPlatformPath(rel) ||
     /(^|\/)state\//.test(rel) ||
+    rel === FILES_DIR ||
+    rel.startsWith(`${FILES_DIR}/`) ||
     (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
 
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
@@ -523,10 +537,113 @@ export const MODEL_TIERS: Record<string, string> = {
   max: "opus",
 };
 
+// The same three tiers under every name someone reasonably reaches for.
+// Nobody should have to learn our vocabulary to pick a model, and the
+// alternative to accepting `small` is worse than pedantic: an unrecognised
+// word is passed through as a model id, so `model: small` would reach the
+// provider as a model called "small" and fail the step at run time, on a
+// file that reads perfectly. A synonym table is cheaper than that error.
+const MODEL_ALIASES: Record<string, keyof typeof MODEL_TIERS> = {
+  fast: "fast",
+  small: "fast",
+  cheap: "fast",
+  mini: "fast",
+  light: "fast",
+  low: "fast",
+  haiku: "fast",
+
+  default: "default",
+  standard: "default",
+  base: "default",
+  balanced: "default",
+  mid: "default",
+  medium: "default",
+  normal: "default",
+  sonnet: "default",
+
+  max: "max",
+  large: "max",
+  big: "max",
+  best: "max",
+  smart: "max",
+  high: "max",
+  deep: "max",
+  opus: "max",
+};
+
+export type Tier = keyof typeof MODEL_TIERS;
+
+/** Which tier a word names, or null if it names none. Exported because the
+ *  provider block keys a remap table by tier and should accept every word
+ *  `model:` does — one vocabulary, not two. */
+export function resolveTier(value: unknown): Tier | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return MODEL_ALIASES[value.trim().toLowerCase()] ?? null;
+}
+
 export function resolveModel(value: unknown): string {
   const raw = typeof value === "string" && value.trim() ? value.trim() : "default";
-  if (raw in MODEL_TIERS) return MODEL_TIERS[raw];
-  return raw; // "opus" | "sonnet" | "haiku" | "claude-opus-5" | …
+  const tier = resolveTier(raw);
+  if (tier) return MODEL_TIERS[tier];
+  return raw; // "claude-opus-5" | a provider's own id | …
+}
+
+// Effort is the other half of model selection, and the orthogonal one: the
+// model is which brain, effort is how long it thinks before answering. The
+// five levels are the SDK's own union — we neither invent our own scale nor
+// narrow theirs, so a level added upstream is one line here.
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORT_LEVELS)[number];
+
+const EFFORT_ALIASES: Record<string, Effort> = {
+  low: "low",
+  min: "low",
+  minimal: "low",
+  lowest: "low",
+  fast: "low",
+  quick: "low",
+
+  medium: "medium",
+  med: "medium",
+  mid: "medium",
+  moderate: "medium",
+  normal: "medium",
+  balanced: "medium",
+
+  high: "high",
+  default: "high", // the SDK's default, said out loud
+  deep: "high",
+
+  xhigh: "xhigh",
+  "x-high": "xhigh",
+  "extra-high": "xhigh",
+  extrahigh: "xhigh",
+  "very-high": "xhigh",
+  veryhigh: "xhigh",
+  higher: "xhigh",
+
+  max: "max",
+  maximum: "max",
+  highest: "max",
+  full: "max",
+};
+
+/**
+ * `null` for both "not set" and "not a level we know" — unlike a model, the
+ * set is closed, so passing an unrecognised word through would be a 400 from
+ * the API rather than someone's pinned choice. Callers that can report say
+ * which it was with `isEffortWord`.
+ */
+export function resolveEffort(value: unknown): Effort | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return EFFORT_ALIASES[value.trim().toLowerCase()] ?? null;
+}
+
+/** True when a non-empty `effort:` was written but names no level — the
+ *  one case worth a line in the run trace, because silence there looks
+ *  exactly like the setting having been applied. */
+export function isEffortWord(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0 && resolveEffort(value) === null;
 }
 
 // apis: frontmatter:
@@ -575,6 +692,9 @@ export interface FlowStep {
   subflow?: string;
   /** Overrides the agent's own model for this step only. */
   model?: string;
+  /** Overrides the agent's own effort for this step only — the expensive
+   *  step in an otherwise cheap flow is exactly what this is for. */
+  effort?: string;
   /** Pause for a human before running this step. */
   approve?: boolean;
   /** Run only if the previous results contain this text (case-insensitive).
@@ -616,8 +736,11 @@ export interface FlowInfo {
   trigger: string;
   schedule: string | null;
   timezone: string | null;
-  /** Overrides every step's agent model for this flow only. */
+  /** The model every step in this flow runs on, unless the step names its
+   *  own. Nearest wins: step, then flow, then the agent's own frontmatter. */
   model: string | null;
+  /** Same, for effort. */
+  effort: string | null;
   steps: FlowStep[];
 }
 
@@ -681,6 +804,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         name,
         description: data.description ?? "",
         model: data.model ?? "default",
+        effort: data.effort ?? null,
         tools,
         apis: parseApis(data.apis),
         use: Array.isArray(data.use) ? data.use.map(String) : [],
@@ -733,6 +857,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       else if (key === "timeout") step.timeout = Math.max(1, Number(value) || 0);
       else if (key === "verify") step.verify = value;
       else if (key === "model") step.model = value;
+      else if (key === "effort") step.effort = value;
       else if (key === "loop") step.loop = Math.min(5, Math.max(1, Number(value) || 0)) || undefined;
       else if (key === "until") step.until = value;
       else if (key === "each") step.each = value === "lines" ? "lines" : undefined;
@@ -747,6 +872,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     schedule: data.schedule ?? null,
     timezone: data.timezone ?? null,
     model: data.model ?? null,
+    effort: data.effort ?? null,
     steps,
   };
 }
@@ -862,7 +988,7 @@ export function setFlowTrigger(
 export function updateFlowStep(
   raw: string,
   index: number,
-  options: Partial<Record<"model" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max", string | number | null>>,
+  options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max", string | number | null>>,
 ): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
@@ -871,6 +997,7 @@ export function updateFlowStep(
 
   const clamp: Record<string, (v: string) => string | null> = {
     model: (v) => v || null,
+    effort: (v) => resolveEffort(v) ?? null,
     verify: (v) => v || null,
     when: (v) => v || null,
     case: (v) => v || null,
@@ -1108,7 +1235,15 @@ export function writeWorkspaceFile(tenant: string, workspace: string, rel: strin
   const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
   const existed = fs.existsSync(p);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, content);
+  // One trailing newline, never a run of them.
+  //
+  // Models end a document with blank lines — several, sometimes dozens — and
+  // nothing trimmed them, so every save kept whatever the last writer left.
+  // A reader sees it as a file that scrolls for a page after the text stops;
+  // the editor's line gutter dutifully numbered all of it. Trailing blank
+  // lines are not content in any format this holds (markdown, YAML
+  // frontmatter, a script), and no author types thirty of them on purpose.
+  fs.writeFileSync(p, `${content.replace(/\s+$/, "")}\n`);
   syncBundleFor(p, existed ? "Update" : "Creation");
 }
 
@@ -1309,6 +1444,11 @@ export interface StepRecord {
   instruction: string;
   group: number;
   optional: boolean;
+  /** Carried from the flow — see FlowStep. Both are resolved at run
+   *  time rather than stored resolved, so a record stays readable as
+   *  what its author wrote. */
+  model?: string;
+  effort?: string;
   approve?: boolean;
   when?: string;
   case?: string;
@@ -1419,4 +1559,141 @@ export function listRuns(tenant: string, workspace: string): RunRecord[] {
     .filter((f) => f.endsWith(".json"))
     .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+// ------------------------------------------------------------------ provider
+
+/**
+ * `provider:` — which endpoint the model calls run against, and the two
+ * knobs that make a non-Anthropic gateway usable rather than merely
+ * reachable.
+ *
+ *   provider:
+ *     base_url: https://openrouter.ai/api
+ *     token: ${OPENROUTER_API_KEY}
+ *     models:
+ *       fast: google/gemini-2.5-flash
+ *       max: anthropic/claude-opus-4.1
+ *     headers:
+ *       X-Title: mdagent
+ *
+ * `models:` is what makes tiers portable rather than merely renamed-proof:
+ * without it `model: fast` means the literal string "haiku" on every
+ * endpoint, which is only true on one of them. `headers:` is the escape
+ * hatch for whatever a gateway wants that our schema will never have —
+ * routing preferences, attribution, tags. Both are the gateway's business,
+ * so neither grows a per-vendor branch in here.
+ */
+export interface ProviderSpec {
+  baseUrl: string;
+  /** May still contain `${SECRET}` — resolving needs a tenant. */
+  token: string;
+  /** Tier → the id this gateway calls that tier. Absent tiers keep ours. */
+  models: Partial<Record<Tier, string>>;
+  /** Header name → value; values may contain `${SECRET}`. */
+  headers: Record<string, string>;
+  /** Things wrong enough to say out loud but not to fail a run over. */
+  warnings: string[];
+}
+
+// RFC 9110 field-name characters. Anything else is not a header, and a
+// gateway would reject it — better to say so here than to have the run fail
+// with someone else's error message.
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+export function parseProvider(raw: unknown): ProviderSpec | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const block = raw as Record<string, unknown>;
+  const warnings: string[] = [];
+
+  const baseUrl = typeof block.base_url === "string" ? block.base_url.trim() : "";
+  const token = typeof block.token === "string" ? block.token.trim() : "";
+
+  const models: Partial<Record<Tier, string>> = {};
+  if (block.models && typeof block.models === "object" && !Array.isArray(block.models)) {
+    for (const [key, value] of Object.entries(block.models as Record<string, unknown>)) {
+      const tier = resolveTier(key);
+      if (!tier) {
+        warnings.push(
+          `provider.models: "${key}" is not a tier — use ${Object.keys(MODEL_TIERS).join(", ")}. Ignored.`,
+        );
+        continue;
+      }
+      const id = typeof value === "string" ? value.trim() : "";
+      if (!id) {
+        warnings.push(`provider.models.${key}: empty — ignored`);
+        continue;
+      }
+      models[tier] = id;
+    }
+  } else if (block.models !== undefined) {
+    warnings.push("provider.models: expected a map of tier → model id — ignored");
+  }
+
+  const headers: Record<string, string> = {};
+  if (block.headers && typeof block.headers === "object" && !Array.isArray(block.headers)) {
+    for (const [name, value] of Object.entries(block.headers as Record<string, unknown>)) {
+      const key = name.trim();
+      if (!HEADER_NAME_RE.test(key)) {
+        warnings.push(`provider.headers: "${name}" is not a valid header name — ignored`);
+        continue;
+      }
+      const text = value == null ? "" : String(value);
+      // A newline in a value would end the header and start another one —
+      // the whole point of a separator-delimited blob is that nothing in it
+      // may contain the separator.
+      if (/[\r\n]/.test(text)) {
+        warnings.push(`provider.headers.${key}: value contains a line break — ignored`);
+        continue;
+      }
+      headers[key] = text.trim();
+    }
+  } else if (block.headers !== undefined) {
+    warnings.push("provider.headers: expected a map of name → value — ignored");
+  }
+
+  return { baseUrl, token, models, headers, warnings };
+}
+
+/** The env the SDK reads for a tier remap. Our tier names are ours; these
+ *  are the SDK's, and this function is the only place the two meet. */
+const TIER_ENV: Record<Tier, string> = {
+  fast: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  default: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  max: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+};
+
+/**
+ * The whole of a provider block as the env the Agent SDK reads. The one
+ * place our format meets the SDK's, so the mapping is testable without a
+ * vault: the caller resolves `${SECRET}` first and passes values.
+ *
+ * The token goes to ANTHROPIC_AUTH_TOKEN (a bearer credential) and
+ * ANTHROPIC_API_KEY is explicitly blanked. Both matter. A key left in the
+ * environment is sent as `x-api-key` and treated as a direct-Anthropic
+ * credential, so a gateway that wants `Authorization: Bearer` gets the
+ * wrong header — and worse, an *unset* key lets the SDK fall back to
+ * authenticating against Anthropic directly, which fails somewhere far from
+ * the file that caused it. A gateway that genuinely wants the key header
+ * asks for it by name: `headers: { x-api-key: ${TOKEN} }`.
+ */
+export function providerEnvFor(spec: {
+  baseUrl?: string;
+  /** Already secret-substituted. */
+  token?: string;
+  models: Partial<Record<Tier, string>>;
+  headers: Record<string, string>;
+}): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (spec.baseUrl) env.ANTHROPIC_BASE_URL = spec.baseUrl;
+  if (spec.token) {
+    env.ANTHROPIC_AUTH_TOKEN = spec.token;
+    env.ANTHROPIC_API_KEY = "";
+  }
+  for (const [tier, id] of Object.entries(spec.models)) {
+    if (id) env[TIER_ENV[tier as Tier]] = id;
+  }
+  const lines = Object.entries(spec.headers).map(([k, v]) => `${k}: ${v}`);
+  if (lines.length) env.ANTHROPIC_CUSTOM_HEADERS = lines.join("\n");
+  return env;
 }

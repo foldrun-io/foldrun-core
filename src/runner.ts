@@ -27,6 +27,11 @@ import {
   parseFlow,
   parseApis,
   resolveModel,
+  parseProvider,
+  providerEnvFor,
+  resolveEffort,
+  isEffortWord,
+  EFFORT_LEVELS,
   checkFormatVersion,
   readRun,
   writeRun,
@@ -35,12 +40,14 @@ import {
   type RunRecord,
   type StepRecord,
 } from "./store.ts";
+import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
+import { materializeFiles, harvestFiles } from "./files.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -509,24 +516,41 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
   let providerEnv: Record<string, string> = {};
   let providerLabel: string | null = null;
-  if (providerBlock && typeof providerBlock === "object") {
-    const raw = providerBlock as Record<string, unknown>;
-    const baseUrl = typeof raw.base_url === "string" ? raw.base_url.trim() : "";
-    const token = typeof raw.token === "string" ? raw.token.trim() : "";
-    const resolved = token.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
-      const hit = getSecret(tenant, secretName, workspace);
-      return hit ? hit.value : whole;
-    });
-    if (baseUrl) {
-      providerEnv = {
-        ANTHROPIC_BASE_URL: baseUrl,
-        ...(resolved ? { ANTHROPIC_AUTH_TOKEN: resolved, ANTHROPIC_API_KEY: resolved } : {}),
-      };
-      providerLabel = baseUrl;
+  // Secret values pulled into the provider block, name → value. Kept apart
+  // from providerEnv because a header blob is a poor redaction key: what
+  // must never reach the journal is the credential inside it, not the blob.
+  const providerSecrets: Record<string, string> = {};
+  const providerWarnings: string[] = [];
+  const spec = parseProvider(providerBlock);
+  if (spec) {
+    providerWarnings.push(...spec.warnings);
+    const substitute = (text: string) =>
+      text.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
+        const hit = getSecret(tenant, secretName, workspace);
+        if (!hit) return whole;
+        providerSecrets[secretName] = hit.value;
+        return hit.value;
+      });
+    const resolved = substitute(spec.token);
+    if (spec.baseUrl) {
+      const headers = Object.fromEntries(
+        Object.entries(spec.headers).map(([k, v]) => [k, substitute(v)]),
+      );
+      providerEnv = providerEnvFor({
+        baseUrl: spec.baseUrl,
+        token: resolved,
+        models: spec.models,
+        headers,
+      });
+      // What the run is actually pointed at, in one line: the endpoint, the
+      // tiers this gateway renames, and whether the credential landed.
+      const remapped = Object.entries(spec.models).map(([tier, id]) => `${tier}→${id}`);
+      providerLabel = spec.baseUrl;
+      if (remapped.length) providerLabel += ` (${remapped.join(", ")})`;
       // An unresolved ${SECRET} would silently fall back to Anthropic's
       // endpoint with the host's key — say so instead.
-      if (token && resolved === token && token.includes("${")) {
-        providerLabel = `${baseUrl} (token secret not set)`;
+      if (spec.token && resolved === spec.token && spec.token.includes("${")) {
+        providerLabel += " — token secret not set";
       }
     }
   }
@@ -663,10 +687,33 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).mdagent_version).warning,
     providerEnv,
     providerLabel,
+    providerSecrets,
+    providerWarnings,
     secretScopes,
     missingTools,
     missingSecrets: [...new Set([...missingDeclared, ...apiTools.missingSecrets])],
   };
+}
+
+/**
+ * The SDK prices a step off Anthropic's table; through a gateway to a
+ * routed model that number is fiction. When the catalogue can price the
+ * tokens itself, its number replaces the SDK's, and the trace says so —
+ * a silently different bill is the one kind nobody forgives.
+ */
+function repriced(
+  catalog: Catalog | null,
+  model: string,
+  usage: { inputTokens: number; outputTokens: number } | null,
+  sdkCost: number | null,
+  push: (type: "info" | "error", text: string) => void,
+): number | null {
+  const known = usage ? catalogCost(catalog, model, usage) : null;
+  if (known === null) return sdkCost;
+  if (sdkCost !== null && Math.abs(known - sdkCost) > 0.000001) {
+    push("info", `cost repriced from the gateway's catalogue: $${known.toFixed(6)} (sdk said $${sdkCost.toFixed(6)})`);
+  }
+  return known;
 }
 
 async function runStep(
@@ -677,6 +724,7 @@ async function runStep(
   save: () => void,
   modelOverride?: string | null,
   tags: string[] = [],
+  effortOverride?: string | null,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -732,7 +780,7 @@ async function runStep(
       front, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
-      providerEnv, providerLabel, formatWarning,
+      providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
     } = agentContext(agentDir, tenant, tags);
 
     // oauth2 secrets become live access tokens here — the one async moment
@@ -750,13 +798,14 @@ async function runStep(
     // Populate before the first push: everything after this point may quote a
     // credential. Short values are skipped — a two-character secret would
     // redact half the English language, and anything that short is not one.
-    redactions = Object.entries({ ...liveSecrets, ...providerEnv })
+    redactions = Object.entries({ ...liveSecrets, ...providerSecrets, ...providerEnv })
       .filter(([, value]) => typeof value === "string" && value.length >= 8)
       .map(([name, value]) => [value, name] as [string, string])
       // Longest first, so a value containing another is replaced whole.
       .sort((a, b) => b[0].length - a[0].length);
 
     if (providerLabel) push("info", `provider: ${providerLabel}`);
+    for (const w of providerWarnings) push("error", w);
     if (formatWarning) push("error", formatWarning);
     for (const t of unknownTools) {
       // The commonest mistake is putting a workspace tool in `tools:`, so say
@@ -788,11 +837,61 @@ async function runStep(
     for (const line of runtime.log) push("info", line);
     push("info", `script executor: ${runtime.executor}`);
     if (runtime.error) push("error", `runtime: ${runtime.error}`);
-    const model = resolveModel(modelOverride ?? front.model);
+    // Nearest wins, for both halves of model selection: the step names one,
+    // else the flow does, else the agent's own frontmatter. Which level won
+    // goes in the trace — "why did this run on haiku" should be answerable
+    // from the run, not by opening three files.
+    const modelSource = step.model ? "step" : modelOverride ? "flow" : "agent";
+    const model = resolveModel(step.model ?? modelOverride ?? front.model);
+    const rawEffort = step.effort ?? effortOverride ?? front.effort;
+    const effortSource = step.effort ? "step" : effortOverride ? "flow" : "agent";
+    let effort = resolveEffort(rawEffort);
+    if (isEffortWord(rawEffort)) {
+      push(
+        "error",
+        `effort: "${String(rawEffort).trim()}" is not a level — use ${EFFORT_LEVELS.join(", ")}. ` +
+          `Running at the model's default instead.`,
+      );
+    }
     push(
       "info",
-      `step started (agent: ${step.agent}, model: ${model}${modelOverride ? " — flow override" : ""})`,
+      `step started (agent: ${step.agent}, model: ${model} — ${modelSource}` +
+        `${effort ? `, effort: ${effort} — ${effortSource}` : ""})`,
     );
+
+    // The run-start gate, when a gateway is in play. "Any model they want"
+    // is only an offer if a wrong pick fails here, in one line naming the
+    // fix — not minutes in, as an agent narrating tool calls into prose
+    // because its model cannot make them. The catalogue only ever fails a
+    // step on knowledge; unknown ids, presets and offline all pass through
+    // to the model call, which stays the authority of last resort.
+    let catalog: Catalog | null = null;
+    // What actually goes on the wire: a tier the provider block remapped is
+    // sent as the gateway's id, and that id — not our tier word — is what
+    // the catalogue can have an opinion about.
+    const wireModel =
+      { haiku: providerEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+        sonnet: providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
+        opus: providerEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
+    if (providerEnv.ANTHROPIC_BASE_URL) {
+      catalog = await loadCatalog(providerEnv.ANTHROPIC_BASE_URL);
+      const needsTools = allowed.length > 0 || mcpNames.length > 0;
+      const verdict = checkModel(catalog, wireModel, { tools: needsTools });
+      if (!verdict.ok) {
+        push("error", verdict.reason!);
+        step.status = "failed";
+        save();
+        return;
+      }
+      // Effort, fitted to what this model actually takes: unchanged when the
+      // level is supported, the nearest supported level when it isn't, gone
+      // when the model doesn't reason — each departure said aloud. This is
+      // what makes `effort:` portable rather than Anthropic-only: the word
+      // in the file stays the intent, the wire carries what the model has.
+      const fitted = clampEffort(catalog, wireModel, effort);
+      if (fitted.note) push("info", fitted.note);
+      effort = fitted.effort;
+    }
 
     fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
     fs.mkdirSync(path.join(agentDir, "memory"), { recursive: true });
@@ -847,6 +946,7 @@ async function runStep(
           agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
           prompt,
           model,
+          effort,
           systemPrompt,
           allowed,
           mcpNames: consultNames,
@@ -874,7 +974,7 @@ async function runStep(
       });
       step.status = outcome.status;
       step.result = outcome.result;
-      step.costUsd = outcome.costUsd;
+      step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
     } else {
       const consultTools = buildConsultTools(
         consults,
@@ -887,6 +987,7 @@ async function runStep(
         libraryRoot: libraryDir(tenant),
         prompt,
         model,
+        effort,
         systemPrompt,
         allowed,
         mcpNames: consultNames,
@@ -913,7 +1014,8 @@ async function runStep(
       step.result = outcome.result;
       // A consult's spend belongs to the step that asked.
       const consultCost = consultTools.drainCost();
-      step.costUsd = outcome.costUsd === null && consultCost === 0 ? null : (outcome.costUsd ?? 0) + consultCost;
+      const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push);
+      step.costUsd = stepCost === null && consultCost === 0 ? null : (stepCost ?? 0) + consultCost;
       for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
       for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
     }
@@ -1009,6 +1111,8 @@ export function createFlowRun(
       instruction: s.instruction,
       group: s.group ?? 1,
       optional: s.optional ?? false,
+      model: s.model,
+      effort: s.effort,
       approve: s.approve,
       when: s.when,
       case: s.case,
@@ -1056,9 +1160,10 @@ export function startFlowRun(
   flowName: string,
   modelOverride?: string | null,
   tags: string[] = [],
+  effortOverride?: string | null,
 ): RunRecord {
   const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags);
-  void driveRun(tenant, workspace, run, modelOverride, tags);
+  void driveRun(tenant, workspace, run, modelOverride, tags, { effortOverride });
   return run;
 }
 
@@ -1083,8 +1188,9 @@ export function driveRun(
   run: RunRecord,
   modelOverride?: string | null,
   tags: string[] = [],
-  opts: { parkOnApproval?: boolean } = {},
+  opts: { parkOnApproval?: boolean; effortOverride?: string | null } = {},
 ): Promise<void> {
+  const effortOverride = opts.effortOverride ?? null;
   const pDir = workspaceDir(tenant, workspace);
   const runRoot = pDir;
   const save = () => writeRun(tenant, workspace, run);
@@ -1142,6 +1248,33 @@ export function driveRun(
         run.status = "running";
         run.parkedAt = null;
         save();
+      }
+
+      // Put the workspace's files on disk before the first step, so they are
+      // simply *there* when the step's container copy is taken. This is the
+      // whole of the agent-facing file API: a directory. Nothing here hands
+      // the model a bucket, a URL or a credential, and a run pod that has
+      // never heard of S3 reads a 200MB PDF the same way it reads AGENTS.md.
+      //
+      // Runs on resume too — a parked run's container is long gone, and the
+      // one it comes back in needs the same files the first one had.
+      try {
+        const brought = await materializeFiles(tenant, workspace);
+        if (brought.length) {
+          run.steps[0]?.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `files: ${brought.length} brought into the workspace`,
+          });
+        }
+      } catch (err) {
+        // A file store that is down must not take the run with it: most flows
+        // never touch files/, and the ones that do will fail their own verify.
+        run.steps[0]?.events.push({
+          t: new Date().toISOString(),
+          type: "error",
+          text: `files: could not be brought in — ${err instanceof Error ? err.message : String(err)}`,
+        });
       }
 
       // Group steps by their group number, ascending. Rebuilt on demand
@@ -1370,6 +1503,7 @@ export function driveRun(
                   save,
                   modelOverride,
                   tags,
+                  effortOverride,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -1471,6 +1605,31 @@ export function driveRun(
           archive();
         } catch {
           // never let bookkeeping fail a run that already finished
+        }
+        // Whatever the run left in files/ becomes a stored file, stamped with
+        // the run and the agent that wrote it — which is what lets the
+        // dashboard answer "where did this PDF come from?" without a join
+        // table. On failure too: a failed run's half-written artifact is
+        // usually the one worth looking at.
+        try {
+          const { saved, errors } = await harvestFiles(
+            tenant,
+            workspace,
+            `run:${run.id}`,
+          );
+          const last = run.steps.findLast((s) => s.status !== "pending") ?? run.steps[0];
+          if (saved.length) {
+            last?.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `files: saved ${saved.join(", ")}`,
+            });
+          }
+          for (const e of errors) {
+            last?.events.push({ t: new Date().toISOString(), type: "error", text: `files: ${e}` });
+          }
+        } catch {
+          // same rule as archive(): bookkeeping never fails a finished run
         }
         save();
       }

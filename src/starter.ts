@@ -50,6 +50,14 @@ mdagent_version: "0.1"
 # provider:
 #   base_url: https://openrouter.ai/api
 #   token: \${OPENROUTER_API_KEY}
+#   models:            # what this gateway calls each tier
+#     fast: google/gemini-2.5-flash
+#     max: anthropic/claude-opus-4.1
+#   headers:           # anything else the gateway wants
+#     X-Title: mdagent
+#
+# The token is sent as a bearer credential. A gateway that wants it as a key
+# header asks for that by name: headers: { x-api-key: \${THE_SECRET} }.
 ---
 
 # ${account}
@@ -112,6 +120,7 @@ outputs/
 name: researcher
 description: Finds one thing worth writing about, and says why.
 model: fast
+effort: high
 tools:
   - web
   - read
@@ -191,6 +200,7 @@ Short drafts got edited less than long ones. Prefer four paragraphs to eight.
 name: writer-quality
 agent: writer
 model: fast
+effort: low
 ---
 
 ## writes something

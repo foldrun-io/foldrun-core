@@ -110,6 +110,7 @@ export const KINDS: Record<Kind, KindMeta> = {
 name: ${name}
 description: What this agent is for, in one line.
 model: fast
+effort: high
 tools: [files]
 ---
 

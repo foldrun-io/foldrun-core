@@ -20,13 +20,16 @@ import path from "node:path";
 import matter from "gray-matter";
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { resolveModel } from "./store.ts";
+import { resolveModel, resolveEffort, type Effort } from "./store.ts";
 import { executeStep } from "./step-exec.ts";
 
 export interface ConsultSpec {
   name: string;
   systemPrompt: string;
   model: string;
+  /** A colleague answers at its own declared effort, not the caller's — the
+   *  point of consulting one is that it is configured differently. */
+  effort: Effort | null;
 }
 
 const CONSULT_TIMEOUT_SEC = 300;
@@ -57,6 +60,7 @@ export function gatherConsults(
         `directly and completely in your reply — you have no tools and no files; ` +
         `everything you know is in this prompt and the question.`,
       model: resolveModel((parsed.data as { model?: string }).model),
+      effort: resolveEffort((parsed.data as { effort?: string }).effort),
     });
   }
   return { consults, missing };
@@ -102,6 +106,7 @@ export function buildConsultTools(
             libraryRoot: scratch,
             prompt: args.question,
             model: c.model,
+            effort: c.effort,
             systemPrompt: c.systemPrompt,
             allowed: [],
             mcpNames: [],

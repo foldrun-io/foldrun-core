@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import type { Effort } from "./store.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 
@@ -19,6 +20,10 @@ export interface ExecOutcome {
   status: "completed" | "failed";
   result: string | null;
   costUsd: number | null;
+  /** Token counts off the SDK's result message. costUsd is priced from
+   *  Anthropic's table, which is wrong for a routed model — these are the
+   *  raw numbers a caller with a gateway's own prices can reprice from. */
+  usage: { inputTokens: number; outputTokens: number } | null;
 }
 
 export interface ExecOptions {
@@ -27,6 +32,10 @@ export interface ExecOptions {
   libraryRoot: string;
   prompt: string;
   model: string;
+  /** How hard the model thinks before answering — orthogonal to which model
+   *  it is. Null leaves it to the SDK's own default rather than guessing a
+   *  level on the author's behalf. */
+  effort?: Effort | null;
   systemPrompt: string;
   /** Exact SDK tool names the agent may use. */
   allowed: string[];
@@ -50,6 +59,7 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
   let status: "running" | "completed" | "failed" = "running";
   let costUsd: number | null = null;
+  let usage: ExecOutcome["usage"] = null;
   const texts: string[] = [];
 
   fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
@@ -60,6 +70,10 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     options: {
       cwd: agentDir,
       model: opts.model,
+      // Omitted, not passed as undefined-with-a-default: an unset effort
+      // should mean "whatever this model does normally", which is not a
+      // level we can name — it moves as models ship.
+      ...(opts.effort ? { effort: opts.effort } : {}),
       systemPrompt: opts.systemPrompt,
       // Restrict the toolset itself, not just approval: an agent that
       // declares no tools gets none, instead of seeing the full Claude
@@ -134,6 +148,19 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     } else if (message.type === "result") {
       status = message.subtype === "success" ? "completed" : "failed";
       costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
+      if ("usage" in message && message.usage) {
+        const u = message.usage as unknown as Record<string, number | undefined>;
+        usage = {
+          // Cache traffic is input the provider still bills (at its own
+          // rates); folding it into the input count over-approximates for
+          // gateways with cheaper cache reads, which errs on the honest side.
+          inputTokens:
+            (u.input_tokens ?? 0) +
+            (u.cache_creation_input_tokens ?? 0) +
+            (u.cache_read_input_tokens ?? 0),
+          outputTokens: u.output_tokens ?? 0,
+        };
+      }
     }
   }
   // The SDK ends a healthy run with a `result` message. A stream that just
@@ -157,7 +184,7 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     if (code !== 0) status = "failed";
   }
 
-  return { status, result, costUsd };
+  return { status, result, costUsd, usage };
 }
 
 // Verification runs in the agent's directory with its secrets available, so

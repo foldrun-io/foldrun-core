@@ -12,7 +12,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseFlow, parseToolDef, reorderFlowSteps, resolveModel } from "./src/store.ts";
+import {
+  parseFlow,
+  parseToolDef,
+  reorderFlowSteps,
+  resolveModel,
+  resolveEffort,
+  isEffortWord,
+  parseProvider,
+  providerEnvFor,
+} from "./src/store.ts";
 import { lintFlow } from "./src/flow-lint.ts";
 import { completionsAt } from "./src/completions.ts";
 import { trustTier, buildIndex } from "./src/okf.ts";
@@ -213,6 +222,135 @@ test("tiers resolve, explicit ids pass through", () => {
   assert.equal(resolveModel("fast"), "haiku");
   assert.equal(resolveModel(undefined), "sonnet");
   assert.equal(resolveModel("claude-opus-5"), "claude-opus-5");
+});
+
+test("every reasonable word for a tier lands on that tier", () => {
+  for (const w of ["fast", "small", "cheap", "mini", "light", "low", "HAIKU"]) {
+    assert.equal(resolveModel(w), "haiku", w);
+  }
+  for (const w of ["default", "standard", "base", "balanced", "mid", "Medium", "normal"]) {
+    assert.equal(resolveModel(w), "sonnet", w);
+  }
+  for (const w of ["max", "large", "big", "best", "smart", "high", "deep", "Opus"]) {
+    assert.equal(resolveModel(w), "opus", w);
+  }
+});
+
+test("a step's own model and effort are parsed, and beat the flow's", () => {
+  const flow = parseFlow(
+    "f.md",
+    `---\nname: f\nmodel: fast\neffort: low\n---\n\n1. [[a]] — cheap\n2. [[b]] — the hard one\n   model: max\n   effort: xhigh\n`,
+  );
+  assert.equal(flow.model, "fast");
+  assert.equal(flow.effort, "low");
+  assert.equal(flow.steps[0].model, undefined);
+  assert.equal(flow.steps[0].effort, undefined);
+  assert.equal(flow.steps[1].model, "max");
+  assert.equal(flow.steps[1].effort, "xhigh");
+});
+
+// ---------------------------------------------------------------- effort
+
+test("effort levels and their synonyms resolve", () => {
+  assert.equal(resolveEffort("low"), "low");
+  assert.equal(resolveEffort("minimal"), "low");
+  assert.equal(resolveEffort("MED"), "medium");
+  assert.equal(resolveEffort("default"), "high");
+  assert.equal(resolveEffort("x-high"), "xhigh");
+  assert.equal(resolveEffort("highest"), "max");
+});
+
+test("unset effort is null, and so is a word we don't know", () => {
+  assert.equal(resolveEffort(undefined), null);
+  assert.equal(resolveEffort("  "), null);
+  assert.equal(resolveEffort("ludicrous"), null);
+  // Only the second is worth telling the author about.
+  assert.equal(isEffortWord(undefined), false);
+  assert.equal(isEffortWord("ludicrous"), true);
+  assert.equal(isEffortWord("max"), false);
+});
+
+test("model and effort are separate axes — same word, different meaning", () => {
+  // `max` is opus on `model:` and think-hardest on `effort:`. Both are the
+  // canonical name on their own key, and neither leaks into the other.
+  assert.equal(resolveModel("max"), "opus");
+  assert.equal(resolveEffort("max"), "max");
+  assert.equal(resolveModel("fast"), "haiku");
+  assert.equal(resolveEffort("fast"), "low");
+});
+
+// ---------------------------------------------------------------- provider
+
+test("a gateway renames our tiers, and every word for a tier is a key", () => {
+  const spec = parseProvider({
+    base_url: "https://openrouter.ai/api",
+    token: "${OPENROUTER_API_KEY}",
+    models: { small: "google/gemini-2.5-flash", max: "anthropic/claude-opus-4.1" },
+  })!;
+  assert.deepEqual(spec.models, { fast: "google/gemini-2.5-flash", max: "anthropic/claude-opus-4.1" });
+  assert.deepEqual(spec.warnings, []);
+  const env = providerEnvFor(spec);
+  assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "google/gemini-2.5-flash");
+  assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, "anthropic/claude-opus-4.1");
+  // A tier the block says nothing about keeps ours.
+  assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, undefined);
+});
+
+test("a models: key that is not a tier is reported, not guessed at", () => {
+  const spec = parseProvider({ base_url: "https://x.test", models: { turbo: "some/model" } })!;
+  assert.deepEqual(spec.models, {});
+  assert.equal(spec.warnings.length, 1);
+  assert.match(spec.warnings[0], /turbo/);
+});
+
+test("headers become one blob, and nothing in a value may end a header", () => {
+  const spec = parseProvider({
+    base_url: "https://x.test",
+    headers: { "X-Title": "mdagent", "HTTP-Referer": "https://example.test" },
+  })!;
+  const env = providerEnvFor(spec);
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, "X-Title: mdagent\nHTTP-Referer: https://example.test");
+});
+
+test("a header that could inject another one is dropped", () => {
+  const spec = parseProvider({
+    base_url: "https://x.test",
+    headers: { "X-Ok": "fine", "X-Bad": "a\nAuthorization: Bearer stolen", "not a name": "x" },
+  })!;
+  assert.deepEqual(Object.keys(spec.headers), ["X-Ok"]);
+  assert.equal(spec.warnings.length, 2);
+});
+
+test("parsing never resolves a secret — that needs a tenant", () => {
+  const spec = parseProvider({ base_url: "https://x.test", token: "${T}" })!;
+  assert.equal(spec.token, "${T}");
+  assert.deepEqual(spec.models, {});
+  assert.deepEqual(spec.headers, {});
+});
+
+test("a gateway token is a bearer credential, and the api key is blanked", () => {
+  // Not merely unset: an unset key lets the SDK fall back to authenticating
+  // against Anthropic directly, which fails a long way from its cause.
+  const env = providerEnvFor({
+    baseUrl: "https://openrouter.ai/api",
+    token: "sk-or-live",
+    models: {},
+    headers: {},
+  });
+  assert.equal(env.ANTHROPIC_BASE_URL, "https://openrouter.ai/api");
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "sk-or-live");
+  assert.equal(env.ANTHROPIC_API_KEY, "");
+  assert.ok("ANTHROPIC_API_KEY" in env);
+});
+
+test("a gateway that wants the key header asks for it by name", () => {
+  const spec = parseProvider({
+    base_url: "https://x.test",
+    headers: { "x-api-key": "resolved-value" },
+  })!;
+  const env = providerEnvFor({ ...spec, token: "resolved-value" });
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, "x-api-key: resolved-value");
+  assert.equal(env.ANTHROPIC_API_KEY, ""); // the header wins; the env stays out of it
 });
 
 // ---------------------------------------------------------------- OKF

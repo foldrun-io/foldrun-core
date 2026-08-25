@@ -24,7 +24,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { isPlatformPath, type ApiSpec } from "./store.ts";
+import { isPlatformPath, type ApiSpec, type Effort } from "./store.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { RuntimeSpec } from "./runtime.ts";
@@ -36,6 +36,7 @@ export interface ContainerStepInput {
   agentRel: string; // "agents/<name>" inside the workspace
   prompt: string;
   model: string;
+  effort?: Effort | null;
   systemPrompt: string;
   allowed: string[];
   mcpNames: string[];
@@ -60,6 +61,7 @@ export interface ContainerStepOutcome {
   status: "completed" | "failed";
   result: string | null;
   costUsd: number | null;
+  usage?: { inputTokens: number; outputTokens: number } | null;
 }
 
 const cli = () => process.env.MDAGENT_CONTAINER_CLI ?? "docker";
@@ -173,6 +175,7 @@ try {
     libraryRoot: "/library",
     prompt: input.prompt,
     model: input.model,
+    effort: input.effort ?? null,
     systemPrompt: input.systemPrompt,
     allowed: input.allowed,
     mcpNames: input.mcpNames,
@@ -324,6 +327,12 @@ export function parseDriverLine(
         status: parsed.status === "completed" ? "completed" : "failed",
         result: typeof parsed.result === "string" ? parsed.result : null,
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
+        usage:
+          parsed.usage &&
+          typeof parsed.usage.inputTokens === "number" &&
+          typeof parsed.usage.outputTokens === "number"
+            ? { inputTokens: parsed.usage.inputTokens, outputTokens: parsed.usage.outputTokens }
+            : null,
       };
     }
     return null;

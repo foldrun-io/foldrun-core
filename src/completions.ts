@@ -19,6 +19,10 @@ export interface Vocabulary {
   /** OKF `type:` values already used here. The index groups by exact string,
    *  so offering what exists is what keeps a bundle consistent. */
   types: string[];
+  /** The gateway's catalogue, when this workspace declares a provider —
+   *  full ids with price and capability in the hint. Tiers stay first:
+   *  they are the portable answer, the catalogue is the informed one. */
+  models?: { id: string; hint: string }[];
 }
 
 export interface Completion {
@@ -40,7 +44,18 @@ export interface CompletionContext {
 const MODELS: Completion[] = [
   { label: "fast", hint: "haiku — cheap, for checks and triage" },
   { label: "default", hint: "sonnet — the working default" },
-  { label: "max", hint: "opus — hardest reasoning" },
+  { label: "max", hint: "opus — the most capable" },
+];
+
+// Effort is the other knob, and the one people miss: it decides how long the
+// model thinks, not which model thinks. `fast` + `max` is a real pairing —
+// the cheap model, told to take its time — and no single tier can say it.
+const EFFORTS: Completion[] = [
+  { label: "low", hint: "minimal thinking, fastest" },
+  { label: "medium", hint: "moderate" },
+  { label: "high", hint: "deep reasoning — the default" },
+  { label: "xhigh", hint: "deeper than high, where the model has it" },
+  { label: "max", hint: "think hardest — correctness over cost" },
 ];
 
 // `tools:` grants what the runtime provides. Group aliases first — they
@@ -111,6 +126,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "name", insert: "name: ", hint: "required" },
     { label: "description", insert: "description: ", hint: "required — what it does, and when" },
     { label: "model", insert: "model: default" },
+    { label: "effort", insert: "effort: high", hint: "how hard it thinks" },
     { label: "tools", insert: "tools:\n  - files", hint: "what the runtime gives it" },
     { label: "use", insert: "use:\n  - ", hint: "tools you built" },
     { label: "secrets", insert: "secrets:\n  - ", hint: "credentials it may spend" },
@@ -124,6 +140,16 @@ const FIELDS: Record<string, Completion[]> = {
       label: "provider",
       insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}",
       hint: "an Anthropic-compatible endpoint — omit for Anthropic",
+    },
+    {
+      label: "provider.models",
+      insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}\n  models:\n    fast: \n    default: \n    max: ",
+      hint: "what this gateway calls each tier",
+    },
+    {
+      label: "provider.headers",
+      insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}\n  headers:\n    X-Title: mdagent",
+      hint: "gateway-specific settings — ${SECRET} resolves server-side",
     },
   ],
   tool: [
@@ -169,13 +195,15 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "trigger", insert: "trigger: manual" },
     { label: "schedule", insert: "schedule: \"0 6 * * MON\"" },
     { label: "timezone", insert: "timezone: Australia/Sydney" },
-    { label: "model", insert: "model: fast", hint: "overrides every step" },
+    { label: "model", insert: "model: fast", hint: "every step, unless the step says" },
+    { label: "effort", insert: "effort: high", hint: "every step, unless the step says" },
   ],
   evalFile: [
     { label: "name", insert: "name: " },
     { label: "agent", insert: "agent: " },
     { label: "flow", insert: "flow: ", hint: "instead of agent:" },
     { label: "model", insert: "model: fast", hint: "the judge's model" },
+    { label: "effort", insert: "effort: low", hint: "the judge's effort" },
   ],
   // memory/ and knowledge/ are OKF bundles — `type` is the spec's one
   // required field, the rest are its v0.2 provenance and lifecycle signals.
@@ -238,6 +266,7 @@ const STEP_OPTIONS: Completion[] = [
   { label: "timeout", insert: "timeout: 300", hint: "seconds" },
   { label: "verify", insert: "verify: ", hint: "shell command must exit 0" },
   { label: "model", insert: "model: fast" },
+  { label: "effort", insert: "effort: high", hint: "this step only" },
   { label: "approve", insert: "approve: true", hint: "pause for a human" },
 ];
 
@@ -369,7 +398,8 @@ export function completionsAt(
     const [, , key, partial] = kv;
     const from = cursor - partial.length;
     const byKey: Record<string, Completion[]> = {
-      model: MODELS,
+      model: [...MODELS, ...(vocab.models ?? []).map((m) => ({ label: m.id, hint: m.hint }))],
+      effort: EFFORTS,
       // `type:` is OKF's field and only OKF's — an open vocabulary describing
       // what a piece of knowledge is about, on knowledge and memory files.
       // Nothing else declares what it is: an agent or a flow is identified by

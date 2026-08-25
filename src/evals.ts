@@ -36,7 +36,7 @@ import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { workspaceDir, readRun, resolveModel, assertSafeName } from "./store.ts";
+import { workspaceDir, readRun, resolveModel, resolveEffort, assertSafeName, type Effort } from "./store.ts";
 import { startFlowRun, loadFlow } from "./runner.ts";
 
 export type Assertion =
@@ -61,6 +61,9 @@ export interface EvalInfo {
   flow: string | null;
   /** Model for the judge. Cases run the agent on its own model. */
   model: string;
+  /** Effort for the judge. PASS/FAIL against one sentence is not deep work,
+   *  so this is one of the few places a low default is the right one. */
+  effort: Effort | null;
   cases: EvalCase[];
 }
 
@@ -112,6 +115,7 @@ export function parseEval(file: string, raw: string): EvalInfo {
     agent: typeof data.agent === "string" ? data.agent : null,
     flow: typeof data.flow === "string" ? data.flow : null,
     model: resolveModel(data.model ?? "fast"),
+    effort: resolveEffort(data.effort ?? "low"),
     cases,
   };
 }
@@ -186,7 +190,12 @@ function shell(command: string, cwd: string): Promise<{ code: number | null; out
 // The judge gets the rubric and the output, and must answer with one word.
 // Constrained output beats asking for a score: "PASS" or "FAIL" can't be
 // misread, where "7/10" needs a threshold nobody agreed on.
-async function judge(rubric: string, output: string, model: string): Promise<AssertionResult["detail"] & string> {
+async function judge(
+  rubric: string,
+  output: string,
+  model: string,
+  effort: Effort | null,
+): Promise<AssertionResult["detail"] & string> {
   const prompt =
     `You are grading one piece of output against one criterion. Answer with exactly ` +
     `PASS or FAIL on the first line, then one short sentence of reason.\n\n` +
@@ -195,7 +204,14 @@ async function judge(rubric: string, output: string, model: string): Promise<Ass
   let text = "";
   const q = query({
     prompt,
-    options: { model, tools: [], allowedTools: [], settingSources: [], maxTurns: 1 },
+    options: {
+      model,
+      ...(effort ? { effort } : {}),
+      tools: [],
+      allowedTools: [],
+      settingSources: [],
+      maxTurns: 1,
+    },
   });
   for await (const message of q) {
     if (message.type === "assistant") {
@@ -212,6 +228,7 @@ async function checkAssertion(
   output: string,
   agentDir: string,
   model: string,
+  effort: Effort | null,
 ): Promise<AssertionResult> {
   const hay = output.toLowerCase();
   switch (assertion.type) {
@@ -244,7 +261,7 @@ async function checkAssertion(
       return { assertion, passed: code === 0, detail: `exit ${code ?? "error"}${out ? ` — ${out.slice(0, 200)}` : ""}` };
     }
     case "judge": {
-      const verdict = await judge(assertion.value, output, model);
+      const verdict = await judge(assertion.value, output, model, effort);
       const passed = /^\s*PASS\b/i.test(verdict);
       return { assertion, passed, detail: verdict.slice(0, 300) || "judge returned nothing" };
     }
@@ -277,7 +294,7 @@ export async function runEval(
             ? { ...s, instruction: `${s.instruction}\n\n<run_task>\n${testCase.task}\n</run_task>` }
             : s,
         );
-        run = startFlowRun(tenant, workspace, steps, `eval:${info.name}`, flow.model);
+        run = startFlowRun(tenant, workspace, steps, `eval:${info.name}`, flow.model, [], flow.effort);
       } else {
         if (!target) throw new Error("this eval names neither an agent nor a flow");
         run = startFlowRun(
@@ -307,9 +324,9 @@ export async function runEval(
       // clearly-wrong answer never costs a model call.
       const cheap = testCase.expect.filter((a) => a.type !== "judge");
       const judges = testCase.expect.filter((a) => a.type === "judge");
-      for (const a of cheap) assertions.push(await checkAssertion(a, output, agentDir, info.model));
+      for (const a of cheap) assertions.push(await checkAssertion(a, output, agentDir, info.model, info.effort));
       if (assertions.every((r) => r.passed)) {
-        for (const a of judges) assertions.push(await checkAssertion(a, output, agentDir, info.model));
+        for (const a of judges) assertions.push(await checkAssertion(a, output, agentDir, info.model, info.effort));
       } else {
         for (const a of judges) {
           assertions.push({ assertion: a, passed: false, detail: "not run — an earlier check failed" });
