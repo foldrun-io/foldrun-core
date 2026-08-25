@@ -866,15 +866,24 @@ async function runStep(
     // step on knowledge; unknown ids, presets and offline all pass through
     // to the model call, which stays the authority of last resort.
     let catalog: Catalog | null = null;
-    // What actually goes on the wire: a tier the provider block remapped is
-    // sent as the gateway's id, and that id — not our tier word — is what
-    // the catalogue can have an opinion about.
+    // The env this run's model calls actually ride: the workspace's own
+    // provider block when one is declared, otherwise the platform's — the
+    // "models included" path, where the host env points every run at the
+    // platform's gateway and users only ever pick a model. The gate, the
+    // effort fit and the repricing follow the credential, not the file:
+    // keying them off the provider block alone left the platform-provided
+    // path — the main one — without any of them.
+    const rideEnv: Record<string, string | undefined> =
+      Object.keys(providerEnv).length > 0 ? providerEnv : process.env;
+    // What actually goes on the wire: a tier the gateway remapped is sent
+    // as the gateway's id, and that id — not our tier word — is what the
+    // catalogue can have an opinion about.
     const wireModel =
-      { haiku: providerEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-        sonnet: providerEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
-        opus: providerEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
-    if (providerEnv.ANTHROPIC_BASE_URL) {
-      catalog = await loadCatalog(providerEnv.ANTHROPIC_BASE_URL);
+      { haiku: rideEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+        sonnet: rideEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
+        opus: rideEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
+    if (rideEnv.ANTHROPIC_BASE_URL) {
+      catalog = await loadCatalog(rideEnv.ANTHROPIC_BASE_URL);
       const needsTools = allowed.length > 0 || mcpNames.length > 0;
       const verdict = checkModel(catalog, wireModel, { tools: needsTools });
       if (!verdict.ok) {
