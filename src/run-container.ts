@@ -25,6 +25,7 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec } from "./store.ts";
+import { isFileValue, fileContent } from "./secrets.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { RuntimeSpec } from "./runtime.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
@@ -185,6 +186,9 @@ try {
     timeoutSec: input.timeoutSec,
     verify: input.verify,
     verifyEnv: {},
+    // The container is the boundary; the SDK's own bash sandbox here would
+    // only block declared network use (SSH, curl) for no added safety.
+    sandboxBash: false,
     emit,
   });
   for (const line of api.drainLog()) emit("info", "api: " + line);
@@ -208,7 +212,7 @@ try {
 // 10001 with no capabilities at all.
 const DOCKERFILE = `FROM node:22-slim
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar \\
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
 WORKDIR /opt/runner
@@ -376,13 +380,31 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(jobIn);
     fs.writeFileSync(path.join(jobIn, "input.json"), JSON.stringify(args.input, null, 2));
 
+    // @file secrets are multi-line (a PEM key, a cert), and a docker
+    // --env-file cannot carry a newline. So they are staged as files *now*,
+    // into the copied-in workspace, and the env carries the container path —
+    // the one place a path is stable across the boundary. Everything else
+    // goes through the env file. (Without this the key silently vanished:
+    // the old filter dropped any value with a newline, and ssh got an empty
+    // -i path.)
+    const containerEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(args.env)) {
+      if (typeof v !== "string") continue;
+      if (isFileValue(v)) {
+        const rel = path.join(args.input.agentRel, ".secret-files", k.toLowerCase());
+        const abs = path.join(wsIn, rel);
+        fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(abs, fileContent(v), { mode: 0o600 });
+        containerEnv[k] = `/workspace/${rel.replaceAll("\\", "/")}`;
+      } else if (!v.includes("\n")) {
+        containerEnv[k] = v;
+      }
+    }
+
     const envFile = path.join(staging, "env");
     fs.writeFileSync(
       envFile,
-      Object.entries(args.env)
-        .filter(([, v]) => typeof v === "string" && !v.includes("\n"))
-        .map(([k, v]) => `${k}=${v}`)
-        .join("\n"),
+      Object.entries(containerEnv).map(([k, v]) => `${k}=${v}`).join("\n"),
       { mode: 0o600 },
     );
 

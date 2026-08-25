@@ -244,7 +244,13 @@ const BASH_ESCAPES = [
   /(^|[\s;|&(<>])[a-z_]+\s+\/(etc|root|home|Users|var|proc|dev)\b/, // absolute system paths
   /secrets\.json/,
   /\.secret-key/,
-  /\$\{?[A-Z_]*(TOKEN|KEY|SECRET|PASSWORD)/, // don't let a command echo a credential out
+  // Don't let a command *print* a credential out — but only that. This used
+  // to match any reference to a secret env var, which denied the entire
+  // point of secrets: `ssh -i "$SSH_KEY"`, `curl -H "Authorization: $TOKEN"`
+  // and `sshpass -e ssh …` all use a credential without emitting it, and all
+  // were being refused. Now only an output builtin fronting the variable is
+  // blocked; the journal redaction layer is the backstop for the rest.
+  /\b(echo|printf|print|cat|head|tail|env|printenv)\b[^\n|;&]*\$\{?[A-Z_]*(TOKEN|KEY|SECRET|PASSWORD)/,
 ];
 
 /**

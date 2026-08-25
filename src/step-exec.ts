@@ -39,6 +39,10 @@ export interface ExecOptions {
   /** Shell command that must exit 0 for the step to count as done. */
   verify?: string;
   verifyEnv?: Record<string, string>;
+  /** false when the caller is already an isolation boundary (a run
+   *  container): the SDK's bash sandbox is then redundant and would block
+   *  declared network use. Default (undefined/true) keeps it on. */
+  sandboxBash?: boolean;
   emit: (type: "text" | "tool" | "info" | "error", text: string) => void;
 }
 
@@ -65,12 +69,17 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
       // skips canUseTool entirely, which is where confinement happens. The
       // toolset is still restricted by `tools` above.
       settingSources: [],
-      // Sandbox the shell. Argument-level path checks can't hold a shell —
-      // it can cd, glob, or pipe its way out — so bash gets OS-level
-      // isolation. failIfUnavailable: false so a host without sandbox
-      // support degrades to the pattern checks below instead of dying.
+      // Sandbox the shell — but only when the shell would otherwise run in a
+      // process worth protecting. In an isolated run the container IS the
+      // boundary (non-root, cap-dropped, host-less, icc-disabled network),
+      // so the SDK's own bash sandbox is redundant there and actively harms:
+      // it blocks outbound network, which a declared SSH or curl step
+      // legitimately needs. So the container relaxes it (opts.sandboxBash =
+      // false) and the container's walls do the containing; the in-process
+      // path (the CLI on someone's laptop, and the host executor) keeps it,
+      // because there a shell escape reaches the real machine.
       sandbox: {
-        enabled: true,
+        enabled: opts.sandboxBash !== false,
         // Must stay false. Auto-allowing bash because it's sandboxed skips
         // canUseTool entirely — and the OS sandbox blocks writes outside the
         // tree but still permits reads, so `cat ../../secrets.json` walked
