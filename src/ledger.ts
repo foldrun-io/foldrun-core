@@ -19,11 +19,47 @@ import { accountDir } from "./store.ts";
 export interface LedgerEntry {
   t: string;
   kind: "topup" | "run" | "adjustment";
-  /** Positive credits the account, negative spends it. */
+  /** Positive credits the account, negative spends it. For a run this is
+   *  the *charge* — what the customer's credits paid, margin included. */
   usd: number;
+  /** What the run cost the platform at the provider, before margin. Kept on
+   *  the same line so every charge carries its own audit: the margin earned
+   *  on any entry is `-usd - cost`, derivable forever, stored nowhere.
+   *  Absent on entries written before margin existed (charge == cost then). */
+  cost?: number;
   workspace?: string;
   runId?: string;
   note?: string;
+}
+
+/**
+ * Margin, as platform configuration — not code, and never per-customer
+ * logic scattered through the runner:
+ *
+ *   MDAGENT_MARGIN=1.25       charge 25% over provider cost (default 1)
+ *   MDAGENT_MIN_RUN_FEE=0.01  no billable run charges less than this
+ *
+ * The floor only applies to runs that cost something: a run that failed
+ * before its first model call spent nothing and is charged nothing —
+ * billing a customer for our own gate refusing a step would be charging
+ * them for the product working.
+ */
+function marginConfig(): { margin: number; minFee: number } {
+  const margin = Number(process.env.MDAGENT_MARGIN);
+  const minFee = Number(process.env.MDAGENT_MIN_RUN_FEE);
+  return {
+    margin: Number.isFinite(margin) && margin > 0 ? margin : 1,
+    minFee: Number.isFinite(minFee) && minFee > 0 ? minFee : 0,
+  };
+}
+
+/** Provider cost → customer charge. Pure, so the price of a run is testable
+ *  without a ledger, and rounded to a whole number of micro-dollars so
+ *  float dust never accumulates in an append-only file. */
+export function priceRun(costUsd: number): number {
+  if (!(costUsd > 0)) return 0;
+  const { margin, minFee } = marginConfig();
+  return Math.round(Math.max(costUsd * margin, minFee) * 1e6) / 1e6;
 }
 
 function ledgerFile(tenant: string) {
@@ -84,12 +120,45 @@ export function recordRunCost(
   const entry: LedgerEntry = {
     t: new Date().toISOString(),
     kind: "run",
-    usd: -costUsd,
+    usd: -priceRun(costUsd),
+    cost: Math.round(costUsd * 1e6) / 1e6,
     workspace,
     runId,
   };
   append(tenant, entry);
   return entry;
+}
+
+/**
+ * The account's money in one shape: what's left, what was charged, what the
+ * charged runs cost the platform, and the difference — the margin actually
+ * earned, derived from the lines rather than tracked beside them. Entries
+ * from before `cost` existed count as charge == cost: honest, since margin
+ * was 1 then.
+ */
+export function ledgerSummary(tenant: string): {
+  balanceUsd: number;
+  chargedUsd: number;
+  providerCostUsd: number;
+  marginUsd: number;
+} {
+  let balance = 0;
+  let charged = 0;
+  let cost = 0;
+  for (const e of readLedger(tenant)) {
+    balance += e.usd;
+    if (e.kind === "run") {
+      charged += -e.usd;
+      cost += e.cost ?? -e.usd;
+    }
+  }
+  const r = (n: number) => Math.round(n * 1e6) / 1e6;
+  return {
+    balanceUsd: r(balance),
+    chargedUsd: r(charged),
+    providerCostUsd: r(cost),
+    marginUsd: r(charged - cost),
+  };
 }
 
 /**
