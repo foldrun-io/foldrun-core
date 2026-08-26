@@ -1,7 +1,7 @@
 {
   "name": "@foldrun/core",
   "version": "0.1.0",
-  "description": "Run agents defined as markdown. The format, the runner, the checks.",
+  "description": "Run agents defined as folders of markdown. The format, the runner, the checks.",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
