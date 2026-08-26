@@ -1512,6 +1512,18 @@ export interface StepRecord {
   events: RunEvent[];
   result: string | null;
   costUsd: number | null;
+  /**
+   * Sandbox seconds this step rented, and how many of them were cold start.
+   * Set only on the isolated path — an in-process step rents nothing, so
+   * `null` is the honest value and billing must read it as zero, not as
+   * "unknown, charge something".
+   *
+   * Wall time is deliberately not a substitute: a step parked at an approval
+   * gate has no pod, and billing a customer for a person taking the weekend
+   * to click approve is charging them for their own deliberation.
+   */
+  computeSecs?: number | null;
+  startupSecs?: number | null;
 }
 
 export interface RunRecord {
@@ -1564,6 +1576,32 @@ export function listAllRuns(tenant: string): RunWithWorkspace[] {
 
 export function runCost(run: RunRecord): number {
   return run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
+}
+
+/**
+ * What a finished run consumed, in the units the format itself has — the
+ * shape ledger.ts prices. Structural, not an import, because ledger.ts
+ * imports this module and money must not depend on a cycle.
+ *
+ * Only steps that actually ran count. A pending step never happened, a
+ * skipped one was skipped by the flow's own `when`, and an `expanded`
+ * fan-out template is a row in the trace rather than work — billing any of
+ * them would charge for steps the customer can see never executed, which is
+ * the fastest way to lose an argument about an invoice.
+ */
+export function runMeter(run: RunRecord): {
+  tokenCostUsd: number;
+  steps: number;
+  computeSecs: number;
+} {
+  let steps = 0;
+  let computeSecs = 0;
+  for (const s of run.steps) {
+    if (s.status !== "completed" && s.status !== "failed") continue;
+    steps += 1;
+    computeSecs += s.computeSecs ?? 0;
+  }
+  return { tokenCostUsd: runCost(run), steps, computeSecs };
 }
 
 export function runDurationSecs(run: RunRecord): number | null {

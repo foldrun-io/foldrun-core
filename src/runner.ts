@@ -989,6 +989,12 @@ async function runStep(
       step.status = outcome.status;
       step.result = outcome.result;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
+      // The compute meter, recorded on the step rather than derived later:
+      // the sandbox is gone by the time the run settles, and its lifetime
+      // is not recoverable from the run's own timestamps.
+      const secs = (ms: number) => Math.round(ms) / 1000;
+      step.computeSecs = outcome.timing ? secs(outcome.timing.totalMs) : null;
+      step.startupSecs = outcome.timing ? secs(outcome.timing.sandboxMs) : null;
     } else {
       const consultTools = buildConsultTools(
         consults,
@@ -1094,9 +1100,29 @@ export function copyTreeBytes(from: string, to: string) {
 // account, never the platform's other secrets, which is the entire reason
 // the container env is allowlisted instead of inheriting process.env.
 function platformModelEnv(): Record<string, string | undefined> {
-  const { ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN } =
-    process.env;
-  return { ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN };
+  const {
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL,
+    CLAUDE_CODE_OAUTH_TOKEN,
+    // What the tiers mean when the platform's own provider is not Anthropic.
+    // These belong to the credential: a base URL pointing at OpenRouter with
+    // Anthropic's model ids still attached is not a working provider, it is
+    // a 404 per step. Forwarded for the same reason the base URL is — an
+    // agent that names no provider gets the platform's, whole.
+    ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL,
+  } = process.env;
+  return {
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL,
+    CLAUDE_CODE_OAUTH_TOKEN,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL,
+  };
 }
 
 /**

@@ -25,41 +25,110 @@ export interface LedgerEntry {
   /** What the run cost the platform at the provider, before margin. Kept on
    *  the same line so every charge carries its own audit: the margin earned
    *  on any entry is `-usd - cost`, derivable forever, stored nowhere.
-   *  Absent on entries written before margin existed (charge == cost then). */
+   *  Absent on entries written before margin existed (charge == cost then).
+   *  Zero on a BYOK run — the tokens were bought on the customer's own
+   *  account and never passed through ours. */
   cost?: number;
+  /** The non-token units this run was billed on. Recorded because a line
+   *  that says only "$0.03" cannot be argued with; one that says "4 steps,
+   *  71.2 sandbox seconds" can be checked against the run it came from.
+   *  Absent on entries written before run/step/compute pricing existed. */
+  meter?: { steps: number; computeSecs: number };
   workspace?: string;
   runId?: string;
   note?: string;
 }
 
 /**
- * Margin, as platform configuration — not code, and never per-customer
+ * What a finished run consumed. `store.ts#runMeter` produces it; nothing
+ * else should, because "which steps count" is a question with one answer.
+ *
+ * The token cost is zero for a BYOK run, and the run is still billable:
+ * bringing your own key buys you out of token resale, not out of the pod,
+ * the storage and the orchestration that ran your flow.
+ */
+export interface RunMeter {
+  tokenCostUsd: number;
+  steps: number;
+  computeSecs: number;
+}
+
+/** A bare number is a token-only run — the CLI and self-host paths, which
+ *  rent no metered sandbox and have no compute leg to report. */
+function asMeter(meter: RunMeter | number): RunMeter {
+  return typeof meter === "number"
+    ? { tokenCostUsd: meter, steps: 0, computeSecs: 0 }
+    : meter;
+}
+
+/**
+ * Pricing, as platform configuration — not code, and never per-customer
  * logic scattered through the runner:
  *
- *   FOLDRUN_MARGIN=1.25       charge 25% over provider cost (default 1)
- *   FOLDRUN_MIN_RUN_FEE=0.01  no billable run charges less than this
+ *   FOLDRUN_MARGIN=1.25            charge 25% over provider token cost
+ *   FOLDRUN_RUN_FEE=0.02           per run, whoever's key paid for tokens
+ *   FOLDRUN_STEP_FEE=0.005         per step that actually ran
+ *   FOLDRUN_COMPUTE_USD_PER_SEC    per sandbox second the run rented
+ *   FOLDRUN_MIN_RUN_FEE=0.01       no billable run charges less than this
  *
- * The floor only applies to runs that cost something: a run that failed
- * before its first model call spent nothing and is charged nothing —
- * billing a customer for our own gate refusing a step would be charging
- * them for the product working.
+ * The three new legs are what a customer can count in the flow file before
+ * spending anything: the run is one, the steps are a list, and only the
+ * compute leg is metered — the same bargain every serverless bill makes.
+ *
+ * Everything defaults to zero, so a self-hoster who sets none of it keeps
+ * exactly the old behaviour: charge equals provider cost, and a BYOK run
+ * costs nothing at all.
  */
-function marginConfig(): { margin: number; minFee: number } {
-  const margin = Number(process.env.FOLDRUN_MARGIN);
-  const minFee = Number(process.env.FOLDRUN_MIN_RUN_FEE);
+interface PriceConfig {
+  margin: number;
+  runFee: number;
+  stepFee: number;
+  computeUsdPerSec: number;
+  minFee: number;
+}
+
+function envNum(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function priceConfig(): PriceConfig {
   return {
-    margin: Number.isFinite(margin) && margin > 0 ? margin : 1,
-    minFee: Number.isFinite(minFee) && minFee > 0 ? minFee : 0,
+    margin: envNum("FOLDRUN_MARGIN", 1),
+    runFee: envNum("FOLDRUN_RUN_FEE", 0),
+    stepFee: envNum("FOLDRUN_STEP_FEE", 0),
+    computeUsdPerSec: envNum("FOLDRUN_COMPUTE_USD_PER_SEC", 0),
+    minFee: envNum("FOLDRUN_MIN_RUN_FEE", 0),
   };
 }
 
-/** Provider cost → customer charge. Pure, so the price of a run is testable
- *  without a ledger, and rounded to a whole number of micro-dollars so
- *  float dust never accumulates in an append-only file. */
-export function priceRun(costUsd: number): number {
-  if (!(costUsd > 0)) return 0;
-  const { margin, minFee } = marginConfig();
-  return Math.round(Math.max(costUsd * margin, minFee) * 1e6) / 1e6;
+const micro = (n: number) => Math.round(n * 1e6) / 1e6;
+
+/**
+ * What a run consumed → what the customer is charged. Pure, so the price of
+ * a run is testable without a ledger, and rounded to a whole number of
+ * micro-dollars so float dust never accumulates in an append-only file.
+ *
+ * Two invariants, both about not inventing bills:
+ *
+ *   - A run that did nothing is free. Not "cheap" — free. A run our own
+ *     gate refused before its first step spent nothing of ours, and the
+ *     floor must never manufacture a charge for it.
+ *   - A run that did something but priced to zero stays zero. That is the
+ *     self-hoster with no pricing configured, and the floor is not an
+ *     invitation to start charging them.
+ */
+export function priceRun(meter: RunMeter | number): number {
+  const m = asMeter(meter);
+  const tokens = m.tokenCostUsd > 0 ? m.tokenCostUsd : 0;
+  const steps = m.steps > 0 ? m.steps : 0;
+  const secs = m.computeSecs > 0 ? m.computeSecs : 0;
+  if (tokens === 0 && steps === 0 && secs === 0) return 0;
+
+  const c = priceConfig();
+  const charge = tokens * c.margin + c.runFee + steps * c.stepFee + secs * c.computeUsdPerSec;
+  if (!(charge > 0)) return 0;
+  return micro(Math.max(charge, c.minFee));
 }
 
 function ledgerFile(tenant: string) {
@@ -106,22 +175,31 @@ export function recordTopUp(tenant: string, usd: number, note?: string): LedgerE
 }
 
 /**
- * Record what a finished run cost. Idempotent: the worker calls this after
- * every drive, and a parked-then-resumed run is driven more than once.
+ * Record what a finished run consumed. Idempotent: the worker calls this
+ * after every drive, and a parked-then-resumed run is driven more than once.
+ *
+ * Returns null when there is nothing to charge — including the self-hoster
+ * with no pricing configured, whose ledger stays empty rather than filling
+ * with zero-dollar lines.
  */
 export function recordRunCost(
   tenant: string,
   workspace: string,
   runId: string,
-  costUsd: number,
+  meter: RunMeter | number,
 ): LedgerEntry | null {
-  if (!(costUsd > 0)) return null;
+  const m = asMeter(meter);
+  const charge = priceRun(m);
+  if (!(charge > 0)) return null;
   if (readLedger(tenant).some((e) => e.kind === "run" && e.runId === runId)) return null;
+  const steps = m.steps > 0 ? m.steps : 0;
+  const computeSecs = m.computeSecs > 0 ? micro(m.computeSecs) : 0;
   const entry: LedgerEntry = {
     t: new Date().toISOString(),
     kind: "run",
-    usd: -priceRun(costUsd),
-    cost: Math.round(costUsd * 1e6) / 1e6,
+    usd: -charge,
+    cost: m.tokenCostUsd > 0 ? micro(m.tokenCostUsd) : 0,
+    ...(steps || computeSecs ? { meter: { steps, computeSecs } } : {}),
     workspace,
     runId,
   };

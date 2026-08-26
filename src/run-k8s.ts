@@ -24,8 +24,10 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   applyContainerChanges,
   parseDriverLine,
+  timingLine,
   type ContainerStepOutcome,
   type RunInContainerArgs,
+  type StepTiming,
 } from "./run-container.ts";
 import { isPlatformPath } from "./store.ts";
 
@@ -129,12 +131,20 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     fs.writeFileSync(path.join(staging, "input.json"), JSON.stringify(args.input, null, 2));
     fs.writeFileSync(path.join(staging, "env.sh"), envFileShell(args.env), { mode: 0o600 });
 
+    // The rent clock starts at apply. Everything before it — copying the
+    // workspace into staging — is host work on a machine that is already
+    // paid for; the pod is the thing that scales to zero and therefore the
+    // thing that costs when it doesn't.
+    const t0 = Date.now();
     const applied = kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image)));
     if (applied.status !== 0) throw new Error(`pod create failed:\n${applied.out.slice(0, 800)}`);
     created = true;
 
     const ready = kc(["wait", "--for=condition=Ready", podRef, "-n", ns, "--timeout=180s"]);
     if (ready.status !== 0) throw new Error(`pod never became ready:\n${ready.out.slice(0, 800)}`);
+    // Scheduling + image + gVisor sandbox boot. This is the cold-start
+    // number: the one that decides whether a human can wait on a run.
+    const sandboxMs = Date.now() - t0;
 
     const cp = (from: string, to: string) => {
       const out = kc(["cp", from, to, "-n", ns]);
@@ -149,6 +159,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // The driver's stdout, streamed. `logs -f` ends only when the container
     // does, and the shim holds for the ack — so the `done` line, not the
     // stream's end, is the signal to move on.
+    let firstOutputAt: number | null = null;
     const outcome = await new Promise<ContainerStepOutcome>((resolve) => {
       const child = spawn(kubectl(), ["logs", "-f", name, "-n", ns], {
         stdio: ["ignore", "pipe", "pipe"],
@@ -177,6 +188,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
           const parsed = parseDriverLine(buffer.slice(0, nl));
           buffer = buffer.slice(nl + 1);
           if (!parsed) continue;
+          firstOutputAt ??= Date.now();
           if (parsed.e === "event") args.emit(parsed.type, parsed.text);
           else return finish(parsed);
         }
@@ -201,7 +213,15 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     }
     kc(["exec", "-n", ns, name, "--", "touch", "/opt/runner/job/ack"]);
 
-    return outcome;
+    // After the ack: the pod is held live for the copy-out, so the copy-out
+    // is rented time like everything else.
+    const timing: StepTiming = {
+      sandboxMs,
+      firstOutputMs: firstOutputAt === null ? null : firstOutputAt - t0 - sandboxMs,
+      totalMs: Date.now() - t0,
+    };
+    args.emit("info", timingLine(timing));
+    return { ...outcome, timing };
   } finally {
     if (created) kc(["delete", podRef, "-n", ns, "--wait=false"]);
     fs.rmSync(staging, { recursive: true, force: true });

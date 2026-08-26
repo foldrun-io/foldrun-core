@@ -35,7 +35,7 @@ import {
 import { createFlowRun, driveRun } from "./runner.ts";
 import { assertFunds, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
-import { runCost } from "./store.ts";
+import { runMeter } from "./store.ts";
 
 export interface QueueJob {
   tenant: string;
@@ -258,7 +258,7 @@ export function startWorker() {
             // even if an earlier drive raced it.
             const settled = readRun(tenant, workspace, runId);
             if (settled && (settled.status === "completed" || settled.status === "failed")) {
-              recordRunCost(tenant, workspace, runId, runCost(settled));
+              recordRunCost(tenant, workspace, runId, runMeter(settled));
             }
             // Tell whoever asked to be told. Terminal states and parks alike
             // — "waiting for your approval" is the one message that cannot

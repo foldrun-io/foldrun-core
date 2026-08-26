@@ -57,11 +57,42 @@ export interface ContainerStepInput {
   verify?: string;
 }
 
+/**
+ * How long the sandbox actually existed, measured host-side — the driver
+ * cannot time its own cold start, because it isn't running yet.
+ *
+ * The split is where the two executors differ, so read it per executor:
+ * `sandboxMs` is scheduling and admission (docker `create` returns almost
+ * at once; a gVisor pod's Ready is the real cold-start number), and
+ * `firstOutputMs` is guest boot to the driver's first line (for docker
+ * that's where the cold start actually lands, since `start` is when the
+ * container boots). `totalMs` is what the platform rented either way, and
+ * is the only one billing should ever use.
+ */
+export interface StepTiming {
+  sandboxMs: number;
+  firstOutputMs: number | null;
+  totalMs: number;
+}
+
 export interface ContainerStepOutcome {
   status: "completed" | "failed";
   result: string | null;
   costUsd: number | null;
   usage?: { inputTokens: number; outputTokens: number } | null;
+  /** Set by the isolated executors only — an in-process step rents no
+   *  sandbox, so it has no compute seconds to bill. */
+  timing?: StepTiming | null;
+}
+
+/**
+ * The one place the timing line is worded, so the docker and k8s traces
+ * read the same and a cold-start regression is greppable across both.
+ */
+export function timingLine(t: StepTiming): string {
+  const s = (ms: number) => `${(ms / 1000).toFixed(2)}s`;
+  const first = t.firstOutputMs === null ? "no output" : `first output +${s(t.firstOutputMs)}`;
+  return `timing: sandbox ready in ${s(t.sandboxMs)}, ${first}, ${s(t.totalMs)} total`;
 }
 
 const cli = () => process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
@@ -444,9 +475,13 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     }
     flags.push("--network", ensureRunNetwork());
 
+    // The rent clock starts here: staging the workspace is host work, but
+    // from `create` to `rm` the sandbox is a resource the platform pays for.
+    const t0 = Date.now();
     const create = spawnSync(cli(), ["create", ...flags, tag], { encoding: "utf8" });
     if (create.status !== 0) throw new Error(`container create failed:\n${create.stderr}`);
     containerId = create.stdout.trim();
+    const sandboxMs = Date.now() - t0;
 
     const cp = (from: string, to: string) => {
       const out = spawnSync(cli(), ["cp", from, to], { encoding: "utf8" });
@@ -458,6 +493,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
     // Start attached and read the driver's JSONL. The step timeout gets a
     // backstop out here — a wedged container is killed, not waited on.
+    let firstOutputAt: number | null = null;
     const outcome = await new Promise<ContainerStepOutcome>((resolve) => {
       const child = spawn(cli(), ["start", "-a", containerId], { stdio: ["ignore", "pipe", "pipe"] });
       let done: ContainerStepOutcome | null = null;
@@ -477,6 +513,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
           buffer = buffer.slice(nl + 1);
           const parsed = parseDriverLine(line);
           if (!parsed) continue;
+          firstOutputAt ??= Date.now();
           if (parsed.e === "event") args.emit(parsed.type, parsed.text);
           else done = parsed;
         }
@@ -508,7 +545,15 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }
 
-    return outcome;
+    // Timed after the copy-out, because the container is still alive for it:
+    // what gets billed is the sandbox's whole life, not the model's turn.
+    const timing: StepTiming = {
+      sandboxMs,
+      firstOutputMs: firstOutputAt === null ? null : firstOutputAt - t0 - sandboxMs,
+      totalMs: Date.now() - t0,
+    };
+    args.emit("info", timingLine(timing));
+    return { ...outcome, timing };
   } finally {
     if (containerId) spawnSync(cli(), ["rm", "-f", containerId], { stdio: "ignore" });
     fs.rmSync(staging, { recursive: true, force: true });
