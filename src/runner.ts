@@ -1076,7 +1076,19 @@ async function runStep(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
+        const first = outcome.timing;
         outcome = await runIsolated(isolatedArgs(fallback));
+        // Both attempts held sandboxes; the meter owes the sum. The first
+        // try's pod ran, was billed for by the platform, and must not
+        // vanish from the record because a second try replaced its outcome.
+        if (first && outcome.timing) {
+          outcome = {
+            ...outcome,
+            timing: { ...outcome.timing, totalMs: outcome.timing.totalMs + first.totalMs },
+          };
+        } else if (first && !outcome.timing) {
+          outcome = { ...outcome, timing: first };
+        }
       }
       step.status = outcome.status;
       step.result = outcome.result;
@@ -1251,7 +1263,13 @@ function platformFallbackEnv(): Record<string, string> | null {
  *  credit, quota or auth — never a failure of the work itself, which would
  *  fail identically anywhere. */
 function isProviderRefusal(text: string): boolean {
-  return /API Error: (401|402|403|429|5\d\d)|credit|quota|exceed|rate.?limit|overloaded/i.test(text);
+  // Money and auth words only, plus the API's own status codes. The first
+  // version matched bare "exceed", which is also how the pod backstop
+  // phrases a timeout — and a timed-out step got retried on the paid
+  // fallback it could only time out on again. A refusal the fallback can
+  // answer is about the ACCOUNT; anything about the work or the sandbox is
+  // not, however similar the vocabulary.
+  return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded/i.test(text);
 }
 
 function platformModelEnv(): Record<string, string | undefined> {
