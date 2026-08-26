@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { accountDir } from "./store.ts";
+import { accountDir, assertSafeName } from "./store.ts";
 
 export interface LedgerEntry {
   t: string;
@@ -181,7 +181,34 @@ export function recordTopUp(tenant: string, usd: number, note?: string): LedgerE
  * Returns null when there is nothing to charge — including the self-hoster
  * with no pricing configured, whose ledger stays empty rather than filling
  * with zero-dollar lines.
+ *
+ * Idempotence has to hold under *concurrency*, not just repetition: a parked
+ * run is re-enqueued by the approval API while its previous drive may still
+ * be settling, so two drivers can reach this function for one run at once.
+ * A read-then-append check leaves a window where both see "not billed" and
+ * both charge. The claim below closes it: creating the run's marker file
+ * with O_EXCL is atomic on the filesystem, so exactly one caller wins the
+ * right to append.
+ *
+ * The ledger scan stays, first, because runs billed before markers existed
+ * have a line but no marker — without the scan an upgrade would re-bill
+ * history. Ordering the marker before the append means a crash between the
+ * two loses one run's charge rather than ever doubling one; between those
+ * failure modes, the one the customer can't be hurt by is the right one.
  */
+function claimSettle(tenant: string, runId: string): boolean {
+  assertSafeName(runId, "run id");
+  const dir = path.join(accountDir(tenant), "billed");
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.writeFileSync(path.join(dir, runId), "", { flag: "wx" });
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
+}
+
 export function recordRunCost(
   tenant: string,
   workspace: string,
@@ -192,6 +219,7 @@ export function recordRunCost(
   const charge = priceRun(m);
   if (!(charge > 0)) return null;
   if (readLedger(tenant).some((e) => e.kind === "run" && e.runId === runId)) return null;
+  if (!claimSettle(tenant, runId)) return null;
   const steps = m.steps > 0 ? m.steps : 0;
   const computeSecs = m.computeSecs > 0 ? micro(m.computeSecs) : 0;
   const entry: LedgerEntry = {
@@ -244,15 +272,55 @@ export function ledgerSummary(tenant: string): {
  * in, and only at the point work is *added* — a run already in flight is
  * never cut off mid-step over money, because a half-done run still costs
  * what it cost and delivers nothing.
+ *
+ * `balance > 0` alone has two holes, both stemming from the same fact: a
+ * run's cost is unknown until it finishes, so the check is structurally one
+ * run late. Sequentially, a $0.01 balance admits a run that then costs
+ * whatever it costs. Concurrently it is worse — a webhook burst fires ten
+ * runs in a second, every one sees the same positive balance, and every one
+ * is admitted before any settles.
+ *
+ *   FOLDRUN_MAX_RUN_EXPOSURE=2.00   worst-case cost the platform will
+ *                                   carry per admitted-but-unsettled run
+ *
+ * Set, the gate holds that much of the balance for every run already in
+ * flight and requires headroom for the new one on top: overdraft is bounded
+ * by how far a real run beats the estimate, instead of by how many jobs a
+ * burst can enqueue. Unset, the old behaviour — positive balance admits —
+ * which remains the self-hoster default, where the ledger is observability
+ * and nobody is owed anything.
+ *
+ * `inFlight` is the caller's count of admitted-but-unsettled runs for this
+ * tenant. The queue knows it (this module deliberately doesn't — money must
+ * not import the machinery it gates), and counting jobs *after* this check
+ * still narrows the burst window rather than closing it — two enqueues can
+ * interleave between count and write. Closing it fully needs the count and
+ * the admission under one lock; at this tier the bound is the product:
+ * N racing enqueues can overshoot by N × exposure at most once, not
+ * unboundedly.
  */
-export function assertFunds(tenant: string) {
+export function assertFunds(tenant: string, inFlight = 0) {
   if (!billingEnabled()) return;
-  if (creditBalance(tenant) > 0) return;
-  const err = new Error(
-    "out of credits — top up before starting new runs (existing runs finish either way)",
-  );
-  // HTTP is not this module's business, but the routes that surface this
-  // refusal should say 402, and they duck-type this field to do it.
-  (err as Error & { status: number }).status = 402;
-  throw err;
+  const balance = creditBalance(tenant);
+  const exposure = Number(process.env.FOLDRUN_MAX_RUN_EXPOSURE);
+  const refuse = (msg: string) => {
+    const err = new Error(msg);
+    // HTTP is not this module's business, but the routes that surface this
+    // refusal should say 402, and they duck-type this field to do it.
+    (err as Error & { status: number }).status = 402;
+    throw err;
+  };
+  if (Number.isFinite(exposure) && exposure > 0) {
+    const needed = exposure * (inFlight + 1);
+    if (balance < needed) {
+      refuse(
+        `insufficient credits for another run — $${needed.toFixed(2)} held ` +
+          `($${exposure.toFixed(2)} × ${inFlight + 1} unsettled run${inFlight ? "s" : ""}), ` +
+          `balance $${balance.toFixed(2)} (existing runs finish either way)`,
+      );
+    }
+    return;
+  }
+  if (balance > 0) return;
+  refuse("out of credits — top up before starting new runs (existing runs finish either way)");
 }

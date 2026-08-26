@@ -56,6 +56,31 @@ function jobFileName(job: QueueJob) {
   return `${Date.now().toString().padStart(14, "0")}-${job.runId}.json`;
 }
 
+/**
+ * Admitted-but-unsettled runs for a tenant: every job still sitting in
+ * pending/ or claimed/ is money the platform has agreed to spend and not
+ * yet counted. assertFunds takes this so a burst of enqueues cannot each
+ * be judged against the same untouched balance — the job files themselves
+ * are the record of what's already been admitted, which is the queue's one
+ * fact the ledger cannot know.
+ */
+function countInFlight(tenant: string): number {
+  let n = 0;
+  for (const state of ["pending", "claimed"] as const) {
+    const dir = queueDir(state);
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as QueueJob;
+        if (job.tenant === tenant) n += 1;
+      } catch {
+        // a torn job file is boot-recovery's problem, not billing's
+      }
+    }
+  }
+  return n;
+}
+
 /** A pending job for this run, if one exists. Claimed jobs don't count — the
  *  run is being driven, which is not a state enqueueing should duplicate. */
 function pendingFileFor(runId: string): string | null {
@@ -97,7 +122,7 @@ export function enqueueFlowRun(
   // Money is checked where work is added, and only where work is added —
   // resuming a parked run skips this on purpose. No-op unless the install
   // enforces billing (FOLDRUN_BILLING=1).
-  assertFunds(tenant);
+  assertFunds(tenant, countInFlight(tenant));
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
   enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
   return run;
