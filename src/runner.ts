@@ -1014,7 +1014,13 @@ async function runStep(
         ),
       }));
       const runIsolated = isolation === "k8s" ? runStepInK8s : runStepInContainer;
-      const outcome = await runIsolated({
+      // The last provider refusal this step saw, for the fallback decision.
+      let lastRefusal = "";
+      const pushWatching: typeof push = (type, text) => {
+        if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
+        push(type, text);
+      };
+      const isolatedArgs = (modelEnv: Record<string, string | undefined>) => ({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
         input: {
@@ -1040,16 +1046,38 @@ async function runStep(
             // process holds one key, and every isolated run borrows it.
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
-            ...(Object.keys(providerEnv).length === 0 ? platformModelEnv() : {}),
+            ...(Object.keys(providerEnv).length === 0 ? modelEnv : {}),
             ...liveSecrets,
             ...providerEnv,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
-        emit: push,
+        emit: pushWatching,
         // Stamps the sandbox, so stopping this run can destroy it.
         runId,
         size,
       });
+
+      let outcome = await runIsolated(isolatedArgs(platformModelEnv()));
+      // The platform's second supply, tried exactly once, and only when all
+      // three are true: the step rode the platform credential (a BYOK step's
+      // provider is the customer's problem and their bill), the primary
+      // refused over money/auth/limits rather than the work failing, and a
+      // fallback is configured. The retry is a fresh sandbox — the failed
+      // one is gone, and driveRun's whole contract is that re-driving is
+      // safe.
+      const fallback = platformFallbackEnv();
+      if (
+        outcome.status === "failed" &&
+        lastRefusal &&
+        fallback &&
+        Object.keys(providerEnv).length === 0
+      ) {
+        push(
+          "info",
+          `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
+        );
+        outcome = await runIsolated(isolatedArgs(fallback));
+      }
       step.status = outcome.status;
       step.result = outcome.result;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
@@ -1190,6 +1218,42 @@ export function copyTreeBytes(from: string, to: string) {
 // model credential — a run gets the ability to think on the platform's
 // account, never the platform's other secrets, which is the entire reason
 // the container env is allowlisted instead of inheriting process.env.
+/**
+ * The platform's second model supply, tried when the first refuses over
+ * money or auth. Order is a cost decision: a flat-rate subscription as the
+ * engine, pay-per-token only when it runs dry —
+ *
+ *   FOLDRUN_FALLBACK_BASE_URL     e.g. https://openrouter.ai/api
+ *   FOLDRUN_FALLBACK_TOKEN        bearer for that endpoint
+ *   FOLDRUN_FALLBACK_HAIKU/SONNET/OPUS_MODEL   tier ids in ITS catalogue
+ *
+ * Empty ANTHROPIC_API_KEY on purpose: set, it goes out as x-api-key and a
+ * gateway rejects it; the fallback's whole credential is the bearer.
+ */
+function platformFallbackEnv(): Record<string, string> | null {
+  const base = process.env.FOLDRUN_FALLBACK_BASE_URL;
+  const token = process.env.FOLDRUN_FALLBACK_TOKEN;
+  if (!base || !token) return null;
+  const out: Record<string, string> = {
+    ANTHROPIC_BASE_URL: base,
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+  };
+  for (const tier of ["HAIKU", "SONNET", "OPUS"] as const) {
+    const id = process.env[`FOLDRUN_FALLBACK_${tier}_MODEL`];
+    if (id) out[`ANTHROPIC_DEFAULT_${tier}_MODEL`] = id;
+  }
+  return out;
+}
+
+/** A model-call failure the fallback can answer: the primary refusing over
+ *  credit, quota or auth — never a failure of the work itself, which would
+ *  fail identically anywhere. */
+function isProviderRefusal(text: string): boolean {
+  return /API Error: (401|402|403|429|5\d\d)|credit|quota|exceed|rate.?limit|overloaded/i.test(text);
+}
+
 function platformModelEnv(): Record<string, string | undefined> {
   const {
     ANTHROPIC_API_KEY,
