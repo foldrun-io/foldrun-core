@@ -35,7 +35,7 @@ export type LibraryKind = "skills" | "scripts" | "memory" | "knowledge" | "tools
 // Order matters and is asserted: it is the order every noun list in the
 // product uses. Tools then scripts, because a script is material a tool
 // points at — see the KINDS table, which is where the order is declared.
-export const LIBRARY_KINDS: LibraryKind[] = ["knowledge", "memory", "skills", "tools", "scripts"];
+export const LIBRARY_KINDS: LibraryKind[] = ["tools", "knowledge", "memory", "skills", "scripts"];
 
 export function libraryDir(tenant: string, kind?: LibraryKind) {
   // Alongside the workspace in single-workspace mode: ./library, so a shared

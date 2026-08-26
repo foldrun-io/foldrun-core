@@ -43,13 +43,16 @@ export type Kind =
   | "agents"
   | "flows"
   | "evals"
+  | "tools"
   | "skills"
   | "memory"
   | "knowledge"
-  | "tools"
-  // Last, and beside tools: a script is what one kind of tool runs, not a
-  // fifth way to give an agent an ability. See the KINDS table.
   | "scripts";
+// The order that matters is the KINDS table's key order below, not this
+// union's: ALL_KINDS reads the object, and every noun list in the product
+// follows ALL_KINDS. It runs build → do → know → scripts, which is the
+// question each answers rather than the alphabet, and a consistency test
+// holds the sidebar and the asset pages to it.
 
 export interface KindMeta {
   kind: Kind;
@@ -165,6 +168,36 @@ trigger: manual
 `,
   },
 
+  tools: {
+    kind: "tools",
+    one: "tool",
+    docType: null,
+    docKey: null,
+    scopes: ["account", "workspace"],
+    placeholder: "uuid-service",
+    hint: "Something an agent can call: an API, a script, or an MCP server.",
+    file: (name) => `tools/${name}.md`,
+    template: (name) => `---
+transport: http
+name: ${name}
+description: What this does, and when to call it.
+base: https://api.example.com/v1
+methods: [GET]
+headers:
+  Authorization: Bearer \${${envName(name)}_TOKEN}
+---
+
+Notes for whoever maintains this. Agents opt in with:
+
+\`\`\`yaml
+use: [${name}]
+\`\`\`
+`,
+  },
+  // Last, and not navigable: a folder tool holds its own code, so scripts
+  // is material a tool carries rather than a shelf anyone picks from. The
+  // directory still exists and library/x.py still resolves — it just isn't
+  // a decision, so the sidebar has no door for it.
   knowledge: {
     kind: "knowledge",
     one: "knowledge doc",
@@ -234,37 +267,6 @@ Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any
 `,
   },
 
-  tools: {
-    kind: "tools",
-    one: "tool",
-    docType: null,
-    docKey: null,
-    scopes: ["account", "workspace"],
-    placeholder: "uuid-service",
-    hint: "Something an agent can call: an API, a script, or an MCP server.",
-    file: (name) => `tools/${name}.md`,
-    template: (name) => `---
-transport: http
-name: ${name}
-description: What this does, and when to call it.
-base: https://api.example.com/v1
-methods: [GET]
-headers:
-  Authorization: Bearer \${${envName(name)}_TOKEN}
----
-
-Notes for whoever maintains this. Agents opt in with:
-
-\`\`\`yaml
-use: [${name}]
-\`\`\`
-`,
-  },
-  // Declared after tools on purpose: a script is material one kind of
-  // tool points at, not a rival way to give an agent an ability. This
-  // object's key order is ALL_KINDS, which is the order the sidebar and
-  // every asset page list their nouns — so the pairing is declared once
-  // here and followed everywhere, and a consistency test holds the line.
   scripts: {
     kind: "scripts",
     one: "script",
