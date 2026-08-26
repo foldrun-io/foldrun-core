@@ -29,6 +29,7 @@ import {
   listWorkspaces,
   listRuns,
   readRun,
+  writeRun,
   type FlowStep,
   type RunRecord,
 } from "./store.ts";
@@ -137,6 +138,99 @@ export function enqueueFlowRun(
  */
 export function enqueueResume(tenant: string, workspace: string, runId: string) {
   enqueue({ tenant, workspace, runId });
+}
+
+/**
+ * Re-run a finished flow from one of its steps, as a new run.
+ *
+ * The old record is never mutated — it is history, its outputs are archived
+ * under its id, and its ledger line already paid for it. Instead the steps
+ * before the chosen one are *carried*: copied with their results so later
+ * steps read the same context they would have, marked `carriedFrom` so the
+ * meter never bills them twice, their per-step costs zeroed because those
+ * dollars are on the original run's line. Everything from the chosen step
+ * on is reset to pending and simply runs.
+ *
+ * Everything after, not just the step itself, because a later step consumed
+ * the earlier one's result — an emailer re-sent against a stale extraction
+ * is the bug this exists to fix, not a feature.
+ *
+ * Fan-out instances in the reset range are dropped and their template step
+ * restored, so the fan-out re-expands against the fresh result.
+ */
+export function rerunFrom(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  from: { agent?: string; step?: number },
+): RunRecord {
+  const source = readRun(tenant, workspace, runId);
+  if (!source) throw new Error(`run ${runId} not found`);
+  if (source.status !== "completed" && source.status !== "failed") {
+    throw new Error(`run ${runId} is ${source.status} — only a finished run can be re-run`);
+  }
+
+  const idx =
+    typeof from.step === "number"
+      ? from.step - 1 // 1-based on the API, because the trace numbers steps from 1
+      : source.steps.findIndex((s) => s.agent === from.agent && !s.item);
+  if (idx < 0 || idx >= source.steps.length) {
+    throw new Error(
+      from.agent
+        ? `no step in run ${runId} runs agent "${from.agent}"`
+        : `run ${runId} has no step ${from.step}`,
+    );
+  }
+
+  assertFunds(tenant, countInFlight(tenant));
+
+  const now = new Date().toISOString();
+  const steps: RunRecord["steps"] = [];
+  for (let i = 0; i < source.steps.length; i++) {
+    const s = source.steps[i];
+    if (i < idx) {
+      steps.push({
+        ...s,
+        carriedFrom: runId,
+        costUsd: null,
+        computeSecs: null,
+        startupSecs: null,
+        events: [
+          { t: now, type: "info", text: `carried from ${runId} — ran there, shown here as context` },
+        ],
+      });
+      continue;
+    }
+    if (s.item) continue; // an instance of a fan-out that will re-expand
+    steps.push({
+      ...s,
+      status: "pending",
+      events: [],
+      result: null,
+      costUsd: null,
+      computeSecs: null,
+      startupSecs: null,
+      attempts: 0,
+      skipReason: undefined,
+      approvedAt: undefined,
+      item: undefined,
+      loopRemaining: undefined,
+      carriedFrom: undefined,
+    });
+  }
+
+  const run: RunRecord = {
+    id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    flow: source.flow,
+    tags: source.tags,
+    status: "queued",
+    startedAt: now,
+    finishedAt: null,
+    steps,
+  };
+  writeRun(tenant, workspace, run);
+  enqueue({ tenant, workspace, runId: run.id });
+  return run;
 }
 
 /** Claim the oldest pending job, or null. Loses every race gracefully. */

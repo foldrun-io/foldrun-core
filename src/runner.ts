@@ -270,7 +270,17 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
       // confidently — while the publisher only found it by guessing at a glob.
       `Each agent writes to its own \`outputs/\`, so a file an earlier step produced is ` +
       `at \`../<that-agent>/outputs/\`, not in yours. If a previous step says it wrote ` +
-      `something, look there before concluding it does not exist.`,
+      `something, look there before concluding it does not exist.\n\n` +
+      // The distinction agents kept getting wrong, said where they can read
+      // it: outputs/ is working text between steps and never leaves the
+      // source tree; files/ is the store the dashboard's Files page lists.
+      // A 100-row CSV written to outputs/ is delivered nowhere — a person
+      // looking for it in Files finds an empty page and concludes the run
+      // produced nothing.
+      `\`../../files/\` is the workspace file store: anything you leave there is kept ` +
+      `after the run and shown on the Files page for people to download. Write ` +
+      `deliverables people asked for — CSVs, reports, PDFs, images — to \`../../files/\`; ` +
+      `use \`outputs/\` for working text the next step reads.`,
   );
 
   // Shared context before anything derived — an account or workspace rule is
@@ -616,7 +626,9 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     );
   }
 
-  parts.push("Write any deliverables to outputs/.");
+  parts.push(
+    "Write deliverables for people to ../../files/ (kept and downloadable); write working text for later steps to outputs/.",
+  );
 
   // One list. `tools:` grants anything: a built-in group, an exact SDK tool
   // name, or a tool defined in this workspace or account. `use:` still works
@@ -1289,6 +1301,26 @@ export function driveRun(
         run.parkedAt = null;
         save();
       }
+
+      // A step still marked `running` here is an orphan: exactly one driver
+      // holds a run's job, so whatever process set that status is gone —
+      // killed mid-step by a deploy or a crash. Left alone it is worse than
+      // failed: the group loop only runs `pending` steps, so the driver
+      // would step over the unfinished work, run everything after it, and
+      // mark the run completed — a run that reports success on work that
+      // never happened, which reconcile can then never see. Reset it to
+      // pending and it simply runs again; driveRun's whole contract is that
+      // re-driving a partly-finished record is safe.
+      for (const step of run.steps) {
+        if (step.status !== "running") continue;
+        step.status = "pending";
+        step.events.push({
+          t: new Date().toISOString(),
+          type: "info",
+          text: "interrupted mid-step (platform restart) — running again from the start of the step",
+        });
+      }
+      save();
 
       // Put the workspace's files on disk before the first step, so they are
       // simply *there* when the step's container copy is taken. This is the

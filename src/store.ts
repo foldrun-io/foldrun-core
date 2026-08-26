@@ -1512,6 +1512,10 @@ export interface StepRecord {
   events: RunEvent[];
   result: string | null;
   costUsd: number | null;
+  /** Set on steps copied into a re-run from an earlier run: the run they
+   *  actually executed in. Carried steps provide context and are never
+   *  billed again — the original run's ledger line already paid for them. */
+  carriedFrom?: string;
   /**
    * Sandbox seconds this step rented, and how many of them were cold start.
    * Set only on the isolated path — an in-process step rents nothing, so
@@ -1598,6 +1602,8 @@ export function runMeter(run: RunRecord): {
   let computeSecs = 0;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
+    // A carried step ran — and was billed — in the run it was carried from.
+    if (s.carriedFrom) continue;
     steps += 1;
     computeSecs += s.computeSecs ?? 0;
   }
