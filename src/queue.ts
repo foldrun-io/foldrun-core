@@ -28,6 +28,7 @@ import {
   listTenants,
   listWorkspaces,
   listRuns,
+  listFlows as listWorkspaceFlows,
   readRun,
   writeRun,
   type FlowStep,
@@ -184,6 +185,24 @@ export function rerunFrom(
 
   assertFunds(tenant, countInFlight(tenant));
 
+  // Re-runs exist to iterate: fix the flow, re-run the step. So the reset
+  // steps take their instructions from the flow file as it reads *now*, not
+  // as it read when the source run started — a re-run that replays a stale
+  // instruction re-fails for the exact reason the author just fixed. Matched
+  // positionally over the run's template steps (fan-out instances aside) and
+  // only where the agent still agrees; a reshaped flow falls back to the
+  // recorded text, because guessing at alignment would rewrite the wrong
+  // step's orders. Carried steps keep their history either way — they ran.
+  const currentFlow = listWorkspaceFlows(tenant, workspace).find((f) => f.name === source.flow);
+  const freshInstruction = (runIdx: number): string | null => {
+    if (!currentFlow) return null;
+    const templates = source.steps.filter((st) => !st.item);
+    if (templates.length !== currentFlow.steps.length) return null;
+    const tIdx = templates.indexOf(source.steps[runIdx]);
+    const now_ = currentFlow.steps[tIdx];
+    return now_ && now_.agent === source.steps[runIdx].agent ? now_.instruction : null;
+  };
+
   const now = new Date().toISOString();
   const steps: RunRecord["steps"] = [];
   for (let i = 0; i < source.steps.length; i++) {
@@ -204,6 +223,7 @@ export function rerunFrom(
     if (s.item) continue; // an instance of a fan-out that will re-expand
     steps.push({
       ...s,
+      instruction: freshInstruction(i) ?? s.instruction,
       status: "pending",
       events: [],
       result: null,
