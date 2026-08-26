@@ -694,6 +694,11 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     mcpNames,
     apiTools,
     scriptTools,
+    // The merged spec lists — inline plus use:-granted — for the isolated
+    // path, which serialises specs across the container boundary rather
+    // than using the servers built here.
+    apiSpecs: apis,
+    scriptSpecs,
     runtime: { log: runtimeLog, error: runtimeError, executor },
     secretEnv: { ...runtime.env, ...secretEnv },
     formatWarning: checkFormatVersion(
@@ -797,6 +802,7 @@ async function runStep(
       front, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
+      apiSpecs, scriptSpecs,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
     } = agentContext(agentDir, tenant, tags);
 
@@ -955,7 +961,14 @@ async function runStep(
       // secrets are substituted into API headers before the specs cross,
       // and reach scripts as env.
       push("info", `isolation: ${isolation}`);
-      const substitutedApis = parseApis(front.apis).map((api) => ({
+      // The *merged* lists — inline declarations plus everything `use:`
+      // granted — not a re-parse of the frontmatter. Rebuilding from `front`
+      // here silently dropped every use:-granted http and script tool on
+      // the isolated path (mcp grants survived only because mcpServers is
+      // passed as the merged object): the agent's prompt promised a tool
+      // the function list didn't have, and the step failed as the model
+      // politely reporting the gap.
+      const substitutedApis = apiSpecs.map((api) => ({
         ...api,
         headers: Object.fromEntries(
           Object.entries(api.headers).map(([k, v]) => [
@@ -978,7 +991,7 @@ async function runStep(
           mcpNames: consultNames,
           mcpServers,
           apis: substitutedApis,
-          scripts: parseScripts(front.scripts),
+          scripts: scriptSpecs,
           runtime: parseRuntime(front.runtime),
           consults,
           timeoutSec: step.timeout,
