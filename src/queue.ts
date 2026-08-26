@@ -28,6 +28,7 @@ import {
   listTenants,
   listWorkspaces,
   listRuns,
+  workspaceDir,
   listFlows as listWorkspaceFlows,
   readRun,
   writeRun,
@@ -37,9 +38,10 @@ import {
 import { createFlowRun, driveRun } from "./runner.ts";
 import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
-import { assertFunds, recordRunCost } from "./ledger.ts";
+import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
 import { runMeter } from "./store.ts";
+import { accountUsage } from "./usage.ts";
 
 export interface QueueJob {
   tenant: string;
@@ -68,6 +70,16 @@ function jobFileName(job: QueueJob) {
  * are the record of what's already been admitted, which is the queue's one
  * fact the ledger cannot know.
  */
+/** Runs of this tenant actually executing right now — status running, on
+ *  disk, which is the record every process agrees on. */
+function countRunning(tenant: string): number {
+  let n = 0;
+  for (const ws of listWorkspaces(tenant)) {
+    for (const r of listRuns(tenant, ws.name)) if (r.status === "running") n += 1;
+  }
+  return n;
+}
+
 function countInFlight(tenant: string): number {
   let n = 0;
   for (const state of ["pending", "claimed"] as const) {
@@ -457,6 +469,21 @@ export function startWorker() {
           // still is, dropping the job is right, because the decision that
           // resolves it will enqueue a fresh one.
           const stillAsking = run?.steps.some((s) => s.status === "awaiting-approval");
+          // The plan's parallelism, enforced where a run would actually start.
+          // At the cap, the job returns to the queue's tail rather than
+          // running — admission was already paid for at enqueue; this only
+          // decides when, never whether.
+          const cap = Number(process.env.FOLDRUN_PLAN_CONCURRENCY);
+          if (
+            run && run.status !== "completed" && run.status !== "failed" && !stillAsking &&
+            Number.isFinite(cap) && cap > 0 && billingEnabled() &&
+            countRunning(tenant) >= cap
+          ) {
+            fs.rmSync(claim.claimedFile, { force: true });
+            enqueue(claim.job);
+            inFlight -= 1;
+            return;
+          }
           if (run && run.status !== "completed" && run.status !== "failed" && !stillAsking) {
             await driveRun(tenant, workspace, run, modelOverride, tags ?? run.tags ?? [], {
               parkOnApproval: true,
@@ -485,4 +512,40 @@ export function startWorker() {
 
   setInterval(tick, POLL_MS).unref();
   tick();
+
+  // The recurring half of the bill, swept hourly: accrueDaily is idempotent
+  // per calendar day, so the schedule here only decides how soon after
+  // midnight the line appears — not how many appear.
+  const accrue = () => {
+    if (!billingEnabled()) return;
+    const retentionDays = Number(process.env.FOLDRUN_RETENTION_DAYS);
+    const cutoff = Number.isFinite(retentionDays) && retentionDays > 0
+      ? Date.now() - retentionDays * 24 * 60 * 60 * 1000
+      : null;
+    for (const tenant of listTenants()) {
+      try {
+        const usage = accountUsage(tenant);
+        accrueDaily(tenant, usage.totals.storageBytes);
+        // The plan's history window. Policy pruning, not a person erasing
+        // history, so no per-run ledger note — the charges stand and the
+        // ledger itself is never pruned. Live runs are never touched.
+        if (cutoff !== null) {
+          for (const ws of listWorkspaces(tenant)) {
+            for (const r of listRuns(tenant, ws.name)) {
+              if ((r.status === "completed" || r.status === "failed") &&
+                  r.finishedAt && new Date(r.finishedAt).getTime() < cutoff) {
+                const dir = path.join(workspaceDir(tenant, ws.name), "runs");
+                fs.rmSync(path.join(dir, `${r.id}.json`), { force: true });
+                fs.rmSync(path.join(dir, r.id), { recursive: true, force: true });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`[foldrun] accrual for ${tenant} failed`, err);
+      }
+    }
+  };
+  setInterval(accrue, 60 * 60 * 1000).unref();
+  accrue();
 }

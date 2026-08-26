@@ -1806,17 +1806,20 @@ export function runMeter(run: RunRecord): {
   tokenCostUsd: number;
   steps: number;
   computeSecs: number;
+  netBytes: number;
 } {
   let steps = 0;
   let computeSecs = 0;
+  let netBytes = 0;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
     // A carried step ran — and was billed — in the run it was carried from.
     if (s.carriedFrom) continue;
     steps += 1;
     computeSecs += s.computeSecs ?? 0;
+    netBytes += (s.actual?.rxBytes ?? 0) + (s.actual?.txBytes ?? 0);
   }
-  return { tokenCostUsd: runCost(run), steps, computeSecs };
+  return { tokenCostUsd: runCost(run), steps, computeSecs, netBytes };
 }
 
 export function runDurationSecs(run: RunRecord): number | null {

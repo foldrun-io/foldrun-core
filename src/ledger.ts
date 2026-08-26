@@ -36,7 +36,7 @@ export interface LedgerEntry {
    *  that says only "$0.03" cannot be argued with; one that says "4 steps,
    *  71.2 sandbox seconds" can be checked against the run it came from.
    *  Absent on entries written before run/step/compute pricing existed. */
-  meter?: { steps: number; computeSecs: number };
+  meter?: { steps: number; computeSecs: number; netBytes?: number };
   workspace?: string;
   runId?: string;
   note?: string;
@@ -54,6 +54,9 @@ export interface RunMeter {
   tokenCostUsd: number;
   steps: number;
   computeSecs: number;
+  /** Bytes on the wire, both directions, where the sandbox could read its
+   *  counters. Absent/zero on older runs and unreadable sandboxes. */
+  netBytes?: number;
 }
 
 /** A bare number is a token-only run — the CLI and self-host paths, which
@@ -70,13 +73,18 @@ function asMeter(meter: RunMeter | number): RunMeter {
  *
  *   FOLDRUN_MARGIN=1.25            charge 25% over provider token cost
  *   FOLDRUN_RUN_FEE=0.02           per run, whoever's key paid for tokens
- *   FOLDRUN_STEP_FEE=0.005         per step that actually ran
  *   FOLDRUN_COMPUTE_USD_PER_SEC    per sandbox second the run rented
+ *   FOLDRUN_NET_USD_PER_GB         per GB the run moved on the wire
  *   FOLDRUN_MIN_RUN_FEE=0.01       no billable run charges less than this
  *
- * The three new legs are what a customer can count in the flow file before
- * spending anything: the run is one, the steps are a list, and only the
- * compute leg is metered — the same bargain every serverless bill makes.
+ * No per-step fee, decidedly: a step is not a unit of anything the platform
+ * pays for — steps ARE sandbox-seconds, so a step fee double-charges
+ * compute and punishes well-factored flows for being well-factored.
+ *
+ * Network is charged on what the meter read, not on what the platform paid
+ * (its own egress is free): the price of a metered unit is a product
+ * decision, and moving bytes for a customer is worth something whether or
+ * not the wire invoiced us.
  *
  * Everything defaults to zero, so a self-hoster who sets none of it keeps
  * exactly the old behaviour: charge equals provider cost, and a BYOK run
@@ -85,8 +93,8 @@ function asMeter(meter: RunMeter | number): RunMeter {
 interface PriceConfig {
   margin: number;
   runFee: number;
-  stepFee: number;
   computeUsdPerSec: number;
+  netUsdPerGb: number;
   minFee: number;
 }
 
@@ -99,8 +107,8 @@ function priceConfig(): PriceConfig {
   return {
     margin: envNum("FOLDRUN_MARGIN", 1),
     runFee: envNum("FOLDRUN_RUN_FEE", 0),
-    stepFee: envNum("FOLDRUN_STEP_FEE", 0),
     computeUsdPerSec: envNum("FOLDRUN_COMPUTE_USD_PER_SEC", 0),
+    netUsdPerGb: envNum("FOLDRUN_NET_USD_PER_GB", 0),
     minFee: envNum("FOLDRUN_MIN_RUN_FEE", 0),
   };
 }
@@ -126,10 +134,11 @@ export function priceRun(meter: RunMeter | number): number {
   const tokens = m.tokenCostUsd > 0 ? m.tokenCostUsd : 0;
   const steps = m.steps > 0 ? m.steps : 0;
   const secs = m.computeSecs > 0 ? m.computeSecs : 0;
-  if (tokens === 0 && steps === 0 && secs === 0) return 0;
+  const gb = (m.netBytes ?? 0) > 0 ? m.netBytes! / (1024 * 1024 * 1024) : 0;
+  if (tokens === 0 && steps === 0 && secs === 0 && gb === 0) return 0;
 
   const c = priceConfig();
-  const charge = tokens * c.margin + c.runFee + steps * c.stepFee + secs * c.computeUsdPerSec;
+  const charge = tokens * c.margin + c.runFee + secs * c.computeUsdPerSec + gb * c.netUsdPerGb;
   if (!(charge > 0)) return 0;
   return micro(Math.max(charge, c.minFee));
 }
@@ -189,6 +198,62 @@ export function noteRunDeleted(tenant: string, workspace: string, runId: string)
   });
 }
 
+/**
+ * The recurring half of the bill, accrued daily so a mid-month customer is
+ * never charged a month: the base fee (unlimited seats — people supervising
+ * agents are not a metered unit, and taxing the reviewer who clicks approve
+ * would price out the platform's own safety story) and storage at rate per
+ * GB-month, both divided by the days in that month.
+ *
+ *   FOLDRUN_BASE_FEE_MONTHLY=29     the account, per month
+ *   FOLDRUN_STORAGE_USD_PER_GB_MONTH=0.15
+ *
+ * Idempotent per calendar day per kind: the sweep can run every tick and
+ * writes at most one line of each. Zero-rate installs accrue nothing, and
+ * accrual only happens where billing is enforced — a self-hoster's ledger
+ * is observability, not a subscription.
+ */
+export function accrueDaily(tenant: string, storageBytes: number, now = new Date()): LedgerEntry[] {
+  if (!billingEnabled()) return [];
+  const day = now.toISOString().slice(0, 10);
+  const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
+  const existing = readLedger(tenant).filter(
+    (e) => e.kind === "adjustment" && e.note?.endsWith(day),
+  );
+  const written: LedgerEntry[] = [];
+
+  const baseMonthly = Number(process.env.FOLDRUN_BASE_FEE_MONTHLY);
+  if (Number.isFinite(baseMonthly) && baseMonthly > 0 &&
+      !existing.some((e) => e.note?.startsWith("base fee"))) {
+    const entry: LedgerEntry = {
+      t: now.toISOString(),
+      kind: "adjustment",
+      usd: -micro(baseMonthly / daysInMonth),
+      note: `base fee ${day}`,
+    };
+    append(tenant, entry);
+    written.push(entry);
+  }
+
+  const perGbMonth = Number(process.env.FOLDRUN_STORAGE_USD_PER_GB_MONTH);
+  const gb = storageBytes / (1024 * 1024 * 1024);
+  if (Number.isFinite(perGbMonth) && perGbMonth > 0 && gb > 0 &&
+      !existing.some((e) => e.note?.startsWith("storage"))) {
+    const usd = micro((gb * perGbMonth) / daysInMonth);
+    if (usd > 0) {
+      const entry: LedgerEntry = {
+        t: now.toISOString(),
+        kind: "adjustment",
+        usd: -usd,
+        note: `storage ${gb.toFixed(2)}GB ${day}`,
+      };
+      append(tenant, entry);
+      written.push(entry);
+    }
+  }
+  return written;
+}
+
 export function recordTopUp(tenant: string, usd: number, note?: string): LedgerEntry {
   if (!(usd > 0) || !Number.isFinite(usd)) throw new Error("top-up must be a positive amount");
   const entry: LedgerEntry = { t: new Date().toISOString(), kind: "topup", usd, note };
@@ -244,12 +309,15 @@ export function recordRunCost(
   if (!claimSettle(tenant, runId)) return null;
   const steps = m.steps > 0 ? m.steps : 0;
   const computeSecs = m.computeSecs > 0 ? micro(m.computeSecs) : 0;
+  const netBytes = Math.round(m.netBytes ?? 0);
   const entry: LedgerEntry = {
     t: new Date().toISOString(),
     kind: "run",
     usd: -charge,
     cost: m.tokenCostUsd > 0 ? micro(m.tokenCostUsd) : 0,
-    ...(steps || computeSecs ? { meter: { steps, computeSecs } } : {}),
+    ...(steps || computeSecs || netBytes
+      ? { meter: { steps, computeSecs, ...(netBytes ? { netBytes } : {}) } }
+      : {}),
     workspace,
     runId,
   };
