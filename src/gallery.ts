@@ -98,6 +98,33 @@ export const GALLERY: GalleryTool[] = [
   },
 ];
 
+/**
+ * A gallery entry as the starting content for a *newly named* document —
+ * what "New tool → start from Email (Resend)" writes.
+ *
+ * Distinct from installing it: installing keeps the platform's name and file
+ * so upgrades and the installed-badge line up, while this is the author
+ * taking a working definition and making it theirs. So the name is rewritten
+ * everywhere it appears — the frontmatter, and the `use: [...]` line in the
+ * body that would otherwise tell a reader to grant a tool that isn't there.
+ *
+ * Returns null for an unknown template, so a caller can treat "no template"
+ * and "bad template" the same way: fall back to the blank one.
+ */
+export function galleryTemplate(
+  kind: GalleryTool["kind"],
+  template: string,
+  name: string,
+): { file: string; content: string } | null {
+  const tool = GALLERY.find((t) => t.name === template && t.kind === kind);
+  if (!tool) return null;
+  const ext = tool.file.slice(tool.file.lastIndexOf("."));
+  const content = tool.content
+    .replace(/^name: .*$/m, `name: ${name}`)
+    .replaceAll(`use: [${tool.name}]`, `use: [${name}]`);
+  return { file: `${name}${ext}`, content };
+}
+
 export function galleryTool(name: string): GalleryTool | undefined {
   return GALLERY.find((t) => t.name === name);
 }
