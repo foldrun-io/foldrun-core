@@ -1,7 +1,7 @@
 ---
 name: blog-desk
 description: A two-agent blog desk. Read flows/publish.md first.
-mdagent_version: "0.1"
+foldrun_version: "0.1"
 ---
 
 # Blog desk

@@ -1,7 +1,7 @@
 ---
 name: hello
 description: A runnable demo — one agent, one flow, no network and no secrets.
-mdagent_version: "0.1"
+foldrun_version: "0.1"
 ---
 
 # hello
