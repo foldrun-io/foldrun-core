@@ -19,6 +19,7 @@ import {
   knowledgeIndex,
   workspaceKnowledgeIndex,
   workspaceTools,
+  brokenToolReport,
   listWorkspaces,
   listTenants,
   listRuns,
@@ -726,6 +727,10 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     providerWarnings,
     secretScopes,
     missingTools,
+    // Definitions that exist but could not be read. Carried alongside the
+    // missing ones so the step can tell "you never made this" apart from
+    // "it's right there with a typo in it".
+    brokenTools: brokenToolReport(tenant, workspace),
     missingSecrets: [...new Set([...missingDeclared, ...apiTools.missingSecrets])],
   };
 }
@@ -816,7 +821,7 @@ async function runStep(
       front, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
-      apiSpecs, scriptSpecs,
+      apiSpecs, scriptSpecs, brokenTools,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
     } = agentContext(agentDir, tenant, tags);
 
@@ -869,7 +874,15 @@ async function runStep(
       push("info", `secret ${name} ← ${scope} scope`);
     }
     for (const t of missingTools) {
-      push("error", `tool "${t}" is not in the workspace library — add it under Library → Tools`);
+      // "Not found" is the wrong sentence when the file is right there with a
+      // typo in it, and it sends the author to the wrong place. Say which.
+      const broken = brokenTools.filter((b) => b.startsWith(`${t}:`));
+      push(
+        "error",
+        broken.length
+          ? `tool "${t}" exists but could not be read — ${broken[0].slice(t.length + 2)}`
+          : `tool "${t}" is not in the workspace library — add it under Library → Tools`,
+      );
     }
     for (const line of runtime.log) push("info", line);
     push("info", `script executor: ${runtime.executor}`);

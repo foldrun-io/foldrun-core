@@ -487,6 +487,7 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
 function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"): Record<string, ToolDef> {
   if (!fs.existsSync(dir)) return {};
   const out: Record<string, ToolDef> = {};
+  const broken: string[] = [];
 
   const add = (raw: string, fallbackName: string, folder: string | null) => {
     try {
@@ -499,8 +500,14 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
       }
       const def = parseToolDef(d, fallbackName);
       if (def) out[def.name] = def;
-    } catch {
-      // skip malformed definitions rather than failing every run
+      else broken.push(`${fallbackName}: no base, run or command — nothing to call`);
+    } catch (err) {
+      // A malformed definition must not fail every run in the workspace. But
+      // it must not vanish either: dropped silently, a tool with a YAML typo
+      // is indistinguishable from one that was never created, and the agent
+      // that opted into it is told the tool "is not in the workspace" —
+      // which sends its author looking in the wrong place entirely.
+      broken.push(`${fallbackName}: ${err instanceof Error ? err.message.split("\n")[0] : "unreadable"}`);
     }
   };
 
@@ -513,7 +520,23 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
     if (!entry.name.endsWith(".md")) continue;
     add(fs.readFileSync(path.join(dir, entry.name), "utf8"), entry.name.replace(/\.md$/, ""), null);
   }
+  // Reported through the definitions map so a caller that only wants tools
+  // can ignore it, and the runner can say what is actually wrong.
+  brokenTools.set(dir, broken);
   return out;
+}
+
+/** Why a tool in this directory failed to load, keyed by directory. */
+const brokenTools = new Map<string, string[]>();
+
+/** Definitions that exist on disk but could not be read, for the scopes an
+ *  agent draws on. Empty when everything parsed. */
+export function brokenToolReport(tenant: string, workspace: string): string[] {
+  const dirs = [
+    path.join(workspaceDir(tenant, workspace), "tools"),
+    path.join(dataRoot(), tenant, "library", "tools"),
+  ];
+  return dirs.flatMap((d) => brokenTools.get(d) ?? []);
 }
 
 export function workspaceTools(tenant: string, workspace: string): Record<string, ToolDef> {
