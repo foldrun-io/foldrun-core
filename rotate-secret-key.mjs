@@ -2,7 +2,7 @@
 //
 // The default master key is `data/.secret-key`, sitting on the same disk as
 // the ciphertext it protects — one filesystem read gets both. The fix is to
-// hold the key somewhere else and pass it in as MDAGENT_SECRET_KEY, which
+// hold the key somewhere else and pass it in as FOLDRUN_SECRET_KEY, which
 // masterKey() already prefers.
 //
 // That move is not safe without this script. Change the key and every stored
@@ -13,14 +13,14 @@
 //   node scripts/rotate-secret-key.mjs <account> --to "<new key>"
 //   node scripts/rotate-secret-key.mjs <account> --to "$(openssl rand -hex 32)"
 //
-// The current key is read from MDAGENT_SECRET_KEY, or from data/.secret-key.
+// The current key is read from FOLDRUN_SECRET_KEY, or from data/.secret-key.
 // Nothing is deleted: a value that will not decrypt is left exactly as it is
 // and reported, so a partial rotation is visible rather than silent.
 
 import fs from "node:fs";
 import path from "node:path";
-import { dataRoot } from "@mdagent/core";
-import { rotateMasterKey, masterKeySource } from "@mdagent/core";
+import { dataRoot } from "@foldrun/core";
+import { rotateMasterKey, masterKeySource } from "@foldrun/core";
 
 const [account, ...rest] = process.argv.slice(2);
 const toIndex = rest.indexOf("--to");
@@ -32,7 +32,7 @@ if (!account || !to) {
 
     node scripts/rotate-secret-key.mjs <account> --to "<new key>"
 
-  Then set MDAGENT_SECRET_KEY to the same value wherever the platform runs,
+  Then set FOLDRUN_SECRET_KEY to the same value wherever the platform runs,
   and delete data/.secret-key.
 `);
   process.exit(1);
@@ -40,7 +40,7 @@ if (!account || !to) {
 
 const source = masterKeySource();
 const from =
-  process.env.MDAGENT_SECRET_KEY ??
+  process.env.FOLDRUN_SECRET_KEY ??
   (source.path && fs.existsSync(source.path) ? fs.readFileSync(source.path, "utf8") : null);
 
 if (!from) {
@@ -71,7 +71,7 @@ if (unreadable.length) {
 
 console.log(`
   Next
-    1. set MDAGENT_SECRET_KEY to the new key wherever the platform runs
+    1. set FOLDRUN_SECRET_KEY to the new key wherever the platform runs
     2. restart it, and confirm a secret resolves
     3. delete ${source.path ?? "data/.secret-key"}
     4. delete the backup once you are satisfied

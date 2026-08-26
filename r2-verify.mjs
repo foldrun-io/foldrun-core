@@ -8,7 +8,7 @@
 // finding out during a customer's run is the expensive way.
 //
 //   ./scripts/r2-verify.mjs            # reads infra/production/production.env
-//   CF_ENV=/etc/mdagent/env ./scripts/r2-verify.mjs
+//   CF_ENV=/etc/foldrun/env ./scripts/r2-verify.mjs
 //
 // Writes one object, reads it back, checks the presigned URL an actual browser
 // would follow, then deletes it. Leaves nothing behind.
@@ -25,20 +25,20 @@ if (fs.existsSync(envFile)) {
     const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
   }
-} else if (!process.env.MDAGENT_S3_BUCKET) {
-  console.error(`no ${envFile} and no MDAGENT_S3_* in the environment — run scripts/r2-setup.sh first`);
+} else if (!process.env.FOLDRUN_S3_BUCKET) {
+  console.error(`no ${envFile} and no FOLDRUN_S3_* in the environment — run scripts/r2-setup.sh first`);
   process.exit(1);
 }
 
 // A scratch tenant/workspace, so nothing here can collide with real data.
-process.env.MDAGENT_DATA = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "r2-verify-"));
-process.env.MDAGENT_FILES_DRIVER = "s3";
+process.env.FOLDRUN_DATA = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "r2-verify-"));
+process.env.FOLDRUN_FILES_DRIVER = "s3";
 
 const { s3Config, driverFor, blobKey } = await import("../packages/core/src/files.ts");
 
 const cfg = s3Config();
 if (!cfg) {
-  console.error("MDAGENT_S3_ENDPOINT / _BUCKET / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY are not all set");
+  console.error("FOLDRUN_S3_ENDPOINT / _BUCKET / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY are not all set");
   process.exit(1);
 }
 console.log(`endpoint  ${cfg.endpoint}`);
@@ -46,11 +46,11 @@ console.log(`bucket    ${cfg.bucket}  (${cfg.pathStyle ? "path" : "virtual-host"
 
 const driver = driverFor("default", "verify");
 if (driver.kind !== "s3") {
-  console.error("the driver resolved to fs — check MDAGENT_FILES_DRIVER and the four S3 values");
+  console.error("the driver resolved to fs — check FOLDRUN_FILES_DRIVER and the four S3 values");
   process.exit(1);
 }
 
-const body = Buffer.from(`mdagent r2 check ${crypto.randomUUID()}\n`);
+const body = Buffer.from(`foldrun r2 check ${crypto.randomUUID()}\n`);
 const sha = crypto.createHash("sha256").update(body).digest("hex");
 const key = blobKey("default", "verify", sha);
 
@@ -106,5 +106,5 @@ await step("DELETE removes it", async () => {
   if (await driver.has(key)) throw new Error("still there after delete");
 });
 
-fs.rmSync(process.env.MDAGENT_DATA, { recursive: true, force: true });
+fs.rmSync(process.env.FOLDRUN_DATA, { recursive: true, force: true });
 console.log("\nR2 is wired up correctly.\n");

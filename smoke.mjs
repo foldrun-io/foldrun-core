@@ -1,8 +1,8 @@
 // The CLI smoke test: scaffold a workspace, then validate it.
 //
-// This replaced `mdagent check examples/blog-desk`, a workspace committed to
+// This replaced `foldrun check examples/blog-desk`, a workspace committed to
 // the repo purely so `check` had something to point at. Its files were the
-// ones `mdagent init` already generates, so it was a second copy of the
+// ones `foldrun init` already generates, so it was a second copy of the
 // starter — and it drifted exactly as a second copy does, needing migrating
 // twice in one day while the generator moved on without it.
 //
@@ -18,8 +18,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "../packages/cli/bin/mdagent.mjs");
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-smoke-"));
+const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "../packages/cli/bin/foldrun.mjs");
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-smoke-"));
 const workspace = path.join(dir, "desk");
 
 const run = (...args) => spawnSync(process.execPath, [CLI, ...args], { stdio: "inherit" });

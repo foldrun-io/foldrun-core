@@ -14,11 +14,11 @@
 # Read from the environment, or from the file named by CF_ENV (default:
 # ~/owner/owner-website/.env.local).
 #
-#   ./scripts/r2-setup.sh                 # bucket mdagent-files, apac
-#   BUCKET=mdagent-dev ./scripts/r2-setup.sh
+#   ./scripts/r2-setup.sh                 # bucket foldrun-files, apac
+#   BUCKET=foldrun-dev ./scripts/r2-setup.sh
 set -euo pipefail
 
-BUCKET="${BUCKET:-mdagent-files}"
+BUCKET="${BUCKET:-foldrun-files}"
 # Bucket location. apac is the closest R2 hint to the box and to the people
 # using it; R2 has no egress cost either way, so this is latency only.
 LOCATION="${LOCATION:-apac}"
@@ -83,7 +83,7 @@ token=$(curl -sS -X POST "${API}/tokens" "${AUTH[@]}" \
   -H "content-type: application/json" \
   --data @- <<JSON
 {
-  "name": "mdagent-files ${now}",
+  "name": "foldrun-files ${now}",
   "policies": [
     {
       "effect": "allow",
@@ -115,11 +115,11 @@ access_key_id = result["id"]
 secret = hashlib.sha256(result["value"].encode()).hexdigest()
 
 values = {
-    "MDAGENT_FILES_DRIVER": "s3",
-    "MDAGENT_S3_ENDPOINT": f"https://{account}.r2.cloudflarestorage.com",
-    "MDAGENT_S3_BUCKET": bucket,
-    "MDAGENT_S3_ACCESS_KEY_ID": access_key_id,
-    "MDAGENT_S3_SECRET_ACCESS_KEY": secret,
+    "FOLDRUN_FILES_DRIVER": "s3",
+    "FOLDRUN_S3_ENDPOINT": f"https://{account}.r2.cloudflarestorage.com",
+    "FOLDRUN_S3_BUCKET": bucket,
+    "FOLDRUN_S3_ACCESS_KEY_ID": access_key_id,
+    "FOLDRUN_S3_SECRET_ACCESS_KEY": secret,
 }
 
 body = ""
@@ -130,7 +130,7 @@ else:
     if os.path.exists(example):
         # Start from the template so the file that reaches the box has every
         # key it needs, not only the ones this script knows about.
-        body = re.sub(r"^(MDAGENT_S3_|MDAGENT_FILES_DRIVER).*$", "", open(example).read(), flags=re.M)
+        body = re.sub(r"^(FOLDRUN_S3_|FOLDRUN_FILES_DRIVER).*$", "", open(example).read(), flags=re.M)
 
 for key, value in values.items():
     line = f"{key}={value}"
@@ -145,7 +145,7 @@ with open(out, "w") as f:
 os.chmod(out, 0o600)
 
 print(f"wrote {out} (0600)")
-print(f"  endpoint  {values['MDAGENT_S3_ENDPOINT']}")
+print(f"  endpoint  {values['FOLDRUN_S3_ENDPOINT']}")
 print(f"  bucket    {bucket}")
 print(f"  key id    {access_key_id[:8]}… (secret written to the file, not shown)")
 PY
@@ -158,7 +158,7 @@ cat <<'TEXT'
 
   Then put it on the box and roll the deployment:
 
-    scp infra/production/production.env root@<box>:/etc/mdagent/env
-    ssh root@<box> 'bash /opt/mdagent/infra/production/bootstrap.sh && \
-      k3s kubectl -n mdagent rollout restart deploy/mdagent-platform'
+    scp infra/production/production.env root@<box>:/etc/foldrun/env
+    ssh root@<box> 'bash /opt/foldrun/infra/production/bootstrap.sh && \
+      k3s kubectl -n foldrun rollout restart deploy/foldrun-platform'
 TEXT

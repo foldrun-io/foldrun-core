@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Import Vaza's agents and skills into an mdagent project.
+// Import Vaza's agents and skills into an foldrun project.
 //
 // Vaza already stores agents as agents/<id>/AGENT.md and skills as
 // skills/<id>/SKILL.md with an `agent:` field naming the owner, so this is
 // mostly a re-parenting exercise: each skill moves under the agent that owns
-// it, and Vaza's tool vocabulary maps onto mdagent's.
+// it, and Vaza's tool vocabulary maps onto foldrun's.
 //
 //   node scripts/import-vaza.mjs <vaza-agent-dir> <output-dir>
 
@@ -19,7 +19,7 @@ if (!sourceArg) {
 const SOURCE = path.resolve(sourceArg);
 const OUT = path.resolve(outArg ?? "vaza-agents");
 
-// Vaza tool names → mdagent's coarser groups.
+// Vaza tool names → foldrun's coarser groups.
 const TOOL_MAP = {
   read: "read",
   glob: "read",
@@ -109,7 +109,7 @@ for (const id of fs.readdirSync(path.join(SOURCE, "skills"))) {
     continue;
   }
 
-  // mdagent reads `name` and `description`; keep Vaza's metadata alongside so
+  // foldrun reads `name` and `description`; keep Vaza's metadata alongside so
   // nothing is lost on the round trip.
   const keep = ["category", "domain", "difficulty", "tier", "riskTier", "estMinutes"];
   const front = [
