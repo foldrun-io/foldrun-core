@@ -116,6 +116,26 @@ function rounded(b: UsageBucket): UsageBucket {
   };
 }
 
+/**
+ * What the file store holds, from its index — not from disk. The bytes live
+ * wherever the driver put them (R2 on the hosted platform), so a du of the
+ * local directory sees only the index and reports a store full of CSVs as
+ * one kilobyte. The index records every file's true size and is the same
+ * record the Files page lists; a du of the local blobs/ is the fallback for
+ * the fs driver's pre-index files.
+ */
+function fileStoreBytes(tenant: string, workspace: string): number {
+  const root = path.join(accountDir(tenant), "files", workspace);
+  const index = path.join(root, "index.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(index, "utf8")) as { files?: { size?: number }[] };
+    const list = Array.isArray(parsed) ? parsed : (parsed.files ?? []);
+    return list.reduce((sum, f) => sum + (typeof f.size === "number" ? f.size : 0), 0);
+  } catch {
+    return du(root);
+  }
+}
+
 export function accountUsage(tenant: string): AccountUsage {
   const limits = podLimits();
   const totals = bucket();
@@ -154,7 +174,7 @@ export function accountUsage(tenant: string): AccountUsage {
       // Source is everything but the run history; runs are their own line
       // because they grow forever and source does not.
       sourceBytes: du(dir) - du(path.join(dir, "runs")),
-      filesBytes: du(path.join(accountDir(tenant), "files", ws.name)),
+      filesBytes: fileStoreBytes(tenant, ws.name),
       runsBytes: du(path.join(dir, "runs")),
     };
     storageBytes += storage.sourceBytes + storage.filesBytes + storage.runsBytes;
