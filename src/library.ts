@@ -99,6 +99,33 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
     }
   };
 
+  // A folder tool is one entry named by its manifest, and its code is not a
+  // separate row: listing tools/browser/run.mjs beside tools/browser/tool.md
+  // says there are two tools called browser, one of which cannot be granted.
+  if (kind === "tools") {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const manifest = path.join(full, "tool.md");
+        if (!fs.existsSync(manifest)) continue;
+        out.push({
+          ...describe(manifest, entry.name),
+          path: `${entry.name}/tool.md`,
+          ...toolShape(manifest, entry.name),
+          updatedAt: fs.statSync(manifest).mtime.toISOString(),
+        });
+      } else if (entry.name.endsWith(".md")) {
+        out.push({
+          ...describe(full, entry.name.replace(/\.md$/, "")),
+          path: entry.name,
+          ...toolShape(full, entry.name),
+          updatedAt: fs.statSync(full).mtime.toISOString(),
+        });
+      }
+    }
+    return out.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
   if (kind === "skills") {
     for (const entry of fs.readdirSync(dir).sort()) {
       const full = path.join(dir, entry);
@@ -133,9 +160,6 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
     out.push({
       ...describe(full, rel),
       path: rel,
-      // Parsed through the same reader the runner uses, so the badge on the
-      // page cannot disagree with what a run actually does.
-      ...(kind === "tools" ? toolShape(full, rel) : {}),
       updatedAt: fs.statSync(full).mtime.toISOString(),
     });
   }
