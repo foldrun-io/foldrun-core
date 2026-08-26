@@ -1626,8 +1626,18 @@ export function runFilePath(tenant: string, workspace: string, runId: string) {
 
 /**
  * Erase a run from history: its record and the outputs archived under its
- * id. The ledger line stays — money is not deleted because a trace was, and
- * a charge with no run to point at is still an honest charge.
+ * id.
+ *
+ * The ledger line stays, and that is settled rather than provisional: if
+ * deleting a run voided its charge, deletion would be a refund button — run
+ * the expensive extraction, read the result, delete, never pay. Money is
+ * not deleted because a trace was.
+ *
+ * What deletion *does* owe the books is an explanation. A charge pointing
+ * at a run that no longer exists reads as unexplained forever, so the
+ * deletion writes itself down: a zero-value adjustment naming the run, on
+ * the same append-only file the charge lives in. The balance is untouched;
+ * the story is complete.
  */
 export function deleteRun(tenant: string, workspace: string, runId: string): boolean {
   const file = runFilePath(tenant, workspace, runId);
@@ -1637,7 +1647,15 @@ export function deleteRun(tenant: string, workspace: string, runId: string): boo
     recursive: true,
     force: true,
   });
+  onRunDeleted?.(tenant, workspace, runId);
   return true;
+}
+
+/** ledger.ts registers here — store cannot import it without a cycle, and
+ *  money must not depend on one. */
+let onRunDeleted: ((tenant: string, workspace: string, runId: string) => void) | undefined;
+export function registerRunDeletionListener(fn: typeof onRunDeleted) {
+  onRunDeleted = fn;
 }
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {

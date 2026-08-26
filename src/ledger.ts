@@ -14,7 +14,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { accountDir, assertSafeName } from "./store.ts";
+import { accountDir, assertSafeName, registerRunDeletionListener } from "./store.ts";
+
+// The books hear about deletions without store.ts importing money.
+registerRunDeletionListener((tenant, workspace, runId) => noteRunDeleted(tenant, workspace, runId));
 
 export interface LedgerEntry {
   t: string;
@@ -165,6 +168,25 @@ function append(tenant: string, entry: LedgerEntry) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // O_APPEND: single-line writes land whole even if two land at once.
   fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+}
+
+/**
+ * A run was deleted from history; say so where its charge lives. Written
+ * only when the run had a charge — an unbilled run deleted leaves nothing
+ * behind to explain. Zero-value: deletion never moves money, it only
+ * completes the story of a line that now points at nothing.
+ */
+export function noteRunDeleted(tenant: string, workspace: string, runId: string) {
+  const charged = readLedger(tenant).some((e) => e.kind === "run" && e.runId === runId);
+  if (!charged) return;
+  append(tenant, {
+    t: new Date().toISOString(),
+    kind: "adjustment",
+    usd: 0,
+    workspace,
+    runId,
+    note: "run deleted from history — the charge stands",
+  });
 }
 
 export function recordTopUp(tenant: string, usd: number, note?: string): LedgerEntry {
