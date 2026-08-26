@@ -1543,12 +1543,32 @@ export interface RunRecord {
    *  set — without the marker it would also re-enqueue runs whose starting
    *  process is still alive and polling, and two drivers would race. */
   parkedAt?: string | null;
+  /** Set when a person stopped this run. Kept on the record rather than
+   *  expressed only as a status, because "failed" and "someone stopped it"
+   *  are different facts and the trace should not conflate them. */
+  stopRequested?: boolean;
   steps: StepRecord[];
 }
 
 export function runFilePath(tenant: string, workspace: string, runId: string) {
   assertSafeName(runId, "run id");
   return path.join(workspaceDir(tenant, workspace), "runs", `${runId}.json`);
+}
+
+/**
+ * Erase a run from history: its record and the outputs archived under its
+ * id. The ledger line stays — money is not deleted because a trace was, and
+ * a charge with no run to point at is still an honest charge.
+ */
+export function deleteRun(tenant: string, workspace: string, runId: string): boolean {
+  const file = runFilePath(tenant, workspace, runId);
+  if (!fs.existsSync(file)) return false;
+  fs.rmSync(file, { force: true });
+  fs.rmSync(path.join(workspaceDir(tenant, workspace), "runs", runId), {
+    recursive: true,
+    force: true,
+  });
+  return true;
 }
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {

@@ -25,6 +25,7 @@ import {
   applyContainerChanges,
   parseDriverLine,
   timingLine,
+  RUN_LABEL,
   type ContainerStepOutcome,
   type RunInContainerArgs,
   type StepTiming,
@@ -44,15 +45,28 @@ runuser -u agent -- node /opt/runner/driver.mjs
 touch /opt/runner/job/finished
 i=0; while [ ! -f /opt/runner/job/ack ] && [ $i -lt 600 ]; do sleep 0.5; i=$((i+1)); done`;
 
+/**
+ * Delete any run pod still alive for this run. Best effort, and by label
+ * rather than name: the pod's name is random, and the run id is the only
+ * thing a person stopping a run actually knows.
+ */
+export function killRunPods(runId: string): number {
+  const ns = namespace();
+  const got = kc(["get", "pods", "-n", ns, "-l", `${RUN_LABEL}=${runId}`, "-o", "name"]);
+  const list = (got.out ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("pod/"));
+  if (list.length) kc(["delete", ...list, "-n", ns, "--wait=false"]);
+  return list.length;
+}
+
 /** The pod, as a manifest — pure, so tests can read it without a cluster. */
-export function runPodManifest(name: string, image: string): object {
+export function runPodManifest(name: string, image: string, runId?: string): object {
   return {
     apiVersion: "v1",
     kind: "Pod",
     metadata: {
       name,
       namespace: namespace(),
-      labels: { app: "foldrun-run" },
+      labels: { app: "foldrun-run", ...(runId ? { [RUN_LABEL]: runId } : {}) },
     },
     spec: {
       restartPolicy: "Never",
@@ -136,7 +150,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // paid for; the pod is the thing that scales to zero and therefore the
     // thing that costs when it doesn't.
     const t0 = Date.now();
-    const applied = kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image)));
+    const applied = kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image, args.runId)));
     if (applied.status !== 0) throw new Error(`pod create failed:\n${applied.out.slice(0, 800)}`);
     created = true;
 

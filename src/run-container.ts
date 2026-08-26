@@ -403,6 +403,29 @@ export interface RunInContainerArgs {
   /** Secret + provider env — crosses as an env file, never argv. */
   env: Record<string, string>;
   emit: (type: "text" | "tool" | "info" | "error", text: string) => void;
+  /** The run this step belongs to. Stamped on the sandbox as a label so a
+   *  person stopping the run can reach the thing actually burning money —
+   *  without it, "stop" could only mean "stop after this step", and a
+   *  browser step has fifteen minutes left to spend. */
+  runId?: string;
+}
+
+/** The label both executors stamp, so one name means one thing. */
+export const RUN_LABEL = "foldrun-run-id";
+
+/**
+ * Destroy any sandbox still running for this run. Best effort by design:
+ * the step may have finished a moment ago, the daemon may be unreachable,
+ * and neither is a reason to refuse to stop a run. Returns how many it
+ * removed, which is what the trace reports.
+ */
+export function killRunSandboxes(runId: string): number {
+  const ids = spawnSync(cli(), ["ps", "-aq", "--filter", `label=${RUN_LABEL}=${runId}`], {
+    encoding: "utf8",
+  });
+  const list = (ids.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const id of list) spawnSync(cli(), ["rm", "-f", id], { stdio: "ignore" });
+  return list.length;
 }
 
 export async function runStepInContainer(args: RunInContainerArgs): Promise<ContainerStepOutcome> {
@@ -459,6 +482,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
     const flags = [
       "--security-opt", "no-new-privileges",
+      ...(args.runId ? ["--label", `${RUN_LABEL}=${args.runId}`] : []),
       // Everything dropped except what the entrypoint's chown-and-drop
       // needs; the exec to the agent user sheds these three too.
       "--cap-drop", "ALL",

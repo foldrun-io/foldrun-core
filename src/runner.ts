@@ -760,6 +760,7 @@ async function runStep(
   modelOverride?: string | null,
   tags: string[] = [],
   effortOverride?: string | null,
+  runId?: string,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1023,6 +1024,8 @@ async function runStep(
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
         emit: push,
+        // Stamps the sandbox, so stopping this run can destroy it.
+        runId,
       });
       step.status = outcome.status;
       step.result = outcome.result;
@@ -1448,6 +1451,26 @@ export function driveRun(
           ordered = orderedGroups();
         }
         save();
+
+        // A person asked for this to stop. Checked between groups, off the
+        // record rather than in memory, because the request arrives in
+        // another process — the same way an approval decision does. The
+        // sandbox for any in-flight step was already destroyed by stopRun;
+        // this is what keeps the *next* group from starting.
+        const stopCheck = readRun(tenant, workspace, run.id);
+        if (stopCheck?.stopRequested) {
+          for (const s of run.steps) {
+            if (s.status === "pending" || s.status === "running") {
+              s.status = "skipped";
+              s.skipReason = "run stopped";
+            }
+          }
+          run.status = "failed";
+          run.stopRequested = true;
+          save();
+          break;
+        }
+
         const freshGroup = ordered[gi];
 
         // Validate agents exist before launching the group.
@@ -1602,6 +1625,7 @@ export function driveRun(
                   modelOverride,
                   tags,
                   effortOverride,
+                  run.id,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.

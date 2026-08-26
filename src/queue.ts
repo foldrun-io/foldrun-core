@@ -35,6 +35,8 @@ import {
   type RunRecord,
 } from "./store.ts";
 import { createFlowRun, driveRun } from "./runner.ts";
+import { killRunSandboxes } from "./run-container.ts";
+import { killRunPods } from "./run-k8s.ts";
 import { assertFunds, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
 import { runMeter } from "./store.ts";
@@ -139,6 +141,73 @@ export function enqueueFlowRun(
  */
 export function enqueueResume(tenant: string, workspace: string, runId: string) {
   enqueue({ tenant, workspace, runId });
+}
+
+/**
+ * Stop a run a person no longer wants.
+ *
+ * Three things, in the order that makes them true: drop any queued job so
+ * nothing picks it up next, destroy the sandbox any in-flight step is
+ * burning money in, and mark the record. A stop that only set a flag would
+ * be a promise to stop *eventually* — a browser step can have fifteen
+ * minutes left, and the pod is the thing actually spending.
+ *
+ * `stopRequested` stays on the record beside the failed status, because
+ * "failed" and "someone stopped it" are different facts. The driver reads
+ * it at the next group boundary and skips the rest, which is what stops a
+ * multi-step flow rather than just its current step.
+ *
+ * The steps already finished keep their results and their costs: they ran,
+ * and the ledger already knows.
+ */
+export function stopRun(tenant: string, workspace: string, runId: string): RunRecord {
+  const run = readRun(tenant, workspace, runId);
+  if (!run) throw new Error(`run ${runId} not found`);
+  if (run.status === "completed" || run.status === "failed") {
+    throw new Error(`run ${runId} already ${run.status} — nothing to stop`);
+  }
+
+  const pending = pendingFileFor(runId);
+  if (pending) fs.rmSync(pending, { force: true });
+  for (const state of ["pending", "claimed"] as const) {
+    const dir = queueDir(state);
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (name.endsWith(`-${runId}.json`)) fs.rmSync(path.join(dir, name), { force: true });
+    }
+  }
+
+  let killed = 0;
+  try {
+    killed =
+      process.env.FOLDRUN_RUN_ISOLATION === "k8s"
+        ? killRunPods(runId)
+        : killRunSandboxes(runId);
+  } catch {
+    // A sandbox we cannot reach must not stop us from stopping the run.
+  }
+
+  const now = new Date().toISOString();
+  for (const step of run.steps) {
+    if (step.status === "pending" || step.status === "running" || step.status === "awaiting-approval") {
+      if (step.status === "running") {
+        step.events.push({ t: now, type: "error", text: "stopped by a person — sandbox destroyed" });
+      }
+      step.status = "skipped";
+      step.skipReason = "run stopped";
+    }
+  }
+  run.status = "failed";
+  run.stopRequested = true;
+  run.parkedAt = null;
+  run.finishedAt = now;
+  run.steps[0]?.events.push({
+    t: now,
+    type: "info",
+    text: killed ? `run stopped — ${killed} sandbox(es) destroyed` : "run stopped",
+  });
+  writeRun(tenant, workspace, run);
+  return run;
 }
 
 /**
