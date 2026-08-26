@@ -117,7 +117,14 @@ function runScript(
     // recursed into the workspace's own file listing.)
     const abs = resolveRunPath(cwd, spec.run, libraryScripts);
     const workspaceRoot = path.resolve(cwd, "..", "..");
-    const allowedRoots = [path.resolve(cwd), workspaceRoot, libraryScripts].filter(Boolean).map((p) => {
+    // The library's tools/ as well as its scripts/: a folder tool installed at
+    // the account keeps its code beside its definition, which is one directory
+    // over from where shared scripts live. Without it the containment check
+    // refuses an account tool the resolver just found.
+    const libraryTools = libraryScripts ? path.resolve(libraryScripts, "..", "tools") : "";
+    const allowedRoots = [path.resolve(cwd), workspaceRoot, libraryScripts, libraryTools]
+      .filter(Boolean)
+      .map((p) => {
       try {
         return fs.realpathSync(p);
       } catch {
@@ -223,15 +230,32 @@ export interface ScriptToolResult {
   drainLog: () => string[];
 }
 
-// `run:` accepts three forms:
-//   scripts/x.py    → this agent's own script
-//   shared/x.py     → the workspace's scripts/
-//   library/x.py    → the workspace library's scripts/
+// `run:` accepts:
+//   scripts/x.py              this agent's own script
+//   workspace/tools/<t>/x.py  a folder tool's own code, in this workspace
+//   account/tools/<t>/x.py    a folder tool's own code, in the library
+//   shared/x.py               the workspace's scripts/
+//   library/x.py              the workspace library's scripts/
+//
+// The tools/ forms are written by readToolDir rather than by hand: a folder
+// tool's definition says `run: run.mjs` and never names its own scope, which
+// is what lets the same folder be copied into a workspace or installed at the
+// account without an edit.
 export function resolveRunPath(agentDir: string, run: string, libraryScripts: string): string {
+  const workspaceRoot = path.resolve(agentDir, "..", "..");
+  // The library's tools/ sits beside its scripts/ — one mount, two shelves.
+  const libraryRoot = path.resolve(libraryScripts, "..");
+
+  if (run.startsWith("workspace/tools/")) {
+    return path.resolve(workspaceRoot, "tools", run.slice("workspace/tools/".length));
+  }
+  if (run.startsWith("account/tools/")) {
+    return path.resolve(libraryRoot, "tools", run.slice("account/tools/".length));
+  }
   // Canonical prefixes, then the legacy spellings they replaced.
   for (const p of ["workspace/scripts/", "shared/"]) {
     if (run.startsWith(p)) {
-      return path.resolve(agentDir, "..", "..", "scripts", run.slice(p.length));
+      return path.resolve(workspaceRoot, "scripts", run.slice(p.length));
     }
   }
   for (const p of ["account/scripts/", "library/"]) {

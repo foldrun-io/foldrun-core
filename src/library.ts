@@ -58,7 +58,11 @@ function assertLibraryPath(kind: LibraryKind, rel: string) {
   assertCanonicalCase(norm);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
   if (!TEXT_EXT.test(norm)) throw new Error(`unsupported file type: ${rel}`);
-  if (kind === "tools" && !norm.endsWith(".md")) throw new Error("tools must be .md files");
+  // A flat tool is a lone .md; a folder tool is tool.md plus the code it
+  // runs, so anything is allowed one level down inside a tool's own folder.
+  if (kind === "tools" && !norm.endsWith(".md") && !norm.includes("/")) {
+    throw new Error("a tool is a .md definition, or a folder holding tool.md and its code");
+  }
   return norm;
 }
 
@@ -167,7 +171,12 @@ export function writeLibraryFile(tenant: string, kind: LibraryKind, rel: string,
   const existed = fs.existsSync(p);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, content);
-  if (kind === "scripts" || /scripts\//.test(norm)) fs.chmodSync(p, 0o755);
+  // Executable where code lives: the scripts shelf, a skill's bundled
+  // scripts/, and now a folder tool's own code — a tool whose run.mjs is not
+  // executable fails at the exec, which reads as "the tool is broken".
+  if (kind === "scripts" || /scripts\//.test(norm) || (kind === "tools" && !norm.endsWith(".md"))) {
+    fs.chmodSync(p, 0o755);
+  }
   syncBundleFor(p, existed ? "Update" : "Creation");
 }
 
@@ -182,7 +191,7 @@ export function deleteLibraryPath(tenant: string, kind: LibraryKind, rel: string
 
 /** Library tool definitions, keyed by name — http or script, both `use:`-able. */
 export function libraryTools(tenant: string): Record<string, ToolDef> {
-  return readToolDir(libraryDir(tenant, "tools"));
+  return readToolDir(libraryDir(tenant, "tools"), "account");
 }
 
 /** Shared memory index — derived from the files, like every other scope. */

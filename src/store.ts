@@ -463,23 +463,61 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
   return spec ? { kind: "http", name, spec } : null;
 }
 
-function readToolDir(dir: string): Record<string, ToolDef> {
+/**
+ * Tools in a directory, in both shapes.
+ *
+ *   tools/email.md            flat — a definition and nothing else
+ *   tools/bounce-verify/      folder — tool.md plus the code it runs
+ *     tool.md
+ *     run.mjs
+ *
+ * The folder is the shape to write. A script tool is a definition and an
+ * executable that cannot be separated — point `run:` at the wrong scope and
+ * the tool silently resolves to nothing — so keeping them in one directory
+ * is what stops the two from ever disagreeing. It is also how skills already
+ * work, which is the pattern people have seen.
+ *
+ * A folder tool's `run:` is relative to its own folder, and rewritten here
+ * to the scope-qualified path the runner resolves. That is the point of the
+ * shape: the definition never names the scope it lives in, so the same
+ * folder works copied into a workspace or installed at the account.
+ *
+ * Flat files keep working unchanged — the shape is a migration, not a break.
+ */
+function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"): Record<string, ToolDef> {
   if (!fs.existsSync(dir)) return {};
   const out: Record<string, ToolDef> = {};
-  for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+
+  const add = (raw: string, fallbackName: string, folder: string | null) => {
     try {
-      const { data } = matter(fs.readFileSync(path.join(dir, file), "utf8"));
-      const def = parseToolDef(data as Record<string, unknown>, file.replace(/\.md$/, ""));
+      const { data } = matter(raw);
+      const d = data as Record<string, unknown>;
+      // A folder tool's code sits beside its definition; qualify the path so
+      // the runner can find it from an agent directory two levels down.
+      if (folder && typeof d.run === "string" && !/^(workspace|account|shared|library)\//.test(d.run)) {
+        d.run = `${scope}/tools/${folder}/${d.run.replace(/^\.\//, "")}`;
+      }
+      const def = parseToolDef(d, fallbackName);
       if (def) out[def.name] = def;
     } catch {
       // skip malformed definitions rather than failing every run
     }
+  };
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const manifest = path.join(dir, entry.name, "tool.md");
+      if (fs.existsSync(manifest)) add(fs.readFileSync(manifest, "utf8"), entry.name, entry.name);
+      continue;
+    }
+    if (!entry.name.endsWith(".md")) continue;
+    add(fs.readFileSync(path.join(dir, entry.name), "utf8"), entry.name.replace(/\.md$/, ""), null);
   }
   return out;
 }
 
 export function workspaceTools(tenant: string, workspace: string): Record<string, ToolDef> {
-  return readToolDir(path.join(workspaceDir(tenant, workspace), "tools"));
+  return readToolDir(path.join(workspaceDir(tenant, workspace), "tools"), "workspace");
 }
 
 export { readToolDir };
@@ -1244,6 +1282,14 @@ export function writeWorkspaceFile(tenant: string, workspace: string, rel: strin
   // lines are not content in any format this holds (markdown, YAML
   // frontmatter, a script), and no author types thirty of them on purpose.
   fs.writeFileSync(p, `${content.replace(/\s+$/, "")}\n`);
+  // Code is executable wherever it lives: the scripts shelf, a skill's
+  // bundled scripts/, or a folder tool's own directory. A run.mjs written
+  // without the bit fails at exec, which reads as "the tool is broken".
+  const norm = rel.replaceAll("\\", "/");
+  if (/^scripts\//.test(norm) || /(^|\/)scripts\//.test(norm) ||
+      (/^tools\//.test(norm) && !norm.endsWith(".md"))) {
+    fs.chmodSync(p, 0o755);
+  }
   syncBundleFor(p, existed ? "Update" : "Creation");
 }
 
