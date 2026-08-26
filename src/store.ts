@@ -1763,6 +1763,16 @@ export function listAllRuns(tenant: string): RunWithWorkspace[] {
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
+/**
+ * The status a person should see. "failed" and "someone stopped it" are
+ * different facts — the record keeps them apart (stopRequested), and the
+ * display must too: a run a person chose to end is not a run that broke,
+ * and showing it red teaches people that stopping things is dangerous.
+ */
+export function runDisplayStatus(run: Pick<RunRecord, "status" | "stopRequested">): string {
+  return run.status === "failed" && run.stopRequested ? "stopped" : run.status;
+}
+
 export function runCost(run: RunRecord): number {
   return run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
 }
