@@ -1,6 +1,6 @@
 # OKF profile
 
-**How mdagent uses the Open Knowledge Format.**
+**How foldrun uses the Open Knowledge Format.**
 
 [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 is Google Cloud's vendor-neutral specification for packaging curated context
@@ -108,14 +108,14 @@ here: OKF's.
 | `type` | required; grouped into sections in `index.md` |
 | `status` | `draft`/`deprecated` surfaces as a badge and in the agent's index |
 | `stale_after` | a stale document is marked **STALE** in the agent's context, with an instruction to confirm before relying on it |
-| `generated` | `by` and `at` stamped automatically after a run — `by: mdagent/0.1.0`, the spec's `<producer>/<version>` form, with the agent's name kept as an extension key |
+| `generated` | `by` and `at` stamped automatically after a run — `by: foldrun/0.1.0`, the spec's `<producer>/<version>` form, with the agent's name kept as an extension key |
 | `verified` | the trust tier is derived from it, never stored; `at` is kept, so the index can say *when* something was checked |
 | `sources` | parsed, with per-source `id`, `title`, `author`, `usage_count`, `last_modified`, and a `usage_window` that falls back to the document's |
 | `resource`, `timestamp` | parsed and available to consumers |
 
 The provenance fields are the reason for adopting v0.2 rather than v0.1. A
 fact an agent invented and a fact a person verified used to be
-indistinguishable on disk. Now the first carries `generated.by: mdagent/0.1.0`,
+indistinguishable on disk. Now the first carries `generated.by: foldrun/0.1.0`,
 renders as *machine-written, unverified* in every index, and the reader is told
 which of the two they are trusting before opening either.
 
