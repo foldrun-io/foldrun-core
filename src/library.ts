@@ -20,6 +20,7 @@ import {
   assertSafeName,
   assertCanonicalCase,
   buildMemoryIndex,
+  parseToolDef,
   readToolDir,
   syncBundleFor,
   listWorkspaces,
@@ -31,7 +32,10 @@ import {
 
 export type LibraryKind = "skills" | "scripts" | "memory" | "knowledge" | "tools";
 // Same order as the workspace nav and asset pages — one list, one order.
-export const LIBRARY_KINDS: LibraryKind[] = ["knowledge", "memory", "scripts", "skills", "tools"];
+// Order matters and is asserted: it is the order every noun list in the
+// product uses. Tools then scripts, because a script is material a tool
+// points at — see the KINDS table, which is where the order is declared.
+export const LIBRARY_KINDS: LibraryKind[] = ["knowledge", "memory", "skills", "tools", "scripts"];
 
 export function libraryDir(tenant: string, kind?: LibraryKind) {
   // Alongside the workspace in single-workspace mode: ./library, so a shared
@@ -65,6 +69,15 @@ export interface LibraryEntry {
   description: string;
   /** For skills: true when the folder bundles scripts/. */
   hasScripts?: boolean;
+  /**
+   * For tools: how this one connects — http, script or mcp. Surfaced so a
+   * list of tools reads as one vocabulary with three transports, rather
+   * than a page of names whose differences are invisible until you open
+   * them. For a script tool it also names the file it runs, which is the
+   * link between this shelf and the code shelf.
+   */
+  transport?: "http" | "script" | "mcp";
+  runs?: string;
   updatedAt: string;
 }
 
@@ -116,10 +129,28 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
     out.push({
       ...describe(full, rel),
       path: rel,
+      // Parsed through the same reader the runner uses, so the badge on the
+      // page cannot disagree with what a run actually does.
+      ...(kind === "tools" ? toolShape(full, rel) : {}),
       updatedAt: fs.statSync(full).mtime.toISOString(),
     });
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/** How a tool connects, and (for a script tool) the code it runs. */
+function toolShape(file: string, rel: string): { transport?: LibraryEntry["transport"]; runs?: string } {
+  try {
+    const { data } = matter(fs.readFileSync(file, "utf8"));
+    const def = parseToolDef(data as Record<string, unknown>, rel.replace(/\.md$/, ""));
+    if (!def) return {};
+    return {
+      transport: def.kind,
+      ...(def.kind === "script" ? { runs: (def.spec as { run?: string }).run } : {}),
+    };
+  } catch {
+    return {}; // a malformed definition gets no badge, not a broken page
+  }
 }
 
 export function readLibraryFile(tenant: string, kind: LibraryKind, rel: string): string {

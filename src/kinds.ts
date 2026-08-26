@@ -47,6 +47,8 @@ export type Kind =
   | "memory"
   | "knowledge"
   | "tools"
+  // Last, and beside tools: a script is what one kind of tool runs, not a
+  // fifth way to give an agent an ability. See the KINDS table.
   | "scripts";
 
 export interface KindMeta {
@@ -212,30 +214,6 @@ The fact.
 `,
   },
 
-  scripts: {
-    kind: "scripts",
-    one: "script",
-    // Code, not a document — no frontmatter to carry either field. A tool
-    // file points at it.
-    docType: null,
-    docKey: null,
-    scopes: ["account", "workspace", "agent"],
-    placeholder: "slugify",
-    hint: "Code an agent runs through a tool. Deterministic work belongs here.",
-    file: (name) => `scripts/${name}.py`,
-    template: (name) => `#!/usr/bin/env python3
-"""${name}"""
-import argparse
-
-p = argparse.ArgumentParser()
-p.add_argument("--input")
-args = p.parse_args()
-
-print(args.input)
-`,
-  },
-
-
   skills: {
     kind: "skills",
     one: "skill",
@@ -280,6 +258,33 @@ Notes for whoever maintains this. Agents opt in with:
 \`\`\`yaml
 use: [${name}]
 \`\`\`
+`,
+  },
+  // Declared after tools on purpose: a script is material one kind of
+  // tool points at, not a rival way to give an agent an ability. This
+  // object's key order is ALL_KINDS, which is the order the sidebar and
+  // every asset page list their nouns — so the pairing is declared once
+  // here and followed everywhere, and a consistency test holds the line.
+  scripts: {
+    kind: "scripts",
+    one: "script",
+    // Code, not a document — no frontmatter to carry either field. A tool
+    // file points at it.
+    docType: null,
+    docKey: null,
+    scopes: ["account", "workspace", "agent"],
+    placeholder: "slugify",
+    hint: "Code an agent runs through a tool. Deterministic work belongs here.",
+    file: (name) => `scripts/${name}.py`,
+    template: (name) => `#!/usr/bin/env python3
+"""${name}"""
+import argparse
+
+p = argparse.ArgumentParser()
+p.add_argument("--input")
+args = p.parse_args()
+
+print(args.input)
 `,
   },};
 
