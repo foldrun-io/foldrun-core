@@ -25,6 +25,7 @@ import {
   applyContainerChanges,
   parseDriverLine,
   timingLine,
+  sizeLimits,
   RUN_LABEL,
   type ContainerStepOutcome,
   type RunInContainerArgs,
@@ -59,7 +60,7 @@ export function killRunPods(runId: string): number {
 }
 
 /** The pod, as a manifest — pure, so tests can read it without a cluster. */
-export function runPodManifest(name: string, image: string, runId?: string): object {
+export function runPodManifest(name: string, image: string, runId?: string, size?: "small" | "large"): object {
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -93,8 +94,8 @@ export function runPodManifest(name: string, image: string, runId?: string): obj
           },
           resources: {
             limits: {
-              memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2Gi",
-              cpu: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
+              memory: sizeLimits(size).memory,
+              cpu: sizeLimits(size).cpus,
             },
           },
         },
@@ -150,7 +151,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // paid for; the pod is the thing that scales to zero and therefore the
     // thing that costs when it doesn't.
     const t0 = Date.now();
-    const applied = kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image, args.runId)));
+    const applied = kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image, args.runId, args.size)));
     if (applied.status !== 0) throw new Error(`pod create failed:\n${applied.out.slice(0, 800)}`);
     created = true;
 

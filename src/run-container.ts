@@ -453,6 +453,24 @@ export interface RunInContainerArgs {
    *  without it, "stop" could only mean "stop after this step", and a
    *  browser step has fifteen minutes left to spend. */
   runId?: string;
+  /** The reservation class — which limits this step's sandbox holds. */
+  size?: "small" | "large";
+}
+
+/** The limits a size class reserves. Large is the install's configured
+ *  limits unchanged, so existing installs bill and behave identically;
+ *  small defaults to a quarter-ish slice and is env-tunable. */
+export function sizeLimits(size?: "small" | "large"): { cpus: string; memory: string } {
+  if (size === "small") {
+    return {
+      cpus: process.env.FOLDRUN_RUNNER_CPUS_SMALL ?? "1",
+      memory: process.env.FOLDRUN_RUNNER_MEMORY_SMALL ?? "1Gi",
+    };
+  }
+  return {
+    cpus: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
+    memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
+  };
 }
 
 /** The label both executors stamp, so one name means one thing. */
@@ -533,8 +551,8 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       "--cap-drop", "ALL",
       "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
       "--pids-limit", "512",
-      "--memory", process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
-      "--cpus", process.env.FOLDRUN_RUNNER_CPUS ?? "2",
+      "--memory", sizeLimits(args.size).memory,
+      "--cpus", sizeLimits(args.size).cpus,
       "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag

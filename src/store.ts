@@ -1675,6 +1675,11 @@ export interface StepRecord {
    */
   computeSecs?: number | null;
   startupSecs?: number | null;
+  /** Which reservation class the sandbox held (small | large). A price is
+   *  per size-second, so the size is a fact of the step — priced later from
+   *  the record, it must not depend on what the agent's frontmatter says
+   *  today. Absent on steps from before sizes existed: they ran large. */
+  size?: "small" | "large";
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */
@@ -1806,20 +1811,26 @@ export function runMeter(run: RunRecord): {
   tokenCostUsd: number;
   steps: number;
   computeSecs: number;
+  /** The subset of computeSecs held at the small reservation. Steps from
+   *  before sizes existed count as large — they held the large limits. */
+  smallSecs: number;
   netBytes: number;
 } {
   let steps = 0;
   let computeSecs = 0;
+  let smallSecs = 0;
   let netBytes = 0;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
     // A carried step ran — and was billed — in the run it was carried from.
     if (s.carriedFrom) continue;
     steps += 1;
-    computeSecs += s.computeSecs ?? 0;
+    const secs = s.computeSecs ?? 0;
+    computeSecs += secs;
+    if (s.size === "small") smallSecs += secs;
     netBytes += (s.actual?.rxBytes ?? 0) + (s.actual?.txBytes ?? 0);
   }
-  return { tokenCostUsd: runCost(run), steps, computeSecs, netBytes };
+  return { tokenCostUsd: runCost(run), steps, computeSecs, smallSecs, netBytes };
 }
 
 export function runDurationSecs(run: RunRecord): number | null {

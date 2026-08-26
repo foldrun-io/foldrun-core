@@ -54,6 +54,9 @@ export interface RunMeter {
   tokenCostUsd: number;
   steps: number;
   computeSecs: number;
+  /** Seconds of computeSecs held at the small reservation; the rest were
+   *  large. Absent means all large. */
+  smallSecs?: number;
   /** Bytes on the wire, both directions, where the sandbox could read its
    *  counters. Absent/zero on older runs and unreadable sandboxes. */
   netBytes?: number;
@@ -73,7 +76,9 @@ function asMeter(meter: RunMeter | number): RunMeter {
  *
  *   FOLDRUN_MARGIN=1.25            charge 25% over provider token cost
  *   FOLDRUN_RUN_FEE=0.02           per run, whoever's key paid for tokens
- *   FOLDRUN_COMPUTE_USD_PER_SEC    per sandbox second the run rented
+ *   FOLDRUN_COMPUTE_USD_PER_SEC    per LARGE sandbox second the run rented
+ *   FOLDRUN_COMPUTE_USD_PER_SEC_SMALL  per small second (defaults to the
+ *                                  large rate — a discount is a decision)
  *   FOLDRUN_NET_USD_PER_GB         per GB the run moved on the wire
  *   FOLDRUN_MIN_RUN_FEE=0.01       no billable run charges less than this
  *
@@ -94,6 +99,7 @@ interface PriceConfig {
   margin: number;
   runFee: number;
   computeUsdPerSec: number;
+  computeUsdPerSecSmall: number;
   netUsdPerGb: number;
   minFee: number;
 }
@@ -108,6 +114,10 @@ function priceConfig(): PriceConfig {
     margin: envNum("FOLDRUN_MARGIN", 1),
     runFee: envNum("FOLDRUN_RUN_FEE", 0),
     computeUsdPerSec: envNum("FOLDRUN_COMPUTE_USD_PER_SEC", 0),
+    computeUsdPerSecSmall: envNum(
+      "FOLDRUN_COMPUTE_USD_PER_SEC_SMALL",
+      envNum("FOLDRUN_COMPUTE_USD_PER_SEC", 0),
+    ),
     netUsdPerGb: envNum("FOLDRUN_NET_USD_PER_GB", 0),
     minFee: envNum("FOLDRUN_MIN_RUN_FEE", 0),
   };
@@ -133,12 +143,24 @@ export function priceRun(meter: RunMeter | number): number {
   const m = asMeter(meter);
   const tokens = m.tokenCostUsd > 0 ? m.tokenCostUsd : 0;
   const steps = m.steps > 0 ? m.steps : 0;
-  const secs = m.computeSecs > 0 ? m.computeSecs : 0;
+  // Whole seconds, rounded up, never less than one for a run that computed
+  // at all — the industry's floor, and the honest one: a bill line reading
+  // "0.4s" invites a dispute about measurement precision that a floor
+  // announces away. A run with zero compute stays zero. The floor applies
+  // to the run's total; the small share is priced at its own rate and the
+  // remainder at the large rate.
+  const rawSmall = Math.min(m.smallSecs ?? 0, m.computeSecs > 0 ? m.computeSecs : 0);
+  const secs = m.computeSecs > 0 ? Math.max(1, Math.ceil(m.computeSecs)) : 0;
+  const small = secs > 0 ? Math.min(Math.round(rawSmall), secs) : 0;
+  const large = secs - small;
   const gb = (m.netBytes ?? 0) > 0 ? m.netBytes! / (1024 * 1024 * 1024) : 0;
   if (tokens === 0 && steps === 0 && secs === 0 && gb === 0) return 0;
 
   const c = priceConfig();
-  const charge = tokens * c.margin + c.runFee + secs * c.computeUsdPerSec + gb * c.netUsdPerGb;
+  const charge =
+    tokens * c.margin + c.runFee +
+    large * c.computeUsdPerSec + small * c.computeUsdPerSecSmall +
+    gb * c.netUsdPerGb;
   if (!(charge > 0)) return 0;
   return micro(Math.max(charge, c.minFee));
 }

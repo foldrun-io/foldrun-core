@@ -525,6 +525,14 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   } = resolveSecrets(tenant, [...new Set([...declared, ...referenced])], workspace);
   const { missing: missingDeclared } = resolveSecrets(tenant, declared, workspace);
 
+  // The step's pod size. Two classes, not a dial: a size is a price and a
+  // promise, and two of each is a menu while ten is a support queue. Default
+  // is large — the install's configured limits — so existing agents change
+  // nothing; `size: small` is the opt-in for agents that wait on APIs more
+  // than they work, and the actuals line in any trace is the evidence for
+  // opting in.
+  const size: "small" | "large" = front.size === "small" ? "small" : "large";
+
   // Provider: which endpoint the model calls run against. Anthropic by
   // default; an Anthropic-compatible gateway (z.ai, LiteLLM, OpenRouter) by
   // declaring one. The format is portable — this is where the runtime stops
@@ -727,6 +735,7 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     providerWarnings,
     secretScopes,
     missingTools,
+    size,
     // Definitions that exist but could not be read. Carried alongside the
     // missing ones so the step can tell "you never made this" apart from
     // "it's right there with a typo in it".
@@ -821,7 +830,7 @@ async function runStep(
       front, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
-      apiSpecs, scriptSpecs, brokenTools,
+      apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
     } = agentContext(agentDir, tenant, tags);
 
@@ -1039,6 +1048,7 @@ async function runStep(
         emit: push,
         // Stamps the sandbox, so stopping this run can destroy it.
         runId,
+        size,
       });
       step.status = outcome.status;
       step.result = outcome.result;
@@ -1062,6 +1072,9 @@ async function runStep(
       const secs = (ms: number) => Math.round(ms) / 1000;
       step.computeSecs = outcome.timing ? secs(outcome.timing.totalMs) : null;
       step.startupSecs = outcome.timing ? secs(outcome.timing.sandboxMs) : null;
+      // Which reservation those seconds held — the price of a second
+      // depends on it, so it is a fact of the step, not of today's config.
+      step.size = size;
     } else {
       const consultTools = buildConsultTools(
         consults,
