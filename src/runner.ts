@@ -1046,6 +1046,16 @@ async function runStep(
       step.tokens = outcome.usage
         ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
         : null;
+      step.actual = outcome.res ?? null;
+      if (outcome.res?.peakMemBytes || outcome.res?.rxBytes) {
+        const mb = (n: number | null) => (n === null ? "?" : (n / 1024 / 1024).toFixed(0));
+        push(
+          "info",
+          `resources: cpu busy ${outcome.res.busyCpuSecs?.toFixed(1) ?? "?"}s · ` +
+            `peak mem ${mb(outcome.res.peakMemBytes)}MB · ` +
+            `net ${mb(outcome.res.rxBytes)}MB in / ${mb(outcome.res.txBytes)}MB out`,
+        );
+      }
       // The compute meter, recorded on the step rather than derived later:
       // the sandbox is gone by the time the run settles, and its lifetime
       // is not recoverable from the run's own timestamps.

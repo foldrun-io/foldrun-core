@@ -1679,6 +1679,16 @@ export interface StepRecord {
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */
   tokens?: { input: number; output: number } | null;
+  /** What the sandbox actually touched, against what it reserved: CPU
+   *  busy-seconds and peak memory from the pod's own cgroup, bytes on the
+   *  wire from /proc/net/dev. Null per-field where the kernel interface
+   *  wasn't readable in the sandbox — never estimated. */
+  actual?: {
+    busyCpuSecs: number | null;
+    peakMemBytes: number | null;
+    rxBytes: number | null;
+    txBytes: number | null;
+  } | null;
 }
 
 export interface RunRecord {
