@@ -8,7 +8,7 @@ import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { executeStep } from "./step-exec.ts";
-import { runStepInContainer } from "./run-container.ts";
+import { runStepInContainer, sizeLimits } from "./run-container.ts";
 import { runStepInK8s } from "./run-k8s.ts";
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
 import {
@@ -1072,9 +1072,17 @@ async function runStep(
       const secs = (ms: number) => Math.round(ms) / 1000;
       step.computeSecs = outcome.timing ? secs(outcome.timing.totalMs) : null;
       step.startupSecs = outcome.timing ? secs(outcome.timing.sandboxMs) : null;
-      // Which reservation those seconds held — the price of a second
-      // depends on it, so it is a fact of the step, not of today's config.
+      // Which reservation those seconds held — as numbers, because the bill
+      // is per core-second and per GiB-second, and what was held must come
+      // from the record, never from what the config says at billing time.
       step.size = size;
+      const lim = sizeLimits(size);
+      const gib = (() => {
+        const m = lim.memory.match(/^(\d+(?:\.\d+)?)\s*(Gi?|Mi?|g|m)?/i);
+        const n = m ? Number(m[1]) : 2;
+        return (m?.[2] ?? "Gi").toLowerCase().startsWith("m") ? n / 1024 : n;
+      })();
+      step.reserved = { cpus: Number(lim.cpus) || 2, memGiB: gib };
     } else {
       const consultTools = buildConsultTools(
         consults,

@@ -40,7 +40,7 @@ import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
 import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
-import { runMeter } from "./store.ts";
+import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
 
 export interface QueueJob {
@@ -493,7 +493,10 @@ export function startWorker() {
             // even if an earlier drive raced it.
             const settled = readRun(tenant, workspace, runId);
             if (settled && (settled.status === "completed" || settled.status === "failed")) {
-              recordRunCost(tenant, workspace, runId, runMeter(settled));
+              recordRunCost(tenant, workspace, runId, {
+                ...runMeter(settled),
+                compute: runComputeMeter(settled),
+              });
             }
             // Tell whoever asked to be told. Terminal states and parks alike
             // — "waiting for your approval" is the one message that cannot

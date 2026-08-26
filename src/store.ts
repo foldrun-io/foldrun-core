@@ -1675,11 +1675,13 @@ export interface StepRecord {
    */
   computeSecs?: number | null;
   startupSecs?: number | null;
-  /** Which reservation class the sandbox held (small | large). A price is
-   *  per size-second, so the size is a fact of the step — priced later from
-   *  the record, it must not depend on what the agent's frontmatter says
-   *  today. Absent on steps from before sizes existed: they ran large. */
+  /** Which reservation class the sandbox held (small | large), and the
+   *  actual limits it held, as numbers. Facts of the step: a price is per
+   *  core-second, so what was reserved must come from the record, never
+   *  from what the config says when the bill is computed. Absent on steps
+   *  from before sizes existed — billing falls back to the flat rate. */
   size?: "small" | "large";
+  reserved?: { cpus: number; memGiB: number } | null;
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */
@@ -1831,6 +1833,36 @@ export function runMeter(run: RunRecord): {
     netBytes += (s.actual?.rxBytes ?? 0) + (s.actual?.txBytes ?? 0);
   }
   return { tokenCostUsd: runCost(run), steps, computeSecs, smallSecs, netBytes };
+}
+
+/**
+ * The compute meter for hold+work pricing: core-seconds and GiB-seconds
+ * actually reserved (from each step's own recorded reservation), and CPU
+ * seconds actually burned (from the sandbox's cgroup, where readable).
+ * Steps with no recorded reservation contribute plain seconds only — the
+ * flat-rate fallback prices those.
+ */
+export function runComputeMeter(run: RunRecord): {
+  coreSecs: number;
+  gibSecs: number;
+  busyCpuSecs: number;
+  flatSecs: number;
+} {
+  let coreSecs = 0, gibSecs = 0, busyCpuSecs = 0, flatSecs = 0;
+  for (const s of run.steps) {
+    if (s.status !== "completed" && s.status !== "failed") continue;
+    if (s.carriedFrom) continue;
+    const secs = s.computeSecs ?? 0;
+    if (secs <= 0) continue;
+    if (s.reserved) {
+      coreSecs += secs * s.reserved.cpus;
+      gibSecs += secs * s.reserved.memGiB;
+    } else {
+      flatSecs += secs;
+    }
+    busyCpuSecs += s.actual?.busyCpuSecs ?? 0;
+  }
+  return { coreSecs, gibSecs, busyCpuSecs, flatSecs };
 }
 
 export function runDurationSecs(run: RunRecord): number | null {

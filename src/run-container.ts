@@ -165,6 +165,33 @@ const DRIVER = `// The runner container's entrypoint. Reads one step, executes i
 import fs from "node:fs";
 const input = JSON.parse(fs.readFileSync("/opt/runner/job/input.json", "utf8"));
 const emit = (type, text) => process.stdout.write(JSON.stringify({ e: "event", type, text }) + "\\n");
+// What this sandbox actually touched, read at the last moment from the
+// kernel's own books: cgroup v2 for CPU busy-time and peak memory,
+// /proc/net/dev for bytes on the wire. Every read is best-effort — gVisor
+// exposes some of these files and not others depending on version, and a
+// metric we cannot read is null, never guessed. Reservation is what is
+// billed; these exist so the reservation can be right-sized.
+function readActuals() {
+  const read = (p) => { try { return require("node:fs").readFileSync(p, "utf8"); } catch { return null; } };
+  const cpuStat = read("/sys/fs/cgroup/cpu.stat");
+  const usage = cpuStat?.match(/^usage_usec (\\d+)/m);
+  const peak = read("/sys/fs/cgroup/memory.peak") ?? read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes");
+  let rx = 0, tx = 0, sawNet = false;
+  const net = read("/proc/net/dev");
+  if (net) {
+    for (const line of net.split("\\n").slice(2)) {
+      const m = line.trim().match(/^(\\S+):\\s+(\\d+)(?:\\s+\\d+){7}\\s+(\\d+)/);
+      if (m && m[1] !== "lo") { rx += Number(m[2]); tx += Number(m[3]); sawNet = true; }
+    }
+  }
+  return {
+    busyCpuSecs: usage ? Number(usage[1]) / 1e6 : null,
+    peakMemBytes: peak ? Number(peak.trim()) || null : null,
+    rxBytes: sawNet ? rx : null,
+    txBytes: sawNet ? tx : null,
+  };
+}
+
 try {
   // Runtime state (venvs, npm prefixes) lands in the agent user's real home
   // — writable, inside the container, gone with it.
@@ -209,33 +236,6 @@ try {
   );
   const consult = buildConsultTools(input.consults ?? [], env, emit);
 
-  // What this sandbox actually touched, read at the last moment from the
-  // kernel's own books: cgroup v2 for CPU busy-time and peak memory,
-  // /proc/net/dev for bytes on the wire. Every read is best-effort — gVisor
-  // exposes some of these files and not others depending on version, and a
-  // metric we cannot read is null, never guessed. Reservation is what is
-  // billed; these exist so the reservation can be right-sized.
-  function readActuals() {
-    const read = (p) => { try { return require("node:fs").readFileSync(p, "utf8"); } catch { return null; } };
-    const cpuStat = read("/sys/fs/cgroup/cpu.stat");
-    const usage = cpuStat?.match(/^usage_usec (\\d+)/m);
-    const peak = read("/sys/fs/cgroup/memory.peak") ?? read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes");
-    let rx = 0, tx = 0, sawNet = false;
-    const net = read("/proc/net/dev");
-    if (net) {
-      for (const line of net.split("\\n").slice(2)) {
-        const m = line.trim().match(/^(\\S+):\\s+(\\d+)(?:\\s+\\d+){7}\\s+(\\d+)/);
-        if (m && m[1] !== "lo") { rx += Number(m[2]); tx += Number(m[3]); sawNet = true; }
-      }
-    }
-    return {
-      busyCpuSecs: usage ? Number(usage[1]) / 1e6 : null,
-      peakMemBytes: peak ? Number(peak.trim()) || null : null,
-      rxBytes: sawNet ? rx : null,
-      txBytes: sawNet ? tx : null,
-    };
-  }
-
   const outcome = await executeStep({
     agentDir,
     workspaceRoot: "/workspace",
@@ -270,7 +270,12 @@ try {
   process.exit(0);
 } catch (err) {
   emit("error", err instanceof Error ? err.message : String(err));
-  process.stdout.write(JSON.stringify({ e: "done", status: "failed", result: null, costUsd: null }) + "\\n");
+  // The failure path reports actuals too — a step that died eleven minutes
+  // in still held its slice for eleven minutes, and the failed runs are
+  // exactly the ones whose resource story gets read.
+  let res = null;
+  try { res = readActuals(); } catch { /* the reading must never mask the error */ }
+  process.stdout.write(JSON.stringify({ e: "done", status: "failed", result: null, costUsd: null, res }) + "\\n");
   process.exit(0);
 }
 `;
