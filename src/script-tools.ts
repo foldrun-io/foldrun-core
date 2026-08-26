@@ -27,7 +27,9 @@ const MAX_OUTPUT = 20_000;
 
 export interface ScriptSpec {
   name: string;
-  run: string; // path relative to the agent dir, e.g. scripts/summary.py or workspace/scripts/x.sh
+  /** Path relative to the agent dir — or empty when `code` carries the
+   *  script inline. Exactly one of the two is the program. */
+  run: string;
   description: string;
   args: Record<string, string>; // arg name → description
   interpreter?: string; // optional override, e.g. "python3", "bash"
@@ -35,6 +37,14 @@ export interface ScriptSpec {
    *  five minutes. Defaults to 120, capped at 600: a limit an author can
    *  raise is a budget; one they can remove is a hang. */
   timeout?: number;
+  /** The script itself, when the tool is a single markdown file with its
+   *  code in a fenced block. Materialised to a file at call time — the
+   *  execution path is the same either way, only where the bytes start
+   *  differs. */
+  code?: string;
+  /** Extension for the materialised file, from the fence's language tag —
+   *  it picks the interpreter the same way a run: path's extension does. */
+  codeExt?: string;
 }
 
 export function parseScripts(raw: unknown): ScriptSpec[] {
@@ -45,7 +55,8 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === "string" ? e.name : null;
     const run = typeof e.run === "string" ? e.run : null;
-    if (!name || !run) continue;
+    const code = typeof e.code === "string" ? e.code : null;
+    if (!name || (!run && !code)) continue;
     const args: Record<string, string> = {};
     if (e.args && typeof e.args === "object" && !Array.isArray(e.args)) {
       for (const [k, v] of Object.entries(e.args as Record<string, unknown>)) {
@@ -55,7 +66,8 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
     const timeout = Number(e.timeout);
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
-      run,
+      run: run ?? "",
+      ...(code ? { code, codeExt: typeof e.codeExt === "string" ? e.codeExt : ".mjs" } : {}),
       description: typeof e.description === "string" ? e.description : "",
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
@@ -109,6 +121,18 @@ function runScript(
   interpreters: Record<string, string>,
   exec: ExecutionContext | null,
 ): Promise<{ code: number | null; out: string }> {
+  // An inline-code tool has no file yet: write it inside the agent's own
+  // directory — already an allowed root — and run it like any other script.
+  // Materialised per call rather than per build, so an edit to the tool's
+  // markdown is live on the next call with nothing to clean up but one file.
+  if (!spec.run && spec.code) {
+    const dir = path.join(cwd, ".tool-code");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${spec.name}${spec.codeExt ?? ".mjs"}`);
+    fs.writeFileSync(file, spec.code, { mode: 0o755 });
+    spec = { ...spec, run: `.tool-code/${spec.name}${spec.codeExt ?? ".mjs"}` };
+  }
+
   return new Promise((resolve) => {
     // Confine to the agent's own directory plus the workspace it belongs to.
     // The workspace root is allowed because `shared/` resolves to

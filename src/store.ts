@@ -422,7 +422,26 @@ export type ToolDef =
   | { kind: "script"; name: string; spec: Record<string, unknown> }
   | { kind: "mcp"; name: string; spec: McpSpec };
 
-export function parseToolDef(data: Record<string, unknown>, fallbackName: string): ToolDef | null {
+/**
+ * The program inside a single-file script tool: the first fenced block whose
+ * language tag names a runnable language. By tag, not by position — a body
+ * legitimately opens with a \`\`\`yaml example of the use: line, and running
+ * the documentation would be a memorable bug. Untagged fences never qualify:
+ * "which block is the program" must be answerable by reading, not guessing.
+ */
+export function fencedCode(body: string): { code: string; ext: string } | null {
+  const EXT: Record<string, string> = {
+    js: ".mjs", mjs: ".mjs", javascript: ".mjs", ts: ".mjs",
+    python: ".py", py: ".py", bash: ".sh", sh: ".sh", ruby: ".rb", rb: ".rb",
+  };
+  for (const m of body.matchAll(/```([a-zA-Z0-9]+)\r?\n([\s\S]*?)```/g)) {
+    const ext = EXT[m[1].toLowerCase()];
+    if (ext && m[2].trim()) return { code: m[2], ext };
+  }
+  return null;
+}
+
+export function parseToolDef(data: Record<string, unknown>, fallbackName: string, body?: string): ToolDef | null {
   const name = typeof data.name === "string" ? data.name : fallbackName;
   // `transport:`, or a legacy `type: http|script|mcp` from before `type:` meant
   // the document. `type: Tool` says what the file is and deliberately says
@@ -456,8 +475,13 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
     };
   }
   if (kind === "script") {
-    if (typeof data.run !== "string") return null;
-    return { kind: "script", name, spec: { ...data, name } };
+    // The program is a run: path, or the file's own fenced code block — the
+    // single-file form, which is what lets a script tool read and edit like
+    // every other markdown document.
+    if (typeof data.run === "string") return { kind: "script", name, spec: { ...data, name } };
+    const inline = body ? fencedCode(body) : null;
+    if (!inline) return null;
+    return { kind: "script", name, spec: { ...data, name, code: inline.code, codeExt: inline.ext } };
   }
   const [spec] = parseApis([{ ...data, name }]);
   return spec ? { kind: "http", name, spec } : null;
@@ -491,16 +515,16 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
 
   const add = (raw: string, fallbackName: string, folder: string | null) => {
     try {
-      const { data } = matter(raw);
+      const { data, content } = matter(raw);
       const d = data as Record<string, unknown>;
       // A folder tool's code sits beside its definition; qualify the path so
       // the runner can find it from an agent directory two levels down.
       if (folder && typeof d.run === "string" && !/^(workspace|account|shared|library)\//.test(d.run)) {
         d.run = `${scope}/tools/${folder}/${d.run.replace(/^\.\//, "")}`;
       }
-      const def = parseToolDef(d, fallbackName);
+      const def = parseToolDef(d, fallbackName, content);
       if (def) out[def.name] = def;
-      else broken.push(`${fallbackName}: no base, run or command — nothing to call`);
+      else broken.push(`${fallbackName}: no base, run, command or fenced code block — nothing to call`);
     } catch (err) {
       // A malformed definition must not fail every run in the workspace. But
       // it must not vanish either: dropped silently, a tool with a YAML typo

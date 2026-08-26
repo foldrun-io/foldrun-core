@@ -308,38 +308,32 @@ export function toolStarter(
   transport: "http" | "script" | "mcp",
 ): { file: string; content: string }[] {
   if (transport === "script") {
+    // One file, like every other document: the definition is the
+    // frontmatter, the program is the fenced code block in the body. The
+    // folder form (tool.md + files beside it) still exists for tools that
+    // outgrow one file — this is the shape to start in, not the ceiling.
     return [
       {
-        file: `tools/${name}/tool.md`,
+        file: `tools/${name}.md`,
         content: `---
 transport: script
 name: ${name}
 description: What this does, and when an agent should call it.
-run: run.mjs
 args:
   input: What the caller passes in
 timeout: 60
 ---
 
-The code is \`run.mjs\`, in this folder. \`run:\` is relative to the tool, so
-this works unchanged in a workspace or in the account library.
+The code below is the tool. Arguments arrive as --flags, one per \`args:\`
+entry; whatever it prints on stdout is what the agent reads back.
 
 Agents opt in with:
 
 \`\`\`yaml
 use: [${name}]
 \`\`\`
-`,
-      },
-      {
-        file: `tools/${name}/run.mjs`,
-        content: `#!/usr/bin/env node
-// ${name} — called by an agent, never by a person.
-//
-// Arguments arrive as --flags, one per \`args:\` entry in tool.md. Whatever
-// this prints on stdout is what the agent reads back, so print the answer
-// and nothing else; diagnostics belong on stderr.
 
+\`\`\`js
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({ options: { input: { type: "string" } } });
@@ -349,6 +343,7 @@ if (!values.input) {
 }
 
 console.log(values.input);
+\`\`\`
 `,
       },
     ];
