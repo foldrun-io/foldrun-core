@@ -27,6 +27,15 @@ export interface GalleryTool {
   /** Ready-made agent.md snippet, account-scope spelling. */
   snippet: string;
   content: string;
+  /**
+   * A script's tool-definition wrapper, installed onto the tools shelf
+   * beside the code — so a script is granted the same way an API is:
+   * `use: [name]`, with the args and timeout living in the definition
+   * rather than pasted into every agent. Written with the account-scope
+   * `run:` path; a workspace install rewrites it to the workspace prefix,
+   * because the wrapper travels with the code it points at.
+   */
+  wrapper?: { file: string; content: string };
 }
 
 export const GALLERY: GalleryTool[] = [
@@ -38,7 +47,8 @@ export const GALLERY: GalleryTool[] = [
       "Fetch a page the way a browser sees it — JavaScript runs, content renders. " +
       "For client-rendered directories and portals a plain fetch reads as an empty shell.",
     file: "fetch-rendered.mjs",
-    snippet: "scripts:\n  - name: fetch_rendered\n    run: account/scripts/fetch-rendered.mjs   # or workspace/scripts/\u2026 if installed there\n    description: >\n      Open a page in a real browser (JavaScript runs) and return what a\n      person would see. Use when a fetch returns an empty shell or a\n      \"checking your browser\" page. mode=links lists every link.\n    args:\n      url: The page to open (https://\u2026)\n      wait_for: Optional CSS selector to wait for\n      mode: text | html | links (default text)\n    timeout: 120",
+    snippet: "use: [browser]",
+    wrapper: { file: "browser.md", content: "---\ntransport: script\nname: browser\ndescription: >\n  Open a page in a real browser (JavaScript runs) and return what a person\n  would see. Use when a fetch returns an empty shell or a \"checking your\n  browser\" page. mode=links lists every link on the page.\nrun: account/scripts/fetch-rendered.mjs\nargs:\n  url: The page to open (https://\u2026)\n  wait_for: Optional CSS selector to wait for\n  mode: text | html | links (default text)\ntimeout: 120\n---\n\nThe headless browser as a tool: the agent calls it by name with typed\narguments and never composes a command line. An agent opts in with:\n\n```yaml\nuse: [browser]\n```\n\nThe code is `fetch-rendered.mjs` on the scripts shelf, installed together\nwith this definition. Pairs with the `websearch` tool: search finds the\npage, the browser reads it rendered.\n" },
     content: "#!/usr/bin/env node\n// Fetch a page the way a browser sees it: run the JavaScript, wait for the\n// content, return text. For the sites WebFetch can't read \u2014 client-rendered\n// directories, portals behind \"checking your browser\" interstitials.\n//\n//   --url       the page to open (required)\n//   --wait_for  a CSS selector to wait for before reading (optional)\n//   --mode      text | html | links   (default text)\n//\n// Chromium's own sandbox is off: the run container/gVisor is the sandbox\n// here, and the two fight. Output is capped \u2014 a page that renders to more\n// is a page to read in pieces via wait_for and specific URLs.\n\nimport { parseArgs } from \"node:util\";\nimport { createRequire } from \"node:module\";\n\n// Playwright is installed globally in the runner image; ESM import() does\n// not consult global paths (NODE_PATH is CJS-only), so resolve it via a\n// require anchored at the global modules directory.\nconst { chromium } = createRequire(\"/usr/local/lib/node_modules/\")(\"playwright\");\n\nconst MAX_CHARS = 18_000;\nconst { values } = parseArgs({\n  options: {\n    url: { type: \"string\" },\n    wait_for: { type: \"string\" },\n    mode: { type: \"string\", default: \"text\" },\n  },\n});\nif (!values.url || !/^https?:\\/\\//.test(values.url)) {\n  console.error(\"need --url https://\u2026\");\n  process.exit(1);\n}\n\nconst browser = await chromium.launch({\n  args: [\"--no-sandbox\", \"--disable-dev-shm-usage\", \"--disable-gpu\"],\n});\ntry {\n  const page = await browser.newPage({\n    // A believable desktop UA \u2014 the point is rendering, not disguise, but\n    // the default HeadlessChrome UA gets walled by the exact sites that\n    // need a browser in the first place.\n    userAgent:\n      \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\",\n    viewport: { width: 1366, height: 900 },\n  });\n  await page.goto(values.url, { waitUntil: \"domcontentloaded\", timeout: 45_000 });\n  if (values.wait_for) {\n    await page.waitForSelector(values.wait_for, { timeout: 20_000 }).catch(() => {\n      console.error(`note: selector \"${values.wait_for}\" never appeared; returning what rendered`);\n    });\n  } else {\n    await page.waitForLoadState(\"networkidle\", { timeout: 15_000 }).catch(() => {});\n  }\n\n  let out;\n  if (values.mode === \"html\") {\n    out = await page.content();\n  } else if (values.mode === \"links\") {\n    const links = await page.$$eval(\"a[href]\", (as) =>\n      as.map((a) => `${(a.textContent ?? \"\").trim().replaceAll(/\\s+/g, \" \")} -> ${a.href}`)\n        .filter((l) => !l.startsWith(\" ->\")),\n    );\n    out = [...new Set(links)].join(\"\\n\");\n  } else {\n    out = await page.evaluate(() => document.body?.innerText ?? \"\");\n  }\n  out = out.trim();\n  if (out.length > MAX_CHARS) {\n    out = out.slice(0, MAX_CHARS) + `\\n\u2026[truncated at ${MAX_CHARS} chars \u2014 narrow the page or use wait_for]`;\n  }\n  console.log(out || \"[page rendered empty]\");\n} finally {\n  await browser.close();\n}\n",
   },
   {
@@ -101,8 +111,17 @@ export function installGalleryTool(tenant: string, name: string, workspace?: str
   if (workspace) {
     const rel = `${tool.kind}/${tool.file}`;
     writeWorkspaceFile(tenant, workspace, rel, tool.content);
+    if (tool.wrapper) {
+      writeWorkspaceFile(
+        tenant,
+        workspace,
+        `tools/${tool.wrapper.file}`,
+        tool.wrapper.content.replace("run: account/scripts/", "run: workspace/scripts/"),
+      );
+    }
     return rel;
   }
   writeLibraryFile(tenant, tool.kind, tool.file, tool.content);
+  if (tool.wrapper) writeLibraryFile(tenant, "tools", tool.wrapper.file, tool.wrapper.content);
   return tool.file;
 }
