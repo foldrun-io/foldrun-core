@@ -1675,6 +1675,10 @@ export interface StepRecord {
    */
   computeSecs?: number | null;
   startupSecs?: number | null;
+  /** Token counts behind costUsd, kept so usage reports can say "how many"
+   *  and not only "how much" — the price of a token changes, the count is
+   *  the fact. Absent on steps recorded before this existed. */
+  tokens?: { input: number; output: number } | null;
 }
 
 export interface RunRecord {

@@ -1043,6 +1043,9 @@ async function runStep(
       step.status = outcome.status;
       step.result = outcome.result;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
+      step.tokens = outcome.usage
+        ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
+        : null;
       // The compute meter, recorded on the step rather than derived later:
       // the sandbox is gone by the time the run settles, and its lifetime
       // is not recoverable from the run's own timestamps.
@@ -1090,6 +1093,9 @@ async function runStep(
       const consultCost = consultTools.drainCost();
       const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push);
       step.costUsd = stepCost === null && consultCost === 0 ? null : (stepCost ?? 0) + consultCost;
+      step.tokens = outcome.usage
+        ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
+        : null;
       for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
       for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
     }
