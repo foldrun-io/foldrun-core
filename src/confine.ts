@@ -158,11 +158,16 @@ export function checkPaths(
   const isWrite = WRITE_TOOLS.has(toolName);
   let rewritten: Record<string, unknown> | undefined;
 
-  const keys = [...PATH_KEYS, "glob", "pattern"];
+  // Grep's `pattern` is a REGEX, not a location — Grep says where to look
+  // with `path`. Checking it as a path denied an agent searching for the
+  // literal text "/dev/null", reporting a workspace escape for a string it
+  // wanted to find inside the workspace. Glob's `pattern` really is a path
+  // shape, so it stays checked.
+  const keys = [...PATH_KEYS, "glob", ...(toolName === "Grep" ? [] : ["pattern"])];
   for (const key of keys) {
     const raw = input[key];
     if (typeof raw !== "string" || !raw.trim()) continue;
-    // Glob/Grep patterns are only paths when they're anchored.
+    // Glob patterns and grep's file filter are only paths when anchored.
     if ((key === "glob" || key === "pattern") && !raw.startsWith("/") && !expandVirtual(raw, roots)) {
       continue;
     }
