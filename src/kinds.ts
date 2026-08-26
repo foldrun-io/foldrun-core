@@ -290,6 +290,97 @@ print(args.input)
 `,
   },};
 
+/**
+ * A new tool, as the files it starts as.
+ *
+ * Three transports, two shapes. An API or an MCP server is a definition and
+ * nothing else, so it stays one flat file. A script tool is a definition and
+ * the code it runs, which cannot be separated without the tool silently
+ * resolving to nothing — so it starts as a folder holding both, with `run:`
+ * relative to itself and naming no scope.
+ *
+ * Returned as a list because "create a tool" is not always one write, and
+ * the callers that stamp templates should not have to know which case they
+ * are in.
+ */
+export function toolStarter(
+  name: string,
+  transport: "http" | "script" | "mcp",
+): { file: string; content: string }[] {
+  if (transport === "script") {
+    return [
+      {
+        file: `tools/${name}/tool.md`,
+        content: `---
+transport: script
+name: ${name}
+description: What this does, and when an agent should call it.
+run: run.mjs
+args:
+  input: What the caller passes in
+timeout: 60
+---
+
+The code is \`run.mjs\`, in this folder. \`run:\` is relative to the tool, so
+this works unchanged in a workspace or in the account library.
+
+Agents opt in with:
+
+\`\`\`yaml
+use: [${name}]
+\`\`\`
+`,
+      },
+      {
+        file: `tools/${name}/run.mjs`,
+        content: `#!/usr/bin/env node
+// ${name} — called by an agent, never by a person.
+//
+// Arguments arrive as --flags, one per \`args:\` entry in tool.md. Whatever
+// this prints on stdout is what the agent reads back, so print the answer
+// and nothing else; diagnostics belong on stderr.
+
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { input: { type: "string" } } });
+if (!values.input) {
+  console.error("need --input");
+  process.exit(1);
+}
+
+console.log(values.input);
+`,
+      },
+    ];
+  }
+
+  if (transport === "mcp") {
+    return [
+      {
+        file: `tools/${name}.md`,
+        content: `---
+transport: mcp
+name: ${name}
+description: What this server provides, and when an agent should reach for it.
+command: npx
+args: ["-y", "@example/mcp-server"]
+env:
+  EXAMPLE_TOKEN: \${${envName(name)}_TOKEN}
+---
+
+Every tool this server exposes reaches the agent that opts in with:
+
+\`\`\`yaml
+use: [${name}]
+\`\`\`
+`,
+      },
+    ];
+  }
+
+  return [{ file: KINDS.tools.file(name), content: KINDS.tools.template(name) }];
+}
+
 export const ALL_KINDS = Object.keys(KINDS) as Kind[];
 
 /** The kinds that exist at a given scope. */
