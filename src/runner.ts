@@ -43,7 +43,7 @@ import {
 import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
-import { buildApiTools } from "./api-tools.ts";
+import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
@@ -504,12 +504,25 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   }
 
   // Secrets an agent declared become env vars for its scripts and bash.
+  //
+  // Plus the credentials its API tools reference. An agent that opted into
+  // `use: [email]` has said nothing about RESEND_API_KEY and should not have
+  // to: the whole point of a tool definition is that the capability travels
+  // with its credential and the agent never learns the name. The in-process
+  // path always worked this way — buildApiTools resolves what the specs
+  // reference — so without this the isolated path substituted nothing and
+  // sent `Bearer ${RESEND_API_KEY}` literally, which the provider answers
+  // with a 4xx the agent then reports as "the credential is missing".
+  //
+  // Declared-and-absent is still an error; referenced-and-absent is the API
+  // tool's own missingSecrets, reported where the tool is described.
   const declared: string[] = Array.isArray(front.secrets) ? front.secrets.map(String) : [];
+  const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
   const {
     env: secretEnv,
     from: secretScopes,
-    missing: missingDeclared,
-  } = resolveSecrets(tenant, declared, workspace);
+  } = resolveSecrets(tenant, [...new Set([...declared, ...referenced])], workspace);
+  const { missing: missingDeclared } = resolveSecrets(tenant, declared, workspace);
 
   // Provider: which endpoint the model calls run against. Anthropic by
   // default; an Anthropic-compatible gateway (z.ai, LiteLLM, OpenRouter) by
