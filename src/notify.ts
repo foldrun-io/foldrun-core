@@ -12,6 +12,17 @@
 //     url: ${SLACK_WEBHOOK_URL}       # a secret name, or a literal URL
 //     events: [failed, awaiting-approval, completed]
 //
+// Or, for people who live in an inbox rather than a channel:
+//
+//   notify:
+//     email: ops@example.com          # sent via the RESEND_API_KEY connection
+//     events: [failed, completed]
+//
+// Email is the one vendor worth speaking natively: the platform already
+// holds a Resend connection for its email tool, and "just email me" is the
+// notification default for most of the world. Everything else stays a
+// webhook — one URL covers Slack, Discord, ntfy and every relay.
+//
 // Workspace config replaces account config whole, like provider: — a URL is
 // a destination, and merging two destinations sends half your alerts to a
 // channel you stopped reading.
@@ -25,7 +36,8 @@ import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 
 export interface NotifyConfig {
-  url: string;
+  url?: string;
+  email?: string;
   events: string[];
 }
 
@@ -36,12 +48,21 @@ export function notifyConfig(tenant: string, workspace: string): NotifyConfig | 
     (readAgentsMd(workspaceDir(tenant, workspace))?.data.notify as unknown) ??
     (readAgentsMd(accountDir(tenant))?.data.notify as unknown);
   if (!raw) return null;
-  if (typeof raw === "string") return { url: raw, events: DEFAULT_EVENTS };
-  if (typeof raw === "object" && raw !== null && typeof (raw as { url?: unknown }).url === "string") {
-    const events = (raw as { events?: unknown }).events;
+  if (typeof raw === "string") {
+    // A bare string is whichever destination it looks like.
+    return raw.includes("@") && !raw.includes("/")
+      ? { email: raw, events: DEFAULT_EVENTS }
+      : { url: raw, events: DEFAULT_EVENTS };
+  }
+  if (typeof raw === "object" && raw !== null) {
+    const o = raw as { url?: unknown; email?: unknown; events?: unknown };
+    const url = typeof o.url === "string" ? o.url : undefined;
+    const email = typeof o.email === "string" ? o.email : undefined;
+    if (!url && !email) return null;
     return {
-      url: (raw as { url: string }).url,
-      events: Array.isArray(events) && events.length ? events.map(String) : DEFAULT_EVENTS,
+      url,
+      email,
+      events: Array.isArray(o.events) && o.events.length ? o.events.map(String) : DEFAULT_EVENTS,
     };
   }
   return null;
@@ -59,17 +80,6 @@ export async function sendRunNotification(
 ): Promise<boolean> {
   const config = notifyConfig(tenant, workspace);
   if (!config || !config.events.includes(run.status)) return false;
-
-  // ${SECRET} so the Slack URL — itself a credential — can live in the
-  // vault instead of in a file that gets committed.
-  const url = config.url.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
-    const hit = getSecret(tenant, name, workspace);
-    return hit ? hit.value : whole;
-  });
-  if (url.includes("${")) {
-    console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
-    return false;
-  }
 
   const failed = run.steps.filter((s) => s.status === "failed").map((s) => s.agent);
   const waiting = run.steps.filter((s) => s.status === "awaiting-approval").map((s) => s.agent);
@@ -94,6 +104,46 @@ export async function sendRunNotification(
   };
 
   try {
+    if (config.email) {
+      // The same connection the email tool uses; a run's own credential
+      // vocabulary. Until the sending domain is verified at Resend, delivery
+      // is limited to the account owner's address — Resend's rule, reported
+      // as its own 403 rather than hidden here.
+      const key = getSecret(tenant, "RESEND_API_KEY", workspace);
+      if (!key) {
+        console.error(`[foldrun] notify: email configured but RESEND_API_KEY is not set for ${tenant}`);
+        return false;
+      }
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { authorization: `Bearer ${key.value}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          from: "foldrun <onboarding@resend.dev>",
+          to: config.email,
+          subject: body.text,
+          text:
+            `${headline}\n\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
+            `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n`,
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        console.error(`[foldrun] notify email: ${tenant}/${workspace} → HTTP ${res.status}`);
+        return false;
+      }
+      return true;
+    }
+
+    // ${SECRET} so the Slack URL — itself a credential — can live in the
+    // vault instead of in a file that gets committed.
+    const url = (config.url ?? "").replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
+      const hit = getSecret(tenant, name, workspace);
+      return hit ? hit.value : whole;
+    });
+    if (!url || url.includes("${")) {
+      console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
+      return false;
+    }
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
