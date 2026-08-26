@@ -1373,7 +1373,40 @@ export function syncBundleFor(file: string, change?: "Creation" | "Update") {
  * memory file leaving a bundle is as much a change to its index as one
  * arriving.
  */
+/**
+ * Why a path can never be moved or renamed, in a sentence — or null when it
+ * can. One vocabulary for the tree, the API and the tests, because "not an
+ * editable path" told the person *that* they were refused and made them
+ * guess at *why*, when the why is the whole lesson: in this format,
+ * location is meaning.
+ */
+export function anchoredReason(rel: string): string | null {
+  const norm = rel.replaceAll("\\", "/");
+  const base = norm.split("/").pop()!;
+  if (norm === "AGENTS.md" || norm === "project.md") {
+    return `${base} is the workspace's own identity — it cannot move; rename or delete the workspace instead`;
+  }
+  if (base === "agent.md") {
+    return "agent.md is the agent because of where it sits — to rename the agent, rename its folder";
+  }
+  if (base === "SKILL.md") {
+    return "SKILL.md names its skill — to rename the skill, rename its folder";
+  }
+  if (base === "tool.md") {
+    return "tool.md names its tool — to rename the tool, rename its folder";
+  }
+  if (/(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/.test(norm)) {
+    return `${base} is generated from the files around it — it is rebuilt in place on the next write`;
+  }
+  return null;
+}
+
 export function renameWorkspaceFile(tenant: string, workspace: string, from: string, to: string) {
+  // Refuse with the reason before any path validation: "not an editable
+  // path" is true of AGENTS.md too, and the generic sentence buries the
+  // specific one worth reading.
+  const why = anchoredReason(from) ?? anchoredReason(to);
+  if (why) throw new Error(why);
   const dir = workspaceDir(tenant, workspace);
   const src = path.join(dir, assertEditablePath(from));
   const dst = path.join(dir, assertEditablePath(to));
@@ -1393,14 +1426,16 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
   // them through — they are editable — but editable and deletable are
   // different claims, and deleting AGENTS.md is deleting the workspace's
   // own name.
-  if (norm === "AGENTS.md" || norm === "project.md") {
-    throw new Error(`${norm} is the workspace's identity — delete the workspace instead`);
-  }
-  // Generated files: deleting one is futile (the next write regenerates it),
-  // so refuse with the reason rather than performing a no-op that looks
-  // like it worked.
-  if (/(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/.test(norm)) {
-    throw new Error("index.md and log.md are generated — they return on the next write");
+  // The same sentences the tree and the rename path use — one vocabulary
+  // for "this file is structure, not content". An identity file is only
+  // deletable as its whole folder: agent.md alone leaves a folder that is
+  // no longer an agent but still shadows the name.
+  const anchored = anchoredReason(norm);
+  if (anchored) {
+    if (/(agent|SKILL|tool)\.md$/.test(norm)) {
+      throw new Error(`${norm.split("/").pop()} is its folder's identity — delete the whole folder instead`);
+    }
+    throw new Error(anchored);
   }
   // Whole-folder units: an agent, a skill, a folder tool. Each is one thing
   // to its reader, so each is one thing to delete.
