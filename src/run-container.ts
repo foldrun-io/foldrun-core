@@ -172,10 +172,20 @@ const emit = (type, text) => process.stdout.write(JSON.stringify({ e: "event", t
 // metric we cannot read is null, never guessed. Reservation is what is
 // billed; these exist so the reservation can be right-sized.
 function readActuals() {
-  const read = (p) => { try { return require("node:fs").readFileSync(p, "utf8"); } catch { return null; } };
+  // fs from the module's own import — the driver is ESM, and a require()
+  // here threw on every call, silently nulling every metric it guarded.
+  const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch { return null; } };
+  // Two cgroup dialects: v2 (cpu.stat, microseconds; memory.peak) on a
+  // plain runtime, v1-style controllers under gVisor (cpuacct.usage,
+  // NANOseconds; memory.max_usage_in_bytes) — probed on the real cluster,
+  // not assumed. Whichever answers wins; both silent means null.
   const cpuStat = read("/sys/fs/cgroup/cpu.stat");
   const usage = cpuStat?.match(/^usage_usec (\\d+)/m);
-  const peak = read("/sys/fs/cgroup/memory.peak") ?? read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes");
+  const cpuacctNs = usage ? NaN : Number(read("/sys/fs/cgroup/cpuacct/cpuacct.usage")?.trim());
+  const peak =
+    read("/sys/fs/cgroup/memory.peak") ??
+    read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes") ??
+    read("/sys/fs/cgroup/memory/memory.usage_in_bytes");
   let rx = 0, tx = 0, sawNet = false;
   const net = read("/proc/net/dev");
   if (net) {
@@ -185,7 +195,11 @@ function readActuals() {
     }
   }
   return {
-    busyCpuSecs: usage ? Number(usage[1]) / 1e6 : null,
+    busyCpuSecs: usage
+      ? Number(usage[1]) / 1e6
+      : Number.isFinite(cpuacctNs) && cpuacctNs > 0
+        ? cpuacctNs / 1e9
+        : null,
     peakMemBytes: peak ? Number(peak.trim()) || null : null,
     rxBytes: sawNet ? rx : null,
     txBytes: sawNet ? tx : null,
