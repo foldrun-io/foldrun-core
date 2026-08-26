@@ -1386,15 +1386,34 @@ export function renameWorkspaceFile(tenant: string, workspace: string, from: str
 }
 
 export function deleteWorkspacePath(tenant: string, workspace: string, rel: string) {
-  const norm = path.normalize(rel);
+  const norm = path.normalize(rel).replaceAll("\\", "/");
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
   const dir = workspaceDir(tenant, workspace);
-  // Whole agent (agents/<name>) or a single editable .md file.
-  if (/^agents\/[a-z0-9-]+$/.test(norm)) {
+  // The two files a workspace cannot exist without. assertEditablePath lets
+  // them through — they are editable — but editable and deletable are
+  // different claims, and deleting AGENTS.md is deleting the workspace's
+  // own name.
+  if (norm === "AGENTS.md" || norm === "project.md") {
+    throw new Error(`${norm} is the workspace's identity — delete the workspace instead`);
+  }
+  // Generated files: deleting one is futile (the next write regenerates it),
+  // so refuse with the reason rather than performing a no-op that looks
+  // like it worked.
+  if (/(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/.test(norm)) {
+    throw new Error("index.md and log.md are generated — they return on the next write");
+  }
+  // Whole-folder units: an agent, a skill, a folder tool. Each is one thing
+  // to its reader, so each is one thing to delete.
+  if (/^agents\/[a-z0-9-]+$/.test(norm) ||
+      /^(skills|tools)\/[a-z0-9-]+$/.test(norm) ||
+      /^agents\/[a-z0-9-]+\/skills\/[a-z0-9-]+$/.test(norm)) {
     fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
     return;
   }
-  fs.rmSync(path.join(dir, assertEditablePath(norm)), { force: true });
+  const p = path.join(dir, assertEditablePath(norm));
+  fs.rmSync(p, { force: true });
+  // A bundle's index must stop naming what is gone.
+  syncBundleFor(p);
 }
 
 export function deleteWorkspace(tenant: string, workspace: string) {
