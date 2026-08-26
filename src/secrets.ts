@@ -1,5 +1,5 @@
 // Secret store. Values are encrypted at rest with AES-256-GCM using a key
-// derived from MDAGENT_SECRET_KEY (falling back to a generated per-install
+// derived from FOLDRUN_SECRET_KEY (falling back to a generated per-install
 // key file, so dev works without configuration).
 //
 // Two scopes, nearest wins — the same rule knowledge uses:
@@ -31,7 +31,7 @@ const keyFile = () => path.join(dataRoot(), ".secret-key");
 export type SecretScope = "account" | "workspace";
 
 function masterKey(): Buffer {
-  const fromEnv = process.env.MDAGENT_SECRET_KEY;
+  const fromEnv = process.env.FOLDRUN_SECRET_KEY;
   if (fromEnv) return crypto.createHash("sha256").update(fromEnv).digest();
   fs.mkdirSync(dataRoot(), { recursive: true });
   if (!fs.existsSync(keyFile())) {
@@ -221,13 +221,13 @@ export function resolveSecrets(tenant: string, names: string[], workspace?: stri
  * Where the master key came from.
  *
  * The key and the ciphertext it protects live on the same disk by default, so
- * one filesystem read gets both. `MDAGENT_SECRET_KEY` fixes that — a managed
+ * one filesystem read gets both. `FOLDRUN_SECRET_KEY` fixes that — a managed
  * secret store holds the key, the disk holds only the encrypted values — and
  * this reports which of the two is in force so the platform can say so rather
  * than leaving it to be discovered.
  */
 export function masterKeySource(): { source: "env" | "file"; path: string | null } {
-  return process.env.MDAGENT_SECRET_KEY
+  return process.env.FOLDRUN_SECRET_KEY
     ? { source: "env", path: null }
     : { source: "file", path: keyFile() };
 }
@@ -262,7 +262,7 @@ export interface RotationResult {
  * *missing* secret. You would not lose the ciphertext, but you would lose the
  * ability to read it, and the error would tell you the secret was never set.
  *
- * Both keys are passed in raw, exactly as MDAGENT_SECRET_KEY would be, and
+ * Both keys are passed in raw, exactly as FOLDRUN_SECRET_KEY would be, and
  * hashed here the same way masterKey does — so the caller never has to know
  * how a key becomes an AES key.
  *

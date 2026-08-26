@@ -1,4 +1,4 @@
-// Every kind of document mdagent knows about, in one place.
+// Every kind of document foldrun knows about, in one place.
 //
 // The naming, settled: these are **documents**. Not "resources" — MCP already
 // owns that word for something specific, and we speak MCP, so a "resource" in
@@ -32,7 +32,7 @@
 // thing it calls, which is a different question from what the file is. A
 // legacy `type: http` is still read as a transport; see readTransport below.
 //
-// Everything downstream — creation templates, `mdagent init`, the scaffolder,
+// Everything downstream — creation templates, `foldrun init`, the scaffolder,
 // the dashboard's New button — reads this table. Adding a kind means adding a
 // row here and nothing else; that is the point.
 

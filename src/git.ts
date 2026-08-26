@@ -19,7 +19,7 @@ const MAX_TARBALL = 25 * 1024 * 1024;
  *
  * Derived rather than stored, exactly like a flow's webhook token: HMAC of the
  * workspace's identity under the install key. Nothing new to persist, unique
- * per workspace, and rotating MDAGENT_SECRET_KEY invalidates every connection
+ * per workspace, and rotating FOLDRUN_SECRET_KEY invalidates every connection
  * at once.
  */
 export function gitSecret(tenant: string, workspace: string): string {
@@ -93,7 +93,7 @@ export async function fetchTarball(repo: string, commit: string): Promise<Buffer
 
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
-    "user-agent": "mdagent",
+    "user-agent": "foldrun",
     "x-github-api-version": "2022-11-28",
   };
   const token = process.env.GITHUB_TOKEN;

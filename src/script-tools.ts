@@ -282,8 +282,8 @@ export function buildScriptTools(
   });
 
   return {
-    server: createSdkMcpServer({ name: "mdagent_scripts", version: "1.0.0", tools }),
-    toolNames: scripts.map((s) => `mcp__mdagent_scripts__${s.name}`),
+    server: createSdkMcpServer({ name: "foldrun_scripts", version: "1.0.0", tools }),
+    toolNames: scripts.map((s) => `mcp__foldrun_scripts__${s.name}`),
     promptLines: scripts.map(
       (s) =>
         `- **${s.name}** — ${s.description || `runs ${s.run}`}${

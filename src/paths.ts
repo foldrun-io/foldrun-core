@@ -1,18 +1,18 @@
 // Where data lives. One declaration, resolved late.
 //
 // This was nine declarations resolved early. Every module that needed the data
-// directory wrote `process.env.MDAGENT_DATA ?? path.join(process.cwd(), "data")`
+// directory wrote `process.env.FOLDRUN_DATA ?? path.join(process.cwd(), "data")`
 // into a module-level const, which has two costs:
 //
 //   Duplication — the same fallback path in nine places is the bug this
 //   codebase keeps producing, and the one its consistency tests exist to
 //   catch. Four of the nine had already drifted: they read `process.cwd()`
-//   directly and ignored MDAGENT_DATA entirely, so pointing the platform at
+//   directly and ignored FOLDRUN_DATA entirely, so pointing the platform at
 //   another directory moved the workspaces but left the scheduler state, the
 //   runtime cache, the build scratch directory and the webhook key behind.
 //
 //   Import-order coupling — a const captures the environment at *import* time.
-//   Anything that sets MDAGENT_DATA after importing core silently reads the
+//   Anything that sets FOLDRUN_DATA after importing core silently reads the
 //   wrong directory, and nothing errors: you get an empty result, which reads
 //   as "no data" rather than "wrong root". Tests hit this first, but so does
 //   any embedder that configures the library before calling it.
@@ -41,7 +41,7 @@ function projectRoot(from: string): string | null {
 /**
  * The data directory: every account, workspace, run and secret lives under it.
  *
- * `MDAGENT_DATA` wins. Otherwise it is `data/` at the project root, found by
+ * `FOLDRUN_DATA` wins. Otherwise it is `data/` at the project root, found by
  * walking up for a `.git` — falling back to the working directory when there
  * is no project to find.
  *
@@ -59,11 +59,11 @@ function projectRoot(from: string): string | null {
  * The walk stops at the *nearest* `.git`, which is a nested repository's own
  * when there is one — `web/` is a submodule here, so a process started inside
  * it would still anchor to the app. That is why the dashboard sets
- * MDAGENT_DATA explicitly rather than relying on this: an inferred default is
+ * FOLDRUN_DATA explicitly rather than relying on this: an inferred default is
  * a good fallback and a bad contract.
  */
 export function dataRoot(): string {
-  if (process.env.MDAGENT_DATA) return process.env.MDAGENT_DATA;
+  if (process.env.FOLDRUN_DATA) return process.env.FOLDRUN_DATA;
   return path.join(projectRoot(process.cwd()) ?? process.cwd(), "data");
 }
 
@@ -75,5 +75,5 @@ export function dataRoot(): string {
  * no account and no tenant there, so the wrapper directories collapse away.
  */
 export function singleWorkspace(): string | null {
-  return process.env.MDAGENT_WORKSPACE ?? null;
+  return process.env.FOLDRUN_WORKSPACE ?? null;
 }

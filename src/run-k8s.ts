@@ -1,6 +1,6 @@
 // The Kubernetes executor: the same step isolation as run-container.ts,
 // spoken to a cluster instead of a docker daemon. Selected with
-// MDAGENT_RUN_ISOLATION=k8s; this is what replaces the dind sidecar — pods
+// FOLDRUN_RUN_ISOLATION=k8s; this is what replaces the dind sidecar — pods
 // scheduled by the cluster, gVisor via runtimeClassName, egress policy via
 // NetworkPolicy on the run namespace.
 //
@@ -11,11 +11,11 @@
 // read from `kubectl logs -f`, and the pod holds after finishing until the
 // host acknowledges the copy-out — a terminated pod cannot be copied from.
 //
-//   MDAGENT_RUNNER_IMAGE      required — the runner image, already in the
+//   FOLDRUN_RUNNER_IMAGE      required — the runner image, already in the
 //                             cluster (k3d image import / a registry)
-//   MDAGENT_K8S_NAMESPACE     default mdagent-runs
-//   MDAGENT_KUBECTL           default kubectl (kubeconfig from the env)
-//   MDAGENT_RUNNER_RUNTIME    a RuntimeClass name, e.g. gvisor
+//   FOLDRUN_K8S_NAMESPACE     default foldrun-runs
+//   FOLDRUN_KUBECTL           default kubectl (kubeconfig from the env)
+//   FOLDRUN_RUNNER_RUNTIME    a RuntimeClass name, e.g. gvisor
 
 import fs from "node:fs";
 import os from "node:os";
@@ -29,8 +29,8 @@ import {
 } from "./run-container.ts";
 import { isPlatformPath } from "./store.ts";
 
-const kubectl = () => process.env.MDAGENT_KUBECTL ?? "kubectl";
-const namespace = () => process.env.MDAGENT_K8S_NAMESPACE ?? "mdagent-runs";
+const kubectl = () => process.env.FOLDRUN_KUBECTL ?? "kubectl";
+const namespace = () => process.env.FOLDRUN_K8S_NAMESPACE ?? "foldrun-runs";
 
 // The shim the pod runs. Stages: wait for files, take the env, hand the
 // tree to the agent user, run the driver, then hold for the ack so the
@@ -50,12 +50,12 @@ export function runPodManifest(name: string, image: string): object {
     metadata: {
       name,
       namespace: namespace(),
-      labels: { app: "mdagent-run" },
+      labels: { app: "foldrun-run" },
     },
     spec: {
       restartPolicy: "Never",
-      ...(process.env.MDAGENT_RUNNER_RUNTIME
-        ? { runtimeClassName: process.env.MDAGENT_RUNNER_RUNTIME }
+      ...(process.env.FOLDRUN_RUNNER_RUNTIME
+        ? { runtimeClassName: process.env.FOLDRUN_RUNNER_RUNTIME }
         : {}),
       containers: [
         {
@@ -77,8 +77,8 @@ export function runPodManifest(name: string, image: string): object {
           },
           resources: {
             limits: {
-              memory: process.env.MDAGENT_RUNNER_MEMORY ?? "2Gi",
-              cpu: process.env.MDAGENT_RUNNER_CPUS ?? "2",
+              memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2Gi",
+              cpu: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
             },
           },
         },
@@ -101,18 +101,18 @@ function kc(args: string[], input?: string): { status: number | null; out: strin
 }
 
 export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerStepOutcome> {
-  const image = process.env.MDAGENT_RUNNER_IMAGE;
+  const image = process.env.FOLDRUN_RUNNER_IMAGE;
   if (!image) {
-    args.emit("error", "MDAGENT_RUN_ISOLATION=k8s needs MDAGENT_RUNNER_IMAGE (an image the cluster can pull)");
+    args.emit("error", "FOLDRUN_RUN_ISOLATION=k8s needs FOLDRUN_RUNNER_IMAGE (an image the cluster can pull)");
     return { status: "failed", result: null, costUsd: null };
   }
 
   const ns = namespace();
   kc(["create", "namespace", ns]); // idempotent-by-outcome; AlreadyExists is fine
 
-  const name = `mdagent-run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const name = `foldrun-run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const podRef = `pod/${name}`;
-  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-k8s-"));
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-k8s-"));
   let created = false;
 
   try {

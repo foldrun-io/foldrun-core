@@ -287,7 +287,7 @@ export function tick(now = new Date()): DueFlow[] {
 let started = false;
 
 export function startScheduler() {
-  if (started || process.env.MDAGENT_DISABLE_SCHEDULER === "1") return;
+  if (started || process.env.FOLDRUN_DISABLE_SCHEDULER === "1") return;
   started = true;
   setInterval(() => {
     try {

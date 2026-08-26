@@ -4,7 +4,7 @@
 // to ship. This isolates the rest: the agent's built-in Read/Write/Bash,
 // which otherwise run in the server process behind path checks. Path checks
 // are argument inspection; a container is an operating system saying no. The
-// hosted platform runs every step this way (MDAGENT_RUN_ISOLATION=container);
+// hosted platform runs every step this way (FOLDRUN_RUN_ISOLATION=container);
 // the CLI keeps the in-process path, because on a laptop the "server process"
 // is the user's own shell and there is nothing to protect it from.
 //
@@ -15,7 +15,7 @@
 // secrets and run history cannot come back changed, because they are not
 // copied back at all (secrets and runs/ were never copied in).
 //
-// The runner image bundles @mdagent/core itself, so the driver runs the same
+// The runner image bundles @foldrun/core itself, so the driver runs the same
 // executeStep the server would — one implementation, two homes.
 
 import fs from "node:fs";
@@ -64,7 +64,7 @@ export interface ContainerStepOutcome {
   usage?: { inputTokens: number; outputTokens: number } | null;
 }
 
-const cli = () => process.env.MDAGENT_CONTAINER_CLI ?? "docker";
+const cli = () => process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
 
 // Paths that must never come back from a container, whatever happened in
 // there: everything platform-owned (store.ts#isPlatformPath — also never
@@ -128,13 +128,13 @@ const emit = (type, text) => process.stdout.write(JSON.stringify({ e: "event", t
 try {
   // Runtime state (venvs, npm prefixes) lands in the agent user's real home
   // — writable, inside the container, gone with it.
-  process.env.MDAGENT_DATA = "/home/agent/.mdagent";
-  const { executeStep } = await import("@mdagent/core/step-exec");
-  const { buildApiTools } = await import("@mdagent/core/api-tools");
-  const { buildScriptTools } = await import("@mdagent/core/script-tools");
-  const { buildConsultTools } = await import("@mdagent/core/agent-tools");
-  const { prepareRuntime } = await import("@mdagent/core/runtime");
-  const { materializeFileSecrets } = await import("@mdagent/core/secret-files");
+  process.env.FOLDRUN_DATA = "/home/agent/.foldrun";
+  const { executeStep } = await import("@foldrun/core/step-exec");
+  const { buildApiTools } = await import("@foldrun/core/api-tools");
+  const { buildScriptTools } = await import("@foldrun/core/script-tools");
+  const { buildConsultTools } = await import("@foldrun/core/agent-tools");
+  const { prepareRuntime } = await import("@foldrun/core/runtime");
+  const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
 
   const agentDir = "/workspace/" + input.agentRel;
   // HOME is where a bare relative path lands when anything resolves one
@@ -180,9 +180,9 @@ try {
     allowed: input.allowed,
     mcpNames: input.mcpNames,
     mcpServers: {
-      ...(api.server ? { mdagent_apis: api.server } : {}),
-      ...(script.server ? { mdagent_scripts: script.server } : {}),
-      ...(consult.server ? { mdagent_agents: consult.server } : {}),
+      ...(api.server ? { foldrun_apis: api.server } : {}),
+      ...(script.server ? { foldrun_scripts: script.server } : {}),
+      ...(consult.server ? { foldrun_agents: consult.server } : {}),
       ...input.mcpServers,
     },
     env,
@@ -228,8 +228,8 @@ RUN npm install -g playwright@1 >/dev/null \\
  && playwright install --with-deps chromium >/dev/null \\
  && chmod -R a+rX /opt/browser
 WORKDIR /opt/runner
-COPY mdagent-core.tgz driver.mjs entry.sh ./
-RUN npm init -y >/dev/null && npm install ./mdagent-core.tgz --omit=dev \\
+COPY foldrun-core.tgz driver.mjs entry.sh ./
+RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
  && mkdir -p /workspace /library /opt/runner/job \\
  && chown -R agent:agent /workspace /library /opt/runner \\
  && chmod +x /opt/runner/entry.sh
@@ -243,7 +243,7 @@ exec runuser -u agent -- node /opt/runner/driver.mjs
 `;
 
 function corePackageDir(): string {
-  // This file *is* part of @mdagent/core, so its own package.json is a walk
+  // This file *is* part of @foldrun/core, so its own package.json is a walk
   // up — from src/ in the repo, from dist/src/ once built. require.resolve
   // can't do it: the exports map rewrites "./package.json" like any subpath.
   let dir = path.dirname(new URL(import.meta.url).pathname);
@@ -251,14 +251,14 @@ function corePackageDir(): string {
     const candidate = path.join(dir, "package.json");
     if (fs.existsSync(candidate)) {
       try {
-        if (JSON.parse(fs.readFileSync(candidate, "utf8")).name === "@mdagent/core") return dir;
+        if (JSON.parse(fs.readFileSync(candidate, "utf8")).name === "@foldrun/core") return dir;
       } catch {
         // keep walking
       }
     }
     dir = path.dirname(dir);
   }
-  throw new Error("could not locate @mdagent/core's package root");
+  throw new Error("could not locate @foldrun/core's package root");
 }
 
 export function runnerImageTag(): string {
@@ -273,7 +273,7 @@ export function runnerImageTag(): string {
       if (fs.statSync(abs).isFile()) hash.update(String(entry)).update(fs.readFileSync(abs));
     }
   }
-  return `mdagent-runner:${hash.digest("hex").slice(0, 12)}`;
+  return `foldrun-runner:${hash.digest("hex").slice(0, 12)}`;
 }
 
 /**
@@ -282,21 +282,21 @@ export function runnerImageTag(): string {
  * runs the same bytes the server does.
  */
 export function ensureRunnerImage(): { tag: string; log: string[] } {
-  const tag = process.env.MDAGENT_RUNNER_IMAGE ?? runnerImageTag();
+  const tag = process.env.FOLDRUN_RUNNER_IMAGE ?? runnerImageTag();
   const log: string[] = [];
-  if (process.env.MDAGENT_RUNNER_IMAGE) return { tag, log };
+  if (process.env.FOLDRUN_RUNNER_IMAGE) return { tag, log };
 
   const have = spawnSync(cli(), ["image", "inspect", tag], { stdio: "ignore" });
   if (have.status === 0) return { tag, log };
 
-  const build = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-runner-build-"));
+  const build = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-runner-build-"));
   try {
     const pack = spawnSync("npm", ["pack", corePackageDir(), "--pack-destination", build], {
       encoding: "utf8",
     });
     if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
     const tarball = pack.stdout.trim().split("\n").at(-1)!;
-    fs.renameSync(path.join(build, tarball), path.join(build, "mdagent-core.tgz"));
+    fs.renameSync(path.join(build, tarball), path.join(build, "foldrun-core.tgz"));
     fs.writeFileSync(path.join(build, "driver.mjs"), DRIVER);
     fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
     fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
@@ -345,10 +345,10 @@ export function parseDriverLine(
 // inter-container traffic disabled, so two tenants' runs sharing a host
 // cannot see each other's ports — each gets the internet (the model API
 // lives there) and nothing beside it. Created once, reused forever.
-const RUN_NETWORK = "mdagent-runs";
+const RUN_NETWORK = "foldrun-runs";
 
 function ensureRunNetwork(): string {
-  const configured = process.env.MDAGENT_RUNNER_NETWORK;
+  const configured = process.env.FOLDRUN_RUNNER_NETWORK;
   if (configured) return configured;
   const have = spawnSync(cli(), ["network", "inspect", RUN_NETWORK], { stdio: "ignore" });
   if (have.status !== 0) {
@@ -378,7 +378,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
   const { tag, log } = ensureRunnerImage();
   for (const line of log) args.emit("info", line);
 
-  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-run-"));
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-run-"));
   let containerId = "";
   try {
     // Stage the workspace copy minus what the platform owns — the vault,
@@ -433,14 +433,14 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       "--cap-drop", "ALL",
       "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
       "--pids-limit", "512",
-      "--memory", process.env.MDAGENT_RUNNER_MEMORY ?? "2g",
-      "--cpus", process.env.MDAGENT_RUNNER_CPUS ?? "2",
+      "--memory", process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
+      "--cpus", process.env.FOLDRUN_RUNNER_CPUS ?? "2",
       "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag
     // is the same docker invocation everywhere else.
-    if (process.env.MDAGENT_RUNNER_RUNTIME) {
-      flags.push("--runtime", process.env.MDAGENT_RUNNER_RUNTIME);
+    if (process.env.FOLDRUN_RUNNER_RUNTIME) {
+      flags.push("--runtime", process.env.FOLDRUN_RUNNER_RUNTIME);
     }
     flags.push("--network", ensureRunNetwork());
 

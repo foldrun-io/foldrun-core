@@ -98,7 +98,7 @@ export function buildConsultTools(
         // Toolless and homeless on purpose: the consult reads and writes
         // nothing — cwd is a throwaway so even a confused model call has no
         // tree to touch (and no tools to touch it with).
-        const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-consult-"));
+        const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-consult-"));
         try {
           const outcome = await executeStep({
             agentDir: scratch,
@@ -132,8 +132,8 @@ export function buildConsultTools(
   );
 
   return {
-    server: createSdkMcpServer({ name: "mdagent_agents", version: "1.0.0", tools }),
-    toolNames: consults.map((c) => `mcp__mdagent_agents__consult_${c.name.replaceAll("-", "_")}`),
+    server: createSdkMcpServer({ name: "foldrun_agents", version: "1.0.0", tools }),
+    toolNames: consults.map((c) => `mcp__foldrun_agents__consult_${c.name.replaceAll("-", "_")}`),
     drainCost: () => cost,
   };
 }

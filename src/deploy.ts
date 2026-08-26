@@ -33,7 +33,7 @@ import {
 import { conformanceIssues } from "./okf.ts";
 
 /** Directories a deploy never reads out of a source tree. */
-const NOT_SOURCE = new Set([".git", "node_modules", "runs", "outputs", ".mdagent", ".results"]);
+const NOT_SOURCE = new Set([".git", "node_modules", "runs", "outputs", ".foldrun", ".results"]);
 
 /** Files that are never part of a workspace, whatever directory they sit in. */
 const NOT_SOURCE_FILE = new Set([".DS_Store", "secrets.json"]);
@@ -111,7 +111,7 @@ export function readTree(dir: string): DeployFile[] {
 /**
  * Everything wrong with an incoming workspace, before any of it is live.
  *
- * Deliberately the same questions `mdagent check` asks, against files that are
+ * Deliberately the same questions `foldrun check` asks, against files that are
  * not on disk yet. A deploy that would leave the workspace failing its own
  * checker should not be a deploy.
  */
@@ -182,7 +182,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
   // OKF conformance, which needs the files as a tree. Staged in a temp
   // directory and thrown away — nothing touches the live workspace until every
   // check above has passed.
-  const staged = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-stage-"));
+  const staged = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-stage-"));
   try {
     for (const f of files) {
       const norm = path.normalize(f.path);

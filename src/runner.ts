@@ -396,7 +396,7 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   // it at /library, host runs at its real location. Printing the host path
   // into a container's prompt handed the model files it could never open.
   const libraryScriptsRoot =
-    process.env.MDAGENT_RUN_ISOLATION === "container" || process.env.MDAGENT_RUN_ISOLATION === "k8s"
+    process.env.FOLDRUN_RUN_ISOLATION === "container" || process.env.FOLDRUN_RUN_ISOLATION === "k8s"
       ? "/library/scripts"
       : libraryDir(tenant, "scripts");
   const global = listDir(libraryDir(tenant, "scripts"), `${libraryScriptsRoot}/`);
@@ -684,7 +684,12 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
     scriptTools,
     runtime: { log: runtimeLog, error: runtimeError, executor },
     secretEnv: { ...runtime.env, ...secretEnv },
-    formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).mdagent_version).warning,
+    formatWarning: checkFormatVersion(
+      // mdagent_version is the same field from before the project was
+      // renamed — workspaces written then keep validating unchanged.
+      workspaceFrontmatter(agentDir, tenant).foldrun_version ??
+        workspaceFrontmatter(agentDir, tenant).mdagent_version,
+    ).warning,
     providerEnv,
     providerLabel,
     providerSecrets,
@@ -754,12 +759,12 @@ async function runStep(
     save();
   };
 
-  // The test seam: MDAGENT_STUB_STEP=1 completes the step from a canned
+  // The test seam: FOLDRUN_STUB_STEP=1 completes the step from a canned
   // script instead of a model, so the orchestration around steps — loops,
   // fan-out, gates — is testable at zero cost. An agent's `stub.md` holds
   // the answers, `\n---\n`-separated, consumed one per call; the last one
   // repeats. Never set outside a test.
-  if (process.env.MDAGENT_STUB_STEP === "1") {
+  if (process.env.FOLDRUN_STUB_STEP === "1") {
     const stubFile = path.join(agentDir, "stub.md");
     const answers = fs.existsSync(stubFile)
       ? fs.readFileSync(stubFile, "utf8").split(/\n---\n/)
@@ -928,9 +933,9 @@ async function runStep(
     for (const m of missingConsults) {
       push("error", `agents: "${m}" is not an agent in this workspace — no consult tool granted`);
     }
-    const consultNames = consults.length ? [...mcpNames, "mdagent_agents"] : mcpNames;
+    const consultNames = consults.length ? [...mcpNames, "foldrun_agents"] : mcpNames;
 
-    const isolation = process.env.MDAGENT_RUN_ISOLATION;
+    const isolation = process.env.FOLDRUN_RUN_ISOLATION;
     if (isolation === "container" || isolation === "k8s") {
       // The isolated path: the whole loop — model, built-in tools, scripts —
       // runs inside a throwaway container (a docker sibling, or a pod), and
@@ -1001,9 +1006,9 @@ async function runStep(
         allowed,
         mcpNames: consultNames,
         mcpServers: {
-          ...(apiTools.server ? { mdagent_apis: apiTools.server } : {}),
-          ...(scriptTools.server ? { mdagent_scripts: scriptTools.server } : {}),
-          ...(consultTools.server ? { mdagent_agents: consultTools.server } : {}),
+          ...(apiTools.server ? { foldrun_apis: apiTools.server } : {}),
+          ...(scriptTools.server ? { foldrun_scripts: scriptTools.server } : {}),
+          ...(consultTools.server ? { foldrun_agents: consultTools.server } : {}),
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model
@@ -1214,7 +1219,7 @@ export function driveRun(
     // Every memory bundle a run can write to, not just the agent's own. The
     // workspace bundle is writable from any step — confine only denies
     // knowledge/ — so a fact left there was going unstamped and untyped, and
-    // the bundle stopped conforming until someone ran `mdagent check`.
+    // the bundle stopped conforming until someone ran `foldrun check`.
     // The account library is not here: it is read-only from a run.
     const dirs: { dir: string; agent: string | null }[] = [
       // Attributable only when one agent could have written it.

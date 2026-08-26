@@ -38,15 +38,15 @@
 //
 // Config (s3 driver):
 //
-//   MDAGENT_FILES_DRIVER        fs | s3          default fs
-//   MDAGENT_S3_ENDPOINT         https://<account>.r2.cloudflarestorage.com
-//   MDAGENT_S3_BUCKET           bucket name
-//   MDAGENT_S3_REGION           default auto (R2's region)
-//   MDAGENT_S3_ACCESS_KEY_ID
-//   MDAGENT_S3_SECRET_ACCESS_KEY
-//   MDAGENT_S3_PATH_STYLE       default true — R2 speaks path style
-//   MDAGENT_FILES_MAX_MB        per object, default 512
-//   MDAGENT_FILES_QUOTA_MB      per workspace, default 5120
+//   FOLDRUN_FILES_DRIVER        fs | s3          default fs
+//   FOLDRUN_S3_ENDPOINT         https://<account>.r2.cloudflarestorage.com
+//   FOLDRUN_S3_BUCKET           bucket name
+//   FOLDRUN_S3_REGION           default auto (R2's region)
+//   FOLDRUN_S3_ACCESS_KEY_ID
+//   FOLDRUN_S3_SECRET_ACCESS_KEY
+//   FOLDRUN_S3_PATH_STYLE       default true — R2 speaks path style
+//   FOLDRUN_FILES_MAX_MB        per object, default 512
+//   FOLDRUN_FILES_QUOTA_MB      per workspace, default 5120
 
 import fs from "node:fs";
 import path from "node:path";
@@ -82,8 +82,8 @@ interface Index {
 
 // ---------- limits ----------
 
-const maxBytes = () => Number(process.env.MDAGENT_FILES_MAX_MB ?? 512) * 1024 * 1024;
-const quotaBytes = () => Number(process.env.MDAGENT_FILES_QUOTA_MB ?? 5120) * 1024 * 1024;
+const maxBytes = () => Number(process.env.FOLDRUN_FILES_MAX_MB ?? 512) * 1024 * 1024;
+const quotaBytes = () => Number(process.env.FOLDRUN_FILES_QUOTA_MB ?? 5120) * 1024 * 1024;
 
 // ---------- paths ----------
 
@@ -283,19 +283,19 @@ interface S3Config {
 }
 
 export function s3Config(): S3Config | null {
-  const endpoint = process.env.MDAGENT_S3_ENDPOINT;
-  const bucket = process.env.MDAGENT_S3_BUCKET;
-  const accessKeyId = process.env.MDAGENT_S3_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.MDAGENT_S3_SECRET_ACCESS_KEY;
+  const endpoint = process.env.FOLDRUN_S3_ENDPOINT;
+  const bucket = process.env.FOLDRUN_S3_BUCKET;
+  const accessKeyId = process.env.FOLDRUN_S3_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.FOLDRUN_S3_SECRET_ACCESS_KEY;
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return null;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     bucket,
     // R2 has one region and calls it `auto`. AWS callers set their own.
-    region: process.env.MDAGENT_S3_REGION ?? "auto",
+    region: process.env.FOLDRUN_S3_REGION ?? "auto",
     accessKeyId,
     secretAccessKey,
-    pathStyle: process.env.MDAGENT_S3_PATH_STYLE !== "false",
+    pathStyle: process.env.FOLDRUN_S3_PATH_STYLE !== "false",
   };
 }
 
@@ -481,7 +481,7 @@ function s3Driver(cfg: S3Config): Driver {
  * because a dashboard that boots and stores locally beats one that 500s.
  */
 export function driverFor(tenant: string, workspace: string): Driver {
-  if (process.env.MDAGENT_FILES_DRIVER === "s3") {
+  if (process.env.FOLDRUN_FILES_DRIVER === "s3") {
     const cfg = s3Config();
     if (cfg) return s3Driver(cfg);
   }

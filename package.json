@@ -1,5 +1,5 @@
 {
-  "name": "@mdagent/core",
+  "name": "@foldrun/core",
   "version": "0.1.0",
   "description": "Run agents defined as markdown. The format, the runner, the checks.",
   "license": "Apache-2.0",

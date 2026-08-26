@@ -30,7 +30,7 @@ export function secretsUsedByApi(api: ApiSpec): string[] {
 export interface ApiToolResult {
   /** Passed to the SDK as an in-process MCP server (the agent just sees tools). */
   server: ReturnType<typeof createSdkMcpServer> | null;
-  /** Tool names to allow, e.g. mcp__mdagent_apis__call_google_ads. */
+  /** Tool names to allow, e.g. mcp__foldrun_apis__call_google_ads. */
   toolNames: string[];
   /** Secrets referenced but not set — surfaced as run warnings. */
   missingSecrets: string[];
@@ -135,11 +135,11 @@ export function buildApiTools(
     ),
   );
 
-  const server = createSdkMcpServer({ name: "mdagent_apis", version: "1.0.0", tools });
+  const server = createSdkMcpServer({ name: "foldrun_apis", version: "1.0.0", tools });
 
   return {
     server,
-    toolNames: apis.map((a) => `mcp__mdagent_apis__call_${a.name}`),
+    toolNames: apis.map((a) => `mcp__foldrun_apis__call_${a.name}`),
     missingSecrets: missing,
     promptLines: apis.map(
       (a) =>

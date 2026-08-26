@@ -129,7 +129,7 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
     if (spec.npm.length) {
       fs.writeFileSync(
         path.join(root, "package.json"),
-        JSON.stringify({ name: `mdagent-runtime-${fp}`, private: true }, null, 2),
+        JSON.stringify({ name: `foldrun-runtime-${fp}`, private: true }, null, 2),
       );
       const installed = run("npm", ["install", "--no-fund", "--no-audit", "--silent", ...spec.npm], root);
       if (!installed.ok) {

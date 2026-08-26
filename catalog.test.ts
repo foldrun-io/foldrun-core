@@ -21,11 +21,11 @@ import {
 
 let dir: string;
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-catalog-"));
-  process.env.MDAGENT_DATA = dir;
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-catalog-"));
+  process.env.FOLDRUN_DATA = dir;
 });
 afterEach(() => {
-  delete process.env.MDAGENT_DATA;
+  delete process.env.FOLDRUN_DATA;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

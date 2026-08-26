@@ -309,10 +309,10 @@ test("a models: key that is not a tier is reported, not guessed at", () => {
 test("headers become one blob, and nothing in a value may end a header", () => {
   const spec = parseProvider({
     base_url: "https://x.test",
-    headers: { "X-Title": "mdagent", "HTTP-Referer": "https://example.test" },
+    headers: { "X-Title": "foldrun", "HTTP-Referer": "https://example.test" },
   })!;
   const env = providerEnvFor(spec);
-  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, "X-Title: mdagent\nHTTP-Referer: https://example.test");
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, "X-Title: foldrun\nHTTP-Referer: https://example.test");
 });
 
 test("a header that could inject another one is dropped", () => {
@@ -360,8 +360,8 @@ test("a gateway that wants the key header asks for it by name", () => {
 
 test("trust tier is derived, never stored", () => {
   assert.equal(trustTier([]), "unverified");
-  assert.equal(trustTier(["mdagent/0.1.0"]), "machine-confirmed");
-  assert.equal(trustTier(["mdagent/0.1.0", "human:matt"]), "human-reviewed");
+  assert.equal(trustTier(["foldrun/0.1.0"]), "machine-confirmed");
+  assert.equal(trustTier(["foldrun/0.1.0", "human:matt"]), "human-reviewed");
 });
 
 test("okf_version appears only at a bundle root", () => {
@@ -496,8 +496,8 @@ import os2 from "node:os";
 import path2 from "node:path";
 
 test("rename moves a file, refuses to clobber, and stays inside the gate", () => {
-  const data = fs2.mkdtempSync(path2.join(os2.tmpdir(), "mdagent-rename-"));
-  process.env.MDAGENT_DATA = data;
+  const data = fs2.mkdtempSync(path2.join(os2.tmpdir(), "foldrun-rename-"));
+  process.env.FOLDRUN_DATA = data;
   try {
     fs2.mkdirSync(path2.join(data, "default", "workspaces", "w", "flows"), { recursive: true });
     writeWorkspaceFile("default", "w", "flows/old.md", "---\nname: old\n---\n");
@@ -511,7 +511,7 @@ test("rename moves a file, refuses to clobber, and stays inside the gate", () =>
     assert.throws(() => renameWorkspaceFile("default", "w", "flows/new.md", "../../escape.md"));
     assert.throws(() => renameWorkspaceFile("default", "w", "flows/new.md", "runs/sneaky.md"));
   } finally {
-    delete process.env.MDAGENT_DATA;
+    delete process.env.FOLDRUN_DATA;
     fs2.rmSync(data, { recursive: true, force: true });
   }
 });

@@ -67,7 +67,7 @@ export async function sendRunNotification(
     return hit ? hit.value : whole;
   });
   if (url.includes("${")) {
-    console.error(`[mdagent] notify: secret in URL not set for ${tenant}/${workspace}`);
+    console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
     return false;
   }
 
@@ -101,12 +101,12 @@ export async function sendRunNotification(
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
-      console.error(`[mdagent] notify: ${tenant}/${workspace} → HTTP ${res.status}`);
+      console.error(`[foldrun] notify: ${tenant}/${workspace} → HTTP ${res.status}`);
       return false;
     }
     return true;
   } catch (err) {
-    console.error(`[mdagent] notify: ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
+    console.error(`[foldrun] notify: ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
     return false;
   }
 }

@@ -8,7 +8,7 @@
 // distinction machine-readable rather than a folder convention —
 //
 //   generated: { by: human:matt }         → knowledge you verified
-//   generated: { by: producer/mdagent }   → a fact an agent wrote
+//   generated: { by: producer/foldrun }   → a fact an agent wrote
 //
 // which matters because on disk those two files used to look identical.
 //
@@ -27,7 +27,7 @@ import matter from "gray-matter";
 export const OKF_VERSION = "0.2";
 
 /** This producer's actor string, in the spec's `<producer>/<version>` form. */
-export const PRODUCER = "mdagent/0.1.0";
+export const PRODUCER = "foldrun/0.1.0";
 
 /**
  * Our stand-in when a v0.1 document carries only `timestamp`. Not an actor —

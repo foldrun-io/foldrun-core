@@ -96,7 +96,7 @@ export function enqueueFlowRun(
 ): RunRecord {
   // Money is checked where work is added, and only where work is added —
   // resuming a parked run skips this on purpose. No-op unless the install
-  // enforces billing (MDAGENT_BILLING=1).
+  // enforces billing (FOLDRUN_BILLING=1).
   assertFunds(tenant);
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
   enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
@@ -213,7 +213,7 @@ export function recoverQueue(): QueueRecovery {
 // How many runs drive at once. A run is mostly waiting on a model, so this
 // is about memory and fairness, not CPU. Overridable per install.
 function concurrency() {
-  const n = Number(process.env.MDAGENT_CONCURRENCY);
+  const n = Number(process.env.FOLDRUN_CONCURRENCY);
   return Number.isInteger(n) && n > 0 ? n : 2;
 }
 
@@ -228,7 +228,7 @@ let started = false;
  * claimed/ always means "a driver is (or died) on it", never "waiting".
  */
 export function startWorker() {
-  if (started || process.env.MDAGENT_DISABLE_WORKER === "1") return;
+  if (started || process.env.FOLDRUN_DISABLE_WORKER === "1") return;
   started = true;
 
   let inFlight = 0;
@@ -266,7 +266,7 @@ export function startWorker() {
             if (settled) await sendRunNotification(tenant, workspace, settled);
           }
         } catch (err) {
-          console.error(`[mdagent] worker: run ${claim.job.runId} threw`, err);
+          console.error(`[foldrun] worker: run ${claim.job.runId} threw`, err);
         } finally {
           fs.rmSync(claim.claimedFile, { force: true });
           inFlight -= 1;

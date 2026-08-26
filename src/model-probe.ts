@@ -68,7 +68,7 @@ export async function probeModel(
 
   // Homeless on purpose, like a consult: the probe reads and writes nothing,
   // and a throwaway cwd means even a confused model call has no tree to touch.
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "mdagent-probe-"));
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-probe-"));
   const started = Date.now();
   try {
     const outcome = await executeStep({
@@ -83,10 +83,10 @@ export async function probeModel(
       systemPrompt:
         "You are a connectivity probe. Follow the instruction literally. Do not explain.",
       allowed: [],
-      mcpNames: ["mdagent_probe"],
+      mcpNames: ["foldrun_probe"],
       mcpServers: {
-        mdagent_probe: createSdkMcpServer({
-          name: "mdagent_probe",
+        foldrun_probe: createSdkMcpServer({
+          name: "foldrun_probe",
           version: "1.0.0",
           tools: [probeTool],
         }),

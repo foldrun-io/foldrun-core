@@ -7,7 +7,7 @@
 // mode that matters. Run costs are recorded once per run (idempotent by
 // run id), so re-driving a resumed run cannot bill it twice.
 //
-// Enforcement is opt-in per install: MDAGENT_BILLING=1 makes an empty tank
+// Enforcement is opt-in per install: FOLDRUN_BILLING=1 makes an empty tank
 // refuse new runs. Self-hosters who never set it get the ledger as pure
 // observability — the "Spent" tile with a paper trail — and the CLI never
 // sets it, so local runs are never refused. The hosted platform sets it.
@@ -36,8 +36,8 @@ export interface LedgerEntry {
  * Margin, as platform configuration — not code, and never per-customer
  * logic scattered through the runner:
  *
- *   MDAGENT_MARGIN=1.25       charge 25% over provider cost (default 1)
- *   MDAGENT_MIN_RUN_FEE=0.01  no billable run charges less than this
+ *   FOLDRUN_MARGIN=1.25       charge 25% over provider cost (default 1)
+ *   FOLDRUN_MIN_RUN_FEE=0.01  no billable run charges less than this
  *
  * The floor only applies to runs that cost something: a run that failed
  * before its first model call spent nothing and is charged nothing —
@@ -45,8 +45,8 @@ export interface LedgerEntry {
  * them for the product working.
  */
 function marginConfig(): { margin: number; minFee: number } {
-  const margin = Number(process.env.MDAGENT_MARGIN);
-  const minFee = Number(process.env.MDAGENT_MIN_RUN_FEE);
+  const margin = Number(process.env.FOLDRUN_MARGIN);
+  const minFee = Number(process.env.FOLDRUN_MIN_RUN_FEE);
   return {
     margin: Number.isFinite(margin) && margin > 0 ? margin : 1,
     minFee: Number.isFinite(minFee) && minFee > 0 ? minFee : 0,
@@ -67,7 +67,7 @@ function ledgerFile(tenant: string) {
 }
 
 export function billingEnabled() {
-  return process.env.MDAGENT_BILLING === "1";
+  return process.env.FOLDRUN_BILLING === "1";
 }
 
 export function readLedger(tenant: string): LedgerEntry[] {

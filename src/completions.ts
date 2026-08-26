@@ -148,7 +148,7 @@ const FIELDS: Record<string, Completion[]> = {
     },
     {
       label: "provider.headers",
-      insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}\n  headers:\n    X-Title: mdagent",
+      insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}\n  headers:\n    X-Title: foldrun",
       hint: "gateway-specific settings — ${SECRET} resolves server-side",
     },
   ],
@@ -282,7 +282,7 @@ const HEADER_NAMES: Completion[] = [
   { label: "Content-Type", insert: "Content-Type: application/json" },
   { label: "Accept", insert: "Accept: application/json" },
   { label: "Accept-Language", insert: "Accept-Language: en-AU" },
-  { label: "User-Agent", insert: "User-Agent: mdagent" },
+  { label: "User-Agent", insert: "User-Agent: foldrun" },
   { label: "X-Api-Version", insert: "X-Api-Version: " },
   { label: "anthropic-version", insert: "anthropic-version: 2023-06-01" },
   { label: "developer-token", insert: "developer-token: ${DEVELOPER_TOKEN}", hint: "Google Ads" },

@@ -17,19 +17,19 @@ import type { RuntimeSpec } from "./runtime.ts";
 import { fingerprint } from "./runtime.ts";
 
 const BUILD_TIMEOUT_MS = 600_000;
-const IMAGE_PREFIX = "mdagent-runtime";
+const IMAGE_PREFIX = "foldrun-runtime";
 
 // Any Docker-compatible CLI works — Docker Engine, colima, Podman, nerdctl,
 // OrbStack. Copying files in and out (rather than bind-mounting) is what
 // makes that portability real: no host path has to be shared with a VM.
-const CLI = process.env.MDAGENT_CONTAINER_CLI ?? "docker";
+const CLI = process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
 
 export type Executor = "docker" | "host";
 
 let cachedAvailability: boolean | null = null;
 
 export function dockerAvailable(): boolean {
-  if (process.env.MDAGENT_EXECUTOR === "host") return false;
+  if (process.env.FOLDRUN_EXECUTOR === "host") return false;
   if (cachedAvailability !== null) return cachedAvailability;
   const res = spawnSync(CLI, ["info", "--format", "{{.ServerVersion}}"], {
     encoding: "utf8",

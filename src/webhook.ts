@@ -1,6 +1,6 @@
 // Per-flow webhook tokens, derived rather than stored: HMAC of the flow's
 // identity under the install's secret key. Stable across restarts, unique
-// per flow, and rotating MDAGENT_SECRET_KEY invalidates every hook at once.
+// per flow, and rotating FOLDRUN_SECRET_KEY invalidates every hook at once.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -15,11 +15,11 @@ const keyFile = () => path.join(dataRoot(), ".secret-key");
  * hangs off this one value, so rotating it invalidates all of them together.
  */
 export function installKey(): string {
-  if (process.env.MDAGENT_SECRET_KEY) return process.env.MDAGENT_SECRET_KEY;
+  if (process.env.FOLDRUN_SECRET_KEY) return process.env.FOLDRUN_SECRET_KEY;
   if (fs.existsSync(keyFile())) return fs.readFileSync(keyFile(), "utf8");
   // secrets.ts creates this on first use; fall back to a fixed dev value so
   // hook URLs stay stable before any secret has been set.
-  return "mdagent-dev-install";
+  return "foldrun-dev-install";
 }
 
 // Per-hook rotation without storing tokens: what is stored is a generation

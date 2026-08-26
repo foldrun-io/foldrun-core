@@ -31,7 +31,7 @@ import { readTransport, KINDS } from "./kinds.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
-// against one folder, which is what `mdagent run ./my-desk` has to mean.
+// against one folder, which is what `foldrun run ./my-desk` has to mean.
 
 /**
  * Single-workspace mode. When set, the workspace IS this directory — no
@@ -122,7 +122,7 @@ export function accountDir(tenant: string) {
  *
  * Never overwrites, and treats the legacy `project.md` as already-present: the
  * whole file is hand-authored config, and a deploy is not permission to touch
- * a scope the deploy did not ship. `dir` is explicit for `mdagent init`, which
+ * a scope the deploy did not ship. `dir` is explicit for `foldrun init`, which
  * writes a workspace to an arbitrary path before anything is pinned to it and
  * so cannot ask accountDir where "up" is.
  */
@@ -153,7 +153,7 @@ const CANONICAL = ["AGENTS.md", "SKILL.md"];
 /**
  * The format version this build understands.
  *
- * A workspace declares what it targets with `mdagent_version` in AGENTS.md.
+ * A workspace declares what it targets with `foldrun_version` in AGENTS.md.
  * Without it, the first breaking change to the flow grammar or frontmatter
  * silently changes what everyone's existing files mean — the one failure a
  * format cannot recover from, because there is no error to notice.
@@ -181,7 +181,7 @@ export function checkFormatVersion(declared: unknown): VersionCheck {
       declared: value,
       supported: FORMAT_VERSION,
       warning:
-        `this workspace targets mdagent format ${value}, and this build understands ` +
+        `this workspace targets foldrun format ${value}, and this build understands ` +
         `${FORMAT_VERSION}. A different major version may mean different behaviour — ` +
         `read it as best-effort rather than correct.`,
     };
@@ -191,7 +191,7 @@ export function checkFormatVersion(declared: unknown): VersionCheck {
       declared: value,
       supported: FORMAT_VERSION,
       warning:
-        `this workspace targets mdagent format ${value}; this build understands ` +
+        `this workspace targets foldrun format ${value}; this build understands ` +
         `${FORMAT_VERSION}. Newer fields will be ignored rather than rejected.`,
     };
   }
@@ -226,7 +226,7 @@ export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.js
 export function isPlatformPath(rel: string): boolean {
   const norm = rel.replaceAll("\\", "/");
   if (PLATFORM_FILES.includes(norm)) return true;
-  return norm === "runs" || norm.startsWith("runs/") || norm === ".mdagent" || norm.startsWith(".mdagent/");
+  return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
 }
 
 export function saveWorkspace(tenant: string, workspace: string, files: DeployFile[]) {
@@ -1381,7 +1381,7 @@ export function setWorkspaceDescription(tenant: string, workspace: string, descr
  * Starter files for "+ New workspace" in the dashboard.
  *
  * Kept as a name because the API route and its callers use it; the content
- * lives in starter.ts so this and `mdagent init` cannot drift. They did:
+ * lives in starter.ts so this and `foldrun init` cannot drift. They did:
  * this copy still said `type: Agent` after the CLI's had moved to `kind:`,
  * so every workspace made from the dashboard was born in the old format.
  */
@@ -1408,7 +1408,7 @@ export type FlowPattern = (typeof FLOW_PATTERNS)[number];
 
 export function flowPatternTemplate(pattern: FlowPattern, name: string, agents: string[]): string {
   // Real agents where they exist, honest placeholders where they don't —
-  // `mdagent check` will point at any placeholder left unrenamed.
+  // `foldrun check` will point at any placeholder left unrenamed.
   const a = (i: number, fallback: string) => agents[i] ?? agents[0] ?? fallback;
   const head = `---\nname: ${name}\n---\n\n`;
   switch (pattern) {
@@ -1610,7 +1610,7 @@ export function listRuns(tenant: string, workspace: string): RunRecord[] {
  *       fast: google/gemini-2.5-flash
  *       max: anthropic/claude-opus-4.1
  *     headers:
- *       X-Title: mdagent
+ *       X-Title: foldrun
  *
  * `models:` is what makes tiers portable rather than merely renamed-proof:
  * without it `model: fast` means the literal string "haiku" on every

@@ -1,4 +1,4 @@
-// @mdagent/core — the open-source runtime.
+// @foldrun/core — the open-source runtime.
 //
 // Everything needed to read a workspace of markdown files and run the agents
 // in it. No server, no database, no account: point it at a folder.

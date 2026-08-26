@@ -1,6 +1,6 @@
 // The starter workspace, defined once.
 //
-// Two things used to build one: `mdagent init` had its own copy and the
+// Two things used to build one: `foldrun init` had its own copy and the
 // dashboard's "new workspace" button had another. They drifted exactly as you
 // would expect — different flow names, one with evals and knowledge and one
 // without — and when structural documents moved from `type:` to `kind:`, one
@@ -14,7 +14,7 @@
 // of a kind with a placeholder name — that is what the New button uses inside
 // an existing workspace. This is the set of files a brand-new workspace starts
 // with, and they reference each other on purpose: the flow names the agents,
-// the eval names the writer, so `mdagent check` passes and `mdagent run
+// the eval names the writer, so `foldrun check` passes and `foldrun run
 // publish` works before anything has been edited.
 
 /** One authored file, relative to the workspace root. */
@@ -42,7 +42,7 @@ export function accountFiles(account: string): StarterFile[] {
     {
       path: "AGENTS.md",
       content: `---
-mdagent_version: "0.1"
+foldrun_version: "0.1"
 # Config here applies to every workspace under this account, and a workspace
 # that declares the same key replaces it *whole* — base_url and token never
 # merge across scopes, so a provider block belongs entirely at one level.
@@ -54,7 +54,7 @@ mdagent_version: "0.1"
 #     fast: google/gemini-2.5-flash
 #     max: anthropic/claude-opus-4.1
 #   headers:           # anything else the gateway wants
-#     X-Title: mdagent
+#     X-Title: foldrun
 #
 # The token is sent as a bearer credential. A gateway that wants it as a key
 # header asks for that by name: headers: { x-api-key: \${THE_SECRET} }.
@@ -83,7 +83,7 @@ export function starterFiles(workspace: string): StarterFile[] {
       content: `---
 name: ${workspace}
 description: A starter workspace — edit the agents, then run the flow.
-mdagent_version: "0.1"
+foldrun_version: "0.1"
 ---
 
 # ${workspace}
@@ -96,13 +96,13 @@ Context every agent here shares. Prices, rules, anything they should all know.
       // A workspace is meant to be a git repository — that is the whole pitch,
       // that you can diff and review what an agent is. So it has to arrive
       // knowing which of its own files must never be committed. The decisive
-      // one is `.mdagent/.secret-key`: the CLI writes the key that decrypts
+      // one is `.foldrun/.secret-key`: the CLI writes the key that decrypts
       // every secret *inside the workspace*, and without this file the first
       // `git add -A` after setting a secret commits it.
       path: ".gitignore",
       content: `# The key that decrypts every secret in this workspace, plus the
 # local run store. Never commit these.
-.mdagent/
+.foldrun/
 
 # Written by runs, not by you.
 runs/

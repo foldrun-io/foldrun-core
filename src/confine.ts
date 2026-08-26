@@ -119,7 +119,7 @@ const VIRTUAL = [
 
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
-// Only the built-in filesystem tools get path checks. mdagent's own MCP tools
+// Only the built-in filesystem tools get path checks. foldrun's own MCP tools
 // are already confined at their own layer — script paths by resolveRunPath,
 // APIs by their declared base URL — and their arguments are not filesystem
 // paths at all: `call_<api>` takes a *URL* path like "/uuid", which this
