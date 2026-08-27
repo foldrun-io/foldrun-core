@@ -139,7 +139,10 @@ function safeMatter(raw: string): { data: Record<string, unknown> } {
         (_m, k: string, v: string) => `${k}: ${JSON.stringify(v)}`,
       );
       try {
-        return matter(raw.replace(fm[1], fixed)) as { data: Record<string, unknown> };
+        // A function replacer, not a string: a fixed block containing `$&` or
+        // `$$` (a value with those in it) would otherwise be treated as a
+        // replacement pattern and splice the whole frontmatter into itself.
+        return matter(raw.replace(fm[1], () => fixed)) as { data: Record<string, unknown> };
       } catch {
         /* fall through */
       }
