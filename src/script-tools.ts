@@ -317,8 +317,17 @@ export function buildScriptTools(
           Object.entries(args ?? {}).map(([k, v]) => [k, v === undefined ? "" : String(v)]),
         );
         const { code, out } = await runScript(agentDir, spec, values, env, libraryScripts, interpreters, exec);
+        // The arguments, on the record. Without them a run says a script was
+        // called and not what it was asked to do — and for a script that
+        // writes to someone else's system, "it ran" is not an account of what
+        // happened. Model-supplied strings only: secrets reach a script
+        // through its environment, never through these.
+        const shown = Object.entries(values)
+          .filter(([, v]) => v !== "")
+          .map(([k, v]) => `${k}=${v.length > 80 ? `${v.slice(0, 77)}…` : v}`)
+          .join(", ");
         log.push(
-          `${spec.name} (${spec.run}) → exit ${code ?? "error"} ` +
+          `${spec.name}(${shown}) → exit ${code ?? "error"} ` +
             `(${Date.now() - started}ms, ${exec?.executor ?? "host"})`,
         );
         return {
