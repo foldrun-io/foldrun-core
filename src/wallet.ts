@@ -248,3 +248,17 @@ export async function walletGuard(tenant: string): Promise<void> {
     }
   }
 }
+
+/** What one workspace has spent this calendar month — the number a
+ *  workspace page shows beside the account's remaining credits. */
+export function workspaceMonthSpendUsd(tenant: string, workspace: string): number {
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
+  let spend = 0;
+  for (const e of readLedger(tenant)) {
+    if (e.usd >= 0 || e.workspace !== workspace) continue;
+    if (new Date(e.t).getTime() >= monthStart.getTime()) spend += -e.usd;
+  }
+  return Number(spend.toFixed(4));
+}
