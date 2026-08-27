@@ -111,6 +111,12 @@ const cli = () => process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
 // copied in), plus knowledge/, which goes in for reading and is dropped on
 // the way out, and .git/.
 const DENY_BACK = ["knowledge/", ".git/"];
+// A .git ANYWHERE in the tree, not just at the root. A step that clones a
+// repository into a shared area (files/site, say) was shipping the entire
+// object store back to the workspace, where the harvest then filed thousands
+// of git internals as "files the agents produced". Git metadata is never a
+// reviewable artifact; the clone's content comes back, its plumbing does not.
+const DENY_BACK_GIT_RE = /(^|\/)\.git(\/|$)/;
 // Materialised @file secrets (SSH keys, certs) live under .secret-files/ in
 // an agent's dir while a step runs; they are live credentials and must never
 // come back to the host, whatever the step wrote there.
@@ -125,6 +131,7 @@ export function allowedBack(rel: string): boolean {
   if (isPlatformPath(norm)) return false;
   if (DENY_BACK.some((d) => norm === d.replace(/\/$/, "") || norm.startsWith(d))) return false;
   if (DENY_BACK_RE.test(norm)) return false;
+  if (DENY_BACK_GIT_RE.test(norm)) return false;
   if (DENY_BACK_SECRET_FILES.test(norm)) return false;
   return true;
 }
