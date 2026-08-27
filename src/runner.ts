@@ -243,6 +243,72 @@ export function applicableSkills<T extends { name: string; when: string[] }>(
     .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
 }
 
+/**
+ * [[name]] as a reference to a document or file — the Obsidian instinct,
+ * honoured where it is safe. A prompt is text the model acts on, and a
+ * model cannot open "[[sources-of-conveyancers]]"; it can open
+ * `../../knowledge/sources-of-conveyancers.md`. So links resolve to real
+ * agent-relative paths BEFORE the prompt is built, matching by filename or
+ * OKF title, hyphen/underscore/case-blind. Anything unmatched — agent
+ * names, flow links, prose in brackets — passes through untouched: this is
+ * sugar over paths, never a gate in front of them.
+ */
+export function resolveDocLinks(text: string, workspaceRoot: string): string {
+  if (!text.includes("[[")) return text;
+  const map = new Map<string, string>();
+  const norm = (v: string) => v.toLowerCase().replace(/\.md$/, "").replace(/[^a-z0-9/]+/g, "-");
+  for (const kind of ["knowledge", "memory"] as const) {
+    const dir = path.join(workspaceRoot, kind);
+    if (!fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { recursive: true }).map(String)) {
+      if (!entry.endsWith(".md")) continue;
+      const rel = `../../${kind}/${entry.split(path.sep).join("/")}`;
+      map.set(norm(entry), rel);
+      map.set(norm(`${kind}/${entry}`), rel);
+      try {
+        const title = matter(fs.readFileSync(path.join(dir, entry), "utf8")).data?.title;
+        if (typeof title === "string" && title) map.set(norm(title), rel);
+      } catch {
+        // unparseable frontmatter still resolves by filename
+      }
+    }
+  }
+  try {
+    // The hosted store's index lives at <tenant>/files/<workspace>/ — beside
+    // the workspaces, not inside one. workspaceRoot is <tenant>/…/<ws>, so
+    // up two and across. Single-workspace installs have no index and fall
+    // through to the plain-directory walk below.
+    const index = JSON.parse(
+      fs.readFileSync(
+        path.join(workspaceRoot, "..", "..", "files", path.basename(workspaceRoot), "index.json"),
+        "utf8",
+      ),
+    ) as { files?: { path: string }[] };
+    for (const f of index.files ?? []) map.set(norm(`files/${f.path}`), `../../files/${f.path}`);
+  } catch {
+    // no file store index is normal
+  }
+  // Plain files on disk under files/ too — local installs write there directly.
+  const filesDir = path.join(workspaceRoot, "files");
+  if (fs.existsSync(filesDir)) {
+    for (const entry of fs.readdirSync(filesDir, { recursive: true }).map(String)) {
+      try {
+        if (!fs.statSync(path.join(filesDir, entry)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const fwd = entry.split(path.sep).join("/");
+      if (fwd.startsWith(".store/")) continue;
+      map.set(norm(`files/${fwd}`), `../../files/${fwd}`);
+      map.set(norm(fwd), `../../files/${fwd}`);
+    }
+  }
+  return text.replace(/\[\[([^\]\n]+)\]\]/g, (whole, name: string) => {
+    const hit = map.get(norm(name.trim()));
+    return hit ? `\`${hit}\`` : whole;
+  });
+}
+
 function agentContext(
   agentDir: string,
   tenant: string,
@@ -256,7 +322,7 @@ function agentContext(
   const { data: front, content: body } = matter(
     fs.readFileSync(path.join(agentDir, "agent.md"), "utf8"),
   );
-  const parts = [body.trim()];
+  const parts = [resolveDocLinks(body.trim(), path.resolve(agentDir, "..", ".."))];
 
   // Where the agent is standing. Every path below this line is relative to the
   // agent's own directory, and a run showed why that has to be said rather
@@ -990,7 +1056,9 @@ async function runStep(
     // workspace is where isolation is enforced.
     const workspaceRoot = path.resolve(agentDir, "..", "..");
 
-    let prompt = step.instruction || "Begin your run now, following your instructions.";
+    let prompt = step.instruction
+      ? resolveDocLinks(step.instruction, workspaceRoot)
+      : "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
     if (step.approvalNote) {
       // The person at the gate said something while letting the run through.

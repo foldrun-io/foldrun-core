@@ -16,6 +16,10 @@ export interface Vocabulary {
   tools: string[];
   secrets: string[];
   scripts: string[]; // already prefixed: workspace/scripts/x.py
+  /** Everything [[ ]] can point at besides agents and flows: knowledge and
+   *  memory docs, and paths in the file store. One reference syntax for the
+   *  whole workspace — the Obsidian instinct, honoured. */
+  docs?: { name: string; hint: string }[];
   /** OKF `type:` values already used here. The index groups by exact string,
    *  so offering what exists is what keeps a bundle consistent. */
   types: string[];
@@ -336,8 +340,13 @@ export function completionsAt(
     const items: Completion[] = [
       ...vocab.agents.map((a) => ({ label: a, hint: "agent" })),
       ...vocab.flows.map((f) => ({ label: `flow:${f}`, hint: "flow" })),
+      // Knowledge, memory and files join the same bracket: in a flow the
+      // first link on a step line stays structural (the parser only reads
+      // that one), and everywhere else the runner resolves these to the
+      // real relative path before the model sees the prompt.
+      ...(vocab.docs ?? []).map((d) => ({ label: d.name, hint: d.hint })),
     ];
-    return { from: open + 2, query, items: filter(items, query), title: "Link a step" };
+    return { from: open + 2, query, items: filter(items, query), title: "Link" };
   }
 
   // 2. ${SECRET} — inside a header, env or query value.
