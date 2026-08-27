@@ -117,10 +117,43 @@ export interface DiscoveredSkill {
 const toTags = (v: unknown): string[] =>
   Array.isArray(v) ? v.map(String) : typeof v === "string" && v.trim() ? [v.trim()] : [];
 
-// Both layouts: skills/<name>/SKILL.md (Agent Skills standard) and the
-// flat skills/<name>.md convenience form.
-export function discoverSkills(agentDir: string): DiscoveredSkill[] {
-  const skillsDir = path.join(agentDir, "skills");
+// gray-matter throws on invalid YAML. Skills authored for another client
+// sometimes ship YAML that that client's parser happened to accept — most
+// often an unquoted value containing a colon (`description: Use when: ...`).
+// The Agent Skills client guide recommends quoting such values and retrying
+// rather than dropping the skill, so a cross-client skill still loads here.
+function safeMatter(raw: string): { data: Record<string, unknown> } {
+  // gray-matter caches by input string AND caches a *failed* parse: the first
+  // call on invalid YAML throws, but every later call on the same bytes returns
+  // a hollow object with the fields silently missing. Clearing the cache makes
+  // the throw deterministic, so the fallback below fires every time rather than
+  // once — otherwise the same skill loads on one run and vanishes on the next.
+  (matter as unknown as { clearCache: () => void }).clearCache();
+  try {
+    return matter(raw) as { data: Record<string, unknown> };
+  } catch {
+    const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (fm) {
+      const fixed = fm[1].replace(
+        /^([A-Za-z0-9_-]+):[ \t]+(?!["'>|])(.*:.*)$/gm,
+        (_m, k: string, v: string) => `${k}: ${JSON.stringify(v)}`,
+      );
+      try {
+        return matter(raw.replace(fm[1], fixed)) as { data: Record<string, unknown> };
+      } catch {
+        /* fall through */
+      }
+    }
+    return { data: {} };
+  }
+}
+
+// Both layouts: <root>/<name>/SKILL.md (Agent Skills standard) and the flat
+// <root>/<name>.md convenience form. `subdir` is the skills root under the
+// scanned directory — "skills" (foldrun-native) or ".agents/skills" (the
+// cross-client convention other skills-compatible tools read and write).
+export function discoverSkills(agentDir: string, subdir = "skills"): DiscoveredSkill[] {
+  const skillsDir = path.join(agentDir, subdir);
   if (!fs.existsSync(skillsDir)) return [];
   const out: DiscoveredSkill[] = [];
 
@@ -131,24 +164,32 @@ export function discoverSkills(agentDir: string): DiscoveredSkill[] {
     if (stat.isDirectory()) {
       const skillMd = path.join(full, "SKILL.md");
       if (!fs.existsSync(skillMd)) continue;
-      const { data } = matter(fs.readFileSync(skillMd, "utf8"));
+      const { data } = safeMatter(fs.readFileSync(skillMd, "utf8"));
+      const description = typeof data.description === "string" ? data.description.trim() : "";
+      // The spec makes description essential — it is the only thing the model
+      // sees before activating the skill. Without one there is nothing to
+      // disclose, so the skill is skipped rather than offered blind. `check`
+      // reports it; here it is simply not loaded.
+      if (!description) continue;
       out.push({
-        name: data.name ?? entry,
-        description: data.description ?? "",
+        name: typeof data.name === "string" && data.name ? data.name : entry,
+        description,
         when: toTags(data.when),
-        path: `skills/${entry}/SKILL.md`,
-        dir: `skills/${entry}`,
+        path: `${subdir}/${entry}/SKILL.md`,
+        dir: `${subdir}/${entry}`,
         hasScripts: fs.existsSync(path.join(full, "scripts")),
         hasReferences: fs.existsSync(path.join(full, "references")),
         hasAssets: fs.existsSync(path.join(full, "assets")),
       });
     } else if (entry.endsWith(".md")) {
-      const { data } = matter(fs.readFileSync(full, "utf8"));
+      const { data } = safeMatter(fs.readFileSync(full, "utf8"));
+      const description = typeof data.description === "string" ? data.description.trim() : "";
+      if (!description) continue;
       out.push({
-        name: data.name ?? entry.replace(/\.md$/, ""),
-        description: data.description ?? "",
+        name: typeof data.name === "string" && data.name ? data.name : entry.replace(/\.md$/, ""),
+        description,
         when: toTags(data.when),
-        path: `skills/${entry}`,
+        path: `${subdir}/${entry}`,
         dir: null,
         hasScripts: false,
         hasReferences: false,
@@ -388,15 +429,21 @@ function agentContext(
   // definition of a name wins, so a team default can be overridden locally.
   const skills: DiscoveredSkill[] = [];
   const seenSkills = new Set<string>();
-  const addSkills = (dir: string, prefix: string) => {
-    for (const skill of discoverSkills(dir)) {
+  const addSkills = (dir: string, prefix: string, subdir = "skills") => {
+    for (const skill of discoverSkills(dir, subdir)) {
       if (seenSkills.has(skill.name)) continue;
       seenSkills.add(skill.name);
       skills.push({ ...skill, path: `${prefix}${skill.path}`, dir: skill.dir ? `${prefix}${skill.dir}` : null });
     }
   };
+  const workspaceRoot = path.join(agentDir, "..", "..");
   addSkills(agentDir, "");
-  addSkills(path.join(agentDir, "..", ".."), "../../"); // the workspace root
+  addSkills(workspaceRoot, "../../"); // the workspace's skills/
+  // The cross-client convention: skills any skills-compatible tool installs
+  // under .agents/skills/ are visible here too, and vice versa. Scanned after
+  // the native location so a foldrun-native skill wins a name clash, but both
+  // are discovered. project scope only — foldrun workspaces are self-contained.
+  addSkills(workspaceRoot, "../../", ".agents/skills");
   addSkills(path.join(libraryDir(tenant)), "../../../../library/"); // the account library
 
   // A skill with `when:` only loads when the run carries a matching tag —
