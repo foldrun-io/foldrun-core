@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { accountDir } from "./store.ts";
+import { accountDir, workspaceDir } from "./store.ts";
 import { readLedger, creditBalance, billingEnabled } from "./ledger.ts";
 import { getSecret } from "./secrets.ts";
 import matter from "gray-matter";
@@ -261,4 +261,37 @@ export function workspaceMonthSpendUsd(tenant: string, workspace: string): numbe
     if (new Date(e.t).getTime() >= monthStart.getTime()) spend += -e.usd;
   }
   return Number(spend.toFixed(4));
+}
+
+/** `budget:` in a workspace's AGENTS.md — a monthly spend cap in USD, or
+ *  null when the workspace declares none. */
+export function workspaceBudgetUsd(tenant: string, workspace: string): number | null {
+  try {
+    const raw = matter(
+      fs.readFileSync(path.join(workspaceDir(tenant, workspace), "AGENTS.md"), "utf8"),
+    ).data?.budget;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The budget gate, refused at admission like assertFunds. A cap the customer
+ * wrote in their own file is honoured whether or not platform billing is
+ * armed — it is their control on their spend, not ours on our revenue.
+ * Runs already going always finish; the cap stops the next one starting.
+ */
+export function assertWorkspaceBudget(tenant: string, workspace: string) {
+  const budget = workspaceBudgetUsd(tenant, workspace);
+  if (budget === null) return;
+  const spent = workspaceMonthSpendUsd(tenant, workspace);
+  if (spent < budget) return;
+  const err = new Error(
+    `workspace ${workspace} is at its monthly budget — $${spent.toFixed(2)} spent of ` +
+      `$${budget.toFixed(2)} (budget: in its AGENTS.md; raise it or wait for the new month)`,
+  );
+  (err as Error & { status: number }).status = 402;
+  throw err;
 }

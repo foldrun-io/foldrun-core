@@ -40,7 +40,7 @@ import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
 import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
-import { walletGuard } from "./wallet.ts";
+import { walletGuard, assertWorkspaceBudget } from "./wallet.ts";
 import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
 
@@ -140,6 +140,7 @@ export function enqueueFlowRun(
   // resuming a parked run skips this on purpose. No-op unless the install
   // enforces billing (FOLDRUN_BILLING=1).
   assertFunds(tenant, countInFlight(tenant));
+  assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
   enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
   return run;
@@ -249,6 +250,7 @@ export function startFlowFromStep(
     throw new Error(`flow ${flowName} has no step ${fromStep} (it has ${maxGroup})`);
   }
   assertFunds(tenant, countInFlight(tenant));
+  assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, flow.steps, flowName, "queued");
   for (const step of run.steps) {
     if (step.group < fromStep) {
@@ -304,6 +306,7 @@ export function rerunFrom(
   }
 
   assertFunds(tenant, countInFlight(tenant));
+  assertWorkspaceBudget(tenant, workspace);
 
   // Re-runs exist to iterate: fix the flow, re-run the step. So the reset
   // steps take their instructions from the flow file as it reads *now*, not
