@@ -243,7 +243,13 @@ export function applicableSkills<T extends { name: string; when: string[] }>(
     .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
 }
 
-function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
+function agentContext(
+  agentDir: string,
+  tenant: string,
+  tags: string[] = [],
+  /** Who is running, so scripts can stamp what they write with its provenance. */
+  identity: { runId?: string; agent?: string } = {},
+) {
   // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
   // workspace a secret should resolve against is two levels up.
   const workspace = path.basename(path.resolve(agentDir, "..", ".."));
@@ -631,7 +637,17 @@ function agentContext(agentDir: string, tenant: string, tags: string[] = []) {
   const scriptTools = buildScriptTools(
     agentDir,
     scriptSpecs,
-    { ...runtime.env, ...secretEnv },
+    // A script can say where its work came from. Without this, anything a
+    // tool writes into another system lands anonymous: you can see 100 new
+    // contacts and have no way back to the run that made them. The run id,
+    // the agent, and the date the platform believes it is.
+    {
+      ...runtime.env,
+      ...secretEnv,
+      ...(identity.runId ? { FOLDRUN_RUN_ID: identity.runId } : {}),
+      ...(identity.agent ? { FOLDRUN_AGENT: identity.agent } : {}),
+      FOLDRUN_DATE: new Date().toISOString().slice(0, 10),
+    },
     libraryDir(tenant, "scripts"),
     runtime.interpreters,
     exec,
@@ -832,7 +848,7 @@ async function runStep(
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
-    } = agentContext(agentDir, tenant, tags);
+    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
