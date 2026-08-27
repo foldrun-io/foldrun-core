@@ -266,8 +266,14 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       map.set(norm(entry), rel);
       map.set(norm(`${kind}/${entry}`), rel);
       try {
-        const title = matter(fs.readFileSync(path.join(dir, entry), "utf8")).data?.title;
-        if (typeof title === "string" && title) map.set(norm(title), rel);
+        const data = matter(fs.readFileSync(path.join(dir, entry), "utf8")).data as Record<string, unknown>;
+        // `title:` is OKF v0.2's word; `name:` is the older spelling still
+        // read, never written. A link should match what the file says it
+        // is, in either era's vocabulary.
+        for (const key of ["title", "name"] as const) {
+          const v = data?.[key];
+          if (typeof v === "string" && v) map.set(norm(v), rel);
+        }
       } catch {
         // unparseable frontmatter still resolves by filename
       }
