@@ -371,7 +371,19 @@ export function completionsAt(
   const inlineList = line.match(/^(\s*)([a-zA-Z_]+):\s*\[([^\]]*)$/);
   if (inlineList) {
     const [, , key, inside] = inlineList;
-    const options: Record<string, Completion[]> = { methods: METHODS, tags: [] };
+    // The inline and block forms of a list are the same field — `use: [a, b]`
+    // and `use:\n  - a` must complete identically, or the shorthand people
+    // actually write is the one the editor abandons.
+    const options: Record<string, Completion[]> = {
+      methods: METHODS,
+      tags: [],
+      tools: [...TOOL_GROUPS, ...vocab.tools.map((t) => ({ label: t, hint: "your tool" })), ...SDK_TOOL_NAMES],
+      use: vocab.tools.map((t) => ({ label: t, hint: "tool" })),
+      secrets: vocab.secrets.map((se) => ({ label: se, hint: "secret" })),
+      skills: vocab.skills.map((sk) => ({ label: sk, hint: "skill" })),
+      agents: vocab.agents.map((a) => ({ label: a, hint: "consult mid-run" })),
+      delegate: vocab.agents.map((a) => ({ label: a, hint: "agent" })),
+    };
     const all = options[key];
     if (all) {
       const lastComma = inside.lastIndexOf(",");
