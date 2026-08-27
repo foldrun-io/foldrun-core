@@ -493,6 +493,50 @@ function concurrency() {
 
 const POLL_MS = 1000;
 
+// One worker per data directory, enforced at runtime rather than by a YAML
+// comment. Same shape as the scheduler's lease: a file naming its holder,
+// renewed each tick, stale after three missed renewals, takeover by
+// read-then-write. The worst case is one bounded double-claim attempt during
+// a handover — and claimNext's rename already makes a double-claim lose
+// cleanly. What this prevents is the quiet catastrophe: a second worker
+// replica double-DRIVING every run on shared storage.
+const WORKER_LEASE_STALE_MS = 90_000;
+const WORKER_OWNER = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
+function workerLeaseFile() {
+  return path.join(dataRoot(), ".worker-lease");
+}
+
+/** True when this process holds (or just took) the worker lease. */
+export function holdsWorkerLease(now = Date.now()): boolean {
+  const file = workerLeaseFile();
+  try {
+    const current = JSON.parse(fs.readFileSync(file, "utf8")) as { owner: string; renewedAt: number };
+    if (current.owner !== WORKER_OWNER && now - current.renewedAt < WORKER_LEASE_STALE_MS) return false;
+  } catch {
+    // no lease yet, or unreadable — claimable
+  }
+  const tmp = `${file}.${WORKER_OWNER}`;
+  fs.writeFileSync(tmp, JSON.stringify({ owner: WORKER_OWNER, renewedAt: now }));
+  fs.renameSync(tmp, file);
+  return true;
+}
+
+/**
+ * Whether THIS process currently holds the worker lease — a pure read.
+ * The probe endpoint calls this, and it must never write: a web replica's
+ * healthcheck taking a stale lease would hold it while running no worker,
+ * and every run on the install would quietly stop being driven.
+ */
+export function peekWorkerLease(): boolean {
+  try {
+    const current = JSON.parse(fs.readFileSync(workerLeaseFile(), "utf8")) as { owner: string };
+    return current.owner === WORKER_OWNER;
+  } catch {
+    return false;
+  }
+}
+
 let started = false;
 
 /**
@@ -508,6 +552,10 @@ export function startWorker() {
   let inFlight = 0;
 
   const tick = () => {
+    // Not the holder → not a worker this tick. A web replica pointed at the
+    // same data, or a second worker from a misapplied manifest, idles here
+    // instead of double-driving runs.
+    if (!holdsWorkerLease()) return;
     while (inFlight < concurrency()) {
       const claim = claimNext();
       if (!claim) return;
@@ -645,4 +693,48 @@ export function startWorker() {
   };
   setInterval(accrue, 60 * 60 * 1000).unref();
   accrue();
+}
+
+/** The queue, described: what /healthz and the metrics endpoint report.
+ *  Cheap enough to call per-scrape — two readdirs and a stat each. */
+export function queueStats(): {
+  pending: number;
+  /** Jobs waiting on a wait: deadline rather than a free slot. */
+  scheduledAhead: number;
+  claimed: number;
+  oldestPendingSecs: number | null;
+} {
+  const now = Date.now();
+  let pending = 0;
+  let scheduledAhead = 0;
+  let oldest: number | null = null;
+  const dir = queueDir("pending");
+  if (fs.existsSync(dir)) {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const file = path.join(dir, name);
+        const job = JSON.parse(fs.readFileSync(file, "utf8")) as QueueJob;
+        if (job.notBefore && new Date(job.notBefore).getTime() > now) {
+          scheduledAhead += 1;
+          continue; // waiting on its own deadline, not on us
+        }
+        pending += 1;
+        const age = now - fs.statSync(file).mtimeMs;
+        if (oldest === null || age > oldest) oldest = age;
+      } catch {
+        // mid-write or mid-claim — count nothing, next scrape settles it
+      }
+    }
+  }
+  const claimedDir = queueDir("claimed");
+  const claimed = fs.existsSync(claimedDir)
+    ? fs.readdirSync(claimedDir).filter((f) => f.endsWith(".json")).length
+    : 0;
+  return {
+    pending,
+    scheduledAhead,
+    claimed,
+    oldestPendingSecs: oldest === null ? null : Math.round(oldest / 1000),
+  };
 }
