@@ -95,6 +95,11 @@ export function ensureImage(spec: RuntimeSpec | null): ImageResult {
   const tag = imageTag(spec);
   if (imageExists(tag)) return { tag, built: false, error: null, log: [`image ${tag}: cached`] };
 
+  // dataRoot() may not exist yet on a brand-new install or a fresh workspace
+  // whose first-ever step is a script tool — mkdtemp does not create parents,
+  // so without this the first script build dies with ENOENT and the whole run
+  // fails on nothing the author did wrong.
+  fs.mkdirSync(dataRoot(), { recursive: true });
   const dir = fs.mkdtempSync(path.join(dataRoot(), ".build-"));
   try {
     fs.writeFileSync(path.join(dir, "Dockerfile"), dockerfileFor(spec));

@@ -1316,18 +1316,20 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
     .map((name) => {
       const pDir = path.join(dir, name);
       // AGENTS.md is the workspace's config file; project.md is the name it
-      // had before. Reading only the old one is why every workspace showed
-      // "No description" after the rename.
+      // had before. Take the first NON-EMPTY description across both — not the
+      // first file that merely exists. A workspace with both files but a
+      // description only in project.md (AGENTS.md carrying just `notify:`, say)
+      // otherwise shows blank, because the old code broke on file-exists.
       let description = "";
       for (const file of ["AGENTS.md", "project.md"]) {
         const p = path.join(pDir, file);
         if (!fs.existsSync(p)) continue;
         try {
-          description = matter(fs.readFileSync(p, "utf8")).data.description ?? "";
+          const d = matter(fs.readFileSync(p, "utf8")).data.description ?? "";
+          if (d) { description = d; break; }
         } catch {
-          description = "";
+          // an unreadable file is not a description; try the next
         }
-        break;
       }
       const runsDir = path.join(pDir, "runs");
       return {

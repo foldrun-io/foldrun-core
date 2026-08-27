@@ -581,8 +581,11 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       "--cap-drop", "ALL",
       "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
       "--pids-limit", "512",
+      // Memory is a hard ceiling (not compressible — an OOM protects the host).
+      // CPU is deliberately NOT capped, matching the k8s path: a cap only
+      // throttles work the customer pays for, and the tier's cpu figure is a
+      // billing weight, applied in usage.ts, not a docker --cpus limit here.
       "--memory", sizeLimits(args.size).memory,
-      "--cpus", sizeLimits(args.size).cpus,
       "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag

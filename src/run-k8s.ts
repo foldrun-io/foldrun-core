@@ -60,7 +60,13 @@ export function killRunPods(runId: string): number {
 }
 
 /** The pod, as a manifest — pure, so tests can read it without a cluster. */
-export function runPodManifest(name: string, image: string, runId?: string, size?: "small" | "large" | "heavy"): object {
+export function runPodManifest(
+  name: string,
+  image: string,
+  runId?: string,
+  size?: "small" | "large" | "heavy",
+  deadlineSec?: number,
+): object {
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -71,6 +77,13 @@ export function runPodManifest(name: string, image: string, runId?: string, size
     },
     spec: {
       restartPolicy: "Never",
+      // A k8s-native backstop that does not depend on the platform staying
+      // alive. The in-process watch below also deletes an overrunning pod, but
+      // if the platform restarts mid-run it loses that handle and the shim can
+      // spin forever waiting for a `go` marker that will never be written —
+      // which is how run pods were seen Running for 40+ minutes, holding their
+      // memory reservation. activeDeadlineSeconds lets the cluster reap them.
+      activeDeadlineSeconds: deadlineSec ?? 20 * 60,
       ...(process.env.FOLDRUN_RUNNER_RUNTIME
         ? { runtimeClassName: process.env.FOLDRUN_RUNNER_RUNTIME }
         : {}),
@@ -180,7 +193,13 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // paid for; the pod is the thing that scales to zero and therefore the
     // thing that costs when it doesn't.
     const t0 = Date.now();
-    const applied = await kc(["apply", "-f", "-"], JSON.stringify(runPodManifest(name, image, args.runId, args.size)));
+    // The pod's own deadline mirrors the in-process backstop (below), plus a
+    // small margin so the watch loop is normally the one to act — the pod
+    // deadline is the fallback for when the platform is not there to.
+    const deadlineSec = (args.input.timeoutSec ?? 15 * 60) + 180;
+    const applied = await kc([
+      "apply", "-f", "-",
+    ], JSON.stringify(runPodManifest(name, image, args.runId, args.size, deadlineSec)));
     if (applied.status !== 0) throw new Error(`pod create failed:\n${applied.out.slice(0, 800)}`);
     created = true;
 
