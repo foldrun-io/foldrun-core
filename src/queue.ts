@@ -40,6 +40,7 @@ import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
 import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
+import { walletGuard } from "./wallet.ts";
 import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
 
@@ -585,6 +586,12 @@ export function startWorker() {
       try {
         const usage = accountUsage(tenant);
         accrueDaily(tenant, usage.totals.storageBytes);
+        // The wallet's hourly look: auto top-up from a saved card, or a
+        // low-balance email, before a scheduled flow finds an empty account
+        // at run start with nobody watching.
+        void walletGuard(tenant).catch((err) =>
+          console.error(`[foldrun] wallet guard ${tenant}: ${err instanceof Error ? err.message : err}`),
+        );
         // The plan's history window. Policy pruning, not a person erasing
         // history, so no per-run ledger note — the charges stand and the
         // ledger itself is never pruned. Live runs are never touched.
