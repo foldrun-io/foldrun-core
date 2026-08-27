@@ -523,15 +523,17 @@ export function holdsWorkerLease(now = Date.now()): boolean {
 }
 
 /**
- * Whether THIS process currently holds the worker lease — a pure read.
- * The probe endpoint calls this, and it must never write: a web replica's
- * healthcheck taking a stale lease would hold it while running no worker,
- * and every run on the install would quietly stop being driven.
+ * Whether a LIVE worker holds the lease on this data directory — a pure
+ * read that never writes (a probe taking a stale lease would hold it while
+ * running no worker, quietly stopping every run). Deliberately not "is it
+ * me": Next bundles this module separately for routes and for the worker's
+ * process hook, so identity comparison across bundles always said false.
+ * The operational question is that a worker exists, not which copy asked.
  */
-export function peekWorkerLease(): boolean {
+export function peekWorkerLease(now = Date.now()): boolean {
   try {
-    const current = JSON.parse(fs.readFileSync(workerLeaseFile(), "utf8")) as { owner: string };
-    return current.owner === WORKER_OWNER;
+    const current = JSON.parse(fs.readFileSync(workerLeaseFile(), "utf8")) as { renewedAt: number };
+    return now - current.renewedAt < WORKER_LEASE_STALE_MS;
   } catch {
     return false;
   }
