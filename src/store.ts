@@ -1084,6 +1084,40 @@ export function setFlowTrigger(
  * `null` clears an option; values are clamped exactly as parseFlow reads
  * them, so what the editor writes is what the runner will do.
  */
+/**
+ * Rewrite one step's instruction, and nothing else.
+ *
+ * The step line carries four things — the group number, the optional/approve
+ * marker, the wikilink, and the instruction — and only the last is being
+ * edited. Rebuilding the line from the parsed step would silently normalise
+ * the other three (a "2?" becoming "2.", an en dash becoming an em dash), so
+ * the prefix is taken verbatim from the file and only the tail replaced. A
+ * flow's markdown stays the author's.
+ */
+export function updateFlowStepInstruction(raw: string, index: number, instruction: string): string {
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
+    throw new Error(`no step ${index}`);
+  }
+  const block = blocks[index];
+  const line = block.lines[0];
+  const m = line.match(STEP_RE);
+  if (!m) throw new Error(`step ${index} is not a step line`);
+  // Everything up to where the instruction starts, exactly as written.
+  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.replace(/\s+$/, "")} — `;
+  const next = instruction.trim().replace(/\s*\n\s*/g, " ");
+  block.lines = [`${prefix}${next}`.replace(/\s+$/, ""), ...block.lines.slice(1)];
+  // Same regrouping as updateFlowStep: consecutive blocks sharing a number
+  // are one parallel group, and emitFlow puts the file back together.
+  const groups: FlowBlock[][] = [];
+  for (const b of blocks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].group === b.group) last.push(b);
+    else groups.push([b]);
+  }
+  return emitFlow(head, preamble, groups);
+}
+
 export function updateFlowStep(
   raw: string,
   index: number,
