@@ -473,17 +473,28 @@ export interface RunInContainerArgs {
    *  browser step has fifteen minutes left to spend. */
   runId?: string;
   /** The reservation class — which limits this step's sandbox holds. */
-  size?: "small" | "large";
+  size?: "small" | "large" | "heavy";
 }
 
 /** The limits a size class reserves. Large is the install's configured
  *  limits unchanged, so existing installs bill and behave identically;
  *  small defaults to a quarter-ish slice and is env-tunable. */
-export function sizeLimits(size?: "small" | "large"): { cpus: string; memory: string } {
+export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
   if (size === "small") {
     return {
       cpus: process.env.FOLDRUN_RUNNER_CPUS_SMALL ?? "1",
       memory: process.env.FOLDRUN_RUNNER_MEMORY_SMALL ?? "1Gi",
+    };
+  }
+  if (size === "heavy") {
+    // For steps that render a browser or hold real data. The memory figure is
+    // a hard ceiling (memory is not compressible — over it, the kernel OOM-kills
+    // the pod, which on a single-box install can take neighbours with it). The
+    // cpus figure is a billing weight, not a ceiling: on k8s the pod bursts CPU
+    // freely, and this is the rate its seconds are priced at.
+    return {
+      cpus: process.env.FOLDRUN_RUNNER_CPUS_HEAVY ?? "4",
+      memory: process.env.FOLDRUN_RUNNER_MEMORY_HEAVY ?? "8Gi",
     };
   }
   return {

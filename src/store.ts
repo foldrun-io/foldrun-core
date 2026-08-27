@@ -1783,7 +1783,7 @@ export interface StepRecord {
    *  core-second, so what was reserved must come from the record, never
    *  from what the config says when the bill is computed. Absent on steps
    *  from before sizes existed — billing falls back to the flat rate. */
-  size?: "small" | "large";
+  size?: "small" | "large" | "heavy";
   reserved?: { cpus: number; memGiB: number } | null;
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is

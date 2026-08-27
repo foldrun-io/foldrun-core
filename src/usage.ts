@@ -67,7 +67,19 @@ function podLimits(): { cpus: number; memoryGiB: number } {
   };
 }
 
-function addRun(b: UsageBucket, run: RunRecord, limits: { cpus: number; memoryGiB: number }) {
+// The reservation a step's seconds are priced at. A step records what it
+// actually held (`reserved`), because a size is a price: bigger job, more
+// GiB-seconds, higher bill — which is what keeps authors honest about asking
+// for `heavy`. Steps from before sizes existed have no record, so they fall
+// back to the install's flat limit.
+function stepLimits(
+  s: RunRecord["steps"][number],
+  fallback: { cpus: number; memoryGiB: number },
+): { cpus: number; memoryGiB: number } {
+  return s.reserved ? { cpus: s.reserved.cpus, memoryGiB: s.reserved.memGiB } : fallback;
+}
+
+function addRun(b: UsageBucket, run: RunRecord, fallback: { cpus: number; memoryGiB: number }) {
   b.runs += 1;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
@@ -77,9 +89,10 @@ function addRun(b: UsageBucket, run: RunRecord, limits: { cpus: number; memoryGi
     b.inputTokens += s.tokens?.input ?? 0;
     b.outputTokens += s.tokens?.output ?? 0;
     const secs = s.computeSecs ?? 0;
+    const lim = stepLimits(s, fallback);
     b.computeSecs += secs;
-    b.cpuSecs += secs * limits.cpus;
-    b.gibSecs += secs * limits.memoryGiB;
+    b.cpuSecs += secs * lim.cpus;
+    b.gibSecs += secs * lim.memoryGiB;
   }
 }
 
@@ -163,9 +176,10 @@ export function accountUsage(tenant: string): AccountUsage {
         a.inputTokens += s.tokens?.input ?? 0;
         a.outputTokens += s.tokens?.output ?? 0;
         const secs = s.computeSecs ?? 0;
+        const lim = stepLimits(s, limits);
         a.computeSecs += secs;
-        a.cpuSecs += secs * limits.cpus;
-        a.gibSecs += secs * limits.memoryGiB;
+        a.cpuSecs += secs * lim.cpus;
+        a.gibSecs += secs * lim.memoryGiB;
       }
     }
 

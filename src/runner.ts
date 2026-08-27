@@ -612,13 +612,16 @@ function agentContext(
   } = resolveSecrets(tenant, [...new Set([...declared, ...referenced])], workspace);
   const { missing: missingDeclared } = resolveSecrets(tenant, declared, workspace);
 
-  // The step's pod size. Two classes, not a dial: a size is a price and a
-  // promise, and two of each is a menu while ten is a support queue. Default
+  // The step's pod size. Three classes, not a dial: a size is a price and a
+  // promise, and three of each is a menu while ten is a support queue. Default
   // is large — the install's configured limits — so existing agents change
-  // nothing; `size: small` is the opt-in for agents that wait on APIs more
-  // than they work, and the actuals line in any trace is the evidence for
-  // opting in.
-  const size: "small" | "large" = front.size === "small" ? "small" : "large";
+  // nothing. `size: small` is the opt-in for agents that wait on APIs more
+  // than they work; `size: heavy` for a rendered browser or real data in
+  // memory. Memory is a hard ceiling per class; CPU bursts uncapped and bills
+  // at the class rate, so heavy both may use more and costs more. The actuals
+  // line in any trace is the evidence for right-sizing.
+  const size: "small" | "large" | "heavy" =
+    front.size === "small" ? "small" : front.size === "heavy" ? "heavy" : "large";
 
   // Provider: which endpoint the model calls run against. Anthropic by
   // default; an Anthropic-compatible gateway (z.ai, LiteLLM, OpenRouter) by

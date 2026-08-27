@@ -60,7 +60,7 @@ export function killRunPods(runId: string): number {
 }
 
 /** The pod, as a manifest — pure, so tests can read it without a cluster. */
-export function runPodManifest(name: string, image: string, runId?: string, size?: "small" | "large"): object {
+export function runPodManifest(name: string, image: string, runId?: string, size?: "small" | "large" | "heavy"): object {
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -93,9 +93,17 @@ export function runPodManifest(name: string, image: string, runId?: string, size
             seccompProfile: { type: "RuntimeDefault" },
           },
           resources: {
+            // No CPU ceiling: CPU is compressible, so a step that can use more
+            // cores finishes sooner and bills for what the tier prices, rather
+            // than being throttled while cores sit idle. The request is a token
+            // scheduling hint (the reservation that decides packing), kept small
+            // so many steps share the node; the real price comes from the tier.
+            // Memory IS a hard limit: it is not compressible, and without a cap
+            // one runaway step OOMs the whole box, which on a single-node
+            // install is every tenant's runs and the control plane at once.
+            requests: { cpu: "100m" },
             limits: {
               memory: sizeLimits(size).memory,
-              cpu: sizeLimits(size).cpus,
             },
           },
         },
