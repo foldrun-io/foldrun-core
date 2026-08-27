@@ -256,7 +256,16 @@ export function applicableSkills<T extends { name: string; when: string[] }>(
 export function resolveDocLinks(text: string, workspaceRoot: string): string {
   if (!text.includes("[[")) return text;
   const map = new Map<string, string>();
-  const norm = (v: string) => v.toLowerCase().replace(/\.md$/, "").replace(/[^a-z0-9/]+/g, "-");
+  const norm = (v: string) =>
+    v.toLowerCase().replace(/\.md$/, "").replace(/\/+$/, "").replace(/[^a-z0-9/]+/g, "-");
+
+  // Folders resolve too: a reference to "the file store" is as real as a
+  // reference to one file in it, and an agent told to read whatever its
+  // instruction names needs to say WHERE without naming a file. Added
+  // first, so a document that happens to share a folder's name still wins.
+  for (const dir of ["files", "state", "knowledge", "memory", "skills", "outputs"]) {
+    if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), `../../${dir}/`);
+  }
   for (const kind of ["knowledge", "memory"] as const) {
     const dir = path.join(workspaceRoot, kind);
     if (!fs.existsSync(dir)) continue;
