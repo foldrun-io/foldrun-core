@@ -995,8 +995,21 @@ async function runStep(
     if (step.approvalNote) {
       // The person at the gate said something while letting the run through.
       // That is the freshest instruction the step has — later than the flow
-      // file, aimed at this exact run.
-      prompt += `\n\n<operator_guidance>\nThe human who approved this step added:\n${step.approvalNote}\n</operator_guidance>`;
+      // file, aimed at this exact run. When the gate asked a question
+      // (ask:), the note IS the answer and is framed as one.
+      prompt += step.ask
+        ? `\n\n<operator_answer>\nThis step asked a human: ${step.ask}\nTheir answer:\n${step.approvalNote}\n</operator_answer>`
+        : `\n\n<operator_guidance>\nThe human who approved this step added:\n${step.approvalNote}\n</operator_guidance>`;
+    }
+    if (step.delegate?.length) {
+      // The chooser's contract. The allowed set comes from the flow file;
+      // the runner parses exactly this shape back out of the result, so the
+      // instruction and the parser agree by construction.
+      prompt +=
+        `\n\n<delegation>\nAfter your analysis, end your reply with one line per agent you are delegating to, ` +
+        `chosen ONLY from: ${step.delegate.join(", ")}.\nFormat, one per line (at most 5):\n` +
+        `agent-name: the instruction for that agent\n` +
+        `Lines naming any other agent are ignored.\n</delegation>`;
     }
     if (step.item) {
       // A fan-out instance: same instruction as its siblings, one item each.
@@ -1326,6 +1339,52 @@ function platformModelEnv(): Record<string, string | undefined> {
  * record for a worker to pick up, while `startFlowRun` keeps its promise of
  * a run that is already going when it returns.
  */
+/**
+ * `each: rows of <path>` — one item per CSV data row, each carrying the
+ * header so an instance reads as a one-row CSV. The path resolves the way
+ * the agent's own instructions do (relative to its folder) and is confined
+ * to the workspace: fan-out must not become a way to read past it.
+ */
+function csvItems(workspaceDir: string, step: StepRecord, take: number): string[] {
+  const raw = step.eachPath ?? "";
+  if (!raw) {
+    step.skipReason = "each: rows needs a path — `each: rows of ../../files/x.csv`";
+    return [];
+  }
+  const resolved = path.resolve(workspaceDir, "agents", step.agent, raw);
+  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep)) {
+    step.skipReason = `each: rows — ${raw} is outside this workspace`;
+    return [];
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(resolved, "utf8");
+  } catch {
+    step.skipReason = `each: rows — ${raw} does not exist (yet?)`;
+    return [];
+  }
+  // Minimal CSV: quoted fields with embedded commas/newlines survive.
+  const rows: string[] = [];
+  let field = "", row = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '""'; i++; }
+      else if (c === '"') { field += c; quoted = false; }
+      else field += c;
+    } else if (c === '"') { field += c; quoted = true; }
+    else if (c === "\n") { rows.push(row + field); row = ""; field = ""; }
+    else if (c !== "\r") field += c;
+  }
+  if (row + field) rows.push(row + field);
+  const [header, ...data] = rows.filter((r) => r.trim() !== "");
+  if (!header || data.length === 0) {
+    step.skipReason = `each: rows — ${raw} has no data rows`;
+    return [];
+  }
+  return data.slice(0, take).map((r) => `${header}\n${r}`);
+}
+
 export function createFlowRun(
   tenant: string,
   workspace: string,
@@ -1359,7 +1418,12 @@ export function createFlowRun(
       until: s.until,
       loopRemaining: s.loop,
       each: s.each,
+      eachPath: s.eachPath,
       max: s.max,
+      onFail: s.onFail,
+      waitSecs: s.waitSecs,
+      ask: s.ask,
+      delegate: s.delegate,
       attempts: 0,
       status: "pending",
       events: [],
@@ -1561,18 +1625,54 @@ export function driveRun(
         const group = ordered[gi];
         context = contextBefore(gi);
 
+        // wait: — the clock starts when the run REACHES the step, so
+        // "wait: 3d" means three days after the previous group finished,
+        // surviving restarts because the deadline is stamped on the record.
+        for (const s of group) {
+          if (s.status === "pending" && s.waitSecs && !s.waitUntil) {
+            s.waitUntil = new Date(Date.now() + s.waitSecs * 1000).toISOString();
+            s.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `waiting until ${s.waitUntil} (wait: ${s.waitSecs}s)`,
+            });
+          }
+        }
+        const stillWaiting = group
+          .filter((s) => s.status === "pending" && s.waitUntil)
+          .map((s) => new Date(s.waitUntil!).getTime())
+          .filter((t) => t > Date.now());
+        if (stillWaiting.length) {
+          save();
+          if (opts.parkOnApproval) {
+            // Back to the queue with a not-before — a three-day wait must
+            // not hold a worker slot, a process, or survive on either.
+            run.status = "queued";
+            run.parkedAt = new Date().toISOString();
+            parked = true;
+            save();
+            return;
+          }
+          // Foreground (CLI) runs sleep in slices so Ctrl-C stays prompt.
+          await new Promise((r) => setTimeout(r, Math.min(Math.min(...stillWaiting) - Date.now(), 30_000)));
+          continue;
+        }
+
         // Fan-out: a step with `each:` becomes one instance per item of the
         // previous group's result, capped, all in this same group — the
         // declared shape stays readable in the file, the width comes from
         // the data. The template survives as a skipped step for the trace.
         for (const step of [...group]) {
-          if (step.each !== "lines" || step.status !== "pending" || step.item) continue;
+          if ((step.each !== "lines" && step.each !== "rows") || step.status !== "pending" || step.item) continue;
           const cap = Math.min(step.max ?? 10, 20);
-          const items = (context ?? "")
-            .split("\n")
-            .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
-            .filter(Boolean)
-            .slice(0, cap + 1);
+          const items =
+            step.each === "rows"
+              ? csvItems(pDir, step, cap + 1)
+              : (context ?? "")
+                  .split("\n")
+                  .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
+                  .filter(Boolean)
+                  .slice(0, cap + 1);
           const dropped = items.length > cap ? "at least one" : "";
           const used = items.slice(0, cap);
           step.status = "skipped";
@@ -1711,7 +1811,7 @@ export function driveRun(
         // `!s.approvedAt` — a step approved before the process went away is
         // already answered. Filtering on status alone asked again.
         const needsApproval = freshGroup.filter(
-          (s) => s.status === "pending" && s.approve && !s.approvedAt,
+          (s) => s.status === "pending" && (s.approve || s.ask) && !s.approvedAt,
         );
         if (needsApproval.length) {
           for (const step of needsApproval) {
@@ -1719,7 +1819,9 @@ export function driveRun(
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: "waiting for approval before running",
+              // ask: is the same gate carrying a question — the answer
+              // arrives as the approval note and rides into the prompt.
+              text: step.ask ? `waiting for an answer: ${step.ask}` : "waiting for approval before running",
             });
           }
           run.status = "awaiting-approval";
@@ -1795,6 +1897,70 @@ export function driveRun(
             }),
         );
 
+        // on-fail: another agent takes the step over. Sequential and rare:
+        // the rescue is a second full attempt at the step's job with the
+        // failure in front of it, and its success is the step's success —
+        // the trace keeps both records, so "who actually did this" stays
+        // answerable.
+        for (const step of freshGroup) {
+          if (step.status !== "failed" || !step.onFail) continue;
+          const rescuerDir = path.join(pDir, "agents", step.onFail);
+          if (!fs.existsSync(path.join(rescuerDir, "agent.md"))) {
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "error",
+              text: `on-fail: "${step.onFail}" is not an agent in this workspace — no rescue`,
+            });
+            continue;
+          }
+          step.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `failed — handing to [[${step.onFail}]] (on-fail)`,
+          });
+          const failure = (step.result ?? step.events.filter((e) => e.type === "error").map((e) => e.text).join("\n")).slice(0, 4000);
+          const rescue: StepRecord = {
+            agent: step.onFail,
+            instruction:
+              `${step.instruction}\n\n<rescue>\nYou are taking this step over: [[${step.agent}]] attempted it and failed. ` +
+              `Its failure, for whatever it is worth:\n${failure}\n</rescue>`,
+            group: step.group,
+            optional: false,
+            model: step.model,
+            effort: step.effort,
+            timeout: step.timeout,
+            attempts: 0,
+            status: "pending",
+            events: [],
+            result: null,
+            costUsd: null,
+          };
+          run.steps.splice(run.steps.indexOf(step) + 1, 0, rescue);
+          save();
+          rescue.attempts = 1;
+          rescue.status = "running";
+          save();
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id);
+          // runStep mutates rescue.status; widen past TS's "running" narrowing.
+          const rescueOutcome: string = rescue.status;
+          if (rescueOutcome === "completed") {
+            step.status = "completed";
+            step.result = rescue.result;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `rescued by [[${step.onFail}]] — its result stands as this step's`,
+            });
+          } else {
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "error",
+              text: `on-fail: [[${step.onFail}]] also failed`,
+            });
+          }
+          save();
+        }
+
         const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional);
         if (requiredFailed) {
           run.status = "failed";
@@ -1811,6 +1977,48 @@ export function driveRun(
                 : s.result!,
           );
         groupResults[gi] = results.length ? results.join("\n\n") : null;
+
+        // delegate: — the completed chooser's picks become a fresh group
+        // right after this one. The choice SET is the file's; only the
+        // picks and their instructions are the model's, and both are on
+        // the record. Once per chooser, loop rewinds included.
+        for (const chooser of freshGroup) {
+          if (!chooser.delegate?.length || chooser.status !== "completed" || chooser.delegated) continue;
+          chooser.delegated = true;
+          const allowed = new Set(chooser.delegate);
+          const picks: StepRecord[] = [];
+          const seenAgents = new Set<string>();
+          for (const line of (chooser.result ?? "").split("\n")) {
+            const m = line.match(/^\s*(?:[-*\d.)\s]*)\[?\[?([a-z0-9-]+)\]?\]?\s*:\s*(.+)$/);
+            if (!m || !allowed.has(m[1]) || seenAgents.has(m[1])) continue;
+            if (!fs.existsSync(path.join(pDir, "agents", m[1], "agent.md"))) continue;
+            seenAgents.add(m[1]);
+            picks.push({
+              agent: m[1],
+              instruction: m[2].trim(),
+              group: chooser.group,
+              optional: false,
+              attempts: 0,
+              status: "pending",
+              events: [],
+              result: null,
+              costUsd: null,
+            });
+            if (picks.length >= 5) break;
+          }
+          chooser.events.push({
+            t: new Date().toISOString(),
+            type: picks.length ? "info" : "error",
+            text: picks.length
+              ? `delegated to ${picks.map((p) => `[[${p.agent}]]`).join(", ")}`
+              : `delegate: no valid picks found in the result (allowed: ${chooser.delegate.join(", ")})`,
+          });
+          if (picks.length) {
+            run.steps.splice(run.steps.indexOf(chooser) + 1, 0, ...picks);
+            ordered.splice(gi + 1, 0, picks);
+          }
+          save();
+        }
 
         // Evaluator loop: a completed step with `loop:` whose result lacks
         // its `until:` marker sends this group and the one before it around

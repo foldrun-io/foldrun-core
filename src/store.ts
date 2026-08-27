@@ -795,6 +795,23 @@ export interface FlowStep {
   retry?: number;
   /** Abandon the step after this many seconds. */
   timeout?: number;
+  /** Another agent takes the step over when it fails: same instruction, the
+   *  failure as context. Success continues the flow with the rescuer's
+   *  result; a second failure fails the step as it always did. */
+  onFail?: string;
+  /** Seconds to hold before this step runs — "wait: 3d" parses to 259200.
+   *  The run parks in the queue, not in a process. */
+  waitSecs?: number;
+  /** For `each: rows` — the CSV whose rows fan the step out, agent-relative
+   *  like every other path an instruction uses. */
+  eachPath?: string;
+  /** A question for a human. The step parks like an approval; the answer
+   *  typed at the gate reaches the step's prompt. */
+  ask?: string;
+  /** Model-led delegation, bounded by declaration: this step's agent picks
+   *  which of THESE agents run next, one instruction each. The choice set
+   *  is the file's, the picks are the model's, the record shows both. */
+  delegate?: string[];
   /** Evaluator loop: when this step's result lacks `until:`'s marker, wind
    *  back to the previous group and go again — at most this many extra
    *  cycles. Bounded by declaration, so the worst-case cost is still
@@ -805,7 +822,7 @@ export interface FlowStep {
   until?: string;
   /** Fan-out: run one instance of this step per item of the previous
    *  group's result. `lines` is the one mode — one item per non-empty line. */
-  each?: "lines";
+  each?: "lines" | "rows";
   /** Fan-out cap. Items beyond it are dropped, and the run log says so. */
   max?: number;
   /** Shell command run after the step; a non-zero exit fails the step. */
@@ -908,7 +925,17 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
 // which is how one flow triggers another.
 const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(.*)$/;
 
-const OPTION_RE = /^\s+([a-z]+):\s*(.+)$/;
+const OPTION_RE = /^\s+([a-z-]+):\s*(.+)$/;
+
+/** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
+ *  days: a wait is a pause in a flow, not a second scheduler. */
+export function parseWait(value: string): number | undefined {
+  const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*([smhd]?)$/i);
+  if (!m) return undefined;
+  const mult = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase() as "" | "s" | "m" | "h" | "d"];
+  const secs = Math.round(Number(m[1]) * mult);
+  return secs > 0 ? Math.min(secs, 30 * 86400) : undefined;
+}
 
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
@@ -951,7 +978,19 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       else if (key === "effort") step.effort = value;
       else if (key === "loop") step.loop = Math.min(5, Math.max(1, Number(value) || 0)) || undefined;
       else if (key === "until") step.until = value;
-      else if (key === "each") step.each = value === "lines" ? "lines" : undefined;
+      else if (key === "each") {
+        if (value === "lines") step.each = "lines";
+        else if (/^rows\b/.test(value)) {
+          step.each = "rows";
+          // "rows of ../../files/leads.csv" — the path is the part after "of".
+          step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
+        }
+      }
+      else if (key === "on-fail" || key === "onfail") step.onFail = value.replace(/^\[\[|\]\]$/g, "");
+      else if (key === "wait") step.waitSecs = parseWait(value);
+      else if (key === "ask") { step.ask = value; }
+      else if (key === "delegate")
+        step.delegate = value.split(",").map((v) => v.trim().replace(/^\[\[|\]\]$/g, "")).filter(Boolean).slice(0, 5);
       else if (key === "max") step.max = Math.min(20, Math.max(1, Number(value) || 0)) || undefined;
     }
   }
@@ -1682,11 +1721,23 @@ export interface StepRecord {
   until?: string;
   loopRemaining?: number;
   /** Fan-out, carried from the flow — see FlowStep. */
-  each?: "lines";
+  each?: "lines" | "rows";
+  eachPath?: string;
   max?: number;
   /** Set on the instances a fan-out step expanded into: the item this one
    *  works on. The template step itself becomes status "expanded". */
   item?: string;
+  /** Carried from the flow — see FlowStep for each. */
+  onFail?: string;
+  waitSecs?: number;
+  /** Stamped when the run reaches the step; the queue holds it until then.
+   *  On the record so a restart resumes the same deadline, not a new one. */
+  waitUntil?: string;
+  ask?: string;
+  delegate?: string[];
+  /** Set once a delegate step's picks have been expanded — the guard that
+   *  a loop rewind cannot fan the same choice out twice. */
+  delegated?: boolean;
   /**
    * When a person approved this step. Set by the approval API and never
    * cleared, because approval is a fact about the past.

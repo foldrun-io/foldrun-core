@@ -50,6 +50,9 @@ export interface QueueJob {
   runId: string;
   modelOverride?: string | null;
   tags?: string[];
+  /** Claimable only from this ISO time — how a `wait:` parks in the queue
+   *  instead of in a process. */
+  notBefore?: string;
 }
 
 function queueDir(state: "pending" | "claimed") {
@@ -383,6 +386,15 @@ export function claimNext(): { job: QueueJob; claimedFile: string } | null {
   for (const name of fs.readdirSync(pending).sort()) {
     if (!name.endsWith(".json")) continue;
     const from = path.join(pending, name);
+    // A job with an unexpired notBefore stays where it is: a wait: is a
+    // deadline in the queue, and skipping is cheaper than claim-and-repark.
+    try {
+      const peek = JSON.parse(fs.readFileSync(from, "utf8")) as QueueJob;
+      if (peek.notBefore && new Date(peek.notBefore).getTime() > Date.now()) continue;
+    } catch {
+      // unreadable now may be claimable later (mid-write); the claim path
+      // below settles it either way
+    }
     const to = path.join(queueDir("claimed"), name);
     fs.mkdirSync(queueDir("claimed"), { recursive: true });
     try {
@@ -523,9 +535,10 @@ export function startWorker() {
               (r) => r.flow === run.flow && r.id !== run.id && r.status === "running",
             )
           ) {
-            fs.rmSync(claim.claimedFile, { force: true });
+            // The finally below removes the claim file and gives the slot
+            // back — doing either here double-counted: every deferral
+            // leaked inFlight downward, quietly raising real concurrency.
             enqueue(claim.job);
-            inFlight -= 1;
             return;
           }
 
@@ -539,9 +552,10 @@ export function startWorker() {
             Number.isFinite(cap) && cap > 0 && billingEnabled() &&
             countRunning(tenant) >= cap
           ) {
-            fs.rmSync(claim.claimedFile, { force: true });
+            // The finally below removes the claim file and gives the slot
+            // back — doing either here double-counted: every deferral
+            // leaked inFlight downward, quietly raising real concurrency.
             enqueue(claim.job);
-            inFlight -= 1;
             return;
           }
           if (run && run.status !== "completed" && run.status !== "failed" && !stillAsking) {
@@ -552,6 +566,20 @@ export function startWorker() {
             // run id, so a parked run settling on its *final* drive is safe
             // even if an earlier drive raced it.
             const settled = readRun(tenant, workspace, runId);
+            // A run that parked on a wait: goes back to the queue carrying
+            // the earliest deadline — without notBefore this would busy-loop
+            // claim → park → claim until the wait expired.
+            if (settled && settled.status === "queued" && settled.parkedAt) {
+              const due = settled.steps
+                .filter((st) => st.status === "pending" && st.waitUntil)
+                .map((st) => new Date(st.waitUntil!).getTime())
+                .filter((t) => t > Date.now());
+              if (due.length) {
+                // Cleanup is the finally's; see the gates above.
+                enqueue({ ...claim.job, notBefore: new Date(Math.min(...due)).toISOString() });
+                return;
+              }
+            }
             if (settled && (settled.status === "completed" || settled.status === "failed")) {
               recordRunCost(tenant, workspace, runId, {
                 ...runMeter(settled),
