@@ -72,6 +72,13 @@ export interface DeployResult extends DeployPlan {
  * skipped rather than rejected, because a workspace living in a repo alongside
  * other things is the normal case, not an error.
  */
+// Where single-file subagents authored by other tools are found, in
+// precedence order: the vendor-neutral cross-client location first, then any
+// tool-specific one for pragmatic compatibility. Extend the tail, never the
+// head. Shared by the deploy import (readTree) and the CLI checker so the two
+// agree on what counts as an agent.
+export const SUBAGENT_IMPORT_DIRS = [".agents/agents", ".claude/agents"] as const;
+
 export function readTree(dir: string): DeployFile[] {
   const root = path.resolve(dir);
   const out: DeployFile[] = [];
@@ -105,6 +112,48 @@ export function readTree(dir: string): DeployFile[] {
   };
 
   walk(root, "");
+
+  // Bridge single-file subagents authored by ANY coding tool into the folder
+  // shape the runtime expects. The cross-client, vendor-neutral location is
+  // `.agents/agents/<name>.md` — the same `.agents/` root as `.agents/skills/`
+  // — and it is scanned first. A tool's own location (only `.claude/agents/`
+  // so far, as the one that ships single-file subagents) is scanned after, for
+  // pragmatic compatibility; add another vendor here when one appears, never
+  // ahead of the neutral location. A subagent's frontmatter — name,
+  // description, tools, model, effort, skills, mcpServers, disallowedTools — is
+  // already what a foldrun agent reads, so each maps to agents/<name>/agent.md
+  // with its content unchanged. A native agents/<name>/agent.md always wins,
+  // and the neutral location wins over a vendor one; the import only fills a
+  // gap, so authoring elsewhere and deploying here needs no rewrite. Unknown
+  // vendor-only keys (permissionMode, hooks, …) are ignored, as every other
+  // frontmatter reader here ignores what it does not use.
+  const nativeAgent = new Set(
+    out.filter((fEntry) => /^agents\/[^/]+\/agent\.md$/.test(fEntry.path)).map((fEntry) => fEntry.path),
+  );
+  for (const importDir of SUBAGENT_IMPORT_DIRS) {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(path.join(root, importDir)).sort();
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".md")) continue;
+      const name = entry.replace(/\.md$/, "");
+      const target = `agents/${name}/agent.md`;
+      // Native wins; and .claude/agents beats .agents/agents on a name clash
+      // (it is scanned first and this skips a path already imported).
+      if (nativeAgent.has(target) || out.some((fEntry) => fEntry.path === target)) continue;
+      const full = path.join(root, importDir, entry);
+      try {
+        if (fs.lstatSync(full).isSymbolicLink()) continue;
+        out.push({ path: target, content: fs.readFileSync(full, "utf8") });
+      } catch {
+        // an unreadable import is skipped, not fatal
+      }
+    }
+  }
+
   return out;
 }
 
