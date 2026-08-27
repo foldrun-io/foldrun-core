@@ -976,6 +976,12 @@ async function runStep(
 
     let prompt = step.instruction || "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
+    if (step.approvalNote) {
+      // The person at the gate said something while letting the run through.
+      // That is the freshest instruction the step has — later than the flow
+      // file, aimed at this exact run.
+      prompt += `\n\n<operator_guidance>\nThe human who approved this step added:\n${step.approvalNote}\n</operator_guidance>`;
+    }
     if (step.item) {
       // A fan-out instance: same instruction as its siblings, one item each.
       prompt += `\n\n<item>\nOf everything above, this instance of the step handles exactly one item — this one:\n${step.item}\n</item>`;

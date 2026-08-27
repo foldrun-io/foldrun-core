@@ -826,6 +826,12 @@ export interface FlowInfo {
   model: string | null;
   /** Same, for effort. */
   effort: string | null;
+  /** What a new fire does while a run of this flow is still live:
+   *  "skip" doesn't start one, "queue" starts it but the worker holds it
+   *  until the live run finishes. Unset keeps today's behaviour (runs may
+   *  overlap) — a default that changed underfoot would surprise every flow
+   *  that legitimately runs in parallel. */
+  overlap: "skip" | "queue" | null;
   steps: FlowStep[];
 }
 
@@ -958,8 +964,16 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     timezone: data.timezone ?? null,
     model: data.model ?? null,
     effort: data.effort ?? null,
+    overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
     steps,
   };
+}
+
+/** A live run of this flow — the fact overlap: decisions are made on. */
+export function flowHasLiveRun(tenant: string, workspace: string, flowName: string): boolean {
+  return listRuns(tenant, workspace).some(
+    (r) => r.flow === flowName && (r.status === "running" || r.status === "queued" || r.status === "awaiting-approval"),
+  );
 }
 
 // Rearranging a flow from the dashboard rewrites the numbers in the markdown
@@ -1649,6 +1663,10 @@ export interface StepRecord {
    * person the same question again.
    */
   approvedAt?: string;
+  /** What the approver said while approving — carried into the step's prompt
+   *  as operator guidance. This turns the gate from a yes/no button into a
+   *  place to steer: "approve, but skip the Sydney batch". */
+  approvalNote?: string;
   status:
     | "pending"
     | "awaiting-approval"

@@ -223,6 +223,44 @@ export function stopRun(tenant: string, workspace: string, runId: string): RunRe
 }
 
 /**
+ * Start a flow from one of its steps, fresh — the current flow file, not a
+ * recorded run. The steps before the starting point are marked skipped with
+ * the reason on them: they did not run in THIS run, and pretending
+ * otherwise would put results in the record that nothing produced. Later
+ * steps find their inputs where these flows actually keep them — files/ —
+ * which is what makes a partial start meaningful at all.
+ *
+ * This is also the cheap way to iterate on a late step: fixture runs, with
+ * the workspace's own files as the fixtures, without paying for the steps
+ * that produce them.
+ */
+export function startFlowFromStep(
+  tenant: string,
+  workspace: string,
+  flowName: string,
+  fromStep: number, // the step number as the flow file numbers it — a GROUP,
+  //                   so "from step 3" keeps all of step 3's parallel agents
+): RunRecord {
+  const flow = listWorkspaceFlows(tenant, workspace).find((f) => f.name === flowName);
+  if (!flow) throw new Error(`flow ${flowName} not found`);
+  const maxGroup = Math.max(...flow.steps.map((s) => s.group));
+  if (fromStep < 1 || fromStep > maxGroup) {
+    throw new Error(`flow ${flowName} has no step ${fromStep} (it has ${maxGroup})`);
+  }
+  assertFunds(tenant, countInFlight(tenant));
+  const run = createFlowRun(tenant, workspace, flow.steps, flowName, "queued");
+  for (const step of run.steps) {
+    if (step.group < fromStep) {
+      step.status = "skipped";
+      step.skipReason = `started from step ${fromStep}`;
+    }
+  }
+  writeRun(tenant, workspace, run);
+  enqueue({ tenant, workspace, runId: run.id });
+  return run;
+}
+
+/**
  * Re-run a finished flow from one of its steps, as a new run.
  *
  * The old record is never mutated — it is history, its outputs are archived
@@ -469,6 +507,24 @@ export function startWorker() {
           // still is, dropping the job is right, because the decision that
           // resolves it will enqueue a fresh one.
           const stillAsking = run?.steps.some((s) => s.status === "awaiting-approval");
+          // overlap: queue — one run of this flow at a time; later ones keep
+          // their place and start when the live one finishes. Same shape as
+          // the plan cap below: back to the tail, when not whether.
+          const flowInfo = run
+            ? listWorkspaceFlows(tenant, workspace).find((f) => f.name === run.flow)
+            : null;
+          if (
+            run && run.status === "queued" && flowInfo?.overlap === "queue" &&
+            listRuns(tenant, workspace).some(
+              (r) => r.flow === run.flow && r.id !== run.id && r.status === "running",
+            )
+          ) {
+            fs.rmSync(claim.claimedFile, { force: true });
+            enqueue(claim.job);
+            inFlight -= 1;
+            return;
+          }
+
           // The plan's parallelism, enforced where a run would actually start.
           // At the cap, the job returns to the queue's tail rather than
           // running — admission was already paid for at enqueue; this only

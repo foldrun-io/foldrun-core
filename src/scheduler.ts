@@ -13,6 +13,7 @@ import { dataRoot } from "./paths.ts";
 import { listWorkspaces, listFlows, listTenants, type FlowInfo } from "./store.ts";
 import { reconcileAllRuns } from "./runner.ts";
 import { enqueueFlowRun } from "./queue.ts";
+import { flowHasLiveRun } from "./store.ts";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
@@ -208,6 +209,15 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
           continue;
         }
         if (firedSince(cron, new Date(last), now, flow.timezone ?? "UTC")) {
+          // overlap: skip — a cron refiring while yesterday's run is still
+          // going almost never means "run two". The tick is consumed either
+          // way: when the long run finally ends, the flow waits for its next
+          // scheduled time rather than firing a stale make-up run.
+          if (flow.overlap === "skip" && flowHasLiveRun(tenant, workspace.name, flow.name)) {
+            console.log(`[scheduler] ${key}: skipped — a run of this flow is still live (overlap: skip)`);
+            state.lastFired[key] = now.toISOString();
+            continue;
+          }
           due.push({ tenant, workspace: workspace.name, flow });
           state.lastFired[key] = now.toISOString();
         }
