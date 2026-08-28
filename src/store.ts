@@ -65,7 +65,38 @@ const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
 // here rather than in files.ts because saveWorkspace has to know the name to
 // preserve it, and store.ts is the module files.ts depends on, not the
 // reverse. See files.ts for the whole argument.
-export const FILES_DIR = "files";
+export const FILES_DIR = "storage";
+/** What this directory was called before. Read-only: nothing writes here any
+ *  more, but installs created before the rename have bytes under it, and a
+ *  workspace whose files vanished on upgrade is a data-loss bug however
+ *  cosmetic the cause. `adoptLegacyFilesDir` moves one across, once. */
+export const LEGACY_FILES_DIR = "files";
+
+/**
+ * Move a pre-rename `files/` directory to `storage/`, once, in place.
+ *
+ * Called on the paths that resolve the store and the run mirror, so an
+ * existing install upgrades the first time either is touched rather than
+ * needing a migration step someone has to remember to run. A no-op when
+ * `storage/` already exists (the normal case after the first call) or when
+ * there is nothing to move (a fresh install).
+ */
+export function adoptLegacyFilesDir(parent: string): void {
+  const current = path.join(parent, FILES_DIR);
+  const legacy = path.join(parent, LEGACY_FILES_DIR);
+  if (fs.existsSync(current) || !fs.existsSync(legacy)) return;
+  try {
+    fs.renameSync(legacy, current);
+  } catch {
+    // A rename across devices, or a permission we do not have: copy instead,
+    // and leave the original alone rather than risk losing it.
+    try {
+      fs.cpSync(legacy, current, { recursive: true });
+    } catch {
+      /* the caller sees an absent directory, which is the pre-rename state */
+    }
+  }
+}
 
 // Where an account keeps its workspaces. Renamed from "projects" once the
 // concept settled on *workspace* everywhere else; the old directory is still

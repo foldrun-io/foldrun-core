@@ -40,6 +40,7 @@ import {
   type McpSpec,
   type RunRecord,
   type StepRecord,
+  FILES_DIR,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
@@ -307,7 +308,7 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
   // reference to one file in it, and an agent told to read whatever its
   // instruction names needs to say WHERE without naming a file. Added
   // first, so a document that happens to share a folder's name still wins.
-  for (const dir of ["files", "state", "knowledge", "memory", "skills", "outputs"]) {
+  for (const dir of [FILES_DIR, "state", "knowledge", "memory", "skills", "outputs"]) {
     if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), `../../${dir}/`);
   }
   for (const kind of ["knowledge", "memory"] as const) {
@@ -333,22 +334,22 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
     }
   }
   try {
-    // The hosted store's index lives at <tenant>/files/<workspace>/ — beside
+    // The hosted store's index lives at <tenant>/storage/<workspace>/ — beside
     // the workspaces, not inside one. workspaceRoot is <tenant>/…/<ws>, so
     // up two and across. Single-workspace installs have no index and fall
     // through to the plain-directory walk below.
     const index = JSON.parse(
       fs.readFileSync(
-        path.join(workspaceRoot, "..", "..", "files", path.basename(workspaceRoot), "index.json"),
+        path.join(workspaceRoot, "..", "..", FILES_DIR, path.basename(workspaceRoot), "index.json"),
         "utf8",
       ),
     ) as { files?: { path: string }[] };
-    for (const f of index.files ?? []) map.set(norm(`files/${f.path}`), `../../files/${f.path}`);
+    for (const f of index.files ?? []) map.set(norm(`${FILES_DIR}/${f.path}`), `../../${FILES_DIR}/${f.path}`);
   } catch {
     // no file store index is normal
   }
-  // Plain files on disk under files/ too — local installs write there directly.
-  const filesDir = path.join(workspaceRoot, "files");
+  // Plain files on disk under storage/ too — local installs write there directly.
+  const filesDir = path.join(workspaceRoot, FILES_DIR);
   if (fs.existsSync(filesDir)) {
     for (const entry of fs.readdirSync(filesDir, { recursive: true }).map(String)) {
       try {
@@ -358,8 +359,8 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       }
       const fwd = entry.split(path.sep).join("/");
       if (fwd.startsWith(".store/")) continue;
-      map.set(norm(`files/${fwd}`), `../../files/${fwd}`);
-      map.set(norm(fwd), `../../files/${fwd}`);
+      map.set(norm(`${FILES_DIR}/${fwd}`), `../../${FILES_DIR}/${fwd}`);
+      map.set(norm(fwd), `../../${FILES_DIR}/${fwd}`);
     }
   }
   return text.replace(/\[\[([^\]\n]+)\]\]/g, (whole, name: string) => {
@@ -405,7 +406,7 @@ function agentContext(
       `something, look there before concluding it does not exist.\n\n` +
       // The distinction agents kept getting wrong, said where they can read
       // it: outputs/ is working text between steps and never leaves the
-      // source tree; files/ is the store the dashboard's Files page lists.
+      // source tree; storage/ is the store the dashboard's Storage page lists.
       // A 100-row CSV written to outputs/ is delivered nowhere — a person
       // looking for it in Files finds an empty page and concludes the run
       // produced nothing.

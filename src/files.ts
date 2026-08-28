@@ -52,7 +52,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot, singleWorkspace } from "./paths.ts";
-import { assertSafeName, workspaceDir, FILES_DIR } from "./store.ts";
+import { assertSafeName, workspaceDir, FILES_DIR, adoptLegacyFilesDir } from "./store.ts";
 
 /** The directory a run sees, and the one this module mirrors into it.
  *  Declared in store.ts, where saveWorkspace also needs it; re-exported so
@@ -108,6 +108,9 @@ function storeDir(tenant: string, workspace: string) {
   }
   assertSafeName(tenant, "tenant");
   assertSafeName(workspace, "workspace");
+  // Upgrade an install that predates the rename, the first time the store is
+  // resolved. data/<tenant>/files/ becomes data/<tenant>/storage/.
+  adoptLegacyFilesDir(path.join(dataRoot(), tenant));
   return path.join(dataRoot(), tenant, FILES_DIR, workspace);
 }
 
@@ -647,6 +650,7 @@ export async function uploadUrl(
  */
 export async function materializeFiles(tenant: string, workspace: string): Promise<string[]> {
   if (!fileStoreEnabled()) return [];
+  adoptLegacyFilesDir(workspaceDir(tenant, workspace));
   const root = path.join(workspaceDir(tenant, workspace), FILES_DIR);
   const driver = driverFor(tenant, workspace);
   const brought: string[] = [];
@@ -691,6 +695,7 @@ export async function harvestFiles(
   by: string,
 ): Promise<{ saved: string[]; errors: string[] }> {
   if (!fileStoreEnabled()) return { saved: [], errors: [] };
+  adoptLegacyFilesDir(workspaceDir(tenant, workspace));
   const root = path.join(workspaceDir(tenant, workspace), FILES_DIR);
   if (!fs.existsSync(root)) return { saved: [], errors: [] };
 
