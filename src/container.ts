@@ -24,12 +24,17 @@ const IMAGE_PREFIX = "foldrun-runtime";
 // makes that portability real: no host path has to be shared with a VM.
 const CLI = process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
 
-export type Executor = "docker" | "host";
+// "sandbox" means "run the script directly in whatever environment this step
+// is already isolated by" — the run pod under FOLDRUN_RUN_ISOLATION=k8s, or
+// the local process on a laptop. It was called "host", which read as "on the
+// platform's own machine" and made a correct, isolated setup look like a
+// tenant escape to anyone reading a run trace.
+export type Executor = "docker" | "sandbox";
 
 let cachedAvailability: boolean | null = null;
 
 export function dockerAvailable(): boolean {
-  if (process.env.FOLDRUN_EXECUTOR === "host") return false;
+  if (process.env.FOLDRUN_EXECUTOR === "host" || process.env.FOLDRUN_EXECUTOR === "sandbox") return false;
   if (cachedAvailability !== null) return cachedAvailability;
   const res = spawnSync(CLI, ["info", "--format", "{{.ServerVersion}}"], {
     encoding: "utf8",
@@ -40,7 +45,7 @@ export function dockerAvailable(): boolean {
 }
 
 export function chooseExecutor(): Executor {
-  return dockerAvailable() ? "docker" : "host";
+  return dockerAvailable() ? "docker" : "sandbox";
 }
 
 export function imageTag(spec: RuntimeSpec | null): string {

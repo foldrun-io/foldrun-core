@@ -238,8 +238,9 @@ function runScript(
 }
 
 export interface ExecutionContext {
-  /** "docker" runs each script in a container; "host" spawns it directly. */
-  executor: "docker" | "host";
+  /** "docker" nests each script in its own container; "sandbox" spawns it
+   *  directly inside the isolation the step already has. */
+  executor: "docker" | "sandbox";
   image: string;
   /** Extra read-only mounts for shared/library scripts. */
   mounts: Record<string, string>;
@@ -328,7 +329,7 @@ export function buildScriptTools(
           .join(", ");
         log.push(
           `${spec.name}(${shown}) → exit ${code ?? "error"} ` +
-            `(${Date.now() - started}ms, ${exec?.executor ?? "host"})`,
+            `(${Date.now() - started}ms, ${exec?.executor ?? "sandbox"})`,
         );
         return {
           content: [{ type: "text" as const, text: `exit ${code ?? "error"}\n\n${out}` }],

@@ -569,6 +569,47 @@ let started = false;
  * deleted — for a parked run the *approval* mints the next job, so a job in
  * claimed/ always means "a driver is (or died) on it", never "waiting".
  */
+/**
+ * Refuse to serve more than one tenant without step isolation.
+ *
+ * Without FOLDRUN_RUN_ISOLATION, a step runs in the platform's own process:
+ * correct on a laptop, where there is nothing to isolate from, and
+ * catastrophic for a multi-tenant install, where one tenant's agent would run
+ * with the platform's filesystem, its vault and every other tenant's data in
+ * reach. Nothing used to refuse that configuration — a missing or misspelled
+ * env var degraded silently from "sandboxed" to "shared", and the only symptom
+ * was a run trace nobody was reading.
+ *
+ * So it is a boot condition now, not a footnote. A single-tenant install (the
+ * CLI, a developer's box) is unaffected; the moment a second account exists,
+ * or FOLDRUN_MULTI_TENANT=1 says one is coming, isolation must be configured.
+ */
+export function assertIsolationSafe(): void {
+  const isolation = process.env.FOLDRUN_RUN_ISOLATION;
+  if (isolation === "container" || isolation === "k8s") return;
+
+  const declared = process.env.FOLDRUN_MULTI_TENANT === "1";
+  let tenants: string[] = [];
+  try {
+    tenants = listTenants();
+  } catch {
+    // An unreadable data root is a different problem; do not mask it as this one.
+    return;
+  }
+  if (!declared && tenants.length <= 1) return;
+
+  const why = declared
+    ? "FOLDRUN_MULTI_TENANT=1 is set"
+    : `${tenants.length} accounts exist (${tenants.slice(0, 4).join(", ")}${tenants.length > 4 ? ", …" : ""})`;
+  throw new Error(
+    `refusing to start: ${why}, but FOLDRUN_RUN_ISOLATION is ` +
+      `${isolation ? `"${isolation}", which is not a recognised mode` : "unset"}. ` +
+      `Steps would run in this process, sharing the platform's filesystem, vault and ` +
+      `every account's data. Set FOLDRUN_RUN_ISOLATION=k8s (a cluster) or =container ` +
+      `(one box). Single-account installs may run without it.`,
+  );
+}
+
 export function startWorker() {
   if (started || process.env.FOLDRUN_DISABLE_WORKER === "1") return;
   started = true;
