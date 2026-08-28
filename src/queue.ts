@@ -500,7 +500,15 @@ const POLL_MS = 1000;
 // a handover — and claimNext's rename already makes a double-claim lose
 // cleanly. What this prevents is the quiet catastrophe: a second worker
 // replica double-DRIVING every run on shared storage.
-const WORKER_LEASE_STALE_MS = 90_000;
+// Observed 2026-08-28: Next bundles this module more than once, each bundle
+// runs its own worker loop, and they share the lease file — one holds it and
+// drains, the others defer. When the holder's interval dies (its bundle was
+// torn down) the queue sits idle until the lease goes stale and a surviving
+// loop takes over. At 90s that handover window read as a stalled platform —
+// runs queued for minutes with healthz green. 30s is still thirty missed
+// renewals (the tick is 1s), far beyond jitter, and it bounds the outage a
+// dead holder can cause to half a minute.
+const WORKER_LEASE_STALE_MS = 30_000;
 const WORKER_OWNER = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 
 function workerLeaseFile() {
@@ -515,6 +523,20 @@ export function holdsWorkerLease(now = Date.now()): boolean {
     if (current.owner !== WORKER_OWNER && now - current.renewedAt < WORKER_LEASE_STALE_MS) return false;
   } catch {
     // no lease yet, or unreadable — claimable
+  }
+  // A takeover — the previous holder stopped renewing. Say so: a queue that
+  // sat idle through a handover window is otherwise indistinguishable from
+  // one that never had work, and this line is how the next stall gets a
+  // timestamped trail instead of a shrug.
+  try {
+    const prev = JSON.parse(fs.readFileSync(file, "utf8")) as { owner: string; renewedAt: number };
+    if (prev.owner !== WORKER_OWNER) {
+      console.error(
+        `[foldrun] worker lease taken over from ${prev.owner} (idle ${Math.round((now - prev.renewedAt) / 1000)}s)`,
+      );
+    }
+  } catch {
+    /* no previous lease — first boot */
   }
   const tmp = `${file}.${WORKER_OWNER}`;
   fs.writeFileSync(tmp, JSON.stringify({ owner: WORKER_OWNER, renewedAt: now }));
