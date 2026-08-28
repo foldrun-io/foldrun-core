@@ -1419,15 +1419,27 @@ export function accountFileSealed(rel: string): string | null {
   return null;
 }
 
+/** Generated bookkeeping: nobody authored it, no agent reads it, and each has
+ *  a page that presents it properly. Listing it would add rows whose only
+ *  function is to refuse the person who clicked them, which is noise wearing
+ *  honesty's clothes. `accountFileSealed` still refuses these if a path is
+ *  constructed directly — the listing hides them, the reader guards them. */
+const ACCOUNT_BOOKKEEPING =
+  /^(billed\/|ledger\.jsonl$|oauth-clients\.json$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
+
 /**
  * The account directory as it actually is on disk.
  *
- * Deliberately a faithful walk, not a curated one: the point of a file tree is
- * that the path you see is the path an agent types, and every omission has to
- * be earned. So the vault, the ledger and run history appear here by name —
- * `accountFileSealed` is what refuses to open them, with the reason. What is
- * skipped is only what would swamp the tree without telling anyone anything:
- * the blobs directory, and anything under a run's own output.
+ * A faithful walk, with one rule for what it leaves out: show what a person
+ * authors or an agent reads. That keeps the path you see the path an agent
+ * types, which is the whole point of the tree — while sparing you rows that
+ * exist only to be refused.
+ *
+ * The vault is not an exception to that rule. Secrets are authored in Settings
+ * and reach an agent as environment variables — never as a file, deliberately,
+ * so that no single read can carry them all off. `secrets.json` is therefore
+ * neither authored here nor read by an agent, and a row that can only refuse
+ * the person who clicks it teaches nothing. The reader still guards it.
  */
 export function listAccountFiles(tenant: string, cap = 4000): string[] {
   const root = accountDir(tenant);
@@ -1448,6 +1460,7 @@ export function listAccountFiles(tenant: string, cap = 4000): string[] {
       // Content-addressed blobs and a run's copied outputs are bytes under a
       // hash — thousands of names that mean nothing to a reader.
       if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git)$/.test(next)) continue;
+      if (ACCOUNT_BOOKKEEPING.test(next)) continue;
       if (e.isDirectory()) walk(path.join(abs, e.name), next, depth + 1);
       else out.push(next);
     }
