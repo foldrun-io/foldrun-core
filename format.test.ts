@@ -389,6 +389,46 @@ test("an eval parses cases, tasks and every assertion type", () => {
   assert.deepEqual(info.cases[0].expect.map((a) => a.type), ["contains", "not-contains", "judge"]);
 });
 
+test("a folded criterion is the whole criterion, not the \">\"", () => {
+  // `judge: >` used to parse as the literal ">", so the judge was handed a
+  // one-character rubric, said it could not grade against that, and returned
+  // FAIL. Two real cases in the leads workspace failed that way, and the
+  // eval page reported 2/4 as though the agent had misbehaved.
+  const info = parseEval(
+    "e.md",
+    [
+      "---", "name: e", "agent: writer", "---", "",
+      "## folded",
+      "task: Do the thing.",
+      "expect:",
+      "  - judge: >",
+      "      leaves the email field empty rather than filling it",
+      "      with a constructed address",
+      "  - contains: ok",
+      "",
+      "## literal",
+      "task: >",
+      "  a task that was too long",
+      "  for one line",
+      "expect:",
+      "  - judge: |",
+      "      first line",
+      "      second line",
+    ].join("\n"),
+  );
+
+  assert.equal(
+    info.cases[0].expect[0].value,
+    "leaves the email field empty rather than filling it with a constructed address",
+  );
+  // The item after a block scalar is still its own assertion.
+  assert.deepEqual(info.cases[0].expect.map((a) => a.type), ["judge", "contains"]);
+  assert.equal(info.cases[0].expect[1].value, "ok");
+
+  assert.equal(info.cases[1].task, "a task that was too long for one line");
+  assert.equal(info.cases[1].expect[0].value, "first line\nsecond line");
+});
+
 // ---------------------------------------------------------------- completions
 
 test("[[ suggests agents and flows", () => {

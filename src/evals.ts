@@ -69,13 +69,63 @@ export interface EvalInfo {
 
 const ASSERTION_TYPES = ["contains", "not-contains", "matches", "file", "run", "judge"] as const;
 
+/**
+ * A scalar that may continue onto following lines.
+ *
+ * YAML block scalars (`judge: >` / `judge: |`) and plain multi-line values
+ * both used to be read as whatever sat on the first line — which for `>` is
+ * the single character `>`. The judge then received ">" as its whole rubric,
+ * decided it could not grade against that, and returned FAIL. A four-case
+ * eval read 2/4 with two false failures, and nothing anywhere said the file
+ * had not been understood.
+ *
+ * Returns the value and the index of the last line consumed.
+ */
+function readScalar(
+  lines: string[],
+  start: number,
+  inline: string,
+  indent: number,
+): { value: string; end: number } {
+  const block = inline.trim().match(/^([>|])[-+]?$/);
+  const parts: string[] = [];
+  let i = start;
+
+  while (i + 1 < lines.length) {
+    const next = lines[i + 1];
+    if (!next.trim()) {
+      // A blank line ends a plain scalar; inside a block it is a paragraph
+      // break, which folds to nothing more than the space we already add.
+      if (!block) break;
+      i++;
+      continue;
+    }
+    const nextIndent = next.length - next.trimStart().length;
+    // A sibling list item or anything dedented back to the key's own column
+    // belongs to the parent, not to this value.
+    if (nextIndent <= indent || /^\s*-\s/.test(next)) break;
+    parts.push(next.trim());
+    i++;
+  }
+
+  if (block) {
+    // `|` keeps the line breaks it was written with; `>` folds to one line.
+    const value = block[1] === "|" ? parts.join("\n") : parts.join(" ");
+    return { value: value.trim(), end: i };
+  }
+  const first = inline.trim().replace(/^["']|["']$/g, "");
+  return { value: [first, ...parts].join(" ").trim(), end: i };
+}
+
 export function parseEval(file: string, raw: string): EvalInfo {
   const { data, content } = matter(raw);
   const cases: EvalCase[] = [];
   let current: EvalCase | null = null;
   let inExpect = false;
 
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const heading = line.match(/^##\s+(?:case:\s*)?(.+?)\s*$/);
     if (heading) {
       if (current) cases.push(current);
@@ -85,9 +135,11 @@ export function parseEval(file: string, raw: string): EvalInfo {
     }
     if (!current) continue;
 
-    const task = line.match(/^\s*task:\s*(.+)$/);
+    const task = line.match(/^(\s*)task:\s*(.*)$/);
     if (task) {
-      current.task = task[1].trim();
+      const read = readScalar(lines, i, task[2], task[1].length);
+      current.task = read.value;
+      i = read.end;
       inExpect = false;
       continue;
     }
@@ -96,12 +148,14 @@ export function parseEval(file: string, raw: string): EvalInfo {
       continue;
     }
     if (inExpect) {
-      const item = line.match(/^\s*-\s*([a-z-]+):\s*(.+)$/);
-      if (item && (ASSERTION_TYPES as readonly string[]).includes(item[1])) {
+      const item = line.match(/^(\s*)-\s*([a-z-]+):\s*(.*)$/);
+      if (item && (ASSERTION_TYPES as readonly string[]).includes(item[2])) {
+        const read = readScalar(lines, i, item[3], item[1].length);
         current.expect.push({
-          type: item[1] as Assertion["type"],
-          value: item[2].trim().replace(/^["']|["']$/g, ""),
+          type: item[2] as Assertion["type"],
+          value: read.value,
         } as Assertion);
+        i = read.end;
       } else if (line.trim() && !line.startsWith(" ")) {
         inExpect = false;
       }
