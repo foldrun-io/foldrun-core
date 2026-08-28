@@ -98,6 +98,37 @@ export function adoptLegacyFilesDir(parent: string): void {
   }
 }
 
+/**
+ * Rewrite a pre-rename `mdagent_version:` in an AGENTS.md to `foldrun_version:`,
+ * once, in place.
+ *
+ * The reader used to accept both spellings, which meant the old name lived on
+ * forever in files nobody would ever edit. Migrating on touch retires it: the
+ * first read of an account or workspace converts the file, and after that
+ * there is one name in the codebase and one name on disk.
+ *
+ * Only the key is touched — same line, same value, same everything else — so
+ * a file with comments or unusual formatting comes through unchanged.
+ */
+export function adoptLegacyVersionKey(dir: string): void {
+  for (const name of ["AGENTS.md", "project.md"]) {
+    const file = path.join(dir, name);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (!/^mdagent_version:/m.test(raw)) continue;
+    try {
+      fs.writeFileSync(file, raw.replace(/^mdagent_version:/m, "foldrun_version:"));
+    } catch {
+      /* read-only checkout, or a source tree we do not own: the caller reads
+         the file either way, and a missing version is a warning, not a stop. */
+    }
+  }
+}
+
 // Where an account keeps its workspaces. Renamed from "projects" once the
 // concept settled on *workspace* everywhere else; the old directory is still
 // read so an existing install keeps working without a migration step.

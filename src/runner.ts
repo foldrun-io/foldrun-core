@@ -41,6 +41,7 @@ import {
   type RunRecord,
   type StepRecord,
   FILES_DIR,
+  adoptLegacyVersionKey,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
@@ -214,6 +215,10 @@ export function discoverSkills(agentDir: string, subdir = "skills"): DiscoveredS
  * must not take down every agent under it.
  */
 export function readAgentsMd(dir: string): { data: Record<string, unknown>; body: string } | null {
+  // Convert a pre-rename `mdagent_version:` before parsing. One name in the
+  // code, one on disk — the reader no longer knows two spellings, so a file
+  // written before the rename is migrated here rather than tolerated forever.
+  adoptLegacyVersionKey(dir);
   for (const name of ["AGENTS.md", "project.md"]) {
     const file = path.join(dir, name);
     if (!fs.existsSync(file)) continue;
@@ -906,12 +911,7 @@ function agentContext(
     scriptSpecs,
     runtime: { log: runtimeLog, error: runtimeError, executor },
     secretEnv: { ...runtime.env, ...secretEnv },
-    formatWarning: checkFormatVersion(
-      // mdagent_version is the same field from before the project was
-      // renamed — workspaces written then keep validating unchanged.
-      workspaceFrontmatter(agentDir, tenant).foldrun_version ??
-        workspaceFrontmatter(agentDir, tenant).mdagent_version,
-    ).warning,
+    formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).foldrun_version).warning,
     providerEnv,
     providerLabel,
     providerSecrets,
