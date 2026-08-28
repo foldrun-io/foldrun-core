@@ -298,6 +298,38 @@ export function applicableSkills<T extends { name: string; when: string[] }>(
  * names, flow links, prose in brackets — passes through untouched: this is
  * sugar over paths, never a gate in front of them.
  */
+/**
+ * Whether an evaluator's reply actually carries its `until:` marker.
+ *
+ * Not a substring test. A reviewer that writes "APPROVED once the tribunal
+ * sentence is corrected" contains the word, and a substring match reads that
+ * conditional as a pass — the loop ends, the correction is never made, and the
+ * step after it inherits the problem the loop existed to catch. That happened:
+ * a factual error rode a conditional approval past the gate.
+ *
+ * So the marker has to stand alone on its own line, which is a thing a model
+ * does deliberately and cannot do by accident mid-sentence. Trailing
+ * punctuation is allowed ("APPROVED." is still a decision), and the line may
+ * sit anywhere in the reply, so an approval followed by notes still passes —
+ * the point is that the word is a switch, not a clause.
+ */
+export function saysUntilMarker(result: string | null, until: string): boolean {
+  const marker = until.trim().toLowerCase();
+  if (!marker) return true;
+  return (result ?? "")
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        // Strip markdown emphasis and punctuation from BOTH ends: "**APPROVED.**"
+        // is a decision written by someone using bold, not a sentence.
+        line
+          .trim()
+          .replace(/^[#>\-*_`\s]+/, "")
+          .replace(/[.!:,*_`\s]+$/, "")
+          .toLowerCase() === marker,
+    );
+}
+
 export function resolveDocLinks(text: string, workspaceRoot: string): string {
   if (!text.includes("[[")) return text;
   const map = new Map<string, string>();
@@ -2165,14 +2197,14 @@ export function driveRun(
         const looper = freshGroup.find((s) => s.loop && s.until && s.status === "completed");
         if (
           looper?.until &&
-          !(looper.result ?? "").toLowerCase().includes(looper.until.toLowerCase())
+          !saysUntilMarker(looper.result ?? null, looper.until)
         ) {
           if ((looper.loopRemaining ?? 0) > 0 && gi > 0) {
             looper.loopRemaining = (looper.loopRemaining ?? 0) - 1;
             looper.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: `loop: result does not say "${looper.until}" — winding back one group (${looper.loopRemaining} cycle${looper.loopRemaining === 1 ? "" : "s"} left)`,
+              text: `loop: result does not say "${looper.until}" on a line of its own — winding back one group (${looper.loopRemaining} cycle${looper.loopRemaining === 1 ? "" : "s"} left)`,
             });
             for (const s of [...ordered[gi - 1], ...freshGroup]) {
               if (s.status === "skipped" && s.each) continue; // an expanded template stays expanded
