@@ -40,7 +40,7 @@ import {
   type McpSpec,
   type RunRecord,
   type StepRecord,
-  FILES_DIR,
+  STORAGE_DIR,
   adoptLegacyVersionKey,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
@@ -50,7 +50,7 @@ import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
-import { materializeFiles, harvestFiles } from "./files.ts";
+import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -345,7 +345,7 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
   // reference to one file in it, and an agent told to read whatever its
   // instruction names needs to say WHERE without naming a file. Added
   // first, so a document that happens to share a folder's name still wins.
-  for (const dir of [FILES_DIR, "state", "knowledge", "memory", "skills", "outputs"]) {
+  for (const dir of [STORAGE_DIR, "state", "knowledge", "memory", "skills", "outputs"]) {
     if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), `../../${dir}/`);
   }
   for (const kind of ["knowledge", "memory"] as const) {
@@ -377,16 +377,16 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
     // through to the plain-directory walk below.
     const index = JSON.parse(
       fs.readFileSync(
-        path.join(workspaceRoot, "..", "..", FILES_DIR, path.basename(workspaceRoot), "index.json"),
+        path.join(workspaceRoot, "..", "..", STORAGE_DIR, path.basename(workspaceRoot), "index.json"),
         "utf8",
       ),
     ) as { files?: { path: string }[] };
-    for (const f of index.files ?? []) map.set(norm(`${FILES_DIR}/${f.path}`), `../../${FILES_DIR}/${f.path}`);
+    for (const f of index.files ?? []) map.set(norm(`${STORAGE_DIR}/${f.path}`), `../../${STORAGE_DIR}/${f.path}`);
   } catch {
     // no file store index is normal
   }
   // Plain files on disk under storage/ too — local installs write there directly.
-  const filesDir = path.join(workspaceRoot, FILES_DIR);
+  const filesDir = path.join(workspaceRoot, STORAGE_DIR);
   if (fs.existsSync(filesDir)) {
     for (const entry of fs.readdirSync(filesDir, { recursive: true }).map(String)) {
       try {
@@ -396,8 +396,8 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       }
       const fwd = entry.split(path.sep).join("/");
       if (fwd.startsWith(".store/")) continue;
-      map.set(norm(`${FILES_DIR}/${fwd}`), `../../${FILES_DIR}/${fwd}`);
-      map.set(norm(fwd), `../../${FILES_DIR}/${fwd}`);
+      map.set(norm(`${STORAGE_DIR}/${fwd}`), `../../${STORAGE_DIR}/${fwd}`);
+      map.set(norm(fwd), `../../${STORAGE_DIR}/${fwd}`);
     }
   }
   return text.replace(/\[\[([^\]\n]+)\]\]/g, (whole, name: string) => {
@@ -445,11 +445,17 @@ function agentContext(
       // it: outputs/ is working text between steps and never leaves the
       // source tree; storage/ is the store the dashboard's Storage page lists.
       // A 100-row CSV written to outputs/ is delivered nowhere — a person
-      // looking for it in Files finds an empty page and concludes the run
+      // looking for it on the Storage page finds it empty and concludes the run
       // produced nothing.
-      `\`../../files/\` is the workspace file store: anything you leave there is kept ` +
-      `after the run and shown on the Files page for people to download. Write ` +
-      `deliverables people asked for — CSVs, reports, PDFs, images — to \`../../files/\`; ` +
+      // The path here MUST be the one harvestFiles reads. It said
+      // `../../files/` after the rename, and nothing recovered from that:
+      // materializeFiles always creates `storage/` before the step, so
+      // adoptLegacyFilesDir's "move files/ to storage/" is a no-op by the time
+      // the run ends — a deliverable written where this text pointed was
+      // harvested from nowhere and silently never appeared.
+      `\`../../storage/\` is the workspace file store: anything you leave there is kept ` +
+      `after the run and shown on the Storage page for people to download. Write ` +
+      `deliverables people asked for — CSVs, reports, PDFs, images — to \`../../storage/\`; ` +
       `use \`outputs/\` for working text the next step reads.`,
   );
 
@@ -837,7 +843,7 @@ function agentContext(
   }
 
   parts.push(
-    "Write deliverables for people to ../../files/ (kept and downloadable); write working text for later steps to outputs/.",
+    "Write deliverables for people to ../../storage/ (kept and downloadable); write working text for later steps to outputs/.",
   );
 
   // One list. `tools:` grants anything: a built-in group, an exact SDK tool
@@ -1517,7 +1523,7 @@ function platformModelEnv(): Record<string, string | undefined> {
 function csvItems(workspaceDir: string, step: StepRecord, take: number): string[] {
   const raw = step.eachPath ?? "";
   if (!raw) {
-    step.skipReason = "each: rows needs a path — `each: rows of ../../files/x.csv`";
+    step.skipReason = "each: rows needs a path — `each: rows of ../../storage/x.csv`";
     return [];
   }
   const resolved = path.resolve(workspaceDir, "agents", step.agent, raw);
@@ -1757,7 +1763,7 @@ export function driveRun(
         }
       } catch (err) {
         // A file store that is down must not take the run with it: most flows
-        // never touch files/, and the ones that do will fail their own verify.
+        // never touch storage/, and the ones that do will fail their own verify.
         run.steps[0]?.events.push({
           t: new Date().toISOString(),
           type: "error",
@@ -2259,7 +2265,7 @@ export function driveRun(
         } catch {
           // never let bookkeeping fail a run that already finished
         }
-        // Whatever the run left in files/ becomes a stored file, stamped with
+        // Whatever the run left in storage/ becomes a stored file, stamped with
         // the run and the agent that wrote it — which is what lets the
         // dashboard answer "where did this PDF come from?" without a join
         // table. On failure too: a failed run's half-written artifact is

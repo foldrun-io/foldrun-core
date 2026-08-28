@@ -65,7 +65,7 @@ const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
 // here rather than in files.ts because saveWorkspace has to know the name to
 // preserve it, and store.ts is the module files.ts depends on, not the
 // reverse. See files.ts for the whole argument.
-export const FILES_DIR = "storage";
+export const STORAGE_DIR = "storage";
 /** What this directory was called before. Read-only: nothing writes here any
  *  more, but installs created before the rename have bytes under it, and a
  *  workspace whose files vanished on upgrade is a data-loss bug however
@@ -82,7 +82,7 @@ export const LEGACY_FILES_DIR = "files";
  * there is nothing to move (a fresh install).
  */
 export function adoptLegacyFilesDir(parent: string): void {
-  const current = path.join(parent, FILES_DIR);
+  const current = path.join(parent, STORAGE_DIR);
   const legacy = path.join(parent, LEGACY_FILES_DIR);
   if (fs.existsSync(current) || !fs.existsSync(legacy)) return;
   try {
@@ -330,9 +330,12 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
   //
   //   runs/            always kept — the audit trail
   //   state/           always kept — what an agent carries between runs
-  //   files/           always kept — the file store's run mirror, which no
+  //   storage/         always kept — the file store's run mirror, which no
   //                    deploy can ship (a deploy carries source, and bytes
-  //                    are not source) and every run expects to find
+  //                    are not source) and every run expects to find. Note
+  //                    the pre-rename `files/` is NOT protected here: a
+  //                    workspace still holding one loses it on deploy, which
+  //                    is why adoptLegacyFilesDir runs on the read paths.
   //   memory/*.md      kept when the deploy doesn't ship that file
   //
   // That last rule is the subtle one. Memory is written from both sides: a
@@ -348,8 +351,8 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     // something: agents lose secrets, a rotated hook un-rotates.
     isPlatformPath(rel) ||
     /(^|\/)state\//.test(rel) ||
-    rel === FILES_DIR ||
-    rel.startsWith(`${FILES_DIR}/`) ||
+    rel === STORAGE_DIR ||
+    rel.startsWith(`${STORAGE_DIR}/`) ||
     (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
 
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
@@ -1044,7 +1047,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         if (value === "lines") step.each = "lines";
         else if (/^rows\b/.test(value)) {
           step.each = "rows";
-          // "rows of ../../files/leads.csv" — the path is the part after "of".
+          // "rows of ../../storage/leads.csv" — the path is the part after "of".
           step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
         }
       }

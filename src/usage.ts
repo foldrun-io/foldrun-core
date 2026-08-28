@@ -18,7 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { listWorkspaces, listRuns, workspaceDir, type RunRecord } from "./store.ts";
-import { FILES_DIR, accountDir } from "./store.ts";
+import { STORAGE_DIR, accountDir } from "./store.ts";
 import { ledgerSummary, creditBalance } from "./ledger.ts";
 
 export interface UsageBucket {
@@ -138,7 +138,7 @@ function rounded(b: UsageBucket): UsageBucket {
  * the fs driver's pre-index files.
  */
 function fileStoreBytes(tenant: string, workspace: string): number {
-  const root = path.join(accountDir(tenant), FILES_DIR, workspace);
+  const root = path.join(accountDir(tenant), STORAGE_DIR, workspace);
   const index = path.join(root, "index.json");
   try {
     const parsed = JSON.parse(fs.readFileSync(index, "utf8")) as { files?: { size?: number }[] };

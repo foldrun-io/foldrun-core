@@ -38,26 +38,26 @@
 //
 // Config (s3 driver):
 //
-//   FOLDRUN_FILES_DRIVER        fs | s3          default fs
+//   FOLDRUN_STORAGE_DRIVER        fs | s3          default fs
 //   FOLDRUN_S3_ENDPOINT         https://<account>.r2.cloudflarestorage.com
 //   FOLDRUN_S3_BUCKET           bucket name
 //   FOLDRUN_S3_REGION           default auto (R2's region)
 //   FOLDRUN_S3_ACCESS_KEY_ID
 //   FOLDRUN_S3_SECRET_ACCESS_KEY
 //   FOLDRUN_S3_PATH_STYLE       default true — R2 speaks path style
-//   FOLDRUN_FILES_MAX_MB        per object, default 512
-//   FOLDRUN_FILES_QUOTA_MB      per workspace, default 5120
+//   FOLDRUN_STORAGE_MAX_MB        per object, default 512
+//   FOLDRUN_STORAGE_QUOTA_MB      per workspace, default 5120
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot, singleWorkspace } from "./paths.ts";
-import { assertSafeName, workspaceDir, FILES_DIR, adoptLegacyFilesDir } from "./store.ts";
+import { assertSafeName, workspaceDir, STORAGE_DIR, adoptLegacyFilesDir } from "./store.ts";
 
 /** The directory a run sees, and the one this module mirrors into it.
  *  Declared in store.ts, where saveWorkspace also needs it; re-exported so
  *  callers of this module do not need to know that. */
-export { FILES_DIR };
+export { STORAGE_DIR };
 
 export interface FileRecord {
   /** Path under storage/, forward-slashed. The primary key: it is also exactly
@@ -82,8 +82,8 @@ interface Index {
 
 // ---------- limits ----------
 
-const maxBytes = () => Number(process.env.FOLDRUN_FILES_MAX_MB ?? 512) * 1024 * 1024;
-const quotaBytes = () => Number(process.env.FOLDRUN_FILES_QUOTA_MB ?? 5120) * 1024 * 1024;
+const maxBytes = () => Number(process.env.FOLDRUN_STORAGE_MAX_MB ?? 512) * 1024 * 1024;
+const quotaBytes = () => Number(process.env.FOLDRUN_STORAGE_QUOTA_MB ?? 5120) * 1024 * 1024;
 
 // ---------- paths ----------
 
@@ -111,7 +111,7 @@ function storeDir(tenant: string, workspace: string) {
   // Upgrade an install that predates the rename, the first time the store is
   // resolved. data/<tenant>/files/ becomes data/<tenant>/storage/.
   adoptLegacyFilesDir(path.join(dataRoot(), tenant));
-  return path.join(dataRoot(), tenant, FILES_DIR, workspace);
+  return path.join(dataRoot(), tenant, STORAGE_DIR, workspace);
 }
 
 function indexPath(tenant: string, workspace: string) {
@@ -200,7 +200,7 @@ function writeIndex(tenant: string, workspace: string, index: Index) {
   fs.renameSync(tmp, file);
 }
 
-export function listFiles(tenant: string, workspace: string): FileRecord[] {
+export function listStorage(tenant: string, workspace: string): FileRecord[] {
   return readIndex(tenant, workspace).files.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -484,7 +484,7 @@ function s3Driver(cfg: S3Config): Driver {
  * because a dashboard that boots and stores locally beats one that 500s.
  */
 export function driverFor(tenant: string, workspace: string): Driver {
-  if (process.env.FOLDRUN_FILES_DRIVER === "s3") {
+  if (process.env.FOLDRUN_STORAGE_DRIVER === "s3") {
     const cfg = s3Config();
     if (cfg) return s3Driver(cfg);
   }
@@ -590,7 +590,7 @@ export async function deleteFile(tenant: string, workspace: string, rel: string)
   writeIndex(tenant, workspace, { version: 1, files: index.files.filter((f) => f.path !== norm) });
   await collect(tenant, workspace, record.sha);
   // The run mirror is a cache of the index, so it follows the index.
-  fs.rmSync(path.join(workspaceDir(tenant, workspace), FILES_DIR, norm), { force: true });
+  fs.rmSync(path.join(workspaceDir(tenant, workspace), STORAGE_DIR, norm), { force: true });
   return true;
 }
 
@@ -651,7 +651,7 @@ export async function uploadUrl(
 export async function materializeFiles(tenant: string, workspace: string): Promise<string[]> {
   if (!fileStoreEnabled()) return [];
   adoptLegacyFilesDir(workspaceDir(tenant, workspace));
-  const root = path.join(workspaceDir(tenant, workspace), FILES_DIR);
+  const root = path.join(workspaceDir(tenant, workspace), STORAGE_DIR);
   const driver = driverFor(tenant, workspace);
   const brought: string[] = [];
 
@@ -696,7 +696,7 @@ export async function harvestFiles(
 ): Promise<{ saved: string[]; errors: string[] }> {
   if (!fileStoreEnabled()) return { saved: [], errors: [] };
   adoptLegacyFilesDir(workspaceDir(tenant, workspace));
-  const root = path.join(workspaceDir(tenant, workspace), FILES_DIR);
+  const root = path.join(workspaceDir(tenant, workspace), STORAGE_DIR);
   if (!fs.existsSync(root)) return { saved: [], errors: [] };
 
   const known = new Map(readIndex(tenant, workspace).files.map((f) => [f.path, f]));

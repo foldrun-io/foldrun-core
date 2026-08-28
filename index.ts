@@ -20,7 +20,7 @@ export * from "./src/arrange.ts";
 export * from "./src/completions.ts";
 export * from "./src/confine.ts";
 export * from "./src/library.ts";
-export * from "./src/files.ts";
+export * from "./src/storage.ts";
 export * from "./src/secrets.ts";
 export * from "./src/secret-files.ts";
 export * from "./src/scheduler.ts";
