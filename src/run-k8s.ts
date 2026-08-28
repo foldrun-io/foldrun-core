@@ -59,6 +59,45 @@ export function killRunPods(runId: string): number {
   return list.length;
 }
 
+/**
+ * Delete run pods that have finished and been left behind.
+ *
+ * The normal path deletes a pod in runStepInK8s's `finally`. That handle is
+ * lost whenever the platform process goes away mid-step — which, with a
+ * single replica on a Recreate strategy, is every deploy. Measured on the
+ * production box 2026-08-28: seven terminated pods still present, the oldest
+ * two and a half days old, one of them the DeadlineExceeded the cluster
+ * reaped precisely because nobody was left to reap it.
+ *
+ * Terminated pods hold no CPU or memory, so this is not urgent — but they
+ * hold names, IPs and an etcd record each, and nothing else in the system
+ * ever removes them. Pods have no `ttlSecondsAfterFinished` (that is a Job
+ * field), so the sweep has to be ours.
+ */
+export async function sweepFinishedRunPods(olderThanMs = 10 * 60_000): Promise<number> {
+  if (process.env.FOLDRUN_RUN_ISOLATION !== "k8s") return 0;
+  const ns = namespace();
+  const got = await kc([
+    "get", "pods", "-n", ns, "-l", "app=foldrun-run",
+    "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.phase} {.metadata.creationTimestamp}{\"\\n\"}{end}",
+  ]);
+  if (got.status !== 0) return 0;
+
+  const stale: string[] = [];
+  for (const line of got.out.split("\n")) {
+    const [name, phase, created] = line.trim().split(/\s+/);
+    if (!name || (phase !== "Succeeded" && phase !== "Failed")) continue;
+    // Age-gated, because a pod that has just written its `done` line is still
+    // being copied out of by a live step — deleting that races the copy-out
+    // and loses the run's file changes.
+    const age = Date.now() - new Date(created).getTime();
+    if (Number.isFinite(age) && age > olderThanMs) stale.push(`pod/${name}`);
+  }
+  if (!stale.length) return 0;
+  await kc(["delete", ...stale, "-n", ns, "--wait=false"]);
+  return stale.length;
+}
+
 /** The pod, as a manifest — pure, so tests can read it without a cluster. */
 export function runPodManifest(
   name: string,
@@ -224,17 +263,16 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // stream's end, is the signal to move on.
     let firstOutputAt: number | null = null;
     const outcome = await new Promise<ContainerStepOutcome>((resolve) => {
-      const child = spawn(kubectl(), ["logs", "-f", name, "-n", ns], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
       let settled = false;
-      let buffer = "";
+      let reattaches = 0;
+      let child: ReturnType<typeof spawn> | null = null;
+      const MAX_REATTACH = 5;
       const backstopMs = ((args.input.timeoutSec ?? 15 * 60) + 120) * 1000;
       const finish = (value: ContainerStepOutcome) => {
         if (settled) return;
         settled = true;
         clearTimeout(backstop);
-        child.kill();
+        child?.kill();
         resolve(value);
       };
       const backstop = setTimeout(() => {
@@ -243,26 +281,80 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
         finish({ status: "failed", result: null, costUsd: null });
       }, backstopMs);
 
-      child.stdout.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString();
-        for (;;) {
-          const nl = buffer.indexOf("\n");
-          if (nl < 0) break;
-          const parsed = parseDriverLine(buffer.slice(0, nl));
-          buffer = buffer.slice(nl + 1);
-          if (!parsed) continue;
-          firstOutputAt ??= Date.now();
-          if (parsed.e === "event") args.emit(parsed.type, parsed.text);
-          else return finish(parsed);
+      /** One parsed line. Returns true when it was the terminal one. */
+      const handle = (raw: string): boolean => {
+        const parsed = parseDriverLine(raw);
+        if (!parsed) return false;
+        firstOutputAt ??= Date.now();
+        if (parsed.e === "event") {
+          args.emit(parsed.type, parsed.text);
+          return false;
         }
-      });
-      child.on("close", () => {
+        finish(parsed);
+        return true;
+      };
+
+      // `skip` is how many lines an earlier attach already handled: a re-read
+      // starts at the beginning of the log, and replaying events would print
+      // a step's output twice.
+      const attach = (skip: number) => {
+        let buffer = "";
+        let seen = 0;
+        const c = spawn(kubectl(), ["logs", "-f", name, "-n", ns], {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        child = c;
+        c.stdout.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString();
+          for (;;) {
+            const nl = buffer.indexOf("\n");
+            if (nl < 0) break;
+            const raw = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            seen += 1;
+            if (seen <= skip) continue;
+            if (handle(raw)) return;
+          }
+        });
+        c.on("close", () => void recover(seen));
+        c.on("error", (err) => {
+          args.emit("error", err.message);
+          void recover(seen);
+        });
+      };
+
+      // The stream ended without a terminal line. That has two very different
+      // causes and they used to be treated as one: the container genuinely
+      // stopped, or the connection dropped while the step was still thinking.
+      // A `logs -f` held open across a quiet model call is exactly what an
+      // idle-connection timeout kills, and failing the step for it fails work
+      // that was fine. The pod's shim holds it open for the ack, so the log is
+      // still readable — re-read it and let its contents decide.
+      const recover = async (consumed: number) => {
+        if (settled) return;
+        let seen = consumed;
+        const full = await kc(["logs", name, "-n", ns]);
+        if (settled) return;
+        if (full.status === 0) {
+          const lines = full.out.split("\n");
+          for (let i = seen; i < lines.length; i += 1) {
+            if (handle(lines[i])) return;
+          }
+          seen = Math.max(seen, lines.length);
+        }
+        const phase = await kc(["get", "pod", name, "-n", ns, "-o", "jsonpath={.status.phase}"]);
+        if (settled) return;
+        const alive = phase.status === 0 && (phase.out === "Running" || phase.out === "Pending");
+        if (alive && reattaches < MAX_REATTACH) {
+          reattaches += 1;
+          args.emit("info", `log stream dropped, pod still running — reattaching (${reattaches}/${MAX_REATTACH})`);
+          attach(seen);
+          return;
+        }
         finish({ status: "failed", result: null, costUsd: null });
-      });
-      child.on("error", (err) => {
-        args.emit("error", err.message);
-        finish({ status: "failed", result: null, costUsd: null });
-      });
+      };
+
+      attach(0);
     });
 
     // Copy out of the still-held pod, then release it.

@@ -14,6 +14,7 @@ import { listWorkspaces, listFlows, listTenants, type FlowInfo } from "./store.t
 import { reconcileAllRuns } from "./runner.ts";
 import { enqueueFlowRun } from "./queue.ts";
 import { flowHasLiveRun } from "./store.ts";
+import { sweepFinishedRunPods } from "./run-k8s.ts";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
@@ -226,6 +227,12 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
   }
   if (++ticksSinceReconcile >= RECONCILE_EVERY) {
     ticksSinceReconcile = 0;
+    // Terminated run pods whose driver died with the process that created
+    // them. Fire-and-forget: it is housekeeping, and a cluster that cannot be
+    // reached right now is not a reason to stop firing flows.
+    void sweepFinishedRunPods()
+      .then((n) => n && console.log(`[scheduler] swept ${n} finished run pod(s)`))
+      .catch((err) => console.error("[scheduler] run-pod sweep failed:", err));
     try {
       for (const closed of reconcileAllRuns(now.getTime())) {
         console.log(
