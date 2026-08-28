@@ -1394,6 +1394,83 @@ function assertEditablePath(rel: string) {
   throw new Error(`not an editable path: ${rel}`);
 }
 
+
+/** Files under the account directory that exist, are worth showing, and must
+ *  never be served. Listing them is honest — hiding them is what makes a file
+ *  tree disagree with the filesystem it claims to show — but their contents
+ *  are the vault and the money, so a reader gets the reason instead. */
+const ACCOUNT_SEALED = new Set(["secrets.json", "oauth-clients.json", "ledger.jsonl"]);
+
+export function accountFileSealed(rel: string): string | null {
+  const norm = rel.replaceAll("\\", "/");
+  if (ACCOUNT_SEALED.has(norm)) {
+    return norm === "secrets.json"
+      ? "the vault — encrypted, and never served to a browser. Manage secrets in Settings."
+      : norm === "oauth-clients.json"
+        ? "OAuth client credentials — never served to a browser."
+        : "the billing ledger — append-only, read it through Usage and Wallet.";
+  }
+  if (/^(billed|workspaces\/[^/]+\/runs)\//.test(norm)) {
+    return "generated bookkeeping, not an authored file.";
+  }
+  if (/^workspaces\/[^/]+\/secrets\.json$/.test(norm)) {
+    return "the workspace vault — encrypted, and never served to a browser.";
+  }
+  return null;
+}
+
+/**
+ * The account directory as it actually is on disk.
+ *
+ * Deliberately a faithful walk, not a curated one: the point of a file tree is
+ * that the path you see is the path an agent types, and every omission has to
+ * be earned. So the vault, the ledger and run history appear here by name —
+ * `accountFileSealed` is what refuses to open them, with the reason. What is
+ * skipped is only what would swamp the tree without telling anyone anything:
+ * the blobs directory, and anything under a run's own output.
+ */
+export function listAccountFiles(tenant: string, cap = 4000): string[] {
+  const root = accountDir(tenant);
+  if (!fs.existsSync(root)) return [];
+  const out: string[] = [];
+  const walk = (abs: string, rel: string, depth: number) => {
+    if (out.length >= cap || depth > 8) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (out.length >= cap) return;
+      const next = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isSymbolicLink()) continue;
+      // Content-addressed blobs and a run's copied outputs are bytes under a
+      // hash — thousands of names that mean nothing to a reader.
+      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git)$/.test(next)) continue;
+      if (e.isDirectory()) walk(path.join(abs, e.name), next, depth + 1);
+      else out.push(next);
+    }
+  };
+  walk(root, "", 0);
+  return out;
+}
+
+/** One file under the account directory, or the reason it will not be served. */
+export function readAccountFile(tenant: string, rel: string): { content: string } | { sealed: string } {
+  const sealed = accountFileSealed(rel);
+  if (sealed) return { sealed };
+  const norm = rel.replaceAll("\\", "/");
+  if (norm.includes("..")) return { sealed: "path escapes the account directory." };
+  const file = path.join(accountDir(tenant), norm);
+  try {
+    if (fs.statSync(file).size > 512 * 1024) return { sealed: "too large to show here — download it instead." };
+    return { content: fs.readFileSync(file, "utf8") };
+  } catch {
+    return { sealed: "could not be read." };
+  }
+}
+
 export function listWorkspaceFiles(tenant: string, workspace: string): string[] {
   const dir = workspaceDir(tenant, workspace);
   if (!fs.existsSync(dir)) return [];
