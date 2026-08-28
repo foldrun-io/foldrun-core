@@ -115,7 +115,7 @@ access_key_id = result["id"]
 secret = hashlib.sha256(result["value"].encode()).hexdigest()
 
 values = {
-    "FOLDRUN_FILES_DRIVER": "s3",
+    "FOLDRUN_STORAGE_DRIVER": "s3",
     "FOLDRUN_S3_ENDPOINT": f"https://{account}.r2.cloudflarestorage.com",
     "FOLDRUN_S3_BUCKET": bucket,
     "FOLDRUN_S3_ACCESS_KEY_ID": access_key_id,
@@ -130,7 +130,7 @@ else:
     if os.path.exists(example):
         # Start from the template so the file that reaches the box has every
         # key it needs, not only the ones this script knows about.
-        body = re.sub(r"^(FOLDRUN_S3_|FOLDRUN_FILES_DRIVER).*$", "", open(example).read(), flags=re.M)
+        body = re.sub(r"^(FOLDRUN_S3_|FOLDRUN_STORAGE_DRIVER).*$", "", open(example).read(), flags=re.M)
 
 for key, value in values.items():
     line = f"{key}={value}"

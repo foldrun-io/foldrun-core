@@ -32,9 +32,9 @@ if (fs.existsSync(envFile)) {
 
 // A scratch tenant/workspace, so nothing here can collide with real data.
 process.env.FOLDRUN_DATA = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "r2-verify-"));
-process.env.FOLDRUN_FILES_DRIVER = "s3";
+process.env.FOLDRUN_STORAGE_DRIVER = "s3";
 
-const { s3Config, driverFor, blobKey } = await import("../packages/core/src/files.ts");
+const { s3Config, driverFor, blobKey } = await import("../packages/core/src/storage.ts");
 
 const cfg = s3Config();
 if (!cfg) {
@@ -46,7 +46,7 @@ console.log(`bucket    ${cfg.bucket}  (${cfg.pathStyle ? "path" : "virtual-host"
 
 const driver = driverFor("default", "verify");
 if (driver.kind !== "s3") {
-  console.error("the driver resolved to fs — check FOLDRUN_FILES_DRIVER and the four S3 values");
+  console.error("the driver resolved to fs — check FOLDRUN_STORAGE_DRIVER and the four S3 values");
   process.exit(1);
 }
 
