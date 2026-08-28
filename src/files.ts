@@ -7,10 +7,10 @@
 //
 // Keeping the two apart is the whole design. `saveWorkspace` already refuses
 // anything outside WORKSPACE_DIRS, so a deploy cannot carry a 40MB PNG into
-// the source tree; and `files/` is not in WORKSPACE_DIRS, so the file tree,
+// the source tree; and `storage/` is not in WORKSPACE_DIRS, so the file tree,
 // the graph and the git export never see one. A workspace stays reviewable.
 //
-//   Agents never learn a storage API. A run gets `files/` materialised into
+//   Agents never learn a storage API. A run gets `storage/` materialised into
 //   its workspace copy and writes there with plain Read/Write/Bash; what it
 //   leaves behind is harvested back into the store afterwards, stamped with
 //   the run that made it. The model's mental model is a folder, because the
@@ -18,7 +18,7 @@
 //
 // Two drivers behind one interface:
 //
-//   fs   the default. Blobs under data/<tenant>/files/<workspace>/blobs/.
+//   fs   the default. Blobs under data/<tenant>/storage/<workspace>/blobs/.
 //        No account, no credentials, no network — the CLI on a laptop gets
 //        the same feature the hosted platform has.
 //
@@ -60,7 +60,7 @@ import { assertSafeName, workspaceDir, FILES_DIR, adoptLegacyFilesDir } from "./
 export { FILES_DIR };
 
 export interface FileRecord {
-  /** Path under files/, forward-slashed. The primary key: it is also exactly
+  /** Path under storage/, forward-slashed. The primary key: it is also exactly
    *  what the agent typed, which is why the record is keyed by it and not by
    *  a generated id nobody could reach from inside a run. */
   path: string;
@@ -88,7 +88,7 @@ const quotaBytes = () => Number(process.env.FOLDRUN_FILES_QUOTA_MB ?? 5120) * 10
 // ---------- paths ----------
 
 /**
- * Hosted only. On a laptop `files/` is just a folder in the user's own
+ * Hosted only. On a laptop `storage/` is just a folder in the user's own
  * project — they can see it, open it, and put a PDF in it with Finder — and
  * an index plus a second hardlinked copy under data/ would be bookkeeping
  * for a problem nobody has. The store exists to give many tenants a shared
@@ -104,7 +104,7 @@ export function fileStoreEnabled(): boolean {
 
 function storeDir(tenant: string, workspace: string) {
   if (!fileStoreEnabled()) {
-    throw new Error("the file store is not used in single-workspace mode — files/ is a plain folder");
+    throw new Error("the file store is not used in single-workspace mode — storage/ is a plain folder");
   }
   assertSafeName(tenant, "tenant");
   assertSafeName(workspace, "workspace");
@@ -126,7 +126,7 @@ export function blobKey(tenant: string, workspace: string, sha: string) {
 }
 
 /**
- * Reject anything that isn't a plain relative path under files/.
+ * Reject anything that isn't a plain relative path under storage/.
  *
  * This runs on names that came from an upload form *and* on paths harvested
  * out of a container, so it is the boundary for both directions. `..` is the
@@ -634,7 +634,7 @@ export async function uploadUrl(
 // ---------- the run mirror ----------
 
 /**
- * Put the workspace's files on disk under `<workspace>/files/`, where a run
+ * Put the workspace's files on disk under `<workspace>/storage/`, where a run
  * copies them into its container like any other directory.
  *
  * On the fs driver this is a hardlink: the blob and the mirror are the same
@@ -682,7 +682,7 @@ export async function materializeFiles(tenant: string, workspace: string): Promi
 }
 
 /**
- * Take what the run left in `files/` back into the store, stamped with the
+ * Take what the run left in `storage/` back into the store, stamped with the
  * run that wrote it.
  *
  * Compares against the index rather than a pre-run snapshot: the mirror is
