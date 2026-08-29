@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveSecrets } from "./secrets.ts";
-import { workspaceDir, type ToolDef } from "./store.ts";
+import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
 import { commandFor, resolveRunPath } from "./script-tools.ts";
@@ -120,9 +120,24 @@ export async function testTool(
 
   if (def.kind === "script") {
     const run = String(def.spec.run ?? "");
-    // Tools are workspace- or account-scoped, so resolve as if from an agent
-    // directory one level down — the same base the runtime uses.
+    // A run's working directory is the calling AGENT's folder, not the
+    // workspace root — and scripts rely on that. `path.resolve(cwd, "..",
+    // "..", "state", f)` is the ordinary way to reach workspace state, and
+    // testing one directory too high sent it to <data>/<tenant>/state: a
+    // real file read from the wrong place, reported as an empty result
+    // rather than an error. The tester now stands where a run stands.
+    //
+    // Which agent: one that granted this tool, so the test is the call that
+    // would actually happen; any agent otherwise, since only the DEPTH
+    // changes what a relative path resolves to.
     const dir = workspaceDir(tenant, workspace);
+    const agents = listAgents(tenant, workspace);
+    const caller =
+      agents.find((a) => a.use?.includes(def.name)) ?? agents[0] ?? null;
+    // With no agents at all there is nothing at that depth to stand in; the
+    // workspace root is wrong but it exists, and the note says so rather
+    // than failing a test over a workspace that cannot run anything yet.
+    const cwd = caller ? path.join(dir, "agents", caller.name) : dir;
     const file = resolveRunPath(path.join(dir, "agents", "_probe"), run, libraryDir(tenant, "scripts"));
 
     if (!fs.existsSync(file)) {
@@ -152,7 +167,7 @@ export async function testTool(
       { interpreter, run: run, name: "", description: "", args: {} },
       file,
     );
-    const { code, out } = await runOnce(cmd, [...args, ...flags], dir, {
+    const { code, out } = await runOnce(cmd, [...args, ...flags], cwd, {
       ...process.env,
       ...env,
     });
@@ -168,7 +183,12 @@ export async function testTool(
       summary: untested
         ? `needs ${declared.map((a) => `--${a}`).join(", ")} — fill them in and test again`
         : code === 0 ? "exited 0" : `exited ${code ?? "with an error"}`,
-      detail: clip(out || "(no output)"),
+      detail: clip(
+        (caller
+          ? `ran from agents/${caller.name}/, where a run runs\n\n`
+          : `ran from the workspace root — there is no agent to stand in for, so a script that reaches ../../ will look one level too high\n\n`) +
+          (out || "(no output)"),
+      ),
     });
   }
 
