@@ -255,6 +255,57 @@ reverted what an agent learned would make every run a little dumber.
 Secrets never go in these files. \`foldrun secrets\` puts them in the vault, and
 agents reference them by name.
 
+## Talking to a deployed workspace
+
+The CLI is local except for \`deploy\`. To inspect or drive a workspace running
+on a server, use the HTTP API — every route takes the same API key
+(\`Authorization: Bearer $FOLDRUN_TOKEN\`, from Settings → API keys) or a browser
+session, and refuses without one.
+
+\`\`\`sh
+export FOLDRUN_TOKEN=...   FOLDRUN_URL=https://your-server   WS=my-workspace
+api() { p=$1; shift; curl -sS -H "authorization: Bearer $FOLDRUN_TOKEN" "$FOLDRUN_URL/api/$p" "$@"; }
+
+api workspaces/$WS/runs                       # recent runs, newest first
+api workspaces/$WS/runs/<id>                  # the full trail of one
+api workspaces/$WS/runs/<id>/stream           # follow a live one (SSE)
+api workspaces/$WS/flows/<flow>/run -X POST   # start one
+\`\`\`
+
+All of it, \`/api/workspaces/<workspace>\` unless noted:
+
+| Route | Methods | For |
+|---|---|---|
+| \`/\` | GET DELETE PATCH | the workspace itself |
+| \`/deploy\` | POST | what \`foldrun deploy\` calls |
+| \`/source\` | GET PUT PATCH DELETE | read and write single files |
+| \`/runs\` | GET | list runs |
+| \`/runs/<id>\` | GET DELETE | one run, every step |
+| \`/runs/<id>/stream\` | GET | live events, server-sent |
+| \`/runs/<id>/stop\` | POST | kill it — destroys the sandbox too |
+| \`/runs/<id>/rerun\` | POST | again, or from a chosen step |
+| \`/runs/<id>/approve\` | POST | release a run waiting on a human |
+| \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
+| \`/flows/<f>/run\` | POST | start a flow |
+| \`/agents\` · \`/agents/<a>/run\` | GET POST · POST | list agents, run one |
+| \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
+| \`/tools/<t>/test\` | POST | exercise one tool alone |
+| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` | GET POST PUT DELETE · GET · POST | workspace files |
+| \`/assets\` | POST | upload an asset |
+| \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
+| \`/vocabulary\` | GET | what this workspace's documents may say |
+
+Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/schedule\`,
+\`/api/approvals\`, \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
+\`/api/healthz\` (open) and \`/api/metrics\` (Prometheus).
+
+Debugging a failed run is usually: \`runs\` to find it, \`runs/<id>\` to read which
+step failed and what it cost, fix the markdown, \`deploy\`, then \`rerun\`.
+
+Every route, with request and response shapes, is in \`docs/api.md\` in the
+foldrun repository — including secrets, keys, billing, OAuth, webhooks and the
+git push endpoint.
+
 ## Writing a flow
 
 A numbered list of steps. The number is the GROUP: same number means those
