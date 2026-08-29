@@ -30,19 +30,55 @@ export interface RuntimeSpec {
   packages: string[]; // pip
   node?: string | boolean;
   npm: string[];
+  /** Declared entries that are not valid requirements. Kept so the run can
+   *  SAY they were dropped: silently discarding `pandas>=2` and then failing
+   *  the script with "no module named pandas" is the least debuggable outcome
+   *  available. Never part of the fingerprint — it names nothing installed. */
+  rejected?: string[];
 }
+
+/**
+ * What may be handed to `pip install`, and what may be handed to `npm install`.
+ *
+ * These are argument-injection guards before they are validators. Both
+ * installers take options in the same argv as their operands, and the previous
+ * pattern (`[\w.@/-]+`) admitted a leading dash — so `packages: ["--index-url",
+ * "http://elsewhere/simple", "pandas"]` in an agent's frontmatter was a valid
+ * declaration that quietly moved the whole install to another index. Anchored,
+ * and a requirement must begin with a letter or a digit.
+ *
+ * The version half is PEP 440 shaped: a comparator and a version, optionally
+ * several comma-separated. The old pattern allowed one comparator CHARACTER,
+ * which meant `pandas>2` passed while `pandas>=2` and `pandas==2.1.4` — the
+ * two forms anyone actually writes — were dropped without a word.
+ */
+const PIP_NAME = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?`;
+const PIP_SPECIFIER = String.raw`(==|!=|<=|>=|~=|<|>)[A-Za-z0-9._*+!-]+`;
+const PIP_REQUIREMENT = new RegExp(`^${PIP_NAME}(${PIP_SPECIFIER}(,${PIP_SPECIFIER})*)?$`);
+/** npm's own shape: an optional @scope, then a name, then an optional @range. */
+const NPM_REQUIREMENT =
+  /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(@[A-Za-z0-9._^~*>=< |-]+)?$/;
 
 export function parseRuntime(raw: unknown): RuntimeSpec | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const e = raw as Record<string, unknown>;
-  const list = (v: unknown) =>
-    Array.isArray(v) ? v.map(String).filter((s) => /^[\w.@/-]+([<>=!~][\w.*]+)?$/.test(s)) : [];
+  const rejected: string[] = [];
+  const list = (v: unknown, ok: RegExp) =>
+    Array.isArray(v)
+      ? v.map(String).filter((entry) => {
+          const s = entry.trim();
+          if (ok.test(s)) return true;
+          if (s) rejected.push(s);
+          return false;
+        })
+      : [];
   const spec: RuntimeSpec = {
     python: typeof e.python === "string" || typeof e.python === "boolean" ? e.python : undefined,
-    packages: list(e.packages ?? e.pip),
+    packages: list(e.packages ?? e.pip, PIP_REQUIREMENT),
     node: typeof e.node === "string" || typeof e.node === "boolean" ? e.node : undefined,
-    npm: list(e.npm),
+    npm: list(e.npm, NPM_REQUIREMENT),
   };
+  if (rejected.length) spec.rejected = rejected;
   const wantsSomething =
     spec.python !== undefined || spec.node !== undefined || spec.packages.length || spec.npm.length;
   return wantsSomething ? spec : null;
@@ -170,11 +206,19 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
 
   const fp = fingerprint(spec);
   const shared = path.join(dataRoot(), tenant, ".runtimes", fp);
+  // Loud, and before anything else: a dropped requirement surfaces later as
+  // an import error inside a script, which points at the wrong thing entirely.
+  const dropped = spec.rejected?.length
+    ? [`runtime ${fp}: ignored invalid requirement(s): ${spec.rejected.join(", ")}`]
+    : [];
 
   // Already built: wire it up and skip the install. The whole point of the
   // cache — on the hosted path this directory is a mounted volume, so the
   // hit rate across a run is close to one.
-  if (fs.existsSync(path.join(shared, ".ready"))) return wire(shared, spec, `runtime ${fp}: cached`);
+  if (fs.existsSync(path.join(shared, ".ready"))) {
+    const hit = wire(shared, spec, `runtime ${fp}: cached`);
+    return { ...hit, log: [...dropped, ...hit.log] };
+  }
 
   fs.mkdirSync(shared, { recursive: true });
 
@@ -184,7 +228,8 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
     // A concurrent step is building exactly this. Waiting for it beats
     // duplicating it — the work is identical and it is already underway.
     if (awaitReady(path.join(shared, ".ready"))) {
-      return wire(shared, spec, `runtime ${fp}: cached (built by a concurrent step)`);
+      const hit = wire(shared, spec, `runtime ${fp}: cached (built by a concurrent step)`);
+      return { ...hit, log: [...dropped, ...hit.log] };
     }
     // It never finished. Build privately instead: slower and uncached, but a
     // step that runs is worth more than a cache entry, and a wedged lock must
@@ -197,7 +242,7 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   const ready = path.join(root, ".ready");
   const interpreters: Record<string, string> = {};
   const env: Record<string, string> = {};
-  const log: string[] = [];
+  const log: string[] = [...dropped];
 
   const venvPython = path.join(root, "venv", "bin", "python");
   const nodeModules = path.join(root, "node_modules");
