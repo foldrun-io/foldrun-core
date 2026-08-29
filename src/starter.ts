@@ -234,7 +234,14 @@ Run it after edits, the way you would run a typecheck.
 | \`knowledge/\` | reference material agents read |
 | \`memory/\` | what past runs learned — agents write here themselves |
 | \`evals/\` | tests for agents, same idea as unit tests |
+| \`skills/\` | a procedure an agent can follow, named in \`skills:\` |
+| \`tools/\` | a folder tool: its definition and its code together |
+| \`scripts/\` | code the agents call, referenced by \`scripts:\` |
+| \`state/\` | what runs accumulate. Yours to read, never deployed over |
 | \`.claude/agents/<name>.md\` | a Claude Code subagent — deploys AS an agent |
+
+\`knowledge/\` is what you tell the agents; \`memory/\` is what they worked out.
+Regenerated every run means a file; accumulated across runs means \`state/\`.
 
 That last row is worth knowing: a subagent you write in Claude Code is imported
 as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
@@ -257,18 +264,35 @@ by a model: what this role is for, what it must not do, what good looks like.
 ---
 name: researcher
 description: Finds and summarises sources.
-model: default          # fast | default | max
+model: default              # fast | default | max
+effort: low                 # how hard to think about it
+size: large                 # small | large | heavy — the sandbox it rents
 tools: [WebSearch, Read, Write]
-runtime:                # only if scripts need packages
+disallowedTools: [Bash]     # subtract from what it would otherwise have
+skills: [house-style]       # from skills/
+scripts: [summarise.py]     # from scripts/, each becomes a callable tool
+use: [my-folder-tool]       # from tools/
+apis: [{ name: crm }]       # an HTTP API, as a tool
+mcpServers: {}              # an MCP server, as a tool
+agents: [writer]            # colleagues this one may consult
+secrets: [CRM_TOKEN]        # from the vault — never written in these files
+provider: {}                # BYOK: your own model credential
+permissionMode: plan        # plan first, act once approved
+runtime:                    # only if scripts need packages
   packages: [requests]
 ---
 
 You research a topic and report what you found...
 \`\`\`
 
+Only \`name\` and the prose are required. Every other field widens or narrows
+what the agent can reach, and the default is narrow.
+
 \`runtime:\` installs pip/npm packages in the sandbox each agent runs in. Pin
 versions the normal way (\`pandas>=2\`, \`lodash@^4\`). Python and Node are
 supported; anything else should ship as a committed binary.
+
+Link documents to each other with \`[[wikilinks]]\` — the name, not the path.
 `,
     },
 
