@@ -29,9 +29,21 @@ export function databaseEnabled(): boolean {
 export function db(): Pool | null {
   if (!databaseEnabled()) return null;
   if (!pool) {
+    // Discrete fields, NOT connectionString + password. pg re-parses the
+    // connection string inside the Client, and the password it finds there
+    // (none — deliberately, so credentials never appear in a URL that gets
+    // logged) overwrites the one passed beside it. The Pool's own options
+    // still show the password, which is what makes this look like it works
+    // right up until the SASL handshake says "client password must be a
+    // string".
+    const url = new URL(process.env.FOLDRUN_DATABASE_URL!);
     pool = new Pool({
-      connectionString: process.env.FOLDRUN_DATABASE_URL,
+      host: url.hostname,
+      port: Number(url.port) || 5432,
+      user: decodeURIComponent(url.username) || "foldrun",
+      database: url.pathname.replace(/^\//, "") || "foldrun",
       password: process.env.FOLDRUN_DATABASE_PASSWORD || undefined,
+      ssl: url.searchParams.get("sslmode") === "require" ? { rejectUnauthorized: false } : undefined,
       // A web replica holds connections while it serves; Postgres counts them
       // against max_connections globally, so the cap is per-process and small
       // on purpose. N replicas × this is the number that matters.
