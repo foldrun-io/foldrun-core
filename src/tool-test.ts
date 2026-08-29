@@ -23,7 +23,7 @@ import { resolveSecrets } from "./secrets.ts";
 import { workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
-import { resolveRunPath } from "./script-tools.ts";
+import { commandFor, resolveRunPath } from "./script-tools.ts";
 
 export interface ToolTestResult {
   ok: boolean;
@@ -135,13 +135,9 @@ export async function testTool(
 
     const names = Array.isArray(def.spec.secrets) ? def.spec.secrets.map(String) : [];
     const { env, missing } = resolveSecrets(tenant, names, workspace);
+    // The runtime's own choice of interpreter, not a second table beside it.
     const interpreter =
-      typeof def.spec.interpreter === "string"
-        ? def.spec.interpreter
-        : file.endsWith(".py") ? "python3"
-        : file.endsWith(".sh") ? "bash"
-        : file.endsWith(".js") ? "node"
-        : null;
+      typeof def.spec.interpreter === "string" ? def.spec.interpreter : undefined;
 
     // Declared args become long flags, exactly as the runtime passes them.
     const declared = def.spec.args && typeof def.spec.args === "object"
@@ -152,12 +148,14 @@ export async function testTool(
       if (v !== "" && /^[a-z][a-z0-9_]*$/i.test(k)) flags.push(`--${k}`, v);
     }
 
-    const { code, out } = await runOnce(
-      interpreter ?? file,
-      interpreter ? [file, ...flags] : flags,
-      dir,
-      { ...process.env, ...env },
+    const { cmd, args } = commandFor(
+      { interpreter, run: run, name: "", description: "", args: {} },
+      file,
     );
+    const { code, out } = await runOnce(cmd, [...args, ...flags], dir, {
+      ...process.env,
+      ...env,
+    });
 
     // A script that needs arguments and got none has not failed — it has not
     // been tested. Saying "exited 2" would send someone looking for a bug.

@@ -78,7 +78,12 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
 }
 
 // Pick how to execute a file when no interpreter is declared.
-function commandFor(
+//
+// Exported because the tool tester has to make the same choice, and used to
+// make it from its own shorter table — which knew .js but not .mjs, so the
+// Test button spawned every .mjs tool as a program and reported EACCES for a
+// tool that runs perfectly. Two tables, one of them wrong.
+export function commandFor(
   spec: ScriptSpec,
   abs: string,
   overrides: Record<string, string> = {},
