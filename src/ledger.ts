@@ -13,6 +13,8 @@
 // sets it, so local runs are never refused. The hosted platform sets it.
 
 import fs from "node:fs";
+import { databaseEnabled } from "./db.ts";
+import { appendDb, balanceDb, readLedgerDb, backfillLedger } from "./ledger-db.ts";
 import path from "node:path";
 import { accountDir, assertSafeName, registerRunDeletionListener } from "./store.ts";
 
@@ -191,7 +193,20 @@ export function billingEnabled() {
   return process.env.FOLDRUN_BILLING === "1";
 }
 
-export function readLedger(tenant: string): LedgerEntry[] {
+/**
+ * Every entry for an account.
+ *
+ * Postgres when this install has one, the JSONL file otherwise. Async because
+ * the first case is a query — and a balance read from two different places
+ * depending on the caller is how a ledger stops agreeing with itself.
+ */
+export async function readLedger(tenant: string): Promise<LedgerEntry[]> {
+  if (databaseEnabled()) return readLedgerDb(tenant);
+  return readLedgerFile(tenant);
+}
+
+/** The file, which stays the fallback and the thing backups already carry. */
+export function readLedgerFile(tenant: string): LedgerEntry[] {
   const file = ledgerFile(tenant);
   if (!fs.existsSync(file)) return [];
   return fs
@@ -208,15 +223,28 @@ export function readLedger(tenant: string): LedgerEntry[] {
     .filter((e): e is LedgerEntry => e !== null);
 }
 
-export function creditBalance(tenant: string): number {
-  return readLedger(tenant).reduce((sum, e) => sum + e.usd, 0);
+export async function creditBalance(tenant: string): Promise<number> {
+  // Summed by the database when there is one: exact NUMERIC arithmetic, and a
+  // number that cannot drift from what a concurrent writer just committed.
+  if (databaseEnabled()) return balanceDb(tenant);
+  return readLedgerFile(tenant).reduce((sum, e) => sum + e.usd, 0);
 }
 
-function append(tenant: string, entry: LedgerEntry) {
+/**
+ * Write one entry.
+ *
+ * BOTH stores while a database is configured, file first. The file is what
+ * backups already carry and what an install falls back to, so keeping it
+ * current means a database can be removed again without losing a cent — and
+ * if the second write fails the two disagree only until the next backfill,
+ * which the unique constraint makes safe to re-run at any time.
+ */
+async function append(tenant: string, entry: LedgerEntry): Promise<void> {
   const file = ledgerFile(tenant);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // O_APPEND: single-line writes land whole even if two land at once.
   fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+  if (databaseEnabled()) await appendDb(tenant, entry);
 }
 
 /**
@@ -225,10 +253,10 @@ function append(tenant: string, entry: LedgerEntry) {
  * behind to explain. Zero-value: deletion never moves money, it only
  * completes the story of a line that now points at nothing.
  */
-export function noteRunDeleted(tenant: string, workspace: string, runId: string) {
-  const charged = readLedger(tenant).some((e) => e.kind === "run" && e.runId === runId);
+export async function noteRunDeleted(tenant: string, workspace: string, runId: string): Promise<void> {
+  const charged = (await readLedger(tenant)).some((e) => e.kind === "run" && e.runId === runId);
   if (!charged) return;
-  append(tenant, {
+  await append(tenant, {
     t: new Date().toISOString(),
     kind: "adjustment",
     usd: 0,
@@ -253,11 +281,11 @@ export function noteRunDeleted(tenant: string, workspace: string, runId: string)
  * accrual only happens where billing is enforced — a self-hoster's ledger
  * is observability, not a subscription.
  */
-export function accrueDaily(tenant: string, storageBytes: number, now = new Date()): LedgerEntry[] {
+export async function accrueDaily(tenant: string, storageBytes: number, now = new Date()): Promise<LedgerEntry[]> {
   if (!billingEnabled()) return [];
   const day = now.toISOString().slice(0, 10);
   const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
-  const existing = readLedger(tenant).filter(
+  const existing = (await readLedger(tenant)).filter(
     (e) => e.kind === "adjustment" && e.note?.endsWith(day),
   );
   const written: LedgerEntry[] = [];
@@ -271,7 +299,7 @@ export function accrueDaily(tenant: string, storageBytes: number, now = new Date
       usd: -micro(baseMonthly / daysInMonth),
       note: `base fee ${day}`,
     };
-    append(tenant, entry);
+    await append(tenant, entry);
     written.push(entry);
   }
 
@@ -287,17 +315,17 @@ export function accrueDaily(tenant: string, storageBytes: number, now = new Date
         usd: -usd,
         note: `storage ${gb.toFixed(2)}GB ${day}`,
       };
-      append(tenant, entry);
+      await append(tenant, entry);
       written.push(entry);
     }
   }
   return written;
 }
 
-export function recordTopUp(tenant: string, usd: number, note?: string): LedgerEntry {
+export async function recordTopUp(tenant: string, usd: number, note?: string): Promise<LedgerEntry> {
   if (!(usd > 0) || !Number.isFinite(usd)) throw new Error("top-up must be a positive amount");
   const entry: LedgerEntry = { t: new Date().toISOString(), kind: "topup", usd, note };
-  append(tenant, entry);
+  await append(tenant, entry);
   return entry;
 }
 
@@ -336,16 +364,16 @@ function claimSettle(tenant: string, runId: string): boolean {
   }
 }
 
-export function recordRunCost(
+export async function recordRunCost(
   tenant: string,
   workspace: string,
   runId: string,
   meter: RunMeter | number,
-): LedgerEntry | null {
+): Promise<LedgerEntry | null> {
   const m = asMeter(meter);
   const charge = priceRun(m);
   if (!(charge > 0)) return null;
-  if (readLedger(tenant).some((e) => e.kind === "run" && e.runId === runId)) return null;
+  if ((await readLedger(tenant)).some((e) => e.kind === "run" && e.runId === runId)) return null;
   if (!claimSettle(tenant, runId)) return null;
   const steps = m.steps > 0 ? m.steps : 0;
   const computeSecs = m.computeSecs > 0 ? micro(m.computeSecs) : 0;
@@ -361,7 +389,7 @@ export function recordRunCost(
     workspace,
     runId,
   };
-  append(tenant, entry);
+  await append(tenant, entry);
   return entry;
 }
 
@@ -372,16 +400,16 @@ export function recordRunCost(
  * from before `cost` existed count as charge == cost: honest, since margin
  * was 1 then.
  */
-export function ledgerSummary(tenant: string): {
+export async function ledgerSummary(tenant: string): Promise<{
   balanceUsd: number;
   chargedUsd: number;
   providerCostUsd: number;
   marginUsd: number;
-} {
+}> {
   let balance = 0;
   let charged = 0;
   let cost = 0;
-  for (const e of readLedger(tenant)) {
+  for (const e of await readLedger(tenant)) {
     balance += e.usd;
     if (e.kind === "run") {
       charged += -e.usd;
@@ -429,9 +457,9 @@ export function ledgerSummary(tenant: string): {
  * N racing enqueues can overshoot by N × exposure at most once, not
  * unboundedly.
  */
-export function assertFunds(tenant: string, inFlight = 0) {
+export async function assertFunds(tenant: string, inFlight = 0) {
   if (!billingEnabled()) return;
-  const balance = creditBalance(tenant);
+  const balance = await creditBalance(tenant);
   const exposure = Number(process.env.FOLDRUN_MAX_RUN_EXPOSURE);
   const refuse = (msg: string) => {
     const err = new Error(msg);
@@ -453,4 +481,19 @@ export function assertFunds(tenant: string, inFlight = 0) {
   }
   if (balance > 0) return;
   refuse("out of credits — top up before starting new runs (existing runs finish either way)");
+}
+
+
+/**
+ * Move an account's file history into the database, once.
+ *
+ * Called at boot on the worker. Without it an install that gains a database
+ * would read a balance of zero for every account while the file sat there
+ * full of entries — which for a ledger does not look like a migration, it
+ * looks like everyone's money disappearing.
+ */
+export async function importLedgerToDatabase(tenant: string): Promise<number> {
+  if (!databaseEnabled()) return 0;
+  const { inserted } = await backfillLedger(tenant, readLedgerFile(tenant));
+  return inserted;
 }

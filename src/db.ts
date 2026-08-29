@@ -133,6 +133,34 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS audit_tenant_at_idx ON audit_log (tenant, at DESC);
     `,
   },
+  {
+    name: "0002_ledger",
+    sql: `
+      -- Money. Append-only, exactly as the JSONL was, but with a balance the
+      -- database can compute under a transaction — which is what assertFunds
+      -- needs and what summing a file it just read cannot promise: two runs
+      -- admitted at once could each be judged against the same untouched
+      -- balance and both pass.
+      CREATE TABLE IF NOT EXISTS ledger (
+        id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        tenant     TEXT NOT NULL,
+        at         TIMESTAMPTZ NOT NULL,
+        kind       TEXT NOT NULL CHECK (kind IN ('topup','run','adjustment')),
+        -- numeric, never float: money summed in binary floating point drifts,
+        -- and a balance is the one number nobody accepts "close enough" on.
+        usd        NUMERIC(14,6) NOT NULL,
+        cost       NUMERIC(14,6),
+        workspace  TEXT,
+        run_id     TEXT,
+        note       TEXT,
+        meter      JSONB,
+        -- A run is charged ONCE. The file could not enforce that; a partial
+        -- unique index can, and it makes the backfill idempotent for free.
+        UNIQUE NULLS NOT DISTINCT (tenant, kind, run_id, at)
+      );
+      CREATE INDEX IF NOT EXISTS ledger_tenant_at_idx ON ledger (tenant, at DESC);
+    `,
+  },
 ];
 
 /**

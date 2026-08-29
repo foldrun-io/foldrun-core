@@ -149,7 +149,7 @@ function fileStoreBytes(tenant: string, workspace: string): number {
   }
 }
 
-export function accountUsage(tenant: string): AccountUsage {
+export async function accountUsage(tenant: string): Promise<AccountUsage> {
   const limits = podLimits();
   const totals = bucket();
   let storageBytes = 0;
@@ -211,13 +211,13 @@ export function accountUsage(tenant: string): AccountUsage {
     });
   }
 
-  const ledger = ledgerSummary(tenant);
+  const ledger = await ledgerSummary(tenant);
   return {
     tenant,
     generatedAt: new Date().toISOString(),
     podLimits: limits,
     totals: { ...rounded(totals), storageBytes },
     workspaces: workspaces.sort((a, b) => b.tokenCostUsd - a.tokenCostUsd),
-    ledger: { ...ledger, balanceUsd: creditBalance(tenant) },
+    ledger: { ...ledger, balanceUsd: await creditBalance(tenant) },
   };
 }

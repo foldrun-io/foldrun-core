@@ -778,7 +778,7 @@ export function startWorker() {
   // The recurring half of the bill, swept hourly: accrueDaily is idempotent
   // per calendar day, so the schedule here only decides how soon after
   // midnight the line appears — not how many appear.
-  const accrue = () => {
+  const accrue = async () => {
     if (!billingEnabled()) return;
     const retentionDays = Number(process.env.FOLDRUN_RETENTION_DAYS);
     const cutoff = Number.isFinite(retentionDays) && retentionDays > 0
@@ -786,8 +786,8 @@ export function startWorker() {
       : null;
     for (const tenant of listTenants()) {
       try {
-        const usage = accountUsage(tenant);
-        accrueDaily(tenant, usage.totals.storageBytes);
+        const usage = await accountUsage(tenant);
+        await accrueDaily(tenant, usage.totals.storageBytes);
         // The wallet's hourly look: auto top-up from a saved card, or a
         // low-balance email, before a scheduled flow finds an empty account
         // at run start with nobody watching.
@@ -814,7 +814,7 @@ export function startWorker() {
       }
     }
   };
-  setInterval(accrue, 60 * 60 * 1000).unref();
+  setInterval(() => void accrue().catch((err) => console.error("[foldrun] hourly accrual:", err)), 60 * 60 * 1000).unref();
   accrue();
 }
 

@@ -73,13 +73,13 @@ export interface WalletSummary {
   warnBelowUsd: number;
 }
 
-export function walletSummary(tenant: string): WalletSummary {
+export async function walletSummary(tenant: string): Promise<WalletSummary> {
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   let spend7 = 0;
   let spend30 = 0;
   let oldestSpend = now;
-  for (const e of readLedger(tenant)) {
+  for (const e of await readLedger(tenant)) {
     if (e.usd >= 0) continue; // top-ups are not burn
     const t = new Date(e.t).getTime();
     if (now - t <= 30 * day) {
@@ -93,7 +93,7 @@ export function walletSummary(tenant: string): WalletSummary {
   // long, which is the one direction this number must never err in.
   const windowDays = Math.min(30, Math.max(1, (now - oldestSpend) / day));
   const burn = spend30 / windowDays;
-  const balance = creditBalance(tenant);
+  const balance = await creditBalance(tenant);
   const daysLeft = burn > 0 ? balance / burn : null;
   return {
     balanceUsd: Number(balance.toFixed(6)),
@@ -217,7 +217,7 @@ async function sendLowBalanceEmail(tenant: string, summary: WalletSummary): Prom
  */
 export async function walletGuard(tenant: string): Promise<void> {
   if (!billingEnabled()) return;
-  const summary = walletSummary(tenant);
+  const summary = await walletSummary(tenant);
   const config = walletConfig(tenant);
 
   if (summary.balanceUsd >= summary.warnBelowUsd) {
@@ -251,12 +251,12 @@ export async function walletGuard(tenant: string): Promise<void> {
 
 /** What one workspace has spent this calendar month — the number a
  *  workspace page shows beside the account's remaining credits. */
-export function workspaceMonthSpendUsd(tenant: string, workspace: string): number {
+export async function workspaceMonthSpendUsd(tenant: string, workspace: string): Promise<number> {
   const monthStart = new Date();
   monthStart.setUTCDate(1);
   monthStart.setUTCHours(0, 0, 0, 0);
   let spend = 0;
-  for (const e of readLedger(tenant)) {
+  for (const e of await readLedger(tenant)) {
     if (e.usd >= 0 || e.workspace !== workspace) continue;
     if (new Date(e.t).getTime() >= monthStart.getTime()) spend += -e.usd;
   }
@@ -283,10 +283,10 @@ export function workspaceBudgetUsd(tenant: string, workspace: string): number | 
  * armed — it is their control on their spend, not ours on our revenue.
  * Runs already going always finish; the cap stops the next one starting.
  */
-export function assertWorkspaceBudget(tenant: string, workspace: string) {
+export async function assertWorkspaceBudget(tenant: string, workspace: string) {
   const budget = workspaceBudgetUsd(tenant, workspace);
   if (budget === null) return;
-  const spent = workspaceMonthSpendUsd(tenant, workspace);
+  const spent = await workspaceMonthSpendUsd(tenant, workspace);
   if (spent < budget) return;
   const err = new Error(
     `workspace ${workspace} is at its monthly budget — $${spent.toFixed(2)} spent of ` +
