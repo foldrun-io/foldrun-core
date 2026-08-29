@@ -255,6 +255,52 @@ reverted what an agent learned would make every run a little dumber.
 Secrets never go in these files. \`foldrun secrets\` puts them in the vault, and
 agents reference them by name.
 
+## Writing a flow
+
+A numbered list of steps. The number is the GROUP: same number means those
+steps run in parallel, and the flow waits for all of them before the next.
+
+\`\`\`markdown
+---
+trigger: manual          # manual | schedule | webhook
+schedule: "0 9 * * 1"    # cron, when trigger: schedule
+timezone: Australia/Sydney
+model: default           # a default for every step here
+effort: low
+overlap: skip            # skip | queue — what a second run does while one is live
+---
+
+1. [[researcher]] — Find three sources on {{topic}}.
+2. [[writer]] — Draft from what the researcher found.
+   model: max
+   verify: the draft cites every source
+3?. [[editor]] — Tighten it.
+4!. [[publisher]] — Publish it.
+\`\`\`
+
+\`3?.\` is optional — it may be skipped. \`4!.\` needs a human to approve before it
+runs. \`[[flow:other-flow]]\` in place of an agent runs another flow as a step.
+
+Indented under a step, any of:
+
+| | |
+|---|---|
+| \`approve: true\` | stop for a human (\`!\` is shorthand for this) |
+| \`when: <condition>\` | run only if it holds |
+| \`case: <value>\` / \`else: true\` | branch on the previous step's result |
+| \`retry: 2\` | re-run on failure, up to 5 |
+| \`timeout: 900\` | seconds before the step is cut off |
+| \`verify: <claim>\` | the step fails unless this is true of its output |
+| \`model:\` / \`effort:\` | override the flow's default for this step |
+| \`loop: 3\` / \`until: <condition>\` | repeat until it holds, at most 5 |
+| \`each: lines\` | run once per line of the previous result |
+| \`each: rows of <path>\` | run once per CSV row |
+| \`max: 10\` | cap how many iterations \`each:\` produces |
+| \`on-fail: [[agent]]\` | who handles it when this step fails |
+| \`wait: 30m\` | pause before running — \`90s\`, \`30m\`, \`4h\`, \`3d\` |
+| \`ask: <question>\` | ask a human, use the answer |
+| \`delegate: [[a]], [[b]]\` | hand the step to whichever fits, up to 5 |
+
 ## Writing an agent
 
 Frontmatter then prose. The prose IS the system prompt, so write it to be read
