@@ -380,21 +380,79 @@ export function rerunFrom(
 }
 
 /** Claim the oldest pending job, or null. Loses every race gracefully. */
+/**
+ * Order the pending queue FAIRLY across accounts, not by arrival alone.
+ *
+ * A plain `readdir().sort()` is FIFO by the timestamp in each filename, which
+ * is correct for one account and wrong the moment there are two: an account
+ * enqueuing five hundred jobs puts every other customer behind all five
+ * hundred of them. That is the difference between "the platform is slow" and
+ * "that account is slow", and it is the complaint you cannot answer once you
+ * have it.
+ *
+ * So: round-robin by account, FIFO within each. Every account's oldest job
+ * before anyone's second, every account's second before anyone's third. A busy
+ * account still finishes all its work and still takes more of the queue than a
+ * quiet one — it simply cannot make the quiet one wait behind its whole
+ * backlog.
+ *
+ * The tenant comes from the job BODY, not the filename: the name is
+ * `<ms>-<runId>.json` and every runId begins `run-`, so a name-derived tenant
+ * would put every account in one bucket and silently degrade to the FIFO this
+ * replaces. claimNext already reads each candidate for its notBefore, so this
+ * costs the same reads, done once.
+ */
+export function fairOrder(entries: { name: string; tenant: string }[]): string[] {
+  const byTenant = new Map<string, string[]>();
+  for (const e of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    const list = byTenant.get(e.tenant);
+    if (list) list.push(e.name);
+    else byTenant.set(e.tenant, [e.name]);
+  }
+  // Accounts taken in the order their OLDEST job arrived, so round-robin does
+  // not quietly become alphabetical-by-account.
+  const queues = [...byTenant.values()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  for (let round = 0; ; round += 1) {
+    let moved = false;
+    for (const q of queues) {
+      if (round < q.length) {
+        out.push(q[round]);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return out;
+}
+
+/** Pending jobs with the tenant each belongs to, unreadable ones last so a
+ *  file caught mid-write is retried rather than dropped from the ordering. */
+function pendingWithTenant(dir: string): { name: string; tenant: string }[] {
+  const out: { name: string; tenant: string }[] = [];
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const job = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as QueueJob;
+      // Held by its own deadline: not a candidate, and not counted against
+      // its account's share either.
+      if (job.notBefore && new Date(job.notBefore).getTime() > Date.now()) continue;
+      out.push({ name, tenant: job.tenant });
+    } catch {
+      out.push({ name, tenant: "" }); // mid-write; the claim path settles it
+    }
+  }
+  return out;
+}
+
 export function claimNext(): { job: QueueJob; claimedFile: string } | null {
   const pending = queueDir("pending");
   if (!fs.existsSync(pending)) return null;
-  for (const name of fs.readdirSync(pending).sort()) {
-    if (!name.endsWith(".json")) continue;
+  // A job with an unexpired notBefore stays where it is: a wait: is a deadline
+  // in the queue, and skipping is cheaper than claim-and-repark. That filter
+  // now lives in pendingWithTenant, which has to open each job anyway.
+  for (const name of fairOrder(pendingWithTenant(pending))) {
     const from = path.join(pending, name);
-    // A job with an unexpired notBefore stays where it is: a wait: is a
-    // deadline in the queue, and skipping is cheaper than claim-and-repark.
-    try {
-      const peek = JSON.parse(fs.readFileSync(from, "utf8")) as QueueJob;
-      if (peek.notBefore && new Date(peek.notBefore).getTime() > Date.now()) continue;
-    } catch {
-      // unreadable now may be claimable later (mid-write); the claim path
-      // below settles it either way
-    }
     const to = path.join(queueDir("claimed"), name);
     fs.mkdirSync(queueDir("claimed"), { recursive: true });
     try {
