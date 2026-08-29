@@ -133,3 +133,87 @@ export async function cacheReady(): Promise<boolean> {
     return false;
   }
 }
+
+// ------------------------------------------------------------------- leases
+//
+// A lease says "one process is doing this job". The file version had to read,
+// decide, then write — three steps, so two workers could both read "stale" and
+// both write. It papered over that with a staleness window and a comment
+// admitting the worst case was one bounded double-claim during a handover.
+//
+// `SET key owner NX PX ttl` has no window: the server decides, once. And the
+// expiry is free — a dead holder's lease simply stops existing, rather than
+// sitting there until someone notices it has gone quiet.
+
+export interface LeaseState {
+  held: boolean;
+  /** Who held it before us, when this call was a takeover. For the log line
+   *  that turns a silent handover into a timestamped one. */
+  tookOverFrom?: string;
+}
+
+/**
+ * Claim the lease, or renew it if we already hold it.
+ *
+ * Renewal is `SET … XX` rather than PEXPIRE so that losing the lease and
+ * regaining it are the same code path: XX only succeeds if the key exists,
+ * and the value comparison below is what stops us renewing someone else's.
+ */
+export async function takeLease(key: string, owner: string, ttlMs: number): Promise<LeaseState> {
+  const c = cache();
+  if (!c) return { held: false };
+  const k = `lease:${key}`;
+  try {
+    // Free? Take it.
+    const taken = await c.set(k, owner, "PX", ttlMs, "NX");
+    if (taken === "OK") return { held: true };
+
+    const holder = await c.get(k);
+    if (holder === owner) {
+      // Ours — extend it. If it expired between the GET and here, the SET NX
+      // on the next tick takes it again; a lease that lapses for one second
+      // costs a tick, not a run.
+      await c.set(k, owner, "PX", ttlMs, "XX");
+      return { held: true };
+    }
+    return { held: false };
+  } catch {
+    // Redis unreachable. Say NOT held rather than assuming: two workers both
+    // deciding "I hold it" because the coordinator is down is the exact
+    // failure a lease exists to prevent.
+    return { held: false };
+  }
+}
+
+/** Is anyone holding it? For a probe — never takes it. */
+export async function leaseHeld(key: string): Promise<boolean> {
+  const c = cache();
+  if (!c) return false;
+  try {
+    return (await c.exists(`lease:${key}`)) === 1;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Give it up, but only if it is still ours.
+ *
+ * A GET-then-DEL can delete a lease that expired between the two and was
+ * already retaken by someone else — so the compare and the delete have to be
+ * one operation, which on Redis means a script.
+ */
+export async function releaseLease(key: string, owner: string): Promise<void> {
+  const c = cache();
+  if (!c) return;
+  try {
+    await c.eval(
+      `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`,
+      1,
+      `lease:${key}`,
+      owner,
+    );
+  } catch {
+    // It expires on its own; that is the point of PX.
+  }
+}

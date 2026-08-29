@@ -44,6 +44,7 @@ import { walletGuard, assertWorkspaceBudget } from "./wallet.ts";
 import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
 import { databaseEnabled, db } from "./db.ts";
+import { cacheEnabled, leaseHeld, releaseLease, takeLease } from "./cache.ts";
 import {
   claimNextDb,
   enqueueDb,
@@ -644,8 +645,21 @@ function workerLeaseFile() {
   return path.join(dataRoot(), ".worker-lease");
 }
 
-/** True when this process holds (or just took) the worker lease. */
-export function holdsWorkerLease(now = Date.now()): boolean {
+/**
+ * True when this process holds (or just took) the worker lease.
+ *
+ * Redis when there is one, the file otherwise. The difference is not
+ * cosmetic: the file version reads, decides, then writes, so two workers can
+ * both read "stale" and both write — its own comment admits the worst case is
+ * one bounded double-claim during a handover. `SET NX PX` has no such window,
+ * which is what makes more than one worker replica safe at all.
+ */
+export async function holdsWorkerLease(now = Date.now()): Promise<boolean> {
+  if (cacheEnabled()) {
+    const state = await takeLease("worker", WORKER_OWNER, WORKER_LEASE_STALE_MS);
+    return state.held;
+  }
+
   const file = workerLeaseFile();
   try {
     const current = JSON.parse(fs.readFileSync(file, "utf8")) as { owner: string; renewedAt: number };
@@ -673,6 +687,12 @@ export function holdsWorkerLease(now = Date.now()): boolean {
   return true;
 }
 
+/** Hand the lease back on a clean shutdown, so the next worker starts driving
+ *  immediately instead of waiting out the TTL. */
+export async function releaseWorkerLease(): Promise<void> {
+  if (cacheEnabled()) await releaseLease("worker", WORKER_OWNER);
+}
+
 /**
  * Whether a LIVE worker holds the lease on this data directory — a pure
  * read that never writes (a probe taking a stale lease would hold it while
@@ -681,7 +701,8 @@ export function holdsWorkerLease(now = Date.now()): boolean {
  * process hook, so identity comparison across bundles always said false.
  * The operational question is that a worker exists, not which copy asked.
  */
-export function peekWorkerLease(now = Date.now()): boolean {
+export async function peekWorkerLease(now = Date.now()): Promise<boolean> {
+  if (cacheEnabled()) return leaseHeld("worker");
   try {
     const current = JSON.parse(fs.readFileSync(workerLeaseFile(), "utf8")) as { renewedAt: number };
     return now - current.renewedAt < WORKER_LEASE_STALE_MS;
