@@ -281,7 +281,7 @@ function holdsLease(now: number): boolean {
   return true;
 }
 
-export function tick(now = new Date()): DueFlow[] {
+export async function tick(now = new Date()): Promise<DueFlow[]> {
   if (!holdsLease(now.getTime())) return [];
   const state = readState();
   const due = findDueFlows(now, state, listTenants());
@@ -291,7 +291,7 @@ export function tick(now = new Date()): DueFlow[] {
       // Through the queue, not straight to driveRun — the scheduler shares a
       // process with the worker, and firing five flows at one minute past
       // midnight should respect the same concurrency cap as everything else.
-      enqueueFlowRun(d.tenant, d.workspace, d.flow.steps, d.flow.name);
+      await enqueueFlowRun(d.tenant, d.workspace, d.flow.steps, d.flow.name);
       console.log(`[scheduler] queued ${d.tenant}/${d.workspace}/${d.flow.name}`);
     } catch (err) {
       console.error(`[scheduler] failed ${d.tenant}/${d.workspace}/${d.flow.name}:`, err);
@@ -307,11 +307,10 @@ export function startScheduler() {
   if (started || process.env.FOLDRUN_DISABLE_SCHEDULER === "1") return;
   started = true;
   setInterval(() => {
-    try {
-      tick();
-    } catch (err) {
-      console.error("[scheduler] tick failed:", err);
-    }
+    // The tick is async now (enqueueing can be a database write), so its
+    // failure is a rejected promise rather than a throw a try/catch here would
+    // ever see — an unhandled one takes the process down.
+    void tick().catch((err) => console.error("[scheduler] tick failed:", err));
   }, TICK_MS).unref?.();
   console.log("[scheduler] started (30s tick)");
 }

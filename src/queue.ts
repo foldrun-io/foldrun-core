@@ -43,6 +43,17 @@ import { sendRunNotification } from "./notify.ts";
 import { walletGuard, assertWorkspaceBudget } from "./wallet.ts";
 import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
+import { databaseEnabled, db } from "./db.ts";
+import {
+  claimNextDb,
+  enqueueDb,
+  hasJobDb,
+  inFlightDb,
+  recoverStaleDb,
+  releaseDb,
+  removeDb,
+  statsDb,
+} from "./queue-db.ts";
 
 export interface QueueJob {
   tenant: string;
@@ -62,7 +73,7 @@ function queueDir(state: "pending" | "claimed") {
 function jobFileName(job: QueueJob) {
   // Millisecond prefix for FIFO ordering; runId for uniqueness (it already
   // carries its own randomness). Re-enqueueing the same run overwrites any
-  // pending file for it — see enqueue().
+  // pending file for it — see await enqueue().
   return `${Date.now().toString().padStart(14, "0")}-${job.runId}.json`;
 }
 
@@ -84,7 +95,8 @@ function countRunning(tenant: string): number {
   return n;
 }
 
-function countInFlight(tenant: string): number {
+async function countInFlight(tenant: string): Promise<number> {
+  if (databaseEnabled()) return inFlightDb(tenant);
   let n = 0;
   for (const state of ["pending", "claimed"] as const) {
     const dir = queueDir(state);
@@ -110,14 +122,20 @@ function pendingFileFor(runId: string): string | null {
   return hit ? path.join(dir, hit) : null;
 }
 
-function enqueue(job: QueueJob) {
+async function enqueue(job: QueueJob) {
+  // One pending job per run, ever. Approving two steps in quick succession, or
+  // reconcile racing the approval API, must not line the same run up twice —
+  // driveRun on an already-finished record would find no pending steps and
+  // mark everything skipped. The file queue got this from a filename check;
+  // the table gets it from a unique index, which cannot race.
+  if (databaseEnabled()) {
+    if (await hasJobDb(job.runId)) return;
+    await enqueueDb(job);
+    return;
+  }
+
   const dir = queueDir("pending");
   fs.mkdirSync(dir, { recursive: true });
-
-  // One pending job per run, ever. Approving two steps in quick succession,
-  // or reconcile racing the approval API, must not line the same run up
-  // twice — driveRun on an already-finished record would find no pending
-  // steps and mark everything skipped.
   const existing = pendingFileFor(job.runId);
   if (existing) return;
 
@@ -131,21 +149,21 @@ function enqueue(job: QueueJob) {
  * Create a `queued` run and line it up for a worker. The record exists on
  * disk before the job does, so a claimed job always finds its run.
  */
-export function enqueueFlowRun(
+export async function enqueueFlowRun(
   tenant: string,
   workspace: string,
   steps: FlowStep[],
   flowName: string,
   modelOverride?: string | null,
   tags: string[] = [],
-): RunRecord {
+): Promise<RunRecord> {
   // Money is checked where work is added, and only where work is added —
   // resuming a parked run skips this on purpose. No-op unless the install
   // enforces billing (FOLDRUN_BILLING=1).
-  assertFunds(tenant, countInFlight(tenant));
+  assertFunds(tenant, await countInFlight(tenant));
   assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
-  enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
+  await enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
   return run;
 }
 
@@ -156,8 +174,8 @@ export function enqueueFlowRun(
  * resolved onto the record's events the first time through, and the
  * override, if any, came from the flow file which is re-read regardless.
  */
-export function enqueueResume(tenant: string, workspace: string, runId: string) {
-  enqueue({ tenant, workspace, runId });
+export async function enqueueResume(tenant: string, workspace: string, runId: string) {
+  await enqueue({ tenant, workspace, runId });
 }
 
 /**
@@ -239,20 +257,20 @@ export function stopRun(tenant: string, workspace: string, runId: string): RunRe
  * the workspace's own files as the fixtures, without paying for the steps
  * that produce them.
  */
-export function startFlowFromStep(
+export async function startFlowFromStep(
   tenant: string,
   workspace: string,
   flowName: string,
   fromStep: number, // the step number as the flow file numbers it — a GROUP,
   //                   so "from step 3" keeps all of step 3's parallel agents
-): RunRecord {
+): Promise<RunRecord> {
   const flow = listWorkspaceFlows(tenant, workspace).find((f) => f.name === flowName);
   if (!flow) throw new Error(`flow ${flowName} not found`);
   const maxGroup = Math.max(...flow.steps.map((s) => s.group));
   if (fromStep < 1 || fromStep > maxGroup) {
     throw new Error(`flow ${flowName} has no step ${fromStep} (it has ${maxGroup})`);
   }
-  assertFunds(tenant, countInFlight(tenant));
+  assertFunds(tenant, await countInFlight(tenant));
   assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, flow.steps, flowName, "queued");
   for (const step of run.steps) {
@@ -262,7 +280,7 @@ export function startFlowFromStep(
     }
   }
   writeRun(tenant, workspace, run);
-  enqueue({ tenant, workspace, runId: run.id });
+  await enqueue({ tenant, workspace, runId: run.id });
   return run;
 }
 
@@ -284,12 +302,12 @@ export function startFlowFromStep(
  * Fan-out instances in the reset range are dropped and their template step
  * restored, so the fan-out re-expands against the fresh result.
  */
-export function rerunFrom(
+export async function rerunFrom(
   tenant: string,
   workspace: string,
   runId: string,
   from: { agent?: string; step?: number },
-): RunRecord {
+): Promise<RunRecord> {
   const source = readRun(tenant, workspace, runId);
   if (!source) throw new Error(`run ${runId} not found`);
   if (source.status !== "completed" && source.status !== "failed") {
@@ -308,7 +326,7 @@ export function rerunFrom(
     );
   }
 
-  assertFunds(tenant, countInFlight(tenant));
+  assertFunds(tenant, await countInFlight(tenant));
   assertWorkspaceBudget(tenant, workspace);
 
   // Re-runs exist to iterate: fix the flow, re-run the step. So the reset
@@ -375,7 +393,7 @@ export function rerunFrom(
     steps,
   };
   writeRun(tenant, workspace, run);
-  enqueue({ tenant, workspace, runId: run.id });
+  await enqueue({ tenant, workspace, runId: run.id });
   return run;
 }
 
@@ -445,7 +463,26 @@ function pendingWithTenant(dir: string): { name: string; tenant: string }[] {
   return out;
 }
 
-export function claimNext(): { job: QueueJob; claimedFile: string } | null {
+/**
+ * Take the next job, or null.
+ *
+ * `release` replaces the claimed FILE the caller used to delete: with a
+ * database the claim is a row, and handing back a closure means the worker
+ * does not have to know which store it is talking to — the one place that
+ * could get "finished with this job" wrong is here, not at every call site.
+ */
+export async function claimNext(): Promise<
+  { job: QueueJob; release: () => Promise<void> } | null
+> {
+  if (databaseEnabled()) {
+    const job = await claimNextDb(WORKER_OWNER);
+    if (!job) return null;
+    return {
+      job: job as QueueJob,
+      release: () => releaseDb(job.runId),
+    };
+  }
+
   const pending = queueDir("pending");
   if (!fs.existsSync(pending)) return null;
   // A job with an unexpired notBefore stays where it is: a wait: is a deadline
@@ -462,7 +499,7 @@ export function claimNext(): { job: QueueJob; claimedFile: string } | null {
     }
     try {
       const job = JSON.parse(fs.readFileSync(to, "utf8")) as QueueJob;
-      return { job, claimedFile: to };
+      return { job, release: async () => fs.rmSync(to, { force: true }) };
     } catch {
       fs.rmSync(to, { force: true }); // unreadable job — drop it, the run
       continue; //                       record survives for reconcile to see
@@ -491,9 +528,38 @@ export interface QueueRecovery {
  * Also drops pending jobs whose run is already terminal — the inverse
  * orphan, from an approval decided while its resume job still sat pending.
  */
-export function recoverQueue(): QueueRecovery {
+export async function recoverQueue(): Promise<QueueRecovery> {
   const requeued: string[] = [];
   const dropped: string[] = [];
+
+  if (databaseEnabled()) {
+    // Two differences from the file path, and both are the point of the move.
+    //
+    // A claim carries WHEN it was made, so an abandoned one is recoverable at
+    // any time rather than only at boot before any worker starts — which is
+    // what lets a second worker pick up after a first is killed, instead of the
+    // run waiting for someone to restart the platform.
+    //
+    // And a run that finished while its job sat there is dropped by asking the
+    // record, exactly as before: the queue's one fact is "nobody is driving
+    // this yet", and the record is still the source of truth for the rest.
+    const stale = await recoverStaleDb(CLAIM_STALE_MS);
+    if (stale) requeued.push(`${stale} stale claim(s)`);
+    const p = db();
+    if (p) {
+      const { rows } = await p.query<{ run_id: string; tenant: string; workspace: string }>(
+        `SELECT run_id, tenant, workspace FROM queue`,
+      );
+      for (const r of rows) {
+        const run = readRun(r.tenant, r.workspace, r.run_id);
+        if (!run || run.status === "completed" || run.status === "failed") {
+          await removeDb(r.run_id);
+          dropped.push(r.run_id);
+        }
+      }
+    }
+    return { requeued, dropped };
+  }
 
   const claimed = queueDir("claimed");
   if (fs.existsSync(claimed)) {
@@ -533,7 +599,7 @@ export function recoverQueue(): QueueRecovery {
       for (const summary of listRuns(tenant, workspace.name)) {
         if (summary.status !== "queued") continue;
         if (pendingFileFor(summary.id)) continue;
-        enqueue({ tenant, workspace: workspace.name, runId: summary.id, tags: summary.tags });
+        await enqueue({ tenant, workspace: workspace.name, runId: summary.id, tags: summary.tags });
         requeued.push(summary.id);
       }
     }
@@ -550,6 +616,11 @@ function concurrency() {
 }
 
 const POLL_MS = 1000;
+
+/** How long a claim may go unrenewed before another worker may take the job.
+ *  Longer than any single step's backstop, so a slow run is never stolen from
+ *  a worker that is still driving it. */
+const CLAIM_STALE_MS = Number(process.env.FOLDRUN_CLAIM_STALE_MS) || 30 * 60_000;
 
 // One worker per data directory, enforced at runtime rather than by a YAML
 // comment. Same shape as the scheduler's lease: a file naming its holder,
@@ -674,15 +745,22 @@ export function startWorker() {
 
   let inFlight = 0;
 
-  const tick = () => {
+  const tick = async () => {
     // Not the holder → not a worker this tick. A web replica pointed at the
     // same data, or a second worker from a misapplied manifest, idles here
     // instead of double-driving runs.
     if (!holdsWorkerLease()) return;
     while (inFlight < concurrency()) {
-      const claim = claimNext();
-      if (!claim) return;
+      // Reserve the slot BEFORE awaiting the claim. The await yields, and a
+      // second tick arriving in that window would read the same inFlight and
+      // claim past the concurrency cap — the file queue never showed this
+      // because its claim was synchronous.
       inFlight += 1;
+      const claim = await claimNext();
+      if (!claim) {
+        inFlight -= 1;
+        return;
+      }
 
       void (async () => {
         try {
@@ -709,7 +787,7 @@ export function startWorker() {
             // The finally below removes the claim file and gives the slot
             // back — doing either here double-counted: every deferral
             // leaked inFlight downward, quietly raising real concurrency.
-            enqueue(claim.job);
+            await enqueue(claim.job);
             return;
           }
 
@@ -726,7 +804,7 @@ export function startWorker() {
             // The finally below removes the claim file and gives the slot
             // back — doing either here double-counted: every deferral
             // leaked inFlight downward, quietly raising real concurrency.
-            enqueue(claim.job);
+            await enqueue(claim.job);
             return;
           }
           if (run && run.status !== "completed" && run.status !== "failed" && !stillAsking) {
@@ -747,7 +825,7 @@ export function startWorker() {
                 .filter((t) => t > Date.now());
               if (due.length) {
                 // Cleanup is the finally's; see the gates above.
-                enqueue({ ...claim.job, notBefore: new Date(Math.min(...due)).toISOString() });
+                await enqueue({ ...claim.job, notBefore: new Date(Math.min(...due)).toISOString() });
                 return;
               }
             }
@@ -765,15 +843,18 @@ export function startWorker() {
         } catch (err) {
           console.error(`[foldrun] worker: run ${claim.job.runId} threw`, err);
         } finally {
-          fs.rmSync(claim.claimedFile, { force: true });
+          // Whichever store this came from knows how to let it go.
+          await claim.release().catch((err) =>
+            console.error(`[foldrun] worker: releasing ${claim.job.runId}:`, err),
+          );
           inFlight -= 1;
         }
       })();
     }
   };
 
-  setInterval(tick, POLL_MS).unref();
-  tick();
+  setInterval(() => void tick().catch((err) => console.error("[foldrun] worker tick:", err)), POLL_MS).unref();
+  void tick().catch((err) => console.error("[foldrun] worker tick:", err));
 
   // The recurring half of the bill, swept hourly: accrueDaily is idempotent
   // per calendar day, so the schedule here only decides how soon after
@@ -820,13 +901,14 @@ export function startWorker() {
 
 /** The queue, described: what /healthz and the metrics endpoint report.
  *  Cheap enough to call per-scrape — two readdirs and a stat each. */
-export function queueStats(): {
+export async function queueStats(): Promise<{
   pending: number;
   /** Jobs waiting on a wait: deadline rather than a free slot. */
   scheduledAhead: number;
   claimed: number;
   oldestPendingSecs: number | null;
-} {
+}> {
+  if (databaseEnabled()) return statsDb();
   const now = Date.now();
   let pending = 0;
   let scheduledAhead = 0;
@@ -860,4 +942,41 @@ export function queueStats(): {
     claimed,
     oldestPendingSecs: oldest === null ? null : Math.round(oldest / 1000),
   };
+}
+
+
+/**
+ * Move any jobs still sitting in the file queue into the database, once.
+ *
+ * Called at boot before the worker starts. Without it, switching an install to
+ * Postgres makes every in-flight job invisible in the same instant — the runs
+ * stay `queued` on disk forever with nobody driving them, which looks like the
+ * platform quietly stopping rather than like a migration.
+ *
+ * Claimed files come across as unclaimed: whatever was driving them died with
+ * the old process, which is exactly what boot recovery already assumed.
+ * Idempotent, because enqueueDb upserts on run_id.
+ */
+export async function importQueueToDatabase(): Promise<number> {
+  if (!databaseEnabled()) return 0;
+  let moved = 0;
+  for (const state of ["claimed", "pending"] as const) {
+    const dir = queueDir(state);
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(dir, name);
+      try {
+        const job = JSON.parse(fs.readFileSync(file, "utf8")) as QueueJob;
+        await enqueueDb(job);
+        fs.rmSync(file, { force: true });
+        moved += 1;
+      } catch {
+        // An unreadable job is dropped exactly as recoverQueue would drop it:
+        // the run record survives, and reconcile is what closes it out.
+        fs.rmSync(file, { force: true });
+      }
+    }
+  }
+  return moved;
 }
