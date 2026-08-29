@@ -195,6 +195,84 @@ Short drafts got edited less than long ones. Prefer four paragraphs to eight.
     },
 
     {
+      // For the CODING TOOL the author is using, not for the platform — this is
+      // the one file here that foldrun itself never reads. Claude Code and its
+      // peers look for AGENTS.md/CLAUDE.md at the root of whatever they open,
+      // and without one they infer conventions from the tree, which for a
+      // workspace of loosely-structured markdown means guessing frontmatter
+      // fields that do not exist and putting agents in the wrong place.
+      //
+      // The platform already imports .claude/agents/*.md as agents, so a
+      // subagent authored in Claude Code deploys as a foldrun agent with no
+      // conversion. That path is much more useful when the tool knows it
+      // exists, which is most of what this file is for.
+      path: "CLAUDE.md",
+      content: `# Working on this foldrun workspace
+
+This is a foldrun workspace: agents, flows and knowledge as markdown. There is
+no build — the files ARE the program — so the loop is edit, check, run, deploy.
+
+## The loop
+
+\`\`\`sh
+foldrun check              # validate everything, offline, no model calls
+foldrun run <flow>         # run it locally against real models
+foldrun eval               # run the evals
+foldrun deploy --url <server> --token $FOLDRUN_TOKEN
+\`\`\`
+
+\`check\` is cheap and catches a broken flow before a schedule fires it at 3am.
+Run it after edits, the way you would run a typecheck.
+
+## Where things go
+
+| Path | What |
+|---|---|
+| \`AGENTS.md\` | shared context every agent in this workspace sees |
+| \`agents/<name>/agent.md\` | one role: its persona, model, tools |
+| \`flows/<name>.md\` | steps, in order, naming the agents that run them |
+| \`knowledge/\` | reference material agents read |
+| \`memory/\` | what past runs learned — agents write here themselves |
+| \`evals/\` | tests for agents, same idea as unit tests |
+| \`.claude/agents/<name>.md\` | a Claude Code subagent — deploys AS an agent |
+
+That last row is worth knowing: a subagent you write in Claude Code is imported
+as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
+
+## What a deploy does NOT touch
+
+\`runs/\`, \`state/\`, \`secrets.json\`, and any memory an agent wrote that your
+push does not mention. Those belong to the platform, not to git — a deploy that
+reverted what an agent learned would make every run a little dumber.
+
+Secrets never go in these files. \`foldrun secrets\` puts them in the vault, and
+agents reference them by name.
+
+## Writing an agent
+
+Frontmatter then prose. The prose IS the system prompt, so write it to be read
+by a model: what this role is for, what it must not do, what good looks like.
+
+\`\`\`markdown
+---
+name: researcher
+description: Finds and summarises sources.
+model: default          # fast | default | max
+tools: [WebSearch, Read, Write]
+runtime:                # only if scripts need packages
+  packages: [requests]
+---
+
+You research a topic and report what you found...
+\`\`\`
+
+\`runtime:\` installs pip/npm packages in the sandbox each agent runs in. Pin
+versions the normal way (\`pandas>=2\`, \`lodash@^4\`). Python and Node are
+supported; anything else should ship as a committed binary.
+`,
+    },
+
+    {
       path: "evals/writer-quality.md",
       content: `---
 name: writer-quality
