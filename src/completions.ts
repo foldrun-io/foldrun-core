@@ -254,6 +254,23 @@ export function fileKind(path: string): FileKind {
   return "note";
 }
 
+/**
+ * Does [[ ]] in this file get expanded into a path, or stay literal?
+ *
+ * The rule is not "which directory" but "does this text become a prompt".
+ * An agent's body, a flow step's instruction and an eval's task all end up
+ * in front of a model, which cannot open `[[house-style]]` but can open
+ * `../../knowledge/house-style.md`. A knowledge or tool document is read as
+ * a file, and its links are for the person reading it.
+ *
+ * Exported so the editor can say which case a file is in, rather than
+ * offering the same word for two different behaviours.
+ */
+export function resolvesLinks(path: string): boolean {
+  const kind = fileKind(path);
+  return kind === "agent" || kind === "flow" || kind === "evalFile";
+}
+
 /** Assertion keywords for eval case bodies. */
 const ASSERTIONS: Completion[] = [
   { label: "contains", hint: "text must appear" },
@@ -346,7 +363,21 @@ export function completionsAt(
       // real relative path before the model sees the prompt.
       ...(vocab.docs ?? []).map((d) => ({ label: d.name, hint: d.hint })),
     ];
-    return { from: open + 2, query, items: filter(items, query), title: "Link" };
+    // The bracket is offered everywhere, because a link between documents is
+    // worth writing whether or not a model ever expands it. But only text
+    // that BECOMES A PROMPT is expanded — an agent's body, a step's
+    // instruction, an eval's task, and what a person types at a gate. In a
+    // knowledge or tool document the link stays literal, which is the right
+    // behaviour and the wrong thing to leave unsaid: the list used to say
+    // "Link" in both cases and let people infer the difference.
+    return {
+      from: open + 2,
+      query,
+      items: filter(items, query),
+      title: resolvesLinks(path)
+        ? "Link — expanded to a real path before the model sees it"
+        : "Link — literal here; expanded only where text becomes a prompt",
+    };
   }
 
   // 2. ${SECRET} — inside a header, env or query value.

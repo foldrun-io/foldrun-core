@@ -1172,9 +1172,22 @@ async function runStep(
       // That is the freshest instruction the step has — later than the flow
       // file, aimed at this exact run. When the gate asked a question
       // (ask:), the note IS the answer and is framed as one.
+      //
+      // Both halves go through resolveDocLinks for the same reason the
+      // instruction above does: this is authored text on its way to becoming
+      // a prompt, and the rule is that ALL of it expands. A person answering
+      // "which list?" with [[dead-ends]] was sending the model two literal
+      // brackets — the one reference syntax the workspace teaches, and the
+      // one place it silently did nothing.
+      //
+      // What is NOT resolved, deliberately: the previous step's results
+      // above. That is model output, not something a person wrote, and a
+      // model that happens to emit [[brackets]] must not thereby name a file.
+      const ask = step.ask ? resolveDocLinks(step.ask, workspaceRoot) : "";
+      const note = resolveDocLinks(step.approvalNote, workspaceRoot);
       prompt += step.ask
-        ? `\n\n<operator_answer>\nThis step asked a human: ${step.ask}\nTheir answer:\n${step.approvalNote}\n</operator_answer>`
-        : `\n\n<operator_guidance>\nThe human who approved this step added:\n${step.approvalNote}\n</operator_guidance>`;
+        ? `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer:\n${note}\n</operator_answer>`
+        : `\n\n<operator_guidance>\nThe human who approved this step added:\n${note}\n</operator_guidance>`;
     }
     if (step.delegate?.length) {
       // The chooser's contract. The allowed set comes from the flow file;
