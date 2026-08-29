@@ -140,10 +140,12 @@ export function sampled(values: number[]): Sampled {
  * A line that does not match is not an error — plenty of info events are
  * prose — it simply contributes nothing.
  */
-export function parseToolLog(text: string): { name: string; ok: boolean; ms: number | null } | null {
+export function parseToolLog(
+  text: string,
+): { kind: "script" | "api"; name: string; ok: boolean; ms: number | null } | null {
   const script = /^script:\s*([A-Za-z0-9_]+)\(.*?\)\s*→\s*exit\s+(\S+)\s*\((\d+)ms/.exec(text);
   if (script) {
-    return { name: script[1], ok: script[2] === "0", ms: Number(script[3]) };
+    return { kind: "script", name: script[1], ok: script[2] === "0", ms: Number(script[3]) };
   }
   // The ms group must not sit after a lazy wildcard — an optional group
   // beyond `.*?` is satisfied by matching nothing, so it never captures.
@@ -151,6 +153,7 @@ export function parseToolLog(text: string): { name: string; ok: boolean; ms: num
   if (api) {
     const status = api[3] ?? api[5]; // timed, or untimed; undefined = "error"
     return {
+      kind: "api",
       name: `${api[1]} ${api[2]}`,
       ok: status !== undefined && Number(status) < 400,
       ms: api[4] ? Number(api[4]) : null,
@@ -259,16 +262,18 @@ export function observeWorkspace(
             name: parsed.name, calls: 0, errors: 0, measured: 0, ms: sampled([]), agents: [],
             _ms: [], _agents: new Set<string>(),
           };
-          // An outcome line is the same call the `tool` event already
-          // counted for a script tool, so it adds outcome, never a count.
-          // An API tool has no tool_use event of its own name, so its line
-          // is the only record that it happened.
+          // A script tool's outcome line describes a call its `tool` event
+          // already counted, so it adds outcome, never a count. An API tool
+          // has no tool_use event of its own name — its log line IS the only
+          // record the call happened, so every line counts. (This used to
+          // count only the timed ones, and a tool whose two calls both
+          // errored untimed showed errors > calls.)
+          if (parsed.kind === "api") t.calls += 1;
           if (!parsed.ok) t.errors += 1;
           if (parsed.ms !== null) {
             t._ms.push(parsed.ms);
             t.measured += 1;
           }
-          if (t.calls === 0) t.calls = t.measured;
           t._agents.add(s.agent);
           tools.set(parsed.name, t);
         }
