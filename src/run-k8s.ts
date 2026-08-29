@@ -27,14 +27,25 @@ import {
   timingLine,
   sizeLimits,
   RUN_LABEL,
+  RUNTIME_CACHE,
   type ContainerStepOutcome,
   type RunInContainerArgs,
   type StepTiming,
 } from "./run-container.ts";
+import { safeTenantSegment } from "./runtime.ts";
 import { isPlatformPath } from "./store.ts";
 
 const kubectl = () => process.env.FOLDRUN_KUBECTL ?? "kubectl";
 const namespace = () => process.env.FOLDRUN_K8S_NAMESPACE ?? "foldrun-runs";
+/**
+ * The claim backing the dependency cache, in the *run* namespace — PVCs are
+ * namespaced, so the platform's own foldrun-data claim is not reachable from
+ * here even though it is on the same disk. Unset means no cache: every step
+ * installs fresh, which is exactly the behaviour that shipped before this.
+ * That default matters, because a name pointing at a claim that does not
+ * exist leaves every run pod Pending, and a slow platform beats a stopped one.
+ */
+const cachePvc = () => process.env.FOLDRUN_RUNTIME_CACHE_PVC ?? "";
 
 // The shim the pod runs. Stages: wait for files, take the env, hand the
 // tree to the agent user, run the driver, then hold for the ack so the
@@ -42,6 +53,7 @@ const namespace = () => process.env.FOLDRUN_K8S_NAMESPACE ?? "foldrun-runs";
 const SHIM = `while [ ! -f /opt/runner/job/go ]; do sleep 0.2; done
 set -a; [ -f /opt/runner/job/env.sh ] && . /opt/runner/job/env.sh; set +a
 chown -R agent:agent /workspace /library /opt/runner/job
+chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
 runuser -u agent -- node /opt/runner/driver.mjs
 touch /opt/runner/job/finished
 i=0; while [ ! -f /opt/runner/job/ack ] && [ $i -lt 600 ]; do sleep 0.5; i=$((i+1)); done`;
@@ -105,7 +117,17 @@ export function runPodManifest(
   runId?: string,
   size?: "small" | "large" | "heavy",
   deadlineSec?: number,
+  tenant?: string,
 ): object {
+  // The dependency cache: one claim, one sub-directory per tenant. subPath is
+  // what keeps tenants apart — the pod sees only its own sub-tree, so a step
+  // cannot read, let alone poison, the venvs another account's steps execute.
+  // kubelet creates the sub-directory on first use, so nothing has to
+  // pre-provision it. No claim configured, or a tenant name that is not a safe
+  // single segment, and the pod simply gets no volume.
+  const claim = cachePvc();
+  const seg = tenant ? safeTenantSegment(tenant) : null;
+  const cache = claim && seg ? { claim, seg } : null;
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -125,6 +147,13 @@ export function runPodManifest(
       activeDeadlineSeconds: deadlineSec ?? 20 * 60,
       ...(process.env.FOLDRUN_RUNNER_RUNTIME
         ? { runtimeClassName: process.env.FOLDRUN_RUNNER_RUNTIME }
+        : {}),
+      ...(cache
+        ? {
+            volumes: [
+              { name: "runtime-cache", persistentVolumeClaim: { claimName: cache.claim } },
+            ],
+          }
         : {}),
       containers: [
         {
@@ -158,6 +187,13 @@ export function runPodManifest(
               memory: sizeLimits(size).memory,
             },
           },
+          ...(cache
+            ? {
+                volumeMounts: [
+                  { name: "runtime-cache", mountPath: RUNTIME_CACHE, subPath: cache.seg },
+                ],
+              }
+            : {}),
         },
       ],
     },
@@ -238,7 +274,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     const deadlineSec = (args.input.timeoutSec ?? 15 * 60) + 180;
     const applied = await kc([
       "apply", "-f", "-",
-    ], JSON.stringify(runPodManifest(name, image, args.runId, args.size, deadlineSec)));
+    ], JSON.stringify(runPodManifest(name, image, args.runId, args.size, deadlineSec, args.tenant)));
     if (applied.status !== 0) throw new Error(`pod create failed:\n${applied.out.slice(0, 800)}`);
     created = true;
 

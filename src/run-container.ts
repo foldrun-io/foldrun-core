@@ -26,8 +26,9 @@ import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec, type Effort } from "./store.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
+import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
+import { dataRoot } from "./paths.ts";
 import type { ScriptSpec } from "./script-tools.ts";
-import type { RuntimeSpec } from "./runtime.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
@@ -165,6 +166,42 @@ export function applyContainerChanges(hostWs: string, containerWs: string): stri
   return applied;
 }
 
+// ---------- the dependency cache ----------
+
+/**
+ * Where the driver builds venvs and npm prefixes, as an absolute path *inside*
+ * the runner. Fixed, and it has to be: a venv bakes its own absolute path into
+ * every shebang and into pyvenv.cfg, so a cache reused across containers is
+ * only valid if it is mounted at the identical path every time. It is the same
+ * path prepareRuntime picks on its own — FOLDRUN_DATA is /home/agent/.foldrun
+ * in the driver, and the in-container tenant is "runner" — so mounting here
+ * turns the existing cache into a persistent one with no change to the code
+ * that fills it.
+ */
+export const RUNTIME_CACHE = "/home/agent/.foldrun/runner/.runtimes";
+
+/**
+ * The per-tenant directory backing that mount, or null when there is none.
+ *
+ * Per-tenant, not shared. A shared cache would store one copy of pandas
+ * instead of one per account, but it would also be mutable state that one
+ * tenant's step writes and another tenant's step then *executes* — a poisoned
+ * venv arriving as a trusted local file, which is precisely the path gVisor,
+ * the capability drop and the egress policy all exist to close. Disk is the
+ * cheaper thing to spend. If the duplication ever stops being cheap, the fix
+ * is a read-only mount filled by a trusted builder, not a writable shared one.
+ *
+ * Deliberately NOT under `<tenant>/.runtimes`, which is the *host* cache: the
+ * venvs there carry host absolute paths and would be unusable inside a runner.
+ * Two roots, so a hit is always a real hit.
+ */
+export function runtimeCacheDir(tenant: string | undefined): string | null {
+  if (process.env.FOLDRUN_RUNTIME_CACHE === "off") return null;
+  const safe = tenant ? safeTenantSegment(tenant) : null;
+  if (!safe) return null;
+  return path.join(dataRoot(), safe, ".runtimes-sandbox");
+}
+
 // ---------- the runner image ----------
 
 const DRIVER = `// The runner container's entrypoint. Reads one step, executes it with the
@@ -233,9 +270,12 @@ try {
   // the container (a host path from the other side would not exist here).
   const env = materializeFileSecrets(agentDir, { ...process.env, HOME: agentDir }).env;
 
-  // The declared runtime, built in here — pip and npm have the network, and
-  // the cache dies with the container (a fresh install per run is the cost
-  // of the isolation; the log says what was built and how long it took).
+  // The declared runtime, built in here — pip and npm have the network, which
+  // the host side may not. It lands in .foldrun/runner/.runtimes, which the
+  // executors mount from a per-tenant directory (run-container.ts#RUNTIME_CACHE):
+  // the first step for a given fingerprint installs, every later one finds
+  // .ready and skips. With no mount it still works, just fresh every time —
+  // which is what this used to be unconditionally. The log says which happened.
   const runtime = input.runtime
     ? prepareRuntime("runner", input.runtime)
     : { interpreters: {}, env: {}, log: [], error: null };
@@ -323,8 +363,8 @@ RUN npm install -g playwright@1 >/dev/null \\
 WORKDIR /opt/runner
 COPY foldrun-core.tgz driver.mjs entry.sh ./
 RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
- && mkdir -p /workspace /library /opt/runner/job \\
- && chown -R agent:agent /workspace /library /opt/runner \\
+ && mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} \\
+ && chown -R agent:agent /workspace /library /opt/runner /home/agent/.foldrun \\
  && chmod +x /opt/runner/entry.sh
 ENTRYPOINT ["/opt/runner/entry.sh"]
 `;
@@ -332,6 +372,10 @@ ENTRYPOINT ["/opt/runner/entry.sh"]
 const ENTRY = `#!/bin/sh
 set -e
 chown -R agent:agent /workspace /library /opt/runner/job
+# The runtime cache, when one is mounted. NOT recursive: a warm cache is tens
+# of thousands of files and its contents are already agent-owned from the step
+# that built them — only the mount point itself arrives owned by root.
+chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
 exec runuser -u agent -- node /opt/runner/driver.mjs
 `;
 
@@ -470,6 +514,9 @@ function ensureRunNetwork(): string {
 export interface RunInContainerArgs {
   workspaceRoot: string;
   libraryRoot: string;
+  /** The account this step belongs to — the key for its dependency cache.
+   *  Optional so an embedder that has no tenancy simply gets no cache. */
+  tenant?: string;
   input: ContainerStepInput;
   /** Secret + provider env — crosses as an env file, never argv. */
   env: Record<string, string>;
@@ -601,6 +648,16 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       flags.push("--runtime", process.env.FOLDRUN_RUNNER_RUNTIME);
     }
     flags.push("--network", ensureRunNetwork());
+
+    // The dependency cache: this tenant's built venvs and npm prefixes,
+    // mounted where prepareRuntime already looks. Created host-side rather
+    // than left to the daemon so it belongs to the platform user; the
+    // entrypoint hands the mount point itself to the agent user.
+    const cacheDir = runtimeCacheDir(args.tenant);
+    if (cacheDir) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      flags.push("-v", `${cacheDir}:${RUNTIME_CACHE}`);
+    }
 
     // The rent clock starts here: staging the workspace is host work, but
     // from `create` to `rm` the sandbox is a resource the platform pays for.
