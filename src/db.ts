@@ -161,6 +161,42 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS ledger_tenant_at_idx ON ledger (tenant, at DESC);
     `,
   },
+  {
+    name: "0003_queue",
+    sql: `
+      -- The queue, in the same database as the records a claim writes, so
+      -- claiming a job and marking its run can be one transaction. That is the
+      -- property no external broker offers without distributed-transaction
+      -- pain, and it is why this is not Redis.
+      CREATE TABLE IF NOT EXISTS queue (
+        id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        -- One job per run, enforced rather than hoped for. The file queue
+        -- overwrote a pending file of the same name to get this; a unique
+        -- index says it, and makes re-enqueue an explicit upsert.
+        run_id      TEXT NOT NULL UNIQUE,
+        tenant      TEXT NOT NULL,
+        workspace   TEXT NOT NULL,
+        model_override TEXT,
+        tags        JSONB NOT NULL DEFAULT '[]'::jsonb,
+        -- A wait: parks in the queue rather than in a process, so a restart
+        -- resumes the same deadline.
+        not_before  TIMESTAMPTZ,
+        enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- Position within this ACCOUNT's pending jobs, assigned at insert.
+        -- Ordering by (seq, enqueued_at) is round-robin across accounts and
+        -- FIFO within one, without a window function — which matters because
+        -- FOR UPDATE cannot be combined with one, and SKIP LOCKED is the whole
+        -- reason to be here.
+        seq         BIGINT NOT NULL,
+        claimed_at  TIMESTAMPTZ,
+        claimed_by  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS queue_ready_idx
+        ON queue (seq, enqueued_at) WHERE claimed_at IS NULL;
+      CREATE INDEX IF NOT EXISTS queue_claimed_idx
+        ON queue (claimed_at) WHERE claimed_at IS NOT NULL;
+    `,
+  },
 ];
 
 /**
