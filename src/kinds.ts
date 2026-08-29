@@ -308,24 +308,32 @@ export function toolStarter(
   transport: "http" | "script" | "mcp",
 ): { file: string; content: string }[] {
   if (transport === "script") {
-    // One file, like every other document: the definition is the
-    // frontmatter, the program is the fenced code block in the body. The
-    // folder form (tool.md + files beside it) still exists for tools that
-    // outgrow one file — this is the shape to start in, not the ceiling.
+    // A folder, because the program is a file. Code in a fenced block gets
+    // no linter, no type checker, no formatter and no way to run it except
+    // through a run — and the agents editing these are file-shaped tools:
+    // they can patch one line of run.mjs and execute it, where a fence has
+    // to be re-emitted whole and can only be tested by shipping it. The
+    // single-file form still parses, for a tool small enough to read at a
+    // glance; it is no longer what a new one starts as.
     return [
       {
-        file: `tools/${name}.md`,
+        file: `tools/${name}/tool.md`,
         content: `---
 transport: script
 name: ${name}
 description: What this does, and when an agent should call it.
+run: run.mjs
 args:
   input: What the caller passes in
 timeout: 60
 ---
 
-The code below is the tool. Arguments arrive as --flags, one per \`args:\`
-entry; whatever it prints on stdout is what the agent reads back.
+\`run.mjs\` beside this file is the tool. Arguments arrive as --flags, one per
+\`args:\` entry; whatever it prints on stdout is what the agent reads back, and
+a non-zero exit is what tells the agent the call failed.
+
+\`run:\` names the file, never the scope it sits in, so this folder is correct
+copied into any workspace or installed at the account.
 
 Agents opt in with:
 
@@ -333,17 +341,27 @@ Agents opt in with:
 use: [${name}]
 \`\`\`
 
-\`\`\`js
-import { parseArgs } from "node:util";
+Run it by hand while you are writing it:
 
+\`\`\`console
+node tools/${name}/run.mjs --input hello
+\`\`\`
+`,
+      },
+      {
+        file: `tools/${name}/run.mjs`,
+        content: `import { parseArgs } from "node:util";
+
+// Every declared arg is optional at the call site — the model may omit any of
+// them, and an empty value is never passed — so required means checked here.
 const { values } = parseArgs({ options: { input: { type: "string" } } });
 if (!values.input) {
   console.error("need --input");
   process.exit(1);
 }
 
-console.log(values.input);
-\`\`\`
+// One JSON object on stdout: small, structured, and the same shape every call.
+console.log(JSON.stringify({ input: values.input }));
 `,
       },
     ];

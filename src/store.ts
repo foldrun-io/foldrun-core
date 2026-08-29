@@ -495,13 +495,28 @@ export type ToolDef =
  * "which block is the program" must be answerable by reading, not guessing.
  */
 export function fencedCode(body: string): { code: string; ext: string } | null {
+  const block = fencedCodeBlock(body);
+  return block ? { code: block.code, ext: block.ext } : null;
+}
+
+/**
+ * The same block, with where it sits — for the migration that lifts a
+ * single-file tool's program out into a file beside it. Extracting the code
+ * and then removing it from the body are the same question asked twice, and
+ * a second copy of the language table is how they would come to disagree.
+ */
+export function fencedCodeBlock(
+  body: string,
+): { code: string; ext: string; start: number; end: number } | null {
   const EXT: Record<string, string> = {
     js: ".mjs", mjs: ".mjs", javascript: ".mjs", ts: ".mjs",
     python: ".py", py: ".py", bash: ".sh", sh: ".sh", ruby: ".rb", rb: ".rb",
   };
   for (const m of body.matchAll(/```([a-zA-Z0-9]+)\r?\n([\s\S]*?)```/g)) {
     const ext = EXT[m[1].toLowerCase()];
-    if (ext && m[2].trim()) return { code: m[2], ext };
+    if (ext && m[2].trim()) {
+      return { code: m[2], ext, start: m.index!, end: m.index! + m[0].length };
+    }
   }
   return null;
 }
@@ -581,7 +596,19 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
   const add = (raw: string, fallbackName: string, folder: string | null) => {
     try {
       const { data, content } = matter(raw);
-      const d = data as Record<string, unknown>;
+      // A COPY, because the qualification below is a mutation and the object
+      // is not ours: gray-matter caches its result by the input string, so two
+      // byte-identical definitions at different scopes are handed the same
+      // `data` object. Mutating it in place stamped the first reader's scope
+      // onto the second — an account tool whose `run:` came back
+      // `workspace/tools/…`, resolving to a path in whichever workspace was
+      // read first, and therefore to nothing. Silent, and dependent on read
+      // order, which is the worst pair of properties a bug can have.
+      //
+      // Real case: the same `browser` tool installed at the account and in a
+      // workspace, which is exactly what installing one gallery tool twice
+      // produces.
+      const d = { ...(data as Record<string, unknown>) };
       // A folder tool's code sits beside its definition; qualify the path so
       // the runner can find it from an agent directory two levels down.
       if (folder && typeof d.run === "string" && !/^(workspace|account|shared|library)\//.test(d.run)) {
