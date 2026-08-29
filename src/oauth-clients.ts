@@ -61,7 +61,7 @@ export function saveOAuthClient(
     authorize_url: config.authorize_url,
     token_url: config.token_url,
     client_id: config.client_id,
-    client_secret: encryptValue(config.client_secret),
+    client_secret: encryptValue(tenant, config.client_secret),
     scopes: config.scopes ?? "",
     ...(config.authorize_extra ? { authorize_extra: config.authorize_extra } : {}),
     createdAt: new Date().toISOString(),
@@ -82,7 +82,7 @@ export function listOAuthClients(
 export function getOAuthClient(tenant: string, name: string): OAuthProviderConfig | null {
   const rec = read(tenant)[name];
   if (!rec) return null;
-  const secret = decryptValue(rec.client_secret);
+  const secret = decryptValue(tenant, rec.client_secret);
   if (secret === null) return null; // key rotated away from under it
   return {
     authorize_url: rec.authorize_url,

@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
+import { tenantKey } from "./tenant-keys.ts";
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
 
@@ -62,6 +63,10 @@ interface StoredSecret {
   data: string;
   updatedAt: string;
   kind?: SecretKind;
+  /** Which key opens this. Absent means the install key, which is what every
+   *  record written before per-account keys existed is encrypted with — so an
+   *  old vault stays readable without a migration having to run first. */
+  k?: "tenant";
 }
 
 type SecretsFile = Record<string, StoredSecret>;
@@ -95,40 +100,64 @@ export function setSecret(
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   }
   if (value.length > 8192) throw new Error("secret too long");
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", masterKey(), iv);
-  const enc = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const sealed = encryptValue(tenant, value);
   const all = read(tenant, workspace);
   all[name] = {
-    iv: iv.toString("base64"),
-    tag: cipher.getAuthTag().toString("base64"),
-    data: enc.toString("base64"),
+    ...sealed,
     updatedAt: new Date().toISOString(),
     ...(kind ? { kind } : {}),
   };
   write(tenant, workspace, all);
 }
 
-/** Encrypt one value under the install's master key — the same envelope
- *  secrets use, exported so sibling stores (OAuth clients) don't invent a
- *  second crypto path. */
-export function encryptValue(value: string): { iv: string; tag: string; data: string } {
+/**
+ * Which key writes this account's records.
+ *
+ * The account's own where there is one, the install key otherwise — a laptop,
+ * a self-hoster with no database, or an account whose key has not been minted.
+ * Returned with the marker to store beside it, so the reader never has to
+ * guess which key a record was written with.
+ */
+function keyFor(tenant: string): { key: Buffer; mark: "tenant" | undefined } {
+  const own = tenantKey(tenant);
+  return own ? { key: own, mark: "tenant" } : { key: masterKey(), mark: undefined };
+}
+
+/** Encrypt one value for an account — the same envelope secrets use, exported
+ *  so sibling stores (OAuth clients) don't invent a second crypto path. */
+export function encryptValue(
+  tenant: string,
+  value: string,
+): { iv: string; tag: string; data: string; k?: "tenant" } {
+  const { key, mark } = keyFor(tenant);
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", masterKey(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const enc = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  return { iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: enc.toString("base64") };
+  return {
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    data: enc.toString("base64"),
+    ...(mark ? { k: mark } : {}),
+  };
 }
 
-export function decryptValue(rec: { iv: string; tag: string; data: string } | undefined): string | null {
-  return decrypt(rec as StoredSecret | undefined);
+export function decryptValue(
+  tenant: string,
+  rec: { iv: string; tag: string; data: string; k?: "tenant" } | undefined,
+): string | null {
+  return decrypt(tenant, rec as StoredSecret | undefined);
 }
 
-function decrypt(rec: StoredSecret | undefined): string | null {
+function decrypt(tenant: string, rec: StoredSecret | undefined): string | null {
   if (!rec) return null;
   try {
+    // The record says which key wrote it. An unmarked one predates per-account
+    // keys and is under the install key; guessing either way would turn a
+    // readable vault into an unreadable one on the first upgrade.
+    const key = rec.k === "tenant" ? (tenantKey(tenant) ?? masterKey()) : masterKey();
     const decipher = crypto.createDecipheriv(
       "aes-256-gcm",
-      masterKey(),
+      key,
       Buffer.from(rec.iv, "base64"),
     );
     decipher.setAuthTag(Buffer.from(rec.tag, "base64"));
@@ -148,10 +177,10 @@ export function getSecret(
   workspace?: string,
 ): { value: string; scope: SecretScope } | null {
   if (workspace) {
-    const own = decrypt(read(tenant, workspace)[name]);
+    const own = decrypt(tenant, read(tenant, workspace)[name]);
     if (own !== null) return { value: own, scope: "workspace" };
   }
-  const shared = decrypt(read(tenant)[name]);
+  const shared = decrypt(tenant, read(tenant)[name]);
   return shared === null ? null : { value: shared, scope: "account" };
 }
 
@@ -287,6 +316,16 @@ export function rotateMasterKey(
     let count = 0;
 
     for (const [name, rec] of Object.entries(all)) {
+      // A record under the ACCOUNT's key is not under the install key, so
+      // rotating the install key must not touch it — re-encrypting it here
+      // with a key it was never sealed with is how a rotation would destroy a
+      // vault it was meant to protect. Rotating the install key now re-wraps
+      // the account keys instead, which is a handful of small values rather
+      // than every secret on the box.
+      if (rec.k === "tenant") {
+        next[name] = rec;
+        continue;
+      }
       let plain: string;
       try {
         const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"));
@@ -674,4 +713,52 @@ export function isApiValue(value: string): boolean {
 
 export function apiConfigOf(value: string): ApiConfig {
   return JSON.parse(value.slice(API_PREFIX.length));
+}
+
+
+/**
+ * Move an account's secrets from the install key onto its own key.
+ *
+ * Read with whichever key each record names, write them all back under the
+ * account's. Every value is decrypted BEFORE anything is written: a vault
+ * half-moved is an account that can authenticate nothing, so the whole file
+ * either converts or is left exactly as it was.
+ */
+export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable: string[] } {
+  assertSafeName(tenant, "tenant");
+  if (!tenantKey(tenant)) return { moved: 0, unreadable: [] };
+
+  let moved = 0;
+  const unreadable: string[] = [];
+
+  for (const { file } of secretFiles(tenant)) {
+    const all: SecretsFile = JSON.parse(fs.readFileSync(file, "utf8"));
+    const plain = new Map<string, string>();
+    let pending = 0;
+
+    for (const [name, rec] of Object.entries(all)) {
+      if (rec.k === "tenant") continue; // already moved
+      const value = decrypt(tenant, rec);
+      if (value === null) {
+        unreadable.push(name);
+        continue;
+      }
+      plain.set(name, value);
+      pending += 1;
+    }
+    // Nothing to do, or something could not be read — leave the file alone.
+    // A partial conversion is worse than none, because the half that moved is
+    // no longer openable by the key the other half still needs.
+    if (pending === 0 || unreadable.length) continue;
+
+    const next: SecretsFile = { ...all };
+    for (const [name, value] of plain) {
+      next[name] = { ...encryptValue(tenant, value), updatedAt: all[name].updatedAt, ...(all[name].kind ? { kind: all[name].kind } : {}) };
+    }
+    const tmp = `${file}.rewrap`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    moved += pending;
+  }
+  return { moved, unreadable };
 }

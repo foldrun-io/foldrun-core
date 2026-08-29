@@ -197,6 +197,26 @@ const MIGRATIONS: Migration[] = [
         ON queue (claimed_at) WHERE claimed_at IS NOT NULL;
     `,
   },
+  {
+    name: "0004_tenant_keys",
+    sql: `
+      -- Envelope encryption. One data key per account, itself encrypted with
+      -- the install key, so a leaked install key is no longer every account's
+      -- secrets at once — it is one more step, per account, and rotating for
+      -- one customer stops meaning signing out all of them.
+      --
+      -- The wrapped key lives HERE while the secrets it opens live on the data
+      -- volume. Reading one without the other is useless, which is the point:
+      -- a stolen backup of either half is not a compromise.
+      CREATE TABLE IF NOT EXISTS tenant_keys (
+        tenant     TEXT PRIMARY KEY,
+        -- base64 of iv|tag|ciphertext, AES-256-GCM under the install key.
+        wrapped    TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        rotated_at TIMESTAMPTZ
+      );
+    `,
+  },
 ];
 
 /**
