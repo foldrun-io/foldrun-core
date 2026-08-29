@@ -154,7 +154,24 @@ function decrypt(tenant: string, rec: StoredSecret | undefined): string | null {
     // The record says which key wrote it. An unmarked one predates per-account
     // keys and is under the install key; guessing either way would turn a
     // readable vault into an unreadable one on the first upgrade.
-    const key = rec.k === "tenant" ? (tenantKey(tenant) ?? masterKey()) : masterKey();
+    let key: Buffer;
+    if (rec.k === "tenant") {
+      const own = tenantKey(tenant);
+      if (!own) {
+        // Say so. Without this the read returns null and the caller reports
+        // "no such secret" — a process that forgot to load the account keys
+        // would look exactly like an account that never set one, which is the
+        // most expensive kind of wrong answer to debug.
+        console.error(
+          `[secrets] ${tenant} has account-keyed secrets but no key is loaded — ` +
+            `call loadTenantKeys() before reading, or the value will read as absent`,
+        );
+        return null;
+      }
+      key = own;
+    } else {
+      key = masterKey();
+    }
     const decipher = crypto.createDecipheriv(
       "aes-256-gcm",
       key,
