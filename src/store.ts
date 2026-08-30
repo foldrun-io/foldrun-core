@@ -1442,6 +1442,28 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
 // agent's own scripts (text source files it runs with bash).
 const SCRIPT_EXT = /\.(py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml|env|md)$/i;
 
+/**
+ * May this path be edited — and therefore, must it be listed?
+ *
+ * The listing and the writer used to answer this separately, and drifted
+ * twice. First `state/notes.md` could be written and never appeared; that was
+ * fixed by adding a state rule to the listing. Then folder tools arrived and
+ * `tools/x/run.mjs` — the program half of every script tool — was writable,
+ * readable, and invisible in the file tree, so the code you were told to edit
+ * could not be found.
+ *
+ * Writable and invisible is the worst of both. One rule decides now: the
+ * listing asks the writer, so a path that can be saved is a path that shows.
+ */
+export function isEditablePath(rel: string): boolean {
+  try {
+    assertEditablePath(rel);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertEditablePath(rel: string) {
   const norm = path.normalize(rel);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
@@ -1562,19 +1584,16 @@ export function listWorkspaceFiles(tenant: string, workspace: string): string[] 
     // Generated, not authored — the same reason runs/ is hidden above.
     if (/(^|\/)\.results\//.test(rel)) continue;
 
-    const isScript = /scripts\//.test(rel) && SCRIPT_EXT.test(rel);
-    const isSkillAsset = /^agents\/[^/]+\/skills\/[^/]+\//.test(rel) && SCRIPT_EXT.test(rel);
-    const isMarkdown =
-      rel.endsWith(".md") &&
-      (rel === "project.md" ||
-        rel === "AGENTS.md" ||
-        new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`).test(rel));
-    // state/ is the one place holding data rather than prose — but the listing
-    // admitted fewer extensions than the writer does, so `state/notes.md` could
-    // be written and then never appeared in the tree. Writable and invisible is
-    // the worst of both; one rule now decides.
-    const isState = /^state\//.test(rel) && SCRIPT_EXT.test(rel);
-    if (isScript || isSkillAsset || isMarkdown || isState) out.push(rel);
+    // Directories are entries too, and a directory is not an editable file.
+    try {
+      if (!fs.statSync(path.join(dir, rel)).isFile()) continue;
+    } catch {
+      continue;
+    }
+    // One rule, asked of the writer — see isEditablePath. The four separate
+    // predicates that used to live here disagreed with it twice, and both
+    // times the symptom was a file you could save and could not see.
+    if (isEditablePath(rel)) out.push(rel);
   }
   return out.sort();
 }

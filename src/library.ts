@@ -187,6 +187,15 @@ export function readLibraryFile(tenant: string, kind: LibraryKind, rel: string):
   return fs.readFileSync(p, "utf8");
 }
 
+/** Is there already something here? For refusing to create over it. */
+export function libraryFileExists(tenant: string, kind: LibraryKind, rel: string): boolean {
+  try {
+    return fs.existsSync(path.join(libraryDir(tenant, kind), assertLibraryPath(kind, rel)));
+  } catch {
+    return false; // an illegal path does not exist, and write will refuse it
+  }
+}
+
 export function writeLibraryFile(tenant: string, kind: LibraryKind, rel: string, content: string) {
   if (content.length > 256 * 1024) throw new Error("file too large");
   const norm = assertLibraryPath(kind, rel);
