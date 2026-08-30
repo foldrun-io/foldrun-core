@@ -291,6 +291,82 @@ print(args.input)
   },};
 
 /**
+ * What a script tool can be written in.
+ *
+ * Three, not every language the runner can execute. The runner picks an
+ * interpreter from the file extension, so `.rb` and the rest keep working the
+ * moment someone renames a file — but a picker with nine entries is a quiz,
+ * and three covers what people actually reach for. The point of asking at all
+ * is that "script tool" silently meaning JavaScript was a thing you had to
+ * find out by reading the file it made.
+ */
+export const SCRIPT_LANGUAGES = [
+  { value: "javascript", label: "JavaScript", ext: ".mjs", hint: "node — the default" },
+  { value: "python", label: "Python", ext: ".py", hint: "python3" },
+  { value: "bash", label: "Shell", ext: ".sh", hint: "bash — for wrapping a command" },
+] as const;
+
+export type ScriptLanguage = (typeof SCRIPT_LANGUAGES)[number]["value"];
+
+/** The starting program, in each language. Every one of them does the same
+ *  three things, because those three are the tool contract:
+ *
+ *    validate its own arguments   — every declared arg is OPTIONAL at the
+ *                                   call site, so required means checked here
+ *    print the result on stdout   — that is what the agent reads back
+ *    exit non-zero on failure     — that is what tells the agent it failed
+ */
+const PROGRAMS: Record<ScriptLanguage, string> = {
+  javascript: `import { parseArgs } from "node:util";
+
+// Every declared arg is optional at the call site — the model may omit any of
+// them, and an empty value is never passed — so required means checked here.
+const { values } = parseArgs({ options: { input: { type: "string" } } });
+if (!values.input) {
+  console.error("need --input");
+  process.exit(1);
+}
+
+// One JSON object on stdout: small, structured, and the same shape every call.
+console.log(JSON.stringify({ input: values.input }));
+`,
+  python: `#!/usr/bin/env python3
+import argparse, json
+
+# Every declared arg is optional at the call site — the model may omit any of
+# them, and an empty value is never passed — so required means checked here.
+# argparse exits 2 with a usage line on stderr, which is exactly the signal
+# the agent should get.
+p = argparse.ArgumentParser()
+p.add_argument("--input", required=True)
+a = p.parse_args()
+
+# One JSON object on stdout: small, structured, and the same shape every call.
+print(json.dumps({"input": a.input}))
+`,
+  bash: `#!/usr/bin/env bash
+set -euo pipefail
+
+# Declared args arrive as long flags: --input value
+input=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --input) input="\${2-}"; shift 2 ;;
+    *) echo "unexpected argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Every declared arg is optional at the call site, so required means checked
+# here. A non-zero exit is what tells the agent the call failed.
+[ -n "$input" ] || { echo "need --input" >&2; exit 1; }
+
+# Whatever this prints on stdout is what the agent reads back. Keep it small
+# and regular — print JSON when the result has structure.
+echo "$input"
+`,
+};
+
+/**
  * A new tool, as the files it starts as.
  *
  * Three transports, two shapes. An API or an MCP server is a definition and
@@ -306,6 +382,7 @@ print(args.input)
 export function toolStarter(
   name: string,
   transport: "http" | "script" | "mcp",
+  language: ScriptLanguage = "javascript",
 ): { file: string; content: string }[] {
   if (transport === "script") {
     // A folder, because the program is a file. Code in a fenced block gets
@@ -315,6 +392,13 @@ export function toolStarter(
     // to be re-emitted whole and can only be tested by shipping it. The
     // single-file form still parses, for a tool small enough to read at a
     // glance; it is no longer what a new one starts as.
+    //
+    // The language is asked for rather than assumed. "Script tool" used to
+    // mean JavaScript silently, which you found out by opening the file it
+    // wrote; the runner has always picked an interpreter from the extension,
+    // so the choice was already real and merely hidden.
+    const lang = SCRIPT_LANGUAGES.find((l) => l.value === language) ?? SCRIPT_LANGUAGES[0];
+    const program = `run${lang.ext}`;
     return [
       {
         file: `tools/${name}/tool.md`,
@@ -322,15 +406,15 @@ export function toolStarter(
 transport: script
 name: ${name}
 description: What this does, and when an agent should call it.
-run: run.mjs
+run: ${program}
 args:
   input: What the caller passes in
 timeout: 60
 ---
 
-\`run.mjs\` beside this file is the tool. Arguments arrive as --flags, one per
-\`args:\` entry; whatever it prints on stdout is what the agent reads back, and
-a non-zero exit is what tells the agent the call failed.
+\`${program}\` beside this file is the tool. Arguments arrive as --flags, one
+per \`args:\` entry; whatever it prints on stdout is what the agent reads back,
+and a non-zero exit is what tells the agent the call failed.
 
 \`run:\` names the file, never the scope it sits in, so this folder is correct
 copied into any workspace or installed at the account.
@@ -344,26 +428,11 @@ use: [${name}]
 Run it by hand while you are writing it:
 
 \`\`\`console
-node tools/${name}/run.mjs --input hello
+${lang.value === "python" ? "python3" : lang.value === "bash" ? "bash" : "node"} tools/${name}/${program} --input hello
 \`\`\`
 `,
       },
-      {
-        file: `tools/${name}/run.mjs`,
-        content: `import { parseArgs } from "node:util";
-
-// Every declared arg is optional at the call site — the model may omit any of
-// them, and an empty value is never passed — so required means checked here.
-const { values } = parseArgs({ options: { input: { type: "string" } } });
-if (!values.input) {
-  console.error("need --input");
-  process.exit(1);
-}
-
-// One JSON object on stdout: small, structured, and the same shape every call.
-console.log(JSON.stringify({ input: values.input }));
-`,
-      },
+      { file: `tools/${name}/${program}`, content: PROGRAMS[lang.value] },
     ];
   }
 
