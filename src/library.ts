@@ -16,6 +16,7 @@ import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
 import { KINDS } from "./kinds.ts";
+import { recordRevision } from "./history.ts";
 import {
   assertSafeName,
   assertCanonicalCase,
@@ -196,12 +197,19 @@ export function libraryFileExists(tenant: string, kind: LibraryKind, rel: string
   }
 }
 
-export function writeLibraryFile(tenant: string, kind: LibraryKind, rel: string, content: string) {
+export function writeLibraryFile(
+  tenant: string,
+  kind: LibraryKind,
+  rel: string,
+  content: string,
+  meta: { by?: string; message?: string } = {},
+) {
   if (content.length > 256 * 1024) throw new Error("file too large");
   const norm = assertLibraryPath(kind, rel);
   if (norm.endsWith(".md")) matter(content); // reject broken frontmatter
   const p = path.join(libraryDir(tenant, kind), norm);
   const existed = fs.existsSync(p);
+  const before = existed ? fs.readFileSync(p, "utf8") : null;
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, content);
   // Executable where code lives: the scripts shelf, a skill's bundled
@@ -211,13 +219,36 @@ export function writeLibraryFile(tenant: string, kind: LibraryKind, rel: string,
     fs.chmodSync(p, 0o755);
   }
   syncBundleFor(p, existed ? "Update" : "Creation");
+  // The account shelf has one history, keyed by kind/path.
+  recordRevision(tenant, "@library", [{ path: `${kind}/${norm}`, before, after: content }], meta);
 }
 
-export function deleteLibraryPath(tenant: string, kind: LibraryKind, rel: string) {
+export function deleteLibraryPath(
+  tenant: string,
+  kind: LibraryKind,
+  rel: string,
+  meta: { by?: string; message?: string } = {},
+) {
   const norm = path.normalize(rel);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
   const target = path.join(libraryDir(tenant, kind), norm);
+  const gone: { path: string; before: string | null; after: null }[] = [];
+  if (fs.existsSync(target)) {
+    const entries = fs.statSync(target).isFile()
+      ? [target]
+      : fs.readdirSync(target, { recursive: true }).map((e) => path.join(target, String(e)));
+    for (const e of entries) {
+      try {
+        if (fs.statSync(e).isFile()) {
+          gone.push({ path: `${kind}/${path.relative(libraryDir(tenant, kind), e).split(path.sep).join("/")}`, before: fs.readFileSync(e, "utf8"), after: null });
+        }
+      } catch {
+        // skip
+      }
+    }
+  }
   fs.rmSync(target, { recursive: true, force: true });
+  recordRevision(tenant, "@library", gone, { message: `deleted ${kind}/${norm}`, ...meta });
 }
 
 // ---------- consumed by the runner ----------

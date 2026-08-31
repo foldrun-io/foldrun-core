@@ -22,6 +22,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { recordRevision, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
 import {
@@ -291,7 +292,14 @@ export function isPlatformPath(rel: string): boolean {
   return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
 }
 
-export function saveWorkspace(tenant: string, workspace: string, files: DeployFile[]) {
+export function saveWorkspace(
+  tenant: string,
+  workspace: string,
+  files: DeployFile[],
+  /** Attribution for the revision this save records. A deploy passes the
+   *  commit, which becomes the revision's id. */
+  meta: ChangeMeta & { commit?: string | null } = {},
+) {
   if (files.length > 500) throw new Error("too many files");
   for (const f of files) {
     const norm = path.normalize(f.path);
@@ -355,6 +363,19 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     rel.startsWith(`${STORAGE_DIR}/`) ||
     (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
 
+  // What is there now, for the revision: every editable file's content
+  // before this save replaces the tree.
+  const before = new Map<string, string>();
+  if (fs.existsSync(dir)) {
+    for (const rel of listWorkspaceFiles(tenant, workspace)) {
+      try {
+        before.set(rel, fs.readFileSync(path.join(dir, rel), "utf8"));
+      } catch {
+        // vanished mid-read; not part of the revision
+      }
+    }
+  }
+
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
   const preserved: string[] = [];
   if (snapshot) {
@@ -393,6 +414,22 @@ export function saveWorkspace(tenant: string, workspace: string, files: DeployFi
     }
     fs.rmSync(snapshot, { recursive: true, force: true });
   }
+
+  // The revision: shipped files against what they replaced, plus anything
+  // that was there and is not any more (and was not preserved).
+  const keep = new Set(preserved);
+  const changes: RevisionFile[] = files.map((f) => {
+    const rel = path.normalize(f.path).split(path.sep).join("/");
+    return { path: rel, before: before.get(rel) ?? null, after: f.content };
+  });
+  for (const [rel, content] of before) {
+    if (!shipped.has(rel) && !keep.has(rel)) changes.push({ path: rel, before: content, after: null });
+  }
+  recordRevision(tenant, workspace, changes, {
+    by: meta.by ?? (meta.commit ? "deploy" : "system"),
+    message: meta.message ?? (meta.commit ? `deployed ${meta.commit.slice(0, 7)}` : undefined),
+    commit: meta.commit ?? null,
+  });
 
   // The files are conformant concepts the moment they land; the bundles around
   // them are not bundles until their index.md exists to carry okf_version. A
@@ -1604,11 +1641,24 @@ export function readWorkspaceFile(tenant: string, workspace: string, rel: string
   return fs.readFileSync(p, "utf8");
 }
 
-export function writeWorkspaceFile(tenant: string, workspace: string, rel: string, content: string) {
+/** Who made a change and why — recorded on its revision. */
+export interface ChangeMeta {
+  by?: string;
+  message?: string;
+}
+
+export function writeWorkspaceFile(
+  tenant: string,
+  workspace: string,
+  rel: string,
+  content: string,
+  meta: ChangeMeta = {},
+) {
   if (content.length > 256 * 1024) throw new Error("file too large");
   matter(content); // reject files whose frontmatter doesn't parse
   const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
   const existed = fs.existsSync(p);
+  const before = existed ? fs.readFileSync(p, "utf8") : null;
   fs.mkdirSync(path.dirname(p), { recursive: true });
   // One trailing newline, never a run of them.
   //
@@ -1628,6 +1678,9 @@ export function writeWorkspaceFile(tenant: string, workspace: string, rel: strin
     fs.chmodSync(p, 0o755);
   }
   syncBundleFor(p, existed ? "Update" : "Creation");
+  // The revision: what it was, what it is now. Identical content records
+  // nothing — see history.ts.
+  recordRevision(tenant, workspace, [{ path: norm, before, after: fs.readFileSync(p, "utf8") }], meta);
 }
 
 // memory/ and knowledge/ are OKF bundles, so index.md has to stay current —
@@ -1691,7 +1744,7 @@ export function anchoredReason(rel: string): string | null {
   return null;
 }
 
-export function renameWorkspaceFile(tenant: string, workspace: string, from: string, to: string) {
+export function renameWorkspaceFile(tenant: string, workspace: string, from: string, to: string, meta: ChangeMeta = {}) {
   // Refuse with the reason before any path validation: "not an editable
   // path" is true of AGENTS.md too, and the generic sentence buries the
   // specific one worth reading.
@@ -1703,12 +1756,53 @@ export function renameWorkspaceFile(tenant: string, workspace: string, from: str
   if (!fs.existsSync(src)) throw new Error(`${from} does not exist`);
   if (fs.existsSync(dst)) throw new Error(`${to} already exists`);
   fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const moved = deletionsUnder(workspaceDir(tenant, workspace), path.normalize(from).replaceAll("\\", "/"));
   fs.renameSync(src, dst);
+  // A rename is a deletion and a creation with the same bytes, which is
+  // exactly how git records one and what lets "where did this go" be answered.
+  const toNorm = path.normalize(to).replaceAll("\\", "/");
+  recordRevision(
+    tenant,
+    workspace,
+    [
+      ...moved,
+      ...moved.map((f) => ({
+        path: f.path === path.normalize(from).replaceAll("\\", "/") ? toNorm : f.path.replace(path.normalize(from).replaceAll("\\", "/"), toNorm),
+        before: null,
+        after: f.before,
+      })),
+    ],
+    { message: `renamed ${from} → ${to}`, ...meta },
+  );
   syncBundleFor(src);
   syncBundleFor(dst, "Update");
 }
 
-export function deleteWorkspacePath(tenant: string, workspace: string, rel: string) {
+/** Every text file under a path, as revision entries recording deletion. */
+function deletionsUnder(dir: string, norm: string): RevisionFile[] {
+  const abs = path.join(dir, norm);
+  if (!fs.existsSync(abs)) return [];
+  if (fs.statSync(abs).isFile()) {
+    return [{ path: norm, before: fs.readFileSync(abs, "utf8"), after: null }];
+  }
+  return fs
+    .readdirSync(abs, { recursive: true })
+    .map(String)
+    .filter((e) => {
+      try {
+        return fs.statSync(path.join(abs, e)).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .map((e) => ({
+      path: `${norm}/${e.split(path.sep).join("/")}`,
+      before: fs.readFileSync(path.join(abs, e), "utf8"),
+      after: null,
+    }));
+}
+
+export function deleteWorkspacePath(tenant: string, workspace: string, rel: string, meta: ChangeMeta = {}) {
   const norm = path.normalize(rel).replaceAll("\\", "/");
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
   const dir = workspaceDir(tenant, workspace);
@@ -1732,11 +1826,15 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
   if (/^agents\/[a-z0-9-]+$/.test(norm) ||
       /^(skills|tools)\/[a-z0-9-]+$/.test(norm) ||
       /^agents\/[a-z0-9-]+\/skills\/[a-z0-9-]+$/.test(norm)) {
+    const gone = deletionsUnder(dir, norm);
     fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
+    recordRevision(tenant, workspace, gone, { message: `deleted ${norm}/`, ...meta });
     return;
   }
   const p = path.join(dir, assertEditablePath(norm));
+  const gone = deletionsUnder(dir, norm);
   fs.rmSync(p, { force: true });
+  recordRevision(tenant, workspace, gone, meta);
   // A bundle's index must stop naming what is gone.
   syncBundleFor(p);
 }

@@ -356,7 +356,7 @@ export function deployWorkspace(
     return { ...plan, applied: false, commit: null, preserved: 0 };
   }
 
-  const { preserved } = saveWorkspace(tenant, workspace, files);
+  const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: "deploy" });
   const commit = opts.commit ?? null;
   if (commit) writeDeployedCommit(tenant, workspace, commit);
   return { ...plan, applied: true, commit, preserved };

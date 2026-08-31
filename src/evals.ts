@@ -34,6 +34,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { deployedCommit } from "./deploy.ts";
+import { latestRevisionId } from "./history.ts";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -425,7 +426,10 @@ export function writeEvalResult(
   tenant: string,
   workspace: string,
   result: EvalResult,
-  commit: string | null = deployedCommit(tenant, workspace)?.commit ?? null,
+  // A deployed commit when there is one; otherwise the latest revision —
+  // so a workspace that has never seen a git repository still gets a
+  // series with ids in it, and the "this change made it worse" table works.
+  commit: string | null = deployedCommit(tenant, workspace)?.commit ?? latestRevisionId(tenant, workspace),
 ) {
   const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
   fs.mkdirSync(dir, { recursive: true });
