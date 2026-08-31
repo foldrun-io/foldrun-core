@@ -175,7 +175,7 @@ trigger: manual
     docKey: null,
     scopes: ["account", "workspace"],
     placeholder: "uuid-service",
-    hint: "Something an agent can call. Name it in kebab-case, with no file extension — the shape below decides what gets written.",
+    hint: "Something an agent can call. Pick a type, name it, and the files are written for you.",
     file: (name) => `tools/${name}.md`,
     template: (name) => `---
 transport: http
