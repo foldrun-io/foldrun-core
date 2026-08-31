@@ -33,6 +33,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { deployedCommit } from "./deploy.ts";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -410,11 +411,161 @@ export async function runEval(
   };
 }
 
-export function writeEvalResult(tenant: string, workspace: string, result: EvalResult) {
+/**
+ * The latest result, and one line of history.
+ *
+ * `<eval>.json` is the latest run, overwritten each time — what the evals
+ * page shows. `history.jsonl` is every run, one line each, stamped with the
+ * commit the workspace was running. That stamp is the whole feature: a score
+ * with no commit says quality changed; a score with one says WHICH change.
+ * Manual runs are stamped too — the commit on record is whatever deploy put
+ * there — so a button press and a post-deploy run land in the same series.
+ */
+export function writeEvalResult(
+  tenant: string,
+  workspace: string,
+  result: EvalResult,
+  commit: string | null = deployedCommit(tenant, workspace)?.commit ?? null,
+) {
   const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
   fs.mkdirSync(dir, { recursive: true });
-  assertSafeName(result.eval, "eval");
   fs.writeFileSync(path.join(dir, `${result.eval}.json`), JSON.stringify(result, null, 2));
+  const line: EvalHistoryEntry = {
+    eval: result.eval,
+    at: result.finishedAt,
+    commit,
+    passed: result.passed,
+    failed: result.failed,
+    costUsd: result.costUsd,
+  };
+  fs.appendFileSync(path.join(dir, "history.jsonl"), `${JSON.stringify(line)}\n`);
+}
+
+export interface EvalHistoryEntry {
+  eval: string;
+  at: string;
+  /** The commit the workspace was running. Null on an install that has
+   *  never deployed from git — the series still exists, just unattributed. */
+  commit: string | null;
+  passed: number;
+  failed: number;
+  costUsd: number;
+}
+
+export function readEvalHistory(tenant: string, workspace: string): EvalHistoryEntry[] {
+  const file = path.join(workspaceDir(tenant, workspace), "evals", ".results", "history.jsonl");
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as EvalHistoryEntry];
+      } catch {
+        return []; // a torn line from a crash mid-append is not a reason to lose the rest
+      }
+    });
+}
+
+export interface EvalTrend {
+  eval: string;
+  /** Newest first. */
+  latest: EvalHistoryEntry;
+  /** The most recent run on a DIFFERENT commit — the comparison that names a
+   *  change. Null when every run so far was on the same commit. */
+  previous: EvalHistoryEntry | null;
+  /** Pass count now minus pass count on the previous commit. */
+  delta: number | null;
+}
+
+/**
+ * Per eval: where it stands, and against which commit that is a change.
+ *
+ * Compares to the last run on a different commit rather than the last run,
+ * because two runs on one commit differ only by the model's mood — and a
+ * "regression" that is really variance would teach people to ignore the
+ * real ones.
+ */
+export function evalTrends(tenant: string, workspace: string): EvalTrend[] {
+  const history = readEvalHistory(tenant, workspace).sort((a, b) => b.at.localeCompare(a.at));
+  const byEval = new Map<string, EvalHistoryEntry[]>();
+  for (const h of history) {
+    if (!byEval.has(h.eval)) byEval.set(h.eval, []);
+    byEval.get(h.eval)!.push(h);
+  }
+  return [...byEval.entries()]
+    .map(([name, runs]) => {
+      const latest = runs[0];
+      const previous = runs.find((r) => r.commit !== latest.commit) ?? null;
+      return {
+        eval: name,
+        latest,
+        previous,
+        delta: previous ? latest.passed - previous.passed : null,
+      };
+    })
+    .sort((a, b) => (a.delta ?? 0) - (b.delta ?? 0) || a.eval.localeCompare(b.eval));
+}
+
+/**
+ * Run every eval against what was just deployed, stamped with its commit.
+ *
+ * Fire-and-forget from the deploy: a deploy answers in milliseconds and an
+ * eval takes minutes and money, so the two are never in one request. Runs
+ * one at a time — evals are model calls and a deploy should not fan out
+ * into all of them at once. A second deploy while one is still evaluating
+ * waits its turn behind the lock rather than doubling the spend.
+ */
+export async function evaluateDeployed(
+  tenant: string,
+  workspace: string,
+  commit: string,
+): Promise<{ ran: number; skipped: string | null }> {
+  const evals = listEvals(tenant, workspace);
+  if (evals.length === 0) return { ran: 0, skipped: "no evals" };
+  const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
+  fs.mkdirSync(dir, { recursive: true });
+  const lock = path.join(dir, ".evaluating");
+  // A lock older than an hour is a crash, not a run.
+  try {
+    if (Date.now() - fs.statSync(lock).mtimeMs < 60 * 60_000) {
+      return { ran: 0, skipped: "evals already running for an earlier deploy" };
+    }
+  } catch {
+    // no lock
+  }
+  fs.writeFileSync(lock, commit);
+  let ran = 0;
+  try {
+    for (const info of evals) {
+      try {
+        const result = await runEval(tenant, workspace, info);
+        writeEvalResult(tenant, workspace, result, commit);
+        ran += 1;
+      } catch (err) {
+        // One eval failing to run must not stop the rest; it is recorded as
+        // a run with nothing passing, so the series shows the gap.
+        writeEvalResult(
+          tenant,
+          workspace,
+          {
+            eval: info.name,
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            passed: 0,
+            failed: info.cases.length,
+            costUsd: 0,
+            cases: [],
+          } as EvalResult,
+          commit,
+        );
+      }
+    }
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+  return { ran, skipped: null };
 }
 
 export function readEvalResult(tenant: string, workspace: string, name: string): EvalResult | null {
