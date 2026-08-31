@@ -73,6 +73,7 @@ export function ensureRepo(tenant: string, scope: string): string {
     // Pushes over HTTP need this; it is the one config a bare remote wants.
     git(dir, ["config", "http.receivepack", "true"]);
   }
+  installHooks(dir);
   return dir;
 }
 
@@ -259,6 +260,109 @@ export function filesAt(tenant: string, scope: string, ref: string): { path: str
     const content = blob(dir, ref, t.path);
     return content === null ? [] : [{ path: t.path, content }];
   });
+}
+
+/**
+ * What a ref would change on main: every file that differs, with both sides.
+ * The branch's own commits are `listCommits({ ref })`; this is the net
+ * effect, which is what a reviewer reads.
+ */
+export function diffRefs(tenant: string, scope: string, base: string, head: string): RevisionFile[] {
+  if (!headSha(tenant, scope, base) || !headSha(tenant, scope, head)) return [];
+  const dir = repoDir(tenant, scope);
+  const out = git(dir, ["diff", "--name-status", `${base}...${head}`]);
+  return out.split("\n").filter(Boolean).map((line) => {
+    const [status, p] = line.split("\t");
+    return {
+      path: p,
+      before: status === "A" ? null : blob(dir, base, p),
+      after: status === "D" ? null : blob(dir, head, p),
+    };
+  });
+}
+
+/**
+ * Merge a branch into main and return the new main. A fast-forward when it
+ * is one; otherwise a merge commit whose tree is the BRANCH's — the branch
+ * is what the person reviewed and chose, and a three-way textual merge of
+ * markdown with no one to resolve conflicts would deploy text nobody wrote.
+ * Both parents are recorded, so history shows the merge for what it was.
+ */
+export function mergeBranch(
+  tenant: string,
+  scope: string,
+  branch: string,
+  meta: { by?: string } = {},
+): { sha: string; fastForward: boolean } {
+  const dir = repoDir(tenant, scope);
+  const main = headSha(tenant, scope);
+  const head = headSha(tenant, scope, `refs/heads/${safe(branch, "branch")}`);
+  if (!head) throw new Error(`no branch "${branch}"`);
+  if (!main) {
+    git(dir, ["update-ref", "refs/heads/main", head]);
+    return { sha: head, fastForward: true };
+  }
+  const isAncestor = spawnSync("git", ["--git-dir", dir, "merge-base", "--is-ancestor", main, head]).status === 0;
+  if (isAncestor) {
+    git(dir, ["update-ref", "refs/heads/main", head, main]);
+    return { sha: head, fastForward: true };
+  }
+  const tree = git(dir, ["rev-parse", `${head}^{tree}`]).trim();
+  const who = meta.by ?? "foldrun";
+  const email = who.includes("@") ? who : `${who}@foldrun`;
+  const name = who.includes("@") ? who.split("@")[0] : who;
+  const date = new Date().toISOString();
+  const sha = git(dir, ["commit-tree", tree, "-p", main, "-p", head, "-m", `merge ${branch} into main`], {
+    env: {
+      GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_AUTHOR_DATE: date,
+      GIT_COMMITTER_NAME: "foldrun", GIT_COMMITTER_EMAIL: "platform@foldrun", GIT_COMMITTER_DATE: date,
+    },
+  }).trim();
+  git(dir, ["update-ref", "refs/heads/main", sha, main]);
+  return { sha, fastForward: false };
+}
+
+export function deleteBranch(tenant: string, scope: string, branch: string) {
+  if (branch === "main") throw new Error("main is the default branch");
+  git(repoDir(tenant, scope), ["update-ref", "-d", `refs/heads/${safe(branch, "branch")}`]);
+}
+
+/** Push main to another remote — a GitHub or GitLab mirror. Blocking; callers
+ *  run it off the request path. The token never touches disk: it is in the
+ *  URL for this one process and nowhere else. */
+export function pushMirror(tenant: string, scope: string, url: string): { ok: boolean; detail: string } {
+  if (!headSha(tenant, scope)) return { ok: false, detail: "nothing to push yet" };
+  const r = spawnSync("git", ["--git-dir", repoDir(tenant, scope), "push", "--quiet", url, "+refs/heads/main:refs/heads/main"], {
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    timeout: 60_000,
+  });
+  const detail = (r.stderr?.toString() ?? "").trim()
+    // Never echo the URL back: it carries the token.
+    .replaceAll(url, "<mirror>")
+    .slice(0, 500);
+  return { ok: r.status === 0, detail: r.status === 0 ? "pushed" : detail || "push failed" };
+}
+
+/**
+ * The pre-receive hook: a push that fails the deploy checks is refused with
+ * the errors in the pusher's terminal, instead of accepted and then not
+ * deployed. The hook shells out to node with the compiled check, so it runs
+ * the same rules as a dashboard deploy; which node and which script are
+ * passed in the environment by the HTTP route, because a hook inherits git's
+ * environment and nothing else.
+ */
+export function installHooks(dir: string) {
+  const hooks = path.join(dir, "hooks");
+  fs.mkdirSync(hooks, { recursive: true });
+  const hook = path.join(hooks, "pre-receive");
+  const script = `#!/bin/sh
+# Installed by foldrun. Refuses a push to main whose tree fails the checks.
+[ -n "$FOLDRUN_HOOK_NODE" ] && [ -n "$FOLDRUN_HOOK_SCRIPT" ] || exit 0
+exec "$FOLDRUN_HOOK_NODE" "$FOLDRUN_HOOK_SCRIPT"
+`;
+  if (!fs.existsSync(hook) || fs.readFileSync(hook, "utf8") !== script) {
+    fs.writeFileSync(hook, script, { mode: 0o755 });
+  }
 }
 
 export { type DiffOp };

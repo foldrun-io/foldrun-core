@@ -54,6 +54,23 @@ export function registerTreeReader(fn: TreeReader) {
   readTree = (tenant, scope) => fn(tenant, scope) ?? prev(tenant, scope);
 }
 
+/** Something to do after a commit lands on main — the mirror push. Registered
+ *  by mirror.ts; this module cannot import it (secrets, settings). */
+type AfterCommit = (tenant: string, scope: string, sha: string) => void;
+const afterCommit: AfterCommit[] = [];
+export function registerAfterCommit(fn: AfterCommit) {
+  afterCommit.push(fn);
+}
+export function notifyCommit(tenant: string, scope: string, sha: string) {
+  for (const fn of afterCommit) {
+    try {
+      fn(tenant, scope, sha);
+    } catch {
+      // a mirror that fails must not fail the save that triggered it
+    }
+  }
+}
+
 /** Journal or git? Git whenever the binary exists; the journal is the
  *  fallback for an install without one. An install that started on the
  *  journal keeps it readable — both are consulted on read. */
@@ -145,6 +162,7 @@ export function recordRevision(
       message: first ? `initial import${meta.message ? ` — ${meta.message}` : ""}` : (meta.message ?? describe(changed)),
     });
     if (!sha) return null;
+    notifyCommit(tenant, scope, sha);
     return {
       id: meta.commit ?? sha,
       at: new Date().toISOString(),

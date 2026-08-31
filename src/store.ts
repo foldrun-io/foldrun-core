@@ -283,7 +283,7 @@ export function assertCanonicalCase(rel: string) {
  * next deploy or silently handed to every container — both invisible until
  * someone is bitten.
  */
-export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl"];
+export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl", ".repo.json"];
 
 /** True for anything the platform, not the author or the agent, writes. */
 export function isPlatformPath(rel: string): boolean {

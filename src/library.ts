@@ -371,3 +371,49 @@ registerTreeReader((tenant, scope) => {
   }
   return out;
 });
+
+
+/**
+ * Make the shelf match a tree — what a push to the library repository does.
+ * Written with plain fs and recorded as ONE revision at the end: going
+ * through writeLibraryFile per file would commit each one on top of the
+ * pushed commit, and the history would show a push as fifty edits.
+ */
+export function syncLibraryFromTree(tenant: string, files: { path: string; content: string }[], meta: { by?: string; commit?: string | null } = {}) {
+  const wanted = new Map<string, string>();
+  for (const f of files) {
+    const [kind, ...rest] = f.path.split("/");
+    if (!LIBRARY_KINDS.includes(kind as LibraryKind) || rest.length === 0) continue;
+    wanted.set(f.path, f.content);
+  }
+  const changes: { path: string; before: string | null; after: string | null }[] = [];
+  for (const kind of LIBRARY_KINDS) {
+    const dir = libraryDir(tenant, kind);
+    if (!fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { recursive: true })) {
+      const rel = `${kind}/${String(entry).split(path.sep).join("/")}`;
+      const full = path.join(dir, String(entry));
+      try {
+        if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel)) continue;
+      } catch {
+        continue;
+      }
+      if (!wanted.has(rel)) {
+        changes.push({ path: rel, before: fs.readFileSync(full, "utf8"), after: null });
+        fs.rmSync(full, { force: true });
+      }
+    }
+  }
+  for (const [rel, content] of wanted) {
+    const [kind, ...rest] = rel.split("/");
+    const full = path.join(libraryDir(tenant, kind as LibraryKind), assertLibraryPath(kind as LibraryKind, rest.join("/")));
+    const before = fs.existsSync(full) ? fs.readFileSync(full, "utf8") : null;
+    if (before === content) continue;
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+    if (kind === "scripts" || /scripts\//.test(rel) || (kind === "tools" && !rel.endsWith(".md"))) fs.chmodSync(full, 0o755);
+    changes.push({ path: rel, before, after: content });
+  }
+  recordRevision(tenant, "@library", changes, { by: meta.by ?? "deploy", message: meta.commit ? `deployed ${meta.commit.slice(0, 7)}` : "synced from push", commit: meta.commit ?? null });
+  return changes.length;
+}

@@ -329,6 +329,9 @@ export function planDeploy(tenant: string, workspace: string, files: DeployFile[
 export interface DeployOptions {
   /** The commit these files came from, recorded so the dashboard can show it. */
   commit?: string | null;
+  /** Attribution for the revision this deploy records. */
+  by?: string;
+  message?: string;
   /** Apply even while runs are in flight. */
   force?: boolean;
 }
@@ -356,7 +359,7 @@ export function deployWorkspace(
     return { ...plan, applied: false, commit: null, preserved: 0 };
   }
 
-  const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: "deploy" });
+  const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: opts.by ?? "deploy", message: opts.message });
   const commit = opts.commit ?? null;
   if (commit) writeDeployedCommit(tenant, workspace, commit);
   return { ...plan, applied: true, commit, preserved };
