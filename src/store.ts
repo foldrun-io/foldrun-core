@@ -22,7 +22,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { recordRevision, type RevisionFile } from "./history.ts";
+import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
 import {
@@ -2435,3 +2435,16 @@ export function providerEnvFor(spec: {
   if (lines.length) env.ANTHROPIC_CUSTOM_HEADERS = lines.join("\n");
   return env;
 }
+
+// The workspace tree, for history's first commit — see registerTreeReader.
+registerTreeReader((tenant, scope) => {
+  if (scope === "@library" || !fs.existsSync(workspaceDir(tenant, scope))) return null;
+  const dir = workspaceDir(tenant, scope);
+  return listWorkspaceFiles(tenant, scope).flatMap((rel) => {
+    try {
+      return [{ path: rel, before: null, after: fs.readFileSync(path.join(dir, rel), "utf8") }];
+    } catch {
+      return [];
+    }
+  });
+});

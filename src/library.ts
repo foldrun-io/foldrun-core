@@ -16,7 +16,7 @@ import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
 import { KINDS } from "./kinds.ts";
-import { recordRevision } from "./history.ts";
+import { recordRevision, registerTreeReader } from "./history.ts";
 import {
   assertSafeName,
   assertCanonicalCase,
@@ -350,3 +350,24 @@ export function libraryUsage(tenant: string, kind: LibraryKind, name: string): L
 
   return out;
 }
+
+// The account shelf as one tree, kind/path — see registerTreeReader.
+registerTreeReader((tenant, scope) => {
+  if (scope !== "@library") return null;
+  const out: { path: string; before: null; after: string }[] = [];
+  for (const kind of LIBRARY_KINDS) {
+    const dir = libraryDir(tenant, kind);
+    if (!fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { recursive: true })) {
+      const rel = String(entry).split(path.sep).join("/");
+      const full = path.join(dir, rel);
+      try {
+        if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel)) continue;
+        out.push({ path: `${kind}/${rel}`, before: null, after: fs.readFileSync(full, "utf8") });
+      } catch {
+        // skip
+      }
+    }
+  }
+  return out;
+});

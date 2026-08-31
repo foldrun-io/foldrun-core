@@ -29,6 +29,35 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
+import {
+  commitChanges,
+  gitAvailable,
+  headSha,
+  listCommits,
+  readCommit,
+  repoExists,
+} from "./gitrepo.ts";
+
+/**
+ * The current tree of a scope, so the first commit can be a full import.
+ *
+ * Registered by the modules that know how to list a workspace or the library
+ * (store.ts, library.ts), because this module cannot import them — they
+ * import it. A revision recorded before any commit exists imports the whole
+ * tree rather than committing one file into an empty repository, so a clone
+ * made a minute later has everything.
+ */
+type TreeReader = (tenant: string, scope: string) => RevisionFile[] | null;
+let readTree: TreeReader = () => null;
+export function registerTreeReader(fn: TreeReader) {
+  const prev = readTree;
+  readTree = (tenant, scope) => fn(tenant, scope) ?? prev(tenant, scope);
+}
+
+/** Journal or git? Git whenever the binary exists; the journal is the
+ *  fallback for an install without one. An install that started on the
+ *  journal keeps it readable — both are consulted on read. */
+const useGit = () => process.env.FOLDRUN_HISTORY !== "journal" && gitAvailable();
 
 // Not store's assertSafeName: store imports this module, and a cycle between
 // the two is avoidable for one regex.
@@ -96,6 +125,36 @@ export function recordRevision(
   const changed = files.filter((f) => f.before !== f.after);
   if (changed.length === 0) return null;
 
+  if (useGit()) {
+    // First commit ever for this scope: import the whole tree as it stands
+    // now (the writer has already written), so the repository is complete
+    // from its first commit rather than starting with one file.
+    const first = !headSha(tenant, scope);
+    // Generated bundle files (knowledge/index.md, memory/log.md) are rewritten
+    // by the same save that changed a concept, outside this call. Commit them
+    // as they now stand, or a clone's index disagrees with its own files —
+    // the exact drift the template tests exist to catch.
+    const generated = first
+      ? []
+      : (readTree(tenant, scope) ?? []).filter((f) => /(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/.test(f.path));
+    const toCommit = first ? (readTree(tenant, scope) ?? changed) : [...changed, ...generated];
+    const sha = commitChanges(tenant, scope, toCommit, {
+      by: meta.by,
+      // Named after what the caller changed, not the generated files that
+      // rode along — "edited knowledge/style.md", not "changed 3 files".
+      message: first ? `initial import${meta.message ? ` — ${meta.message}` : ""}` : (meta.message ?? describe(changed)),
+    });
+    if (!sha) return null;
+    return {
+      id: meta.commit ?? sha,
+      at: new Date().toISOString(),
+      by: meta.by ?? "system",
+      message: meta.message ?? describe(changed),
+      commit: sha,
+      files: changed,
+    };
+  }
+
   const dir = historyDir(tenant, scope);
   fs.mkdirSync(dir, { recursive: true });
   const rev: Revision = {
@@ -148,6 +207,20 @@ export function listRevisions(
   scope: string,
   opts: { forPath?: string; limit?: number } = {},
 ): RevisionSummary[] {
+  if (useGit() && repoExists(tenant, scope)) {
+    const fromGit = listCommits(tenant, scope, opts);
+    // Anything the journal holds from before the repository existed comes
+    // after git's rows: older, and still worth showing.
+    return [...fromGit, ...journalRevisions(tenant, scope, opts)].slice(0, opts.limit ?? 200);
+  }
+  return journalRevisions(tenant, scope, opts);
+}
+
+function journalRevisions(
+  tenant: string,
+  scope: string,
+  opts: { forPath?: string; limit?: number } = {},
+): RevisionSummary[] {
   const file = path.join(historyDir(tenant, scope), "index.jsonl");
   if (!fs.existsSync(file)) return [];
   const all = fs
@@ -166,11 +239,27 @@ export function listRevisions(
   return narrowed.slice(0, opts.limit ?? 200);
 }
 
-export function readRevision(tenant: string, scope: string, id: string): Revision | null {
+export function readRevision(tenant: string, scope: string, id: string, forPath?: string): Revision | null {
   assertSafeName(id, "revision id");
+  if (useGit() && repoExists(tenant, scope) && /^[0-9a-f]{7,40}$/.test(id)) {
+    const fromGit = readCommit(tenant, scope, id, forPath);
+    if (fromGit) return fromGit;
+  }
   const file = path.join(historyDir(tenant, scope), `${id}.json`);
   if (!fs.existsSync(file)) return null;
   return JSON.parse(fs.readFileSync(file, "utf8")) as Revision;
+}
+
+/**
+ * Make sure a scope's repository has its initial import, so a clone made
+ * right now is complete. A no-op once any commit exists.
+ */
+export function ensureImported(tenant: string, scope: string): string | null {
+  if (!useGit()) return null;
+  if (headSha(tenant, scope)) return headSha(tenant, scope);
+  const tree = readTree(tenant, scope);
+  if (!tree || tree.length === 0) return null;
+  return commitChanges(tenant, scope, tree, { by: "foldrun", message: "initial import" });
 }
 
 /** The most recent revision id for a scope — what a change is attributed

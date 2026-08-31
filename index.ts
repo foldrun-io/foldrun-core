@@ -25,6 +25,7 @@ export * from "./src/linkable.ts";
 export * from "./src/observe.ts";
 export * from "./src/ownership.ts";
 export * from "./src/history.ts";
+export * from "./src/gitrepo.ts";
 export * from "./src/storage.ts";
 export * from "./src/secrets.ts";
 export * from "./src/secret-files.ts";
