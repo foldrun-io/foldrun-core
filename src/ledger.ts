@@ -13,6 +13,7 @@
 // sets it, so local runs are never refused. The hosted platform sets it.
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { databaseEnabled } from "./db.ts";
 import { appendDb, balanceDb, readLedgerDb, backfillLedger } from "./ledger-db.ts";
 import path from "node:path";
@@ -327,6 +328,35 @@ export async function recordTopUp(tenant: string, usd: number, note?: string): P
   const entry: LedgerEntry = { t: new Date().toISOString(), kind: "topup", usd, note };
   await append(tenant, entry);
   return entry;
+}
+
+/**
+ * Atomically claim the right to credit a marked top-up exactly once.
+ *
+ * A Stripe payment is credited from two racing paths — the browser returning
+ * to /api/billing/confirm and the webhook — and a refresh (or a burst of
+ * concurrent requests) replays either. The old guard was a read-ledger-then-
+ * check-marker-then-append sequence with no atomicity: N concurrent requests
+ * all read the ledger before any had appended, none saw the marker, and all N
+ * credited the same payment. This closes that window the same way run billing
+ * does (`claimSettle`): creating the marker file with O_EXCL is atomic on the
+ * filesystem, so exactly one caller wins the right to append. Returns false if
+ * the marker was already claimed — the caller must then skip the credit.
+ *
+ * The marker (e.g. `stripe:cs_test_…`) is hashed into a safe filename because
+ * it is not a kebab-case name.
+ */
+export function claimTopUp(tenant: string, marker: string): boolean {
+  const dir = path.join(accountDir(tenant), "topups");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = crypto.createHash("sha256").update(marker).digest("hex");
+  try {
+    fs.writeFileSync(path.join(dir, file), marker, { flag: "wx" });
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
 }
 
 /**

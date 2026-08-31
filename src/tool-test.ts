@@ -41,6 +41,30 @@ export interface ToolTestResult {
 const MAX_DETAIL = 4000;
 const TIMEOUT_MS = 15_000;
 
+// A tool test runs tenant-authored code directly on the host — real runs are
+// containerized, this is not — so it must NOT inherit the dashboard's full
+// process.env. That env holds FOLDRUN_SECRET_KEY (the global install key that
+// signs every tenant's webhook tokens and git-push secrets), plus the S3/DB/
+// Stripe/GitHub credentials: handing them to a `console.log(process.env)`
+// script tool is cross-tenant compromise. The child instead starts from a
+// minimal host base — only enough for an interpreter to be found and run —
+// and gets the tool's own declared secrets layered on top by the callers.
+const HOST_BASE_ENV_KEYS = [
+  "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE",
+  "LC_ALL", "LC_CTYPE", "TZ", "TERM", "SHELL", "USER", "LOGNAME",
+  "NODE_ENV", // not a secret; some interpreters/tools read it.
+  // Windows equivalents, harmless elsewhere.
+  "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR",
+];
+function hostSafeBaseEnv(): NodeJS.ProcessEnv {
+  const base: Record<string, string> = {};
+  for (const k of HOST_BASE_ENV_KEYS) {
+    const v = process.env[k];
+    if (v !== undefined) base[k] = v;
+  }
+  return base as NodeJS.ProcessEnv;
+}
+
 const clip = (s: string) =>
   s.length > MAX_DETAIL ? `${s.slice(0, MAX_DETAIL)}\n… truncated` : s;
 
@@ -182,7 +206,7 @@ export async function testTool(
       toolRuntime.interpreters,
     );
     const { code, out } = await runOnce(cmd, [...args, ...flags], cwd, {
-      ...process.env,
+      ...hostSafeBaseEnv(),
       ...toolRuntime.env,
       ...env,
     });
@@ -242,7 +266,7 @@ export async function testTool(
     .map(([, v]) => String(v).match(/^\$\{([A-Z0-9_]+)\}$/)?.[1])
     .filter((n): n is string => Boolean(n));
   const { env, missing } = resolveSecrets(tenant, named, workspace);
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  const childEnv: NodeJS.ProcessEnv = { ...hostSafeBaseEnv() };
   for (const [k, v] of Object.entries(spec.env ?? {})) childEnv[k] = substitute(String(v), env);
 
   const handshake = await mcpHandshake(spec.command, spec.args ?? [], childEnv);

@@ -161,8 +161,8 @@ export async function enqueueFlowRun(
   // Money is checked where work is added, and only where work is added —
   // resuming a parked run skips this on purpose. No-op unless the install
   // enforces billing (FOLDRUN_BILLING=1).
-  assertFunds(tenant, await countInFlight(tenant));
-  assertWorkspaceBudget(tenant, workspace);
+  await assertFunds(tenant, await countInFlight(tenant));
+  await assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, steps, flowName, "queued", tags);
   await enqueue({ tenant, workspace, runId: run.id, modelOverride, tags });
   return run;
@@ -271,8 +271,8 @@ export async function startFlowFromStep(
   if (fromStep < 1 || fromStep > maxGroup) {
     throw new Error(`flow ${flowName} has no step ${fromStep} (it has ${maxGroup})`);
   }
-  assertFunds(tenant, await countInFlight(tenant));
-  assertWorkspaceBudget(tenant, workspace);
+  await assertFunds(tenant, await countInFlight(tenant));
+  await assertWorkspaceBudget(tenant, workspace);
   const run = createFlowRun(tenant, workspace, flow.steps, flowName, "queued");
   for (const step of run.steps) {
     if (step.group < fromStep) {
@@ -327,8 +327,8 @@ export async function rerunFrom(
     );
   }
 
-  assertFunds(tenant, await countInFlight(tenant));
-  assertWorkspaceBudget(tenant, workspace);
+  await assertFunds(tenant, await countInFlight(tenant));
+  await assertWorkspaceBudget(tenant, workspace);
 
   // Re-runs exist to iterate: fix the flow, re-run the step. So the reset
   // steps take their instructions from the flow file as it reads *now*, not

@@ -498,7 +498,13 @@ export async function materializeSecrets(
         throw new Error(`secret ${name}: stored oauth2 config is unreadable`);
       }
       try {
-        out[name] = await exchange(config, `${name}:${config.client_id}:${(config.refresh_token ?? config.grant_type ?? "").slice(0, 8)}`);
+        // Fingerprint the WHOLE refresh token, not its first 8 chars: Google
+        // refresh tokens share a long common prefix, so an 8-char slice could
+        // collide two distinct grants onto one cache entry and hand one the
+        // other's access token. Hashed so the token is not held in a Map key.
+        const grantMaterial = config.refresh_token ?? config.grant_type ?? "";
+        const fp = crypto.createHash("sha256").update(grantMaterial).digest("hex").slice(0, 16);
+        out[name] = await exchange(config, `${name}:${config.client_id}:${fp}`);
       } catch (err) {
         throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
       }
