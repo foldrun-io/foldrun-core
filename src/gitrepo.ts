@@ -344,6 +344,29 @@ export function pushMirror(tenant: string, scope: string, url: string): { ok: bo
 }
 
 /**
+ * Where the compiled pre-receive check is, found on disk rather than through
+ * require.resolve — a bundler rewrites require.resolve("pkg") into a module
+ * id, and the hook was once told to run a script called "51113". Searched
+ * from the working directory upward: the monorepo layout, then an installed
+ * package. Empty when there is no compiled check (a dev server on the source
+ * tree), in which case a push is checked at deploy instead of refused — the
+ * same rules, one step later.
+ */
+export function hookScriptPath(): string {
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    for (const rel of ["packages/core/dist/src/git-hook.js", "node_modules/@foldrun/core/dist/src/git-hook.js"]) {
+      const candidate = path.join(dir, rel);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "";
+}
+
+/**
  * The pre-receive hook: a push that fails the deploy checks is refused with
  * the errors in the pusher's terminal, instead of accepted and then not
  * deployed. The hook shells out to node with the compiled check, so it runs
