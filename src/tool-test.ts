@@ -24,6 +24,7 @@ import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
 import { commandFor, resolveRunPath } from "./script-tools.ts";
+import { parseRuntime, prepareRuntime } from "./runtime.ts";
 
 export interface ToolTestResult {
   ok: boolean;
@@ -163,12 +164,26 @@ export async function testTool(
       if (v !== "" && /^[a-z][a-z0-9_]*$/i.test(k)) flags.push(`--${k}`, v);
     }
 
+    // The tool's own dependencies, built (or reused) the way a run builds
+    // them. Without this a tool declaring `runtime: { packages: [requests] }`
+    // ran fine in a flow and failed the Test button with "no module named
+    // requests" — the one place a developer goes to find out if it works.
+    const toolRuntime = prepareRuntime(tenant, parseRuntime(def.spec.runtime));
+    if (toolRuntime.error) {
+      return done({
+        ok: false, transport: "script", missingSecrets: missing,
+        summary: "its runtime could not be built",
+        detail: [toolRuntime.error, ...toolRuntime.log].join("\n"),
+      });
+    }
     const { cmd, args } = commandFor(
       { interpreter, run: run, name: "", description: "", args: {} },
       file,
+      toolRuntime.interpreters,
     );
     const { code, out } = await runOnce(cmd, [...args, ...flags], cwd, {
       ...process.env,
+      ...toolRuntime.env,
       ...env,
     });
 

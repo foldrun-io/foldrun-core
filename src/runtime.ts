@@ -84,6 +84,38 @@ export function parseRuntime(raw: unknown): RuntimeSpec | null {
   return wantsSomething ? spec : null;
 }
 
+/**
+ * Several declarations, one environment.
+ *
+ * A tool declares what ITS program needs — `runtime: { packages: [requests] }`
+ * in tool.md — because the tool is the unit of code and its dependencies
+ * belong beside it, not in every agent that grants it. An agent that grants
+ * three Python tools gets one venv holding the union. Version pins are kept
+ * verbatim; if two tools pin the same package differently, pip is the one to
+ * say so, loudly, at build time — better than one of them silently winning.
+ */
+export function mergeRuntimes(...specs: (RuntimeSpec | null | undefined)[]): RuntimeSpec | null {
+  const present = specs.filter((s): s is RuntimeSpec => Boolean(s));
+  if (present.length === 0) return null;
+  if (present.length === 1) return present[0];
+  const pick = (key: "python" | "node") => {
+    // A version pin beats a bare `true`; the first pin wins.
+    const pinned = present.map((s) => s[key]).find((v) => typeof v === "string");
+    if (pinned !== undefined) return pinned;
+    return present.some((s) => s[key] === true) ? true : undefined;
+  };
+  const uniq = (xs: string[]) => [...new Set(xs)];
+  const merged: RuntimeSpec = {
+    python: pick("python"),
+    packages: uniq(present.flatMap((s) => s.packages)),
+    node: pick("node"),
+    npm: uniq(present.flatMap((s) => s.npm)),
+  };
+  const rejected = uniq(present.flatMap((s) => s.rejected ?? []));
+  if (rejected.length) merged.rejected = rejected;
+  return merged;
+}
+
 export function fingerprint(spec: RuntimeSpec): string {
   const canonical = JSON.stringify({
     python: spec.python ?? null,

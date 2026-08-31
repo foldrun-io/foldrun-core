@@ -419,6 +419,16 @@ and a non-zero exit is what tells the agent the call failed.
 \`run:\` names the file, never the scope it sits in, so this folder is correct
 copied into any workspace or installed at the account.
 
+Needs a package? Declare it here and it is installed for every agent that
+grants this tool — the tool is the unit of code, so its dependencies travel
+with it:
+
+\`\`\`yaml
+runtime:
+  packages: [requests]      # pip
+  npm: [cheerio]            # npm
+\`\`\`
+
 Agents opt in with:
 
 \`\`\`yaml

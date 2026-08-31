@@ -49,7 +49,7 @@ import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
-import { parseRuntime, prepareRuntime } from "./runtime.ts";
+import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
@@ -646,6 +646,10 @@ function agentContext(
   const mcpServers: Record<string, McpServerConfig> = {};
   const mcpNames: string[] = [];
 
+  // What the granted tools' programs need — merged into this step's runtime
+  // below. The tool is the unit of code, so its dependencies live in tool.md
+  // and travel with it; the agent should not have to repeat them.
+  const toolRuntimes: RuntimeSpec[] = [];
   const grantOwnTool = (name: string) => {
     const def = available[name];
     if (!def) {
@@ -653,7 +657,11 @@ function agentContext(
       return;
     }
     if (def.kind === "http") apis.push(def.spec);
-    else if (def.kind === "script") scriptSpecs.push(...parseScripts([def.spec]));
+    else if (def.kind === "script") {
+      scriptSpecs.push(...parseScripts([def.spec]));
+      const rt = parseRuntime((def.spec as { runtime?: unknown }).runtime);
+      if (rt) toolRuntimes.push(rt);
+    }
     else {
       mcpServers[def.name] = mcpConfig(def.spec, tenant, workspace);
       mcpNames.push(def.name);
@@ -781,6 +789,8 @@ function agentContext(
     // nothing that already exists breaks.
     runtimeSpec = parseRuntime(workspaceFrontmatter(agentDir, tenant).runtime);
   }
+  // Plus whatever the tools this agent granted declared for themselves.
+  runtimeSpec = mergeRuntimes(runtimeSpec, ...toolRuntimes);
   // Execution: a container per run when Docker is available (real isolation),
   // otherwise the host venv path so local development still works.
   const executor = chooseExecutor();
