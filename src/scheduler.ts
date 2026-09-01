@@ -15,6 +15,9 @@ import { reconcileAllRuns } from "./runner.ts";
 import { enqueueFlowRun } from "./queue.ts";
 import { flowHasLiveRun } from "./store.ts";
 import { sweepFinishedRunPods } from "./run-k8s.ts";
+import { applyPendingPush } from "./deploy.ts";
+import { filesAt } from "./gitrepo.ts";
+import { evaluateDeployed } from "./evals.ts";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
@@ -198,6 +201,21 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
   const due: DueFlow[] = [];
   for (const tenant of tenants) {
     for (const workspace of listWorkspaces(tenant)) {
+      // A push refused only because a run was in flight is a deploy that has
+      // not happened yet, and git already told the client it succeeded. Apply
+      // it now the runs are done, before deciding what to fire — a schedule
+      // should read the flows the newest push shipped.
+      try {
+        const applied = applyPendingPush(tenant, workspace.name, filesAt);
+        if (applied) {
+          console.log(
+            `[scheduler] applied the push that was waiting on a run: ${tenant}/${workspace.name} @ ${applied.commit.slice(0, 7)}`,
+          );
+          void evaluateDeployed(tenant, workspace.name, applied.commit).catch(() => {});
+        }
+      } catch (err) {
+        console.error(`[scheduler] pending push for ${tenant}/${workspace.name}:`, err);
+      }
       for (const flow of listFlows(tenant, workspace.name)) {
         if (flow.trigger !== "schedule" || !flow.schedule || flow.steps.length === 0) continue;
         const cron = parseCron(flow.schedule);

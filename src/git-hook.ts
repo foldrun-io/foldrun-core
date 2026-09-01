@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { deployIssues } from "./deploy.ts";
+import { deployIssues, runsInFlight } from "./deploy.ts";
 
 const dir = process.env.GIT_DIR;
 if (!dir) process.exit(0);
@@ -29,6 +29,26 @@ const git = (args: string[]) => {
   const r = spawnSync("git", ["--git-dir", dir, ...args], { maxBuffer: 64 * 1024 * 1024 });
   return r.status === 0 ? r.stdout.toString() : null;
 };
+
+// The client is gone by the time the deploy runs, so this is the only moment
+// a person can be told their push will not take effect yet. A warning, not a
+// refusal: the commit is fine and the scheduler applies it when the runs end.
+const here = path.basename(path.resolve(process.cwd(), dir));
+if (here.endsWith(".git")) {
+  const workspace = here.slice(0, -4);
+  const tenant = path.basename(path.resolve(process.cwd(), dir, "..", ".."));
+  try {
+    const live = runsInFlight(tenant, workspace);
+    if (live.length) {
+      process.stderr.write(
+        `\nfoldrun: ${live.length} run${live.length === 1 ? " is" : "s are"} in flight, so this push is not live yet.\n` +
+          `  It is on main and will be applied automatically when they finish.\n\n`,
+      );
+    }
+  } catch {
+    // A warning that cannot be computed must never fail a push.
+  }
+}
 
 let refused = false;
 for (const line of input.split("\n").filter(Boolean)) {

@@ -31,6 +31,7 @@ import {
   type DeployFile,
 } from "./store.ts";
 import { conformanceIssues } from "./okf.ts";
+import { repoDir } from "./gitrepo.ts";
 
 /** Directories a deploy never reads out of a source tree. */
 const NOT_SOURCE = new Set([".git", "node_modules", "runs", "outputs", ".foldrun", ".results"]);
@@ -344,6 +345,71 @@ export interface DeployOptions {
  * webhook or a CLI that needs to report *why*, and every reason is already in
  * the plan.
  */
+/** What a push recorded about itself, where the Repository page reads it. */
+export interface PushNote {
+  commit: string;
+  at: string;
+  applied: boolean;
+  issues?: unknown[];
+  blockedBy?: string[];
+  /** Set when a blocked push was applied later, by the retry. */
+  appliedAt?: string;
+}
+
+export const pushNotePath = (tenant: string, workspace: string) =>
+  path.join(repoDir(tenant, workspace), "foldrun-last-push.json");
+
+export function readPushNote(tenant: string, workspace: string): PushNote | null {
+  try {
+    return JSON.parse(fs.readFileSync(pushNotePath(tenant, workspace), "utf8")) as PushNote;
+  } catch {
+    return null;
+  }
+}
+
+export function writePushNote(tenant: string, workspace: string, note: PushNote) {
+  try {
+    fs.writeFileSync(pushNotePath(tenant, workspace), JSON.stringify(note));
+  } catch {
+    // The note is a record, not the deploy. Losing it must not fail a push.
+  }
+}
+
+/**
+ * A push whose deploy was refused only because a run was in flight is not a
+ * failure — it is a deploy that has not happened yet. Git already said the
+ * push succeeded (the deploy happens after the client is gone), so nothing
+ * would ever tell anyone the workspace on disk is behind `main`. This applies
+ * it once the runs are done.
+ *
+ * Only `blockedBy`: a push refused for `issues` is a broken workspace and
+ * wants a person, not a retry.
+ */
+export function applyPendingPush(
+  tenant: string,
+  workspace: string,
+  filesAt: (tenant: string, scope: string, ref: string) => DeployFile[],
+): { commit: string } | null {
+  const note = readPushNote(tenant, workspace);
+  if (!note || note.applied) return null;
+  if (!note.blockedBy?.length || (note.issues?.length ?? 0) > 0) return null;
+  if (runsInFlight(tenant, workspace).length > 0) return null;
+  // Only the commit the note names, and only while it is still what main
+  // points at — a newer push supersedes it and wrote its own note.
+  const result = deployWorkspace(tenant, workspace, filesAt(tenant, workspace, note.commit), {
+    commit: note.commit,
+    force: false,
+  });
+  writePushNote(tenant, workspace, {
+    ...note,
+    applied: result.applied,
+    issues: result.issues ?? [],
+    blockedBy: result.blockedBy ?? [],
+    ...(result.applied ? { appliedAt: new Date().toISOString() } : {}),
+  });
+  return result.applied ? { commit: note.commit } : null;
+}
+
 export function deployWorkspace(
   tenant: string,
   workspace: string,
