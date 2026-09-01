@@ -38,7 +38,15 @@ import { latestRevisionId } from "./history.ts";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { workspaceDir, readRun, resolveModel, resolveEffort, assertSafeName, type Effort } from "./store.ts";
+import {
+  workspaceDir,
+  readRun,
+  writeWorkspaceFile,
+  resolveModel,
+  resolveEffort,
+  assertSafeName,
+  type Effort,
+} from "./store.ts";
 import { startFlowRun, loadFlow } from "./runner.ts";
 import { enqueueFlowRun } from "./queue.ts";
 import type { FlowStep } from "./store.ts";
@@ -191,6 +199,160 @@ export function listEvals(tenant: string, workspace: string): EvalInfo[] {
     .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => parseEval(f, fs.readFileSync(path.join(dir, f), "utf8")));
+}
+
+// ---------- promoting a run ----------
+
+/** An error a route can turn into the right status without knowing HTTP. */
+function refuse(message: string, status: number): Error {
+  return Object.assign(new Error(message), { status });
+}
+
+/** Whatever the run was actually asked to do. A flow run carries its input
+ *  inside `<run_task>` (the Run button, the API) or `<webhook_payload>` (a
+ *  hook) appended to the first step's instruction; an ad-hoc agent run's
+ *  instruction IS the task. */
+function taskOf(instruction: string): string {
+  const block = instruction.match(/<(run_task|webhook_payload)>\n?([\s\S]*?)\n?<\/\1>/);
+  return (block ? block[2] : instruction).trim();
+}
+
+/** One line for the eval file: the parser reads a scalar to the end of its
+ *  line, and a stray newline would become a new key. */
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/**
+ * Lay a task out as the eval parser will read it back.
+ *
+ * A single line sits after `task:`. Anything longer goes in a `|` block,
+ * indented — which also keeps a line beginning `## ` from opening a new
+ * case. A `- ` at the start of a line ends a block scalar even indented, so
+ * a markdown bullet is written as `* `: the same bullet to a reader and to
+ * a model, and the case survives.
+ */
+function layoutTask(task: string): string {
+  // A quote at either end of a one-liner would be stripped on read.
+  if (!task.includes("\n") && !/^["']|["']$/.test(task)) return `task: ${task}`;
+  const lines = task.split("\n").map((l) => `  ${l.replace(/^(\s*)-\s/, "$1* ")}`);
+  return `task: |\n${lines.join("\n")}`;
+}
+
+/**
+ * Turn a finished run into a regression case.
+ *
+ * A run that worked is the best test of the agent that did it: the task is
+ * on record, and so is the answer. This writes both into `evals/` — the task
+ * verbatim, the answer as a rubric the judge holds the next run to — so a
+ * later edit to the markdown that changes the conclusion shows up as a red
+ * case rather than as a customer noticing. Appends to the target's
+ * regressions file when there is one, so a flow collects its cases in one
+ * place instead of one file per press.
+ */
+export function promoteRunToEval(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  opts: { evalName?: string; caseName?: string; expect?: string[]; by?: string } = {},
+): { file: string; created: boolean; caseName: string } {
+  const run = readRun(tenant, workspace, runId);
+  if (!run) throw refuse(`run ${runId} not found`, 404);
+  if (run.status !== "completed") {
+    throw refuse(`only a completed run can become an eval — this one is ${run.status}`, 409);
+  }
+  const produced = run.steps.filter((s) => (s.result ?? "").trim());
+  const last = produced[produced.length - 1];
+  if (!last) throw refuse("this run produced no result to hold the next one to", 409);
+  if (run.steps.length === 0 || !run.steps[0].instruction?.trim()) {
+    throw refuse("this run has no task on record", 409);
+  }
+  if (run.flow.startsWith("eval:")) {
+    throw refuse("this run was itself an eval case — promote the run it was checking", 409);
+  }
+
+  // The target: the agent for a direct run, the flow otherwise.
+  const target = run.flow.startsWith("adhoc:")
+    ? { kind: "agent" as const, name: run.flow.slice("adhoc:".length) }
+    : { kind: "flow" as const, name: run.flow };
+  assertSafeName(target.name, target.kind);
+
+  const evalName = opts.evalName ?? `${target.name}-regressions`;
+  assertSafeName(evalName, "eval name");
+  const rel = `evals/${evalName}.md`;
+  const abs = path.join(workspaceDir(tenant, workspace), rel);
+  const existing = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : null;
+
+  // The expectations, checked before anything is written: a line the
+  // parser would skip is a case that passes on nothing.
+  let expect: string[];
+  if (opts.expect && opts.expect.length > 0) {
+    expect = opts.expect.map((line) => {
+      const m = oneLine(line).match(/^([a-z-]+):\s*(.*)$/);
+      if (!m || !(ASSERTION_TYPES as readonly string[]).includes(m[1]) || !m[2]) {
+        throw refuse(
+          `"${line}" is not an assertion — expected one of ${ASSERTION_TYPES.map((t) => `${t}:`).join(", ")} followed by a value`,
+          400,
+        );
+      }
+      return `${m[1]}: ${m[2]}`;
+    });
+  } else {
+    const conclusion = oneLine(run.summary?.trim() || (last.result ?? "")).slice(0, 200);
+    expect = [`judge: reaches the same conclusion as the recorded run: ${conclusion}`];
+  }
+
+  // The case name: what the caller said, else the run and the day it ran —
+  // made unique in the file, so promoting the same run twice reads as two
+  // cases rather than one case declared twice.
+  const taken = new Set(existing ? parseEval(rel, existing).cases.map((c) => c.name) : []);
+  const base = oneLine(opts.caseName ?? "") || `run ${run.id} (${run.startedAt.slice(0, 10)})`;
+  let caseName = base;
+  for (let n = 2; taken.has(caseName); n++) caseName = `${base} (${n})`;
+
+  const task = taskOf(run.steps[0].instruction);
+  if (!task) throw refuse("this run has no task on record", 409);
+  const caseText =
+    `## ${caseName}\n${layoutTask(task)}\nexpect:\n${expect.map((e) => `  - ${e}`).join("\n")}\n`;
+
+  let content: string;
+  if (existing) {
+    // Appending to a file that tests something else would run this case
+    // against the wrong target and call the result a regression.
+    const info = parseEval(rel, existing);
+    const points = info.flow ? { kind: "flow", name: info.flow } : { kind: "agent", name: info.agent };
+    if (points.kind !== target.kind || points.name !== target.name) {
+      throw refuse(
+        `${rel} tests ${points.kind} ${points.name ?? "(nothing)"}, not ${target.kind} ${target.name} — pick another evalName`,
+        409,
+      );
+    }
+    content = `${existing.replace(/\s+$/, "")}\n\n${caseText}`;
+  } else {
+    // A flow eval costs a whole run and touches real systems, so it waits
+    // for a person to press Run rather than following every push.
+    const front =
+      `---\nname: ${evalName}\n${target.kind}: ${target.name}\nmodel: fast\n` +
+      (target.kind === "flow" ? "trigger: manual\n" : "") +
+      `---\n`;
+    content = `${front}\n${caseText}`;
+  }
+
+  // Read it back the way the runner will before it is written: a case the
+  // parser holds differently from what was meant is not a test of anything.
+  const written = parseEval(rel, content).cases.find((c) => c.name === caseName);
+  const wanted = task
+    .split("\n")
+    .map((l) => l.replace(/^(\s*)-\s/, "$1* ").trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!written || written.task !== wanted || written.expect.length !== expect.length) {
+    throw refuse("the task on this run cannot be written in the eval format as it stands", 400);
+  }
+
+  writeWorkspaceFile(tenant, workspace, rel, content, {
+    by: opts.by,
+    message: `${existing ? "added a case to" : "created"} ${rel} from run ${run.id}`,
+  });
+  return { file: rel, created: !existing, caseName };
 }
 
 // ---------- running ----------
