@@ -68,6 +68,10 @@ export interface EvalInfo {
   /** Effort for the judge. PASS/FAIL against one sentence is not deep work,
    *  so this is one of the few places a low default is the right one. */
   effort: Effort | null;
+  /** When it runs. `deploy` (default): after every push, with the rest.
+   *  `manual`: only when a person presses Run or the CLI asks — for a flow
+   *  eval that costs a whole run and touches real systems every time. */
+  trigger: "deploy" | "manual";
   cases: EvalCase[];
 }
 
@@ -174,6 +178,7 @@ export function parseEval(file: string, raw: string): EvalInfo {
     flow: typeof data.flow === "string" ? data.flow : null,
     model: resolveModel(data.model ?? "fast"),
     effort: resolveEffort(data.effort ?? "low"),
+    trigger: data.trigger === "manual" ? "manual" : "deploy",
     cases,
   };
 }
@@ -248,17 +253,21 @@ async function beginEvalRun(
   return enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, []);
 }
 
-async function waitForRun(tenant: string, workspace: string, runId: string, timeoutMs = 300_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+// Waits for as long as the run runs. There was a cap here (5 minutes, then
+// 30) and it marked a flow eval "run disappeared" at the cap while the flow
+// carried on for another half hour — the eval failed for a reason that had
+// nothing to do with the flow. The run is the thing that is bounded, by the
+// flow's own step timeouts; the eval just watches it.
+async function waitForRun(tenant: string, workspace: string, runId: string) {
+  for (;;) {
     const run = readRun(tenant, workspace, runId);
-    if (run?.finishedAt) return run;
+    if (!run) return null;
+    if (run.finishedAt) return run;
     // An eval never answers an approval gate: a test that needs a human isn't
-    // a test. Fail it clearly instead of waiting for a timeout.
-    if (run?.status === "awaiting-approval") return run;
+    // a test. Fail it clearly instead of waiting.
+    if (run.status === "awaiting-approval") return run;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  return readRun(tenant, workspace, runId);
 }
 
 function shell(command: string, cwd: string): Promise<{ code: number | null; out: string }> {
@@ -393,8 +402,7 @@ export async function runEval(
         );
       }
       runId = run.id;
-      // A queued run also waits for a slot; give the worker room.
-      const finished = await waitForRun(tenant, workspace, run.id, runsViaQueue() ? 30 * 60_000 : 300_000);
+      const finished = await waitForRun(tenant, workspace, run.id);
       if (!finished) throw new Error("run disappeared");
       if (finished.status === "awaiting-approval") {
         throw new Error("this run pauses for approval — an eval cannot answer a human gate");
@@ -559,7 +567,9 @@ export async function evaluateDeployed(
   workspace: string,
   commit: string,
 ): Promise<{ ran: number; skipped: string | null }> {
-  const evals = listEvals(tenant, workspace);
+  // Only the evals that asked to run on deploy — a `trigger: manual` eval is
+  // one a person runs on purpose, because it costs a whole flow run.
+  const evals = listEvals(tenant, workspace).filter((e) => e.trigger !== "manual");
   if (evals.length === 0) return { ran: 0, skipped: "no evals" };
   const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
   fs.mkdirSync(dir, { recursive: true });
