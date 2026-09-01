@@ -50,7 +50,12 @@ const cachePvc = () => process.env.FOLDRUN_RUNTIME_CACHE_PVC ?? "";
 // The shim the pod runs. Stages: wait for files, take the env, hand the
 // tree to the agent user, run the driver, then hold for the ack so the
 // workspace can be copied out of a still-live container.
-const SHIM = `while [ ! -f /opt/runner/job/go ]; do sleep 0.2; done
+// The wait for `go` is bounded (10 minutes): if the platform dies between
+// creating the pod and writing the marker, the shim exits instead of holding
+// its reservation forever — the one orphan a step deadline used to reap, now
+// that a step with no \`timeout:\` carries none.
+const SHIM = `i=0; while [ ! -f /opt/runner/job/go ] && [ $i -lt 3000 ]; do sleep 0.2; i=$((i+1)); done
+[ -f /opt/runner/job/go ] || { echo "no go marker after 10 minutes — platform gone, exiting" >&2; exit 1; }
 set -a; [ -f /opt/runner/job/env.sh ] && . /opt/runner/job/env.sh; set +a
 chown -R agent:agent /workspace /library /opt/runner/job
 chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
@@ -144,7 +149,10 @@ export function runPodManifest(
       // spin forever waiting for a `go` marker that will never be written —
       // which is how run pods were seen Running for 40+ minutes, holding their
       // memory reservation. activeDeadlineSeconds lets the cluster reap them.
-      activeDeadlineSeconds: deadlineSec ?? 20 * 60,
+      // Only when the step set a timeout: the platform has no opinion of its
+      // own about how long real work takes — a step with no `timeout:` runs
+      // until it finishes, and stopping it is what the stop button is for.
+      ...(deadlineSec ? { activeDeadlineSeconds: deadlineSec } : {}),
       ...(process.env.FOLDRUN_RUNNER_RUNTIME
         ? { runtimeClassName: process.env.FOLDRUN_RUNNER_RUNTIME }
         : {}),
@@ -271,7 +279,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     // The pod's own deadline mirrors the in-process backstop (below), plus a
     // small margin so the watch loop is normally the one to act — the pod
     // deadline is the fallback for when the platform is not there to.
-    const deadlineSec = (args.input.timeoutSec ?? 15 * 60) + 180;
+    const deadlineSec = args.input.timeoutSec ? args.input.timeoutSec + 180 : undefined;
     const applied = await kc([
       "apply", "-f", "-",
     ], JSON.stringify(runPodManifest(name, image, args.runId, args.size, deadlineSec, args.tenant)));
@@ -303,11 +311,14 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
       let reattaches = 0;
       let child: ReturnType<typeof spawn> | null = null;
       const MAX_REATTACH = 5;
-      const backstopMs = ((args.input.timeoutSec ?? 15 * 60) + 120) * 1000;
+      // No `timeout:` on the step means no backstop: the step runs until it
+      // finishes. There used to be a silent 15-minute default here, and it
+      // killed an enricher that was doing exactly what it was asked.
+      const backstopMs = args.input.timeoutSec ? (args.input.timeoutSec + 120) * 1000 : null;
       const finish = (value: ContainerStepOutcome) => {
         if (settled) return;
         settled = true;
-        clearTimeout(backstop);
+        if (backstop) clearTimeout(backstop);
         child?.kill();
         resolve(value);
       };
@@ -317,10 +328,12 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
       // 17 minutes left nothing, not even the rows it had finished. The
       // pod's own activeDeadlineSeconds sits 60s past this backstop, which
       // is the window the copy-out gets.
-      const backstop = setTimeout(() => {
-        args.emit("error", `pod exceeded its ${Math.round(backstopMs / 1000)}s backstop — stopping; copying its files out first`);
-        finish({ status: "failed", result: null, costUsd: null });
-      }, backstopMs);
+      const backstop = backstopMs
+        ? setTimeout(() => {
+            args.emit("error", `pod exceeded its ${Math.round(backstopMs / 1000)}s backstop — stopping; copying its files out first`);
+            finish({ status: "failed", result: null, costUsd: null });
+          }, backstopMs)
+        : null;
 
       /** One parsed line. Returns true when it was the terminal one. */
       const handle = (raw: string): boolean => {

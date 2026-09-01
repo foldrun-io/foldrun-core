@@ -8,8 +8,8 @@ import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { executeStep } from "./step-exec.ts";
-import { runStepInContainer, sizeLimits } from "./run-container.ts";
-import { runStepInK8s } from "./run-k8s.ts";
+import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
+import { runStepInK8s, killRunPods } from "./run-k8s.ts";
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
 import {
   accountDir,
@@ -1153,7 +1153,10 @@ async function runStep(
     push(
       "info",
       `step started (agent: ${step.agent}, model: ${model} — ${modelSource}` +
-        `${effort ? `, effort: ${effort} — ${effortSource}` : ""})`,
+        `${effort ? `, effort: ${effort} — ${effortSource}` : ""}` +
+        // Say it every time, so a limit is never a surprise and its absence
+        // is a choice on the record, not an accident.
+        `${step.timeout ? `, timeout: ${step.timeout}s` : ", no timeout"})`,
     );
 
     // The run-start gate, when a gateway is in play. "Any model they want"
@@ -2560,6 +2563,15 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
       run.status = "failed";
       run.finishedAt = new Date(now).toISOString();
       writeRun(tenant, workspace.name, run);
+      // The record is closed; make the sandbox match. A step with no
+      // `timeout:` has no pod deadline, so an orphan from a mid-step restart
+      // is reaped here, by the run that owned it, not by a clock.
+      try {
+        if (process.env.FOLDRUN_RUN_ISOLATION === "k8s") killRunPods(run.id);
+        else killRunSandboxes(run.id);
+      } catch {
+        // a sandbox we cannot reach must not stop the reconcile
+      }
       closed.push({ runId: run.id, tenant, workspace: workspace.name, action: "closed", interrupted });
     }
   }

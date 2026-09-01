@@ -682,11 +682,15 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       const child = spawn(cli(), ["start", "-a", containerId], { stdio: ["ignore", "pipe", "pipe"] });
       let done: ContainerStepOutcome | null = null;
       let buffer = "";
-      const backstopMs = ((args.input.timeoutSec ?? 15 * 60) + 60) * 1000;
-      const backstop = setTimeout(() => {
-        args.emit("error", `container exceeded its ${Math.round(backstopMs / 1000)}s backstop — killed`);
-        spawnSync(cli(), ["kill", containerId], { stdio: "ignore" });
-      }, backstopMs);
+      // Only when the step set a `timeout:` — no platform default. A step
+      // that names no limit runs until it finishes.
+      const backstopMs = args.input.timeoutSec ? (args.input.timeoutSec + 60) * 1000 : null;
+      const backstop = backstopMs
+        ? setTimeout(() => {
+            args.emit("error", `container exceeded its ${Math.round(backstopMs / 1000)}s backstop — killed`);
+            spawnSync(cli(), ["kill", containerId], { stdio: "ignore" });
+          }, backstopMs)
+        : null;
 
       child.stdout.on("data", (chunk: Buffer) => {
         buffer += chunk.toString();
@@ -707,12 +711,12 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
         stderrTail = (stderrTail + c.toString()).slice(-2000);
       });
       child.on("close", () => {
-        clearTimeout(backstop);
+        if (backstop) clearTimeout(backstop);
         if (!done && stderrTail.trim()) args.emit("error", stderrTail.trim().slice(0, 1000));
         resolve(done ?? { status: "failed", result: null, costUsd: null });
       });
       child.on("error", (err) => {
-        clearTimeout(backstop);
+        if (backstop) clearTimeout(backstop);
         args.emit("error", err.message);
         resolve({ status: "failed", result: null, costUsd: null });
       });

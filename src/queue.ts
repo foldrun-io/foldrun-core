@@ -639,8 +639,8 @@ function concurrency() {
 const POLL_MS = 1000;
 
 /** How long a claim may go unrenewed before another worker may take the job.
- *  Longer than any single step's backstop, so a slow run is never stolen from
- *  a worker that is still driving it. */
+ *  Checked at boot only (recoverQueue), never while a worker is live — which
+ *  is what makes it safe for a step with no `timeout:` to run for hours. */
 const CLAIM_STALE_MS = Number(process.env.FOLDRUN_CLAIM_STALE_MS) || 30 * 60_000;
 
 // One worker per data directory, enforced at runtime rather than by a YAML
