@@ -40,6 +40,8 @@ import { spawn } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { workspaceDir, readRun, resolveModel, resolveEffort, assertSafeName, type Effort } from "./store.ts";
 import { startFlowRun, loadFlow } from "./runner.ts";
+import { enqueueFlowRun } from "./queue.ts";
+import type { FlowStep } from "./store.ts";
 
 export type Assertion =
   | { type: "contains"; value: string }
@@ -216,6 +218,36 @@ export interface EvalResult {
 }
 
 /** Wait for a run to finish, with a ceiling so a hung agent can't hang an eval. */
+/**
+ * A web replica never drives a run: it has no route to the cluster API and
+ * no right to create a pod, by design — so an eval started there (a push,
+ * the Run button) queues its run for the worker like any other. From 29 Aug
+ * every eval on the split platform died at "pod create failed: connection
+ * refused" for exactly this reason. A single process — the CLI, a laptop,
+ * FOLDRUN_ROLE unset — still drives it right here, as it always did.
+ */
+const runsViaQueue = () => process.env.FOLDRUN_ROLE === "web";
+
+async function beginEvalRun(
+  tenant: string,
+  workspace: string,
+  steps: FlowStep[],
+  flowName: string,
+  model?: string | null,
+  effort?: string | null,
+) {
+  if (!runsViaQueue()) return startFlowRun(tenant, workspace, steps, flowName, model, [], effort);
+  // The job carries a model override but no effort one, and driveRun cannot
+  // re-read a flow called `eval:<name>`. Put the flow's defaults onto the
+  // steps that have none — which is what nearest-wins resolves to anyway.
+  const withDefaults = steps.map((s) => ({
+    ...s,
+    ...(s.model || !model ? {} : { model }),
+    ...(s.effort || !effort ? {} : { effort }),
+  }));
+  return enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, []);
+}
+
 async function waitForRun(tenant: string, workspace: string, runId: string, timeoutMs = 300_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -350,10 +382,10 @@ export async function runEval(
             ? { ...s, instruction: `${s.instruction}\n\n<run_task>\n${testCase.task}\n</run_task>` }
             : s,
         );
-        run = startFlowRun(tenant, workspace, steps, `eval:${info.name}`, flow.model, [], flow.effort);
+        run = await beginEvalRun(tenant, workspace, steps, `eval:${info.name}`, flow.model, flow.effort);
       } else {
         if (!target) throw new Error("this eval names neither an agent nor a flow");
-        run = startFlowRun(
+        run = await beginEvalRun(
           tenant,
           workspace,
           [{ agent: target, instruction: testCase.task, group: 1, optional: false }],
@@ -361,7 +393,8 @@ export async function runEval(
         );
       }
       runId = run.id;
-      const finished = await waitForRun(tenant, workspace, run.id);
+      // A queued run also waits for a slot; give the worker room.
+      const finished = await waitForRun(tenant, workspace, run.id, runsViaQueue() ? 30 * 60_000 : 300_000);
       if (!finished) throw new Error("run disappeared");
       if (finished.status === "awaiting-approval") {
         throw new Error("this run pauses for approval — an eval cannot answer a human gate");
