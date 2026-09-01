@@ -9,11 +9,18 @@
 // Runs as its own process under git's environment. GIT_DIR is set by git.
 
 import fs from "node:fs";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { deployIssues } from "./deploy.ts";
 
 const dir = process.env.GIT_DIR;
 if (!dir) process.exit(0);
+
+// `_library.git` is the account shelf, not a workspace: it holds tools,
+// skills and knowledge and has no agents by definition. The workspace rules
+// refused every push to it with "no agents". Its sync (syncLibraryFromTree)
+// validates what it accepts on receive; nothing here to add yet.
+if (path.basename(dir.replace(/\/+$/, "")) === "_library.git") process.exit(0);
 
 const input = fs.readFileSync(0, "utf8");
 const git = (args: string[]) => {
