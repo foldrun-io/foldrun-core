@@ -147,6 +147,26 @@ async function enqueue(job: QueueJob) {
 }
 
 /**
+ * Put a job this worker HOLDS back in the queue — deferred by overlap: or
+ * the plan cap, or parked on a wait: with its deadline.
+ *
+ * Not enqueue(): its "already lined up" guard sees the very row this worker
+ * has claimed and does nothing, the row stays claimed, and the finally's
+ * release then deletes it — the run sat `queued` with an empty queue, and
+ * on Postgres every wait: step did exactly that. The upsert is the right
+ * verb here: it clears the claim, keeps the run's original position, and
+ * sets the not-before. The file store has no such guard problem — a fresh
+ * pending file is written and the finally removes the claimed one.
+ */
+async function handBack(job: QueueJob) {
+  if (databaseEnabled()) {
+    await enqueueDb(job);
+    return;
+  }
+  await enqueue(job);
+}
+
+/**
  * Create a `queued` run and line it up for a worker. The record exists on
  * disk before the job does, so a claimed job always finds its run.
  */
@@ -808,7 +828,7 @@ export function startWorker() {
             // The finally below removes the claim file and gives the slot
             // back — doing either here double-counted: every deferral
             // leaked inFlight downward, quietly raising real concurrency.
-            await enqueue(claim.job);
+            await handBack(claim.job);
             return;
           }
 
@@ -825,7 +845,7 @@ export function startWorker() {
             // The finally below removes the claim file and gives the slot
             // back — doing either here double-counted: every deferral
             // leaked inFlight downward, quietly raising real concurrency.
-            await enqueue(claim.job);
+            await handBack(claim.job);
             return;
           }
           if (run && run.status !== "completed" && run.status !== "failed" && !stillAsking) {
@@ -846,7 +866,7 @@ export function startWorker() {
                 .filter((t) => t > Date.now());
               if (due.length) {
                 // Cleanup is the finally's; see the gates above.
-                await enqueue({ ...claim.job, notBefore: new Date(Math.min(...due)).toISOString() });
+                await handBack({ ...claim.job, notBefore: new Date(Math.min(...due)).toISOString() });
                 return;
               }
             }
