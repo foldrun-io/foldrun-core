@@ -1323,6 +1323,13 @@ async function runStep(
             // after and carries the agent's chosen endpoint + token.
             ...(Object.keys(providerEnv).length === 0 ? modelEnv : {}),
             ...clockEnv,
+            // Who is running: the in-process path stamps scripts with these
+            // host-side, but a container rebuilds its tools from its own
+            // environment, so without them here every script and verify in
+            // the pod ran anonymous — and a verify comparing a marker to
+            // $FOLDRUN_RUN_ID compared it to nothing.
+            FOLDRUN_RUN_ID: runId,
+            FOLDRUN_AGENT: step.agent,
             ...liveSecrets,
             ...providerEnv,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -1431,7 +1438,16 @@ async function runStep(
         })(),
         timeoutSec: step.timeout,
         verify: step.verify,
-        verifyEnv: liveSecrets,
+        // What the scripts saw, the verify sees: a flow can then check that
+        // the proof a step left names THIS run, not one that came before —
+        // copy-back never propagates a deletion, so a marker from an earlier
+        // run rides into every later sandbox.
+        verifyEnv: {
+          ...clockEnv,
+          ...(runId ? { FOLDRUN_RUN_ID: runId } : {}),
+          FOLDRUN_AGENT: step.agent,
+          ...liveSecrets,
+        },
         emit: push,
       });
       step.status = outcome.status;
