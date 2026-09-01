@@ -195,10 +195,11 @@ function runVerify(
   env: Record<string, string>,
 ): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
+    // No clock of the platform's: a verify like `npm run build` takes what
+    // it takes, and the step's own `timeout:` is the bound if the flow set one.
     const child = spawn("bash", ["-lc", command], {
       cwd: agentDir,
       env: { ...process.env, ...env },
-      timeout: 120_000,
     });
     let out = "";
     const append = (c: Buffer) => {

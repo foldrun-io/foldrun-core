@@ -721,6 +721,8 @@ export interface ApiSpec {
   headers: Record<string, string>; // values may contain ${SECRET_NAME}
   query: Record<string, string>; // always-appended query params (e.g. api keys)
   methods: string[]; // allowed HTTP methods; default GET only
+  /** Seconds a call may take, when the tool.md says so. Unset: no clock. */
+  timeout?: number;
 }
 
 export interface AgentInfo {
@@ -887,6 +889,7 @@ export function parseApis(raw: unknown): ApiSpec[] {
       : ["GET"];
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
+      ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
       base: base.replace(/\/+$/, ""),
       description: typeof e.description === "string" ? e.description : "",
       headers: asRecordLocal(e.headers),

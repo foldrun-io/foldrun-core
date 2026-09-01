@@ -32,7 +32,6 @@ export interface ConsultSpec {
   effort: Effort | null;
 }
 
-const CONSULT_TIMEOUT_SEC = 300;
 
 /**
  * Read the consultable colleagues' personas, host-side. Names that don't
@@ -112,7 +111,6 @@ export function buildConsultTools(
             mcpNames: [],
             mcpServers: {},
             env,
-            timeoutSec: CONSULT_TIMEOUT_SEC,
             emit: () => {}, // the consult's inner monologue stays its own
           });
           cost += outcome.costUsd ?? 0;

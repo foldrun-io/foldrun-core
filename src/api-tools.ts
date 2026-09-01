@@ -12,7 +12,6 @@ import type { ApiSpec } from "./store.ts";
 import { resolveSecrets, materializeSecrets } from "./secrets.ts";
 
 const MAX_BODY_CHARS = 20_000;
-const TIMEOUT_MS = 30_000;
 
 function substitute(value: string, env: Record<string, string>) {
   return value.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name: string) => env[name] ?? whole);
@@ -106,7 +105,8 @@ export function buildApiTools(
             method: args.method,
             headers,
             body: args.body,
-            signal: AbortSignal.timeout(TIMEOUT_MS),
+            // The tool.md's `timeout:` is the only clock; none set, none applied.
+            ...(api.timeout ? { signal: AbortSignal.timeout(api.timeout * 1000) } : {}),
           });
           const text = await res.text();
           const truncated =

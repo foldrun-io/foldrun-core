@@ -21,8 +21,12 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { runInContainer } from "./container.ts";
 
-const TIMEOUT_MS = 120_000;
-const timeoutFor = (spec: ScriptSpec) => (spec.timeout ? spec.timeout * 1000 : TIMEOUT_MS);
+// A script's only clock is the `timeout:` its own tool.md declares. There
+// was a two-minute default and a ten-minute cap here; both were the
+// platform's opinion about how long a person's script may take, and the
+// deploy watcher had to be taught to call its tool four times to outlast the
+// cap. The platform orchestrates; it does not decide that.
+const timeoutFor = (spec: ScriptSpec) => (spec.timeout ? spec.timeout * 1000 : undefined);
 const MAX_OUTPUT = 20_000;
 
 export interface ScriptSpec {
@@ -71,7 +75,7 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
       description: typeof e.description === "string" ? e.description : "",
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
-      timeout: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 600) : undefined,
+      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
     });
   }
   return out;

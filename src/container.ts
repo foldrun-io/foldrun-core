@@ -134,7 +134,8 @@ export interface ContainerRunOptions {
   image: string;
   argv: string[]; // command inside the container
   env: Record<string, string>;
-  timeoutMs: number;
+  /** Only when the tool.md set one — the platform has no clock of its own. */
+  timeoutMs?: number;
   /** Allow outbound network (agents that declared APIs need it). */
   network: boolean;
   maxOutput: number;

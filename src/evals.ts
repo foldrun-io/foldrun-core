@@ -272,7 +272,7 @@ async function waitForRun(tenant: string, workspace: string, runId: string) {
 
 function shell(command: string, cwd: string): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], { cwd, timeout: 60_000 });
+    const child = spawn("bash", ["-lc", command], { cwd });
     let out = "";
     const append = (c: Buffer) => {
       if (out.length < 2000) out += c.toString();

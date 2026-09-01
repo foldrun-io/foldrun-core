@@ -1492,23 +1492,22 @@ async function runStep(
 
 // Block until a human approves or rejects the pending steps. Polls the run
 // record — the same file the dashboard writes through the approval API — so
-// no in-memory queue has to survive a restart.
+// no in-memory queue has to survive a restart. For as long as it takes: a
+// person answering on the 25th hour used to find the run had given up on
+// them at the 24th, and no clock of the platform's gets to decide that.
 async function waitForDecision(
   tenant: string,
   workspace: string,
   runId: string,
   indexes: number[],
-  timeoutMs = 24 * 60 * 60_000,
 ): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  for (;;) {
     await new Promise((r) => setTimeout(r, 1000));
     const latest = readRun(tenant, workspace, runId);
     if (!latest) return false;
     const stillWaiting = indexes.some((i) => latest.steps[i]?.status === "awaiting-approval");
     if (!stillWaiting) return true;
   }
-  return false;
 }
 
 /**
@@ -1753,6 +1752,13 @@ export function startFlowRun(
  * stopped. Without it (the CLI, whose process belongs to the person waiting)
  * the gate blocks in place exactly as before.
  */
+/**
+ * The runs this process is driving right now. The one fact reconcile needs:
+ * a run in here is alive however quiet its step is, and a `running` run not
+ * in here has no driver — this is the only process that drives.
+ */
+export const drivingRuns = new Set<string>();
+
 export function driveRun(
   tenant: string,
   workspace: string,
@@ -1760,6 +1766,20 @@ export function driveRun(
   modelOverride?: string | null,
   tags: string[] = [],
   opts: { parkOnApproval?: boolean; effortOverride?: string | null } = {},
+): Promise<void> {
+  drivingRuns.add(run.id);
+  return driveRunInner(tenant, workspace, run, modelOverride, tags, opts).finally(() => {
+    drivingRuns.delete(run.id);
+  });
+}
+
+function driveRunInner(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  modelOverride: string | null | undefined,
+  tags: string[],
+  opts: { parkOnApproval?: boolean; effortOverride?: string | null },
 ): Promise<void> {
   const effortOverride = opts.effortOverride ?? null;
   const pDir = workspaceDir(tenant, workspace);
@@ -2471,7 +2491,13 @@ export function loadFlow(tenant: string, workspace: string, flowName: string) {
  * a single step can legitimately take minutes — and short enough that a
  * restarted server does not leave yesterday's run looking live.
  */
-const ABANDONED_AFTER_MS = 30 * 60 * 1000;
+// A run this process is driving is never abandoned, however long its step
+// is quiet — a 40-minute script is work, not a fault, and the platform sets
+// no clock on work. A `running` run nobody here is driving has lost its
+// driver (a restart; this is the only process that drives) and is closed
+// once it has been quiet for two minutes — the margin is for a record
+// written a beat before its driver registered, not a judgement about pace.
+const ABANDONED_AFTER_MS = 2 * 60 * 1000;
 
 /** The most recent moment a run showed any sign of life. */
 function lastActivity(run: RunRecord): number {
@@ -2519,6 +2545,7 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
 
   for (const workspace of listWorkspaces(tenant)) {
     for (const summary of listRuns(tenant, workspace.name)) {
+      if (drivingRuns.has(summary.id)) continue;
       if (now - lastActivity(summary) < ABANDONED_AFTER_MS) continue;
 
       // Approved, then abandoned. Approval only writes to the run record; the
