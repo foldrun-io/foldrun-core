@@ -404,6 +404,26 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       }
     }
   }
+  // state/ — the cursors, snapshots and histories a scheduled desk reads from
+  // itself every run. Individual files here were not linkable for a long time
+  // while the folder was, so the one directory a recurring flow reads MOST was
+  // the one that could only be reached by typing `../../state/x.md` by hand.
+  // Indexed by path like storage/ rather than by frontmatter like knowledge/:
+  // these are data files, often .json or .csv, and many carry no frontmatter.
+  const stateDir = path.join(workspaceRoot, "state");
+  if (fs.existsSync(stateDir)) {
+    for (const entry of fs.readdirSync(stateDir, { recursive: true }).map(String)) {
+      try {
+        if (!fs.statSync(path.join(stateDir, entry)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const fwd = entry.split(path.sep).join("/");
+      const rel = `../../state/${fwd}`;
+      map.set(norm(`state/${fwd}`), rel);
+      map.set(norm(fwd), rel);
+    }
+  }
   try {
     // The hosted store's index lives at <tenant>/storage/<workspace>/ — beside
     // the workspaces, not inside one. workspaceRoot is <tenant>/…/<ws>, so

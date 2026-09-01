@@ -30,6 +30,29 @@ const REFERS_BACK =
 
 export function lintFlow(flow: FlowInfo): FlowWarning[] {
   const warnings: FlowWarning[] = [];
+
+  // Cron's oldest trap, and an expensive one: when day-of-month AND
+  // day-of-week are both restricted they are OR'd, not AND'd — the scheduler
+  // does it too, correctly (`domRestricted && dowRestricted` → `domOk ||
+  // dowOk`). So `0 5 1-7 * 5`, which every reader parses as "first Friday of
+  // the month", fires every Friday AND every day of the first week: about
+  // eleven runs where one was meant. Nothing about the expression looks wrong,
+  // which is exactly why it needs saying here rather than being discovered on
+  // the bill.
+  if (flow.schedule) {
+    const [, , dom, , dow] = flow.schedule.trim().split(/\s+/);
+    if (dom && dow && dom !== "*" && dow !== "*") {
+      warnings.push({
+        step: null,
+        message: `schedule "${flow.schedule}" restricts both day fields — cron runs it on EITHER, not both`,
+        detail:
+          "Day-of-month and day-of-week are OR'd when both are set, so this fires far more often " +
+          "than it reads. For \"the Nth weekday of the month\" there is no cron form; use a plain " +
+          "day-of-month (`0 5 3 * *`) for monthly, or a plain weekday (`0 5 * * 1`) for weekly.",
+      });
+    }
+  }
+
   if (flow.steps.length === 0) return warnings;
 
   const firstGroup = Math.min(...flow.steps.map((s) => s.group));

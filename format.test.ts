@@ -107,6 +107,32 @@ test("lint catches a reviewer scheduled before the work exists", () => {
   assert.ok(messages.some((m) => m.includes("refers to earlier work but runs first")));
 });
 
+test("lint catches the cron both-day-fields trap", () => {
+  // "0 5 1-7 * 5" reads as the first Friday of the month and is not: cron ORs
+  // the two day fields, so it fires every Friday AND the whole first week.
+  const monthly = parseFlow(
+    "f.md",
+    `---\nname: f\ntrigger: schedule\nschedule: "0 5 1-7 * 5"\n---\n\n1. [[a]] — go\n`,
+  );
+  assert.ok(
+    lintFlow(monthly).some((w) => w.message.includes("restricts both day fields")),
+    "the OR trap goes unwarned",
+  );
+
+  // One restricted field is unambiguous — neither of these may warn, or the
+  // rule is noise on every ordinary weekly flow.
+  for (const schedule of ['"0 5 3 * *"', '"0 5 * * 1"', '"0 7 * * 2,4,6"']) {
+    const ok = parseFlow(
+      "f.md",
+      `---\nname: f\ntrigger: schedule\nschedule: ${schedule}\n---\n\n1. [[a]] — go\n`,
+    );
+    assert.ok(
+      !lintFlow(ok).some((w) => w.message.includes("both day fields")),
+      `${schedule} warned and should not have`,
+    );
+  }
+});
+
 test("lint catches a when: that can never match", () => {
   const flow = parseFlow("f.md", `---\nname: f\n---\n\n1. [[a]] — go\n   when: schema\n`);
   assert.ok(lintFlow(flow).some((w) => w.message.includes("when: condition but runs first")));

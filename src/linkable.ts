@@ -73,6 +73,21 @@ export function linkableDocs(
     }
   }
 
+  // state/ — what a recurring flow reads from its own past runs. Offered by
+  // path, like the file store and unlike knowledge/, because these are data
+  // files rather than documents with a title.
+  const stateDir = path.join(workspaceRoot, "state");
+  if (fs.existsSync(stateDir)) {
+    for (const entry of fs.readdirSync(stateDir, { recursive: true }).map(String)) {
+      try {
+        if (!fs.statSync(path.join(stateDir, entry)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      out.push({ name: `state/${entry.split(path.sep).join("/")}`, hint: "state" });
+    }
+  }
+
   // The file store, under the directory the resolver actually indexes.
   const seen = new Set<string>();
   for (const f of storageFiles) {
