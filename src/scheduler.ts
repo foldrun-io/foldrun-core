@@ -18,6 +18,8 @@ import { sweepFinishedRunPods } from "./run-k8s.ts";
 import { applyPendingPush } from "./deploy.ts";
 import { filesAt } from "./gitrepo.ts";
 import { evaluateDeployed } from "./evals.ts";
+import { withTask } from "./triggers.ts";
+import crypto from "node:crypto";
 
 const stateFile = () => path.join(dataRoot(), "schedule.json");
 const TICK_MS = 30_000;
@@ -37,6 +39,9 @@ let ticksSinceReconcile = 0;
 interface ScheduleState {
   // key: `${tenant}/${workspace}/${flow}` → ISO timestamp of last fire
   lastFired: Record<string, string>;
+  /** `trigger: watch` — when each URL was last read and what it hashed to.
+   *  The hash, not the body: the body can be large and is nobody's to keep. */
+  watches?: Record<string, { checkedAt: string; hash: string }>;
 }
 
 function readState(): ScheduleState {
@@ -45,6 +50,57 @@ function readState(): ScheduleState {
     return JSON.parse(fs.readFileSync(stateFile(), "utf8"));
   } catch {
     return { lastFired: {} };
+  }
+}
+
+/** How far back a `once` flow's `at:` may lie at first sighting and still
+ *  fire. A deploy of a flow whose moment passed last week is a stale file,
+ *  not a request; a platform that was down for an hour is a missed fire. */
+const ONCE_CATCHUP_MS = 6 * 3600_000;
+const WATCH_DEFAULT_SECS = 15 * 60;
+const WATCH_MAX_BYTES = 200_000;
+
+/**
+ * `trigger: watch` — read the URL when it is due and say whether it changed.
+ * Exported for the test; the tick calls it with a real fetch.
+ */
+export async function checkWatches(
+  now: Date,
+  state: ScheduleState,
+  tenants: string[],
+  read: (url: string) => Promise<string | null> = fetchText,
+): Promise<{ tenant: string; workspace: string; flow: FlowInfo; body: string }[]> {
+  const due: { tenant: string; workspace: string; flow: FlowInfo; body: string }[] = [];
+  state.watches ??= {};
+  for (const tenant of tenants) {
+    for (const workspace of listWorkspaces(tenant)) {
+      for (const flow of listFlows(tenant, workspace.name)) {
+        if (flow.trigger !== "watch" || !flow.url || flow.steps.length === 0) continue;
+        if (!/^https?:\/\//.test(flow.url)) continue;
+        const key = `${tenant}/${workspace.name}/${flow.name}`;
+        const every = (flow.every ?? WATCH_DEFAULT_SECS) * 1000;
+        const prev = state.watches[key];
+        if (prev && now.getTime() - new Date(prev.checkedAt).getTime() < every) continue;
+        const body = await read(flow.url);
+        if (body === null) continue; // unreachable this time; try again next interval
+        const hash = crypto.createHash("sha256").update(body).digest("hex");
+        state.watches[key] = { checkedAt: now.toISOString(), hash };
+        // First sighting records, never fires: "it exists" is not a change.
+        if (prev && prev.hash !== hash) due.push({ tenant, workspace: workspace.name, flow, body });
+      }
+    }
+  }
+  return due;
+}
+
+async function fetchText(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), headers: { "user-agent": "foldrun-watch" } });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text.slice(0, WATCH_MAX_BYTES);
+  } catch {
+    return null;
   }
 }
 
@@ -217,6 +273,22 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
         console.error(`[scheduler] pending push for ${tenant}/${workspace.name}:`, err);
       }
       for (const flow of listFlows(tenant, workspace.name)) {
+        // trigger: once — a single instant. Fires on the first tick at or
+        // after it, and the record of having fired is what stops a second.
+        if (flow.trigger === "once") {
+          if (!flow.at || flow.steps.length === 0) continue;
+          const key = `${tenant}/${workspace.name}/${flow.name}@${flow.at}`;
+          if (state.lastFired[key]) continue;
+          const at = new Date(flow.at).getTime();
+          if (now.getTime() < at) continue;
+          state.lastFired[key] = now.toISOString();
+          if (now.getTime() - at > ONCE_CATCHUP_MS) {
+            console.log(`[scheduler] ${key}: its moment passed more than six hours ago — recorded, not fired`);
+            continue;
+          }
+          due.push({ tenant, workspace: workspace.name, flow });
+          continue;
+        }
         if (flow.trigger !== "schedule" || !flow.schedule || flow.steps.length === 0) continue;
         const cron = parseCron(flow.schedule);
         if (!cron) continue;
@@ -302,8 +374,25 @@ function holdsLease(now: number): boolean {
 export async function tick(now = new Date()): Promise<DueFlow[]> {
   if (!holdsLease(now.getTime())) return [];
   const state = readState();
-  const due = findDueFlows(now, state, listTenants());
+  const tenants = listTenants();
+  const due = findDueFlows(now, state, tenants);
+  // trigger: watch — network reads, so after the cron pass and outside it:
+  // a slow URL must not delay a schedule.
+  let changed: Awaited<ReturnType<typeof checkWatches>> = [];
+  try {
+    changed = await checkWatches(now, state, tenants);
+  } catch (err) {
+    console.error("[scheduler] watch check failed:", err);
+  }
   writeState(state);
+  for (const w of changed) {
+    try {
+      await enqueueFlowRun(w.tenant, w.workspace, withTask(w.flow.steps, "watched_content", w.body.slice(0, 20_000)), w.flow.name, w.flow.model, ["watch"]);
+      console.log(`[scheduler] queued ${w.tenant}/${w.workspace}/${w.flow.name} — ${w.flow.url} changed`);
+    } catch (err) {
+      console.error(`[scheduler] watch ${w.tenant}/${w.workspace}/${w.flow.name}:`, err);
+    }
+  }
   for (const d of due) {
     try {
       // Through the queue, not straight to driveRun — the scheduler shares a

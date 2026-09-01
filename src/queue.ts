@@ -40,6 +40,7 @@ import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
 import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
 import { sendRunNotification } from "./notify.ts";
+import { fireChainedFlows } from "./triggers.ts";
 import { walletGuard, assertWorkspaceBudget } from "./wallet.ts";
 import { runComputeMeter, runMeter } from "./store.ts";
 import { accountUsage } from "./usage.ts";
@@ -880,6 +881,9 @@ export function startWorker() {
             // — "waiting for your approval" is the one message that cannot
             // wait for someone to happen to open the dashboard.
             if (settled) await sendRunNotification(tenant, workspace, settled);
+            // trigger: flow — whatever chains on this run starts now, from
+            // the same settle that told a person about it.
+            if (settled) await fireChainedFlows(tenant, workspace, settled);
           }
         } catch (err) {
           console.error(`[foldrun] worker: run ${claim.job.runId} threw`, err);

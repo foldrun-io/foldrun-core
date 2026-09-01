@@ -497,7 +497,35 @@ export function driverFor(tenant: string, workspace: string): Driver {
  * Record bytes the platform already holds. Used by the upload route on the fs
  * driver and by the run harvest on both.
  */
+/**
+ * trigger: storage — tell the flows watching a prefix that files landed.
+ * Called after an index write, never before: a flow that starts on a file
+ * must find the file there. Dynamic import, because the queue imports the
+ * runner, which imports this module.
+ */
+async function announceFiles(tenant: string, workspace: string, paths: string[], by: string): Promise<void> {
+  try {
+    const { fireStorageTriggers } = await import("./triggers.ts");
+    await fireStorageTriggers(tenant, workspace, paths, by);
+  } catch (err) {
+    console.error(`[foldrun] storage trigger ${tenant}/${workspace}:`, err instanceof Error ? err.message : err);
+  }
+}
+
 export async function putFile(
+  tenant: string,
+  workspace: string,
+  rel: string,
+  body: Buffer,
+  by: string,
+): Promise<FileRecord> {
+  const record = await putFileQuietly(tenant, workspace, rel, body, by);
+  // A run's copy-back announces once, for all its files, from harvestFiles.
+  if (!by.startsWith("run:")) await announceFiles(tenant, workspace, [record.path], by);
+  return record;
+}
+
+async function putFileQuietly(
   tenant: string,
   workspace: string,
   rel: string,
@@ -569,6 +597,7 @@ export async function registerUpload(
     files: [...index.files.filter((f) => f.path !== norm), record],
   });
   if (previous && previous.sha !== sha) await collect(tenant, workspace, previous.sha);
+  await announceFiles(tenant, workspace, [record.path], by);
   return record;
 }
 
@@ -731,11 +760,12 @@ export async function harvestFiles(
         // Same size is not proof, so confirm by hash before skipping a write.
         if (sha256(fs.readFileSync(abs)) === previous.sha) continue;
       }
-      await putFile(tenant, workspace, norm, fs.readFileSync(abs), by);
+      await putFileQuietly(tenant, workspace, norm, fs.readFileSync(abs), by);
       saved.push(norm);
     } catch (err) {
       errors.push(`${rel}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  if (saved.length) await announceFiles(tenant, workspace, saved, by);
   return { saved, errors };
 }
