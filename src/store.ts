@@ -723,6 +723,22 @@ export interface ApiSpec {
   methods: string[]; // allowed HTTP methods; default GET only
   /** Seconds a call may take, when the tool.md says so. Unset: no clock. */
   timeout?: number;
+  /** An OpenAPI 3.x document describing the API: a path relative to the
+   *  workspace root (`tools/hubspot/openapi.json`, JSON or YAML) or an
+   *  https URL. Each operation becomes its own typed tool. */
+  openapi?: string;
+  /** Which of the document's operations to expose — operationIds or
+   *  `"METHOD /path"` strings. Absent: every operation, capped at 60.
+   *  Present: only these, and the generic `call_<api>` tool is withheld. */
+  operations?: string[];
+  /** Calls per second this API may see from one step: `count` is the burst
+   *  the bucket holds, `perSec` the refill rate. `"5/s"` → {5, 5};
+   *  `"100/m"` → {100, 1.67}. A call over the limit waits, never fails. */
+  rate?: { count: number; perSec: number };
+  /** The operations the `openapi:` document yielded, filled in by
+   *  attachOperations (openapi.ts) before the step is assembled. parseApis
+   *  leaves it unset. Plain JSON: this crosses into the run container. */
+  resolvedOperations?: import("./openapi.ts").OperationSpec[];
 }
 
 export interface AgentInfo {
@@ -862,6 +878,27 @@ export function isEffortWord(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0 && resolveEffort(value) === null;
 }
 
+const RATE_UNIT_SECONDS: Record<string, number> = {
+  s: 1, sec: 1, second: 1,
+  m: 60, min: 60, minute: 60,
+  h: 3600, hr: 3600, hour: 3600,
+};
+
+/** `"5/s"`, `"100/m"`, `"1000/h"` → a bucket size and refill rate. Null for
+ *  anything else: an unreadable limit is ignored rather than guessed. */
+export function parseRate(value: unknown): { count: number; perSec: number } | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return { count: value, perSec: value };
+  }
+  if (typeof value !== "string") return null;
+  const m = /^\s*(\d+(?:\.\d+)?)\s*\/\s*([a-z]+)\s*$/i.exec(value);
+  if (!m) return null;
+  const count = Number(m[1]);
+  const unit = RATE_UNIT_SECONDS[m[2].toLowerCase()];
+  if (!(count > 0) || !unit) return null;
+  return { count, perSec: count / unit };
+}
+
 // apis: frontmatter:
 //   apis:
 //     - name: google_ads
@@ -871,6 +908,10 @@ export function isEffortWord(value: unknown): boolean {
 //       headers:
 //         Authorization: Bearer ${GOOGLE_ADS_TOKEN}
 //         developer-token: ${GOOGLE_ADS_DEV_TOKEN}
+//       openapi: tools/google_ads/openapi.yaml   # optional: typed tools
+//       operations: [searchStream, "GET /customers/{id}"]
+//       rate: 10/s                               # or 100/m, 1000/h
+
 export function parseApis(raw: unknown): ApiSpec[] {
   if (!Array.isArray(raw)) return [];
   const out: ApiSpec[] = [];
@@ -887,6 +928,10 @@ export function parseApis(raw: unknown): ApiSpec[] {
     const methods = Array.isArray(e.methods)
       ? e.methods.map((m) => String(m).toUpperCase()).filter((m) => ALLOWED_METHODS.includes(m))
       : ["GET"];
+    const rate = parseRate(e.rate);
+    const operations = Array.isArray(e.operations)
+      ? e.operations.map((o) => String(o).trim()).filter(Boolean)
+      : null;
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
       ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
@@ -895,6 +940,11 @@ export function parseApis(raw: unknown): ApiSpec[] {
       headers: asRecordLocal(e.headers),
       query: asRecordLocal(e.query),
       methods: methods.length ? methods : ["GET"],
+      ...(typeof e.openapi === "string" && e.openapi.trim() ? { openapi: e.openapi.trim() } : {}),
+      // An explicit list, even an empty one, means "only these" — the
+      // generic tool is withheld. Absent means "everything, plus call_<api>".
+      ...(operations ? { operations } : {}),
+      ...(rate ? { rate } : {}),
     });
   }
   return out;
@@ -934,6 +984,12 @@ export interface FlowStep {
   /** Seconds to hold before this step runs — "wait: 3d" parses to 259200.
    *  The run parks in the queue, not in a process. */
   waitSecs?: number;
+  /** `wait: event` — hold until something outside POSTs the run's event
+   *  URL. Same parking as an approval, released by a machine instead of a
+   *  person; the body it sends reaches the step as its event payload. This
+   *  is what lets a flow send a quote, wait for the reply, then follow up,
+   *  without the platform becoming a chat product. */
+  waitFor?: "event";
   /** For `each: rows` — the CSV whose rows fan the step out, agent-relative
    *  like every other path an instruction uses. */
   eachPath?: string;
@@ -953,12 +1009,22 @@ export interface FlowStep {
    *  the loop early. Required for `loop:` to mean anything. */
   until?: string;
   /** Fan-out: run one instance of this step per item of the previous
-   *  group's result. `lines` is the one mode — one item per non-empty line. */
-  each?: "lines" | "rows";
+   *  group's result. `lines` — one item per non-empty line of the prose;
+   *  `rows` — one per CSV row of a file; `items` — one per element of the
+   *  JSON array a previous `output: json` step returned. */
+  each?: "lines" | "rows" | "items";
   /** Fan-out cap. Items beyond it are dropped, and the run log says so. */
   max?: number;
-  /** Shell command run after the step; a non-zero exit fails the step. */
+  /** A check run after the step; failing it fails the step. Either a shell
+   *  command (non-zero exit fails) or one of the eval assertions —
+   *  `contains: x`, `not-contains: x`, `matches: regex`, `file: path`,
+   *  `judge: sentence` — so a flow and an eval share one vocabulary. */
   verify?: string;
+  /** The step returns data, not just prose: its reply must end with one JSON
+   *  value in a ```json block. The runner parses it, fails the step when it
+   *  cannot, and hands the value to the next group losslessly — the narrow
+   *  move the grammar ADR allowed instead of variables. */
+  output?: "json";
   /** 1-indexed line in the flow file. Diagnostics without a line make you
    *  search; every real linter emits file:line. */
   line?: number;
@@ -981,8 +1047,39 @@ export interface FlowInfo {
    *  overlap) — a default that changed underfoot would surprise every flow
    *  that legitimately runs in parallel. */
   overlap: "skip" | "queue" | null;
+  /** The most one run of this flow may spend, in USD. A literal, never an
+   *  expression — the cap is readable off the file, which is the property
+   *  the whole grammar exists to keep. Checked between groups: the group
+   *  that crosses it is the last one that runs. Null: no cap of its own
+   *  (the workspace's monthly `budget:` still applies). */
+  budget: number | null;
+  /** `trigger: flow` — start when this other flow of the workspace finishes,
+   *  with `on:` saying which endings count. The finished run's summary and
+   *  result become this run's task. */
+  after: string | null;
+  on: "completed" | "failed" | "any";
+  /** `trigger: once` — an ISO 8601 instant; fires the first tick at or after
+   *  it, once, then never again. */
+  at: string | null;
+  /** `trigger: watch` — a URL polled every `every:` seconds (default 15m);
+   *  fires when its content changes, with the new content as the task. */
+  url: string | null;
+  every: number | null;
+  /** `trigger: webhook` may also demand a provider's signature on every
+   *  delivery: GitHub (X-Hub-Signature-256), Stripe (Stripe-Signature), Slack
+   *  (X-Slack-Signature, plus the url_verification handshake) or a plain
+   *  `hmac` (X-Signature, hex SHA-256 of the body). `signingSecret` is the
+   *  NAME of the vault secret holding the shared key, never its value. */
+  signature: "github" | "stripe" | "slack" | "hmac" | null;
+  signingSecret: string | null;
+  /** `trigger: storage` — a path prefix under storage/; a file landing
+   *  there starts the flow with the path as its task. */
+  path: string | null;
   steps: FlowStep[];
 }
+
+export const FLOW_TRIGGERS = ["manual", "schedule", "webhook", "email", "flow", "once", "watch", "storage"] as const;
+export type FlowTrigger = (typeof FLOW_TRIGGERS)[number];
 
 // Skills and memory files belonging to one agent — for the graph view and
 // [[ ]] autocomplete.
@@ -1069,6 +1166,15 @@ export function parseWait(value: string): number | undefined {
   return secs > 0 ? Math.min(secs, 30 * 86400) : undefined;
 }
 
+/** An ISO 8601 instant (YAML may already have parsed it into a Date), or
+ *  null for anything that is not one — a `once` flow with an unreadable
+ *  `at:` never fires, and `foldrun check` says so. */
+export function parseInstant(raw: unknown): string | null {
+  if (!(typeof raw === "string" || raw instanceof Date)) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
@@ -1106,12 +1212,14 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       else if (key === "retry") step.retry = Math.min(5, Math.max(0, Number(value) || 0));
       else if (key === "timeout") step.timeout = Math.max(1, Number(value) || 0);
       else if (key === "verify") step.verify = value;
+      else if (key === "output") step.output = /^json$/i.test(value) ? "json" : undefined;
       else if (key === "model") step.model = value;
       else if (key === "effort") step.effort = value;
       else if (key === "loop") step.loop = Math.min(5, Math.max(1, Number(value) || 0)) || undefined;
       else if (key === "until") step.until = value;
       else if (key === "each") {
         if (value === "lines") step.each = "lines";
+        else if (value === "items") step.each = "items";
         else if (/^rows\b/.test(value)) {
           step.each = "rows";
           // "rows of ../../storage/leads.csv" — the path is the part after "of".
@@ -1119,7 +1227,10 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         }
       }
       else if (key === "on-fail" || key === "onfail") step.onFail = value.replace(/^\[\[|\]\]$/g, "");
-      else if (key === "wait") step.waitSecs = parseWait(value);
+      else if (key === "wait") {
+        if (/^event$/i.test(value)) step.waitFor = "event";
+        else step.waitSecs = parseWait(value);
+      }
       else if (key === "ask") { step.ask = value; }
       else if (key === "delegate")
         step.delegate = value.split(",").map((v) => v.trim().replace(/^\[\[|\]\]$/g, "")).filter(Boolean).slice(0, 5);
@@ -1136,6 +1247,25 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     model: data.model ?? null,
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
+    budget: Number(data.budget) > 0 ? Number(data.budget) : null,
+    // `after: [[flow:publish]]` is a nested list to YAML; the link spelling
+    // is the format's, so both it and the bare name are read.
+    after: (() => {
+      const raw = Array.isArray(data.after) ? String((data.after as unknown[]).flat(2)[0] ?? "") : typeof data.after === "string" ? data.after : "";
+      return raw.trim().replace(/^\[\[|\]\]$/g, "").replace(/^flow:/, "").trim() || null;
+    })(),
+    on: data.on === "failed" || data.on === "any" ? data.on : "completed",
+    at: parseInstant(data.at),
+    url: typeof data.url === "string" ? data.url.trim() : null,
+    every: typeof data.every === "string" || typeof data.every === "number" ? (parseWait(String(data.every)) ?? null) : null,
+    signature: ["github", "stripe", "slack", "hmac"].includes(String(data.signature))
+      ? (String(data.signature) as FlowInfo["signature"])
+      : null,
+    signingSecret:
+      typeof data.signing_secret === "string"
+        ? data.signing_secret.trim().replace(/^\$\{|\}$/g, "")
+        : null,
+    path: typeof data.path === "string" ? data.path.trim().replace(/^\/+/, "") : null,
     steps,
   };
 }
@@ -1207,10 +1337,10 @@ function emitFlow(head: string, preamble: string[], groups: FlowBlock[][]): stri
  */
 export function setFlowTrigger(
   raw: string,
-  opts: { trigger: "manual" | "schedule" | "webhook"; schedule?: string; timezone?: string },
+  opts: { trigger: FlowTrigger; schedule?: string; timezone?: string },
 ): string {
-  if (!["manual", "schedule", "webhook"].includes(opts.trigger)) {
-    throw new Error(`unknown trigger "${opts.trigger}" — manual, schedule or webhook`);
+  if (!(FLOW_TRIGGERS as readonly string[]).includes(opts.trigger)) {
+    throw new Error(`unknown trigger "${opts.trigger}" — one of ${FLOW_TRIGGERS.join(", ")}`);
   }
   const wanted = new Map<string, string | null>();
   wanted.set("trigger", opts.trigger === "manual" ? null : opts.trigger); // manual is the default — say nothing
@@ -2025,9 +2155,15 @@ export interface StepRecord {
   until?: string;
   loopRemaining?: number;
   /** Fan-out, carried from the flow — see FlowStep. */
-  each?: "lines" | "rows";
+  each?: "lines" | "rows" | "items";
   eachPath?: string;
   max?: number;
+  /** Carried from the flow — see FlowStep. */
+  output?: "json";
+  /** The parsed JSON an `output: json` step returned. Kept beside the prose
+   *  result rather than instead of it: the reply is still what a person
+   *  reads on the run page, and the data is what the next step computes on. */
+  data?: unknown;
   /** Set on the instances a fan-out step expanded into: the item this one
    *  works on. The template step itself becomes status "expanded". */
   item?: string;
@@ -2037,6 +2173,11 @@ export interface StepRecord {
   /** Stamped when the run reaches the step; the queue holds it until then.
    *  On the record so a restart resumes the same deadline, not a new one. */
   waitUntil?: string;
+  /** Carried from the flow — see FlowStep. */
+  waitFor?: "event";
+  /** What the outside world POSTed to release a `wait: event` step. Rides
+   *  into the step's prompt the way an approval note does. */
+  eventPayload?: string;
   ask?: string;
   delegate?: string[];
   /** Set once a delegate step's picks have been expanded — the guard that
@@ -2136,6 +2277,14 @@ export interface RunRecord {
    * simply gets its first line — which is still better than a status.
    */
   summary?: string | null;
+  /** The flow's per-run `budget:` at the time this run started, so the cap
+   *  a run was held to is on its record rather than read from a file that
+   *  may since have changed. Null: none. */
+  budgetUsd?: number | null;
+  /** Memory files this run created or changed, workspace-relative — what
+   *  the agents decided was worth remembering, listed so a person can review
+   *  the lesson without diffing the folder. */
+  memoryWrites?: string[];
   steps: StepRecord[];
 }
 
@@ -2334,7 +2483,9 @@ export function runSummary(run: RunRecord): string | null {
       // a row of asterisks — is decoration, not a headline. Checked after the
       // strips above rather than folded into them, because `#{1,6}\s*` would
       // also eat the hash in a line that legitimately opens "#1 priority".
-      if (!line || /^[#>\-*_=\s]*$/.test(line)) continue;
+      // A code fence, or a line that is only brackets, is the shape of an
+      // `output: json` reply, not its headline either.
+      if (!line || /^[#>\-*_=\s`{}\[\],]*$/.test(line) || line.startsWith("```")) continue;
       return line.length > 200 ? `${line.slice(0, 197)}…` : line;
     }
   }
@@ -2384,6 +2535,11 @@ export interface ProviderSpec {
   headers: Record<string, string>;
   /** Things wrong enough to say out loud but not to fail a run over. */
   warnings: string[];
+  /** A second endpoint, tried once when the first refuses over money, auth
+   *  or limits (not when the work itself fails). Same shape, one level deep
+   *  — a fallback with its own fallback is a routing table, and that lives
+   *  in a gateway, not in frontmatter. */
+  fallback?: ProviderSpec | null;
 }
 
 // RFC 9110 field-name characters. Anything else is not a header, and a
@@ -2442,7 +2598,20 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
     warnings.push("provider.headers: expected a map of name → value — ignored");
   }
 
-  return { baseUrl, token, models, headers, warnings };
+  // One level only: the nested block's own `fallback:` is dropped, with a
+  // word about it, rather than followed.
+  let fallback: ProviderSpec | null = null;
+  if (block.fallback !== undefined) {
+    const inner = parseProvider(block.fallback);
+    if (!inner || !inner.baseUrl) warnings.push("provider.fallback: needs a base_url — ignored");
+    else {
+      if (inner.fallback) warnings.push("provider.fallback.fallback: only one level of fallback is followed — ignored");
+      fallback = { ...inner, fallback: null };
+      warnings.push(...inner.warnings.map((w) => `fallback: ${w}`));
+    }
+  }
+
+  return { baseUrl, token, models, headers, warnings, fallback };
 }
 
 /** The env the SDK reads for a tier remap. Our tier names are ours; these

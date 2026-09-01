@@ -30,6 +30,7 @@ import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
 import { dataRoot } from "./paths.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
+import type { SearchRoot, RunDigest } from "./context-tools.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -56,6 +57,13 @@ export interface ContainerStepInput {
   consults: ConsultSpec[];
   timeoutSec?: number;
   verify?: string;
+  /** `output: json` — checked inside, where the reply is. */
+  output?: "json";
+  /** tools: [search] — the directories to search, as paths INSIDE the
+   *  container (/workspace/…, /library/…). */
+  search?: SearchRoot[];
+  /** tools: [history] — the workspace's recent runs, gathered host-side. */
+  history?: RunDigest[];
 }
 
 /**
@@ -86,6 +94,8 @@ export interface StepActuals {
 export interface ContainerStepOutcome {
   status: "completed" | "failed";
   result: string | null;
+  /** The parsed JSON of an `output: json` step, crossing back as a value. */
+  data?: unknown;
   costUsd: number | null;
   usage?: { inputTokens: number; outputTokens: number } | null;
   /** What the sandbox actually touched — see the driver's readActuals. */
@@ -258,6 +268,7 @@ try {
   const { buildApiTools } = await import("@foldrun/core/api-tools");
   const { buildScriptTools } = await import("@foldrun/core/script-tools");
   const { buildConsultTools } = await import("@foldrun/core/agent-tools");
+  const { buildSearchTools, buildHistoryTools } = await import("@foldrun/core/context-tools");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
 
@@ -296,6 +307,9 @@ try {
     runtime.interpreters,
   );
   const consult = buildConsultTools(input.consults ?? [], env, emit);
+  // The platform's own two groups, rebuilt from values like everything else.
+  const search = buildSearchTools(input.search ?? []);
+  const history = input.history?.length ? buildHistoryTools(input.history) : { server: null };
 
   const outcome = await executeStep({
     agentDir,
@@ -311,12 +325,15 @@ try {
       ...(api.server ? { foldrun_apis: api.server } : {}),
       ...(script.server ? { foldrun_scripts: script.server } : {}),
       ...(consult.server ? { foldrun_agents: consult.server } : {}),
+      ...(search.server ? { foldrun_search: search.server } : {}),
+      ...(history.server ? { foldrun_history: history.server } : {}),
       ...input.mcpServers,
     },
     env,
     timeoutSec: input.timeoutSec,
     verify: input.verify,
     verifyEnv: {},
+    output: input.output,
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.
     sandboxBash: false,
@@ -463,6 +480,7 @@ export function parseDriverLine(
         e: "done",
         status: parsed.status === "completed" ? "completed" : "failed",
         result: typeof parsed.result === "string" ? parsed.result : null,
+        ...("data" in parsed ? { data: parsed.data } : {}),
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
         usage:
           parsed.usage &&

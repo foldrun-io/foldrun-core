@@ -71,6 +71,59 @@ export function webhookPath(tenant: string, workspace: string, flow: string): st
   return `/api/hooks/${tenant}/${workspace}/${flow}?token=${webhookToken(tenant, workspace, flow)}`;
 }
 
+// ---------- one-click approval ----------
+
+/**
+ * The token in an emailed approve/reject link. Same shape as a hook token:
+ * derived from the run's identity under the install key, never stored, so
+ * a link keeps working across restarts and dies with a key rotation. A run
+ * id is unique, so there is no generation counter — a leaked link is dealt
+ * with by deciding the run, after which the link does nothing.
+ *
+ * The `approve:` prefix keeps this HMAC family apart from the hook family:
+ * without it a run id that happened to spell `tenant/ws/flow` would mint a
+ * working hook token.
+ */
+export function approveToken(tenant: string, workspace: string, runId: string): string {
+  return crypto
+    .createHmac("sha256", installKey())
+    .update(`approve:${tenant}/${workspace}/${runId}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
+ * The token that releases a run parked on `wait: event`. Its own HMAC
+ * family, so an approval link cannot double as an event URL or the reverse.
+ */
+export function eventToken(tenant: string, workspace: string, runId: string): string {
+  return crypto
+    .createHmac("sha256", installKey())
+    .update(`event:${tenant}/${workspace}/${runId}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/** The URL a `wait: event` step is released at — absolute when the install
+ *  knows its origin, a path otherwise. */
+export function eventUrl(tenant: string, workspace: string, runId: string): string {
+  const p = `/api/events/${tenant}/${workspace}/${runId}?token=${eventToken(tenant, workspace, runId)}`;
+  const base = publicUrl();
+  return base ? `${base}${p}` : p;
+}
+
+/**
+ * Where this install can be reached from outside, or null. The platform has
+ * never needed to know its own address — every URL it hands out has been a
+ * path, completed by whoever pasted it. A link in an email has no such
+ * reader, so this is the one place an absolute origin is required.
+ */
+export function publicUrl(): string | null {
+  const raw = process.env.FOLDRUN_PUBLIC_URL?.trim();
+  if (!raw) return null;
+  return raw.replace(/\/+$/, "");
+}
+
 // ---------- delivery log ----------
 
 // Every POST at a hook URL, kept: accepted ones with their run id, refused
@@ -80,7 +133,7 @@ export function webhookPath(tenant: string, workspace: string, flow: string): st
 export interface HookDelivery {
   t: string;
   flow: string;
-  outcome: "accepted" | "invalid-token" | "not-webhook" | "no-flow" | "error";
+  outcome: "accepted" | "invalid-token" | "invalid-signature" | "not-webhook" | "no-flow" | "error";
   runId?: string;
   bytes?: number;
   detail?: string;

@@ -53,6 +53,25 @@ export function lintFlow(flow: FlowInfo): FlowWarning[] {
     }
   }
 
+  // Trigger shapes that can never fire, said at check time rather than
+  // discovered as a flow that "never runs".
+  if (flow.trigger === "once" && !flow.at) {
+    warnings.push({ step: null, message: "trigger: once needs an `at:` instant", detail: "Write `at: 2026-09-05T09:00:00+10:00` (ISO 8601). Without a readable instant this flow never fires." });
+  }
+  if (flow.trigger === "watch" && !/^https?:\/\//.test(flow.url ?? "")) {
+    warnings.push({ step: null, message: "trigger: watch needs an http(s) `url:`", detail: "The scheduler polls that URL and starts the flow when its content changes." });
+  }
+  if (flow.trigger === "flow") {
+    if (!flow.after) warnings.push({ step: null, message: "trigger: flow needs `after: <flow>`", detail: "Name the flow of this workspace whose finishing starts this one." });
+    else if (flow.after === flow.name) warnings.push({ step: null, message: "trigger: flow — a flow cannot chain on itself", detail: "That is a loop with no bound. Chain on the flow that produces what this one needs." });
+  }
+  if (flow.signature && !flow.signingSecret) {
+    warnings.push({ step: null, message: `signature: ${flow.signature} needs \`signing_secret: \${NAME}\``, detail: "Every delivery will be refused until the secret is named and set in Settings → Secrets." });
+  }
+  if (flow.signature && flow.trigger !== "webhook") {
+    warnings.push({ step: null, message: "signature: only applies to trigger: webhook", detail: "Inbox and other triggers do not carry a provider signature; the line does nothing here." });
+  }
+
   if (flow.steps.length === 0) return warnings;
 
   const firstGroup = Math.min(...flow.steps.map((s) => s.group));
@@ -71,6 +90,24 @@ export function lintFlow(flow: FlowInfo): FlowWarning[] {
           "Steps in the first group start with no context — nothing has run yet. This agent will " +
           "invent what it was asked to review rather than fail. Move it to a later group.",
       });
+    }
+
+    // `each: items` fans out over DATA, and only an `output: json` step in
+    // an earlier group produces any. Without one the step expands to
+    // nothing every time, quietly — the exact failure this file exists for.
+    if (step.each === "items") {
+      const feeder = flow.steps.some((s) => s.group < step.group && s.output === "json");
+      if (!feeder) {
+        warnings.push({
+          step: i,
+          line: step.line,
+          message: `"${step.subflow ?? step.agent}" fans out with each: items but no earlier step returns data`,
+          detail:
+            "each: items reads the JSON array an `output: json` step returned. No step before this " +
+            "one declares output: json, so there are never any items and this step is always skipped. " +
+            "Add `output: json` to the step that produces the list.",
+        });
+      }
     }
 
     // `when:` tests the previous results, which the first group doesn't have.

@@ -349,8 +349,11 @@ Indented under a step, any of:
 | \`max: 10\` | cap how many iterations \`each:\` produces |
 | \`on-fail: [[agent]]\` | who handles it when this step fails |
 | \`wait: 30m\` | pause before running — \`90s\`, \`30m\`, \`4h\`, \`3d\` |
+| \`wait: event\` | hold until something POSTs the run's event URL; the body reaches the step |
 | \`ask: <question>\` | ask a human, use the answer |
 | \`delegate: [[a]], [[b]]\` | hand the step to whichever fits, up to 5 |
+| \`output: json\` | the reply ends with one JSON value; the next step gets it as data, \`each: items\` fans out over it |
+| \`each: items\` | run once per element of the previous step's JSON array |
 
 ## Writing an agent
 

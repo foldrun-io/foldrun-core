@@ -286,7 +286,9 @@ const STEP_OPTIONS: Completion[] = [
   { label: "when", insert: "when: ", hint: "skip unless prior results mention it" },
   { label: "retry", insert: "retry: 1" },
   { label: "timeout", insert: "timeout: 300", hint: "seconds" },
-  { label: "verify", insert: "verify: ", hint: "shell command must exit 0" },
+  { label: "verify", insert: "verify: ", hint: "shell command, or contains:/matches:/file:/judge:" },
+  { label: "output", insert: "output: json", hint: "the step returns a JSON value" },
+  { label: "each", insert: "each: items", hint: "fan out: lines | items | rows of <csv>" },
   { label: "model", insert: "model: fast" },
   { label: "effort", insert: "effort: high", hint: "this step only" },
   { label: "approve", insert: "approve: true", hint: "pause for a human" },
@@ -489,6 +491,17 @@ export function completionsAt(
       verify: [
         { label: "test -s outputs/report.md", hint: "a file was produced" },
         { label: "npm run build" },
+        { label: "contains: ", hint: "the reply must mention this" },
+        { label: "not-contains: ", hint: "the reply must not mention this" },
+        { label: "matches: ", hint: "regular expression over the reply" },
+        { label: "file: outputs/report.md", hint: "exists and is non-empty" },
+        { label: "judge: ", hint: "a fast model grades the reply against this sentence" },
+      ],
+      output: [{ label: "json", hint: "the reply ends with one ```json block" }],
+      each: [
+        { label: "lines", hint: "one instance per line of the previous result" },
+        { label: "items", hint: "one per element of the previous output: json array" },
+        { label: "rows of ../../storage/x.csv", hint: "one per CSV row" },
       ],
     };
     const items = byKey[key];

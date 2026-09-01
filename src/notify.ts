@@ -34,6 +34,7 @@
 import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
+import { approveToken, publicUrl } from "./webhook.ts";
 
 export interface NotifyConfig {
   url?: string;
@@ -68,6 +69,38 @@ export function notifyConfig(tenant: string, workspace: string): NotifyConfig | 
   return null;
 }
 
+// Said once per process, not once per run: the fix is one env edit, and a
+// line per parked run would bury the failures around it.
+let warnedNoPublicUrl = false;
+
+/**
+ * The approve/reject links for a run waiting on a person, or null when the
+ * install cannot say where it lives. A notification that only says "waiting
+ * for you" sends the reader to find a laptop; one that carries the decision
+ * lets them make it where they read it.
+ *
+ * The reject link goes to the same page with the choice pre-selected — a
+ * GET must not decide anything, because inbox link-checkers follow links.
+ */
+export function approvalLinks(
+  tenant: string,
+  workspace: string,
+  runId: string,
+): { approveUrl: string; rejectUrl: string } | null {
+  const base = publicUrl();
+  if (!base) {
+    if (!warnedNoPublicUrl) {
+      warnedNoPublicUrl = true;
+      console.error(
+        "[foldrun] notify: approval links need FOLDRUN_PUBLIC_URL (the install's public origin); sending without them",
+      );
+    }
+    return null;
+  }
+  const approveUrl = `${base}/api/approve/${tenant}/${workspace}/${runId}?token=${approveToken(tenant, workspace, runId)}`;
+  return { approveUrl, rejectUrl: `${approveUrl}&decision=reject` };
+}
+
 /**
  * Fire the webhook for a run's state, if the workspace asked to hear about
  * it. Failures are logged and swallowed — a broken Slack hook must never
@@ -82,19 +115,28 @@ export async function sendRunNotification(
   if (!config || !config.events.includes(run.status)) return false;
 
   const failed = run.steps.filter((s) => s.status === "failed").map((s) => s.agent);
-  const waiting = run.steps.filter((s) => s.status === "awaiting-approval").map((s) => s.agent);
+  const waitingSteps = run.steps.filter((s) => s.status === "awaiting-approval");
+  const waiting = waitingSteps.map((s) => s.agent);
+  // A park on `wait: event` is not a question for the reader: the message
+  // says what the run is waiting for, so nobody hunts for a button that
+  // the outside world is meant to press.
+  const onEvent = waitingSteps.length > 0 && waitingSteps.every((s) => s.waitFor === "event");
   const headline =
     run.status === "completed"
       ? `✓ ${run.flow} completed`
       : run.status === "failed"
         ? `✗ ${run.flow} failed${failed.length ? ` at ${failed.join(", ")}` : ""}`
-        : `⏸ ${run.flow} is waiting for your approval${waiting.length ? ` (${waiting.join(", ")})` : ""}`;
+        : onEvent
+          ? `⏳ ${run.flow} is waiting for an external event${waiting.length ? ` (${waiting.join(", ")})` : ""}`
+          : `⏸ ${run.flow} is waiting for your approval${waiting.length ? ` (${waiting.join(", ")})` : ""}`;
 
   // What the run concluded, if it concluded anything. This is the whole point
   // of the message: "✓ health completed · $0.42" tells you a thing ran and
   // what it cost, and nothing at all about what it found. A scheduled desk
   // reporting only its own existence is a desk nobody reads by week three.
   const summary = run.summary?.trim() || null;
+
+  const links = run.status === "awaiting-approval" ? approvalLinks(tenant, workspace, run.id) : null;
 
   const body = {
     // `text` is what Slack-shaped receivers render; the rest is for anything
@@ -110,6 +152,7 @@ export async function sendRunNotification(
     costUsd: runCost(run),
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    ...(links ?? {}),
   };
 
   try {
@@ -138,7 +181,8 @@ export async function sendRunNotification(
             `${headline}\n` +
             (summary ? `\n${summary}\n` : "") +
             `\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
-            `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n`,
+            `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n` +
+            (links ? `\nApprove: ${links.approveUrl}\nReject: ${links.rejectUrl}\n` : ""),
         }),
         signal: AbortSignal.timeout(8000),
       });

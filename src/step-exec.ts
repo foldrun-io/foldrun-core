@@ -19,6 +19,10 @@ import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 export interface ExecOutcome {
   status: "completed" | "failed";
   result: string | null;
+  /** The JSON an `output: json` step returned — parsed, so the next step
+   *  gets the value and not a re-extraction of it from prose. Undefined for
+   *  a step that declared no output shape. */
+  data?: unknown;
   costUsd: number | null;
   /** Token counts off the SDK's result message. costUsd is priced from
    *  Anthropic's table, which is wrong for a routed model — these are the
@@ -45,9 +49,14 @@ export interface ExecOptions {
   /** The child environment: process env + secrets + provider. */
   env: Record<string, string | undefined>;
   timeoutSec?: number;
-  /** Shell command that must exit 0 for the step to count as done. */
+  /** A check the step must pass to count as done: a shell command that must
+   *  exit 0, or an eval-style assertion (`contains: x`, `not-contains: x`,
+   *  `matches: re`, `file: path`, `judge: sentence`) — see checkVerify. */
   verify?: string;
   verifyEnv?: Record<string, string>;
+  /** `output: json` — the reply must carry one JSON value; extracting it is
+   *  part of finishing the step, and failing to is failing the step. */
+  output?: "json";
   /** false when the caller is already an isolation boundary (a run
    *  container): the SDK's bash sandbox is then redundant and would block
    *  declared network use. Default (undefined/true) keeps it on. */
@@ -176,15 +185,190 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   }
   const result = texts.join("\n").trim() || null;
 
-  // "Done" should mean a check passed, not that the model stopped talking.
-  if (status === "completed" && opts.verify) {
-    const { code, out } = await runVerify(agentDir, opts.verify, opts.verifyEnv ?? {});
-    emit(code === 0 ? "info" : "error", `verify \`${opts.verify}\` → exit ${code ?? "error"}`);
-    if (out.trim()) emit(code === 0 ? "info" : "error", out.slice(0, 1000));
-    if (code !== 0) status = "failed";
+  // output: json — the declared shape is a contract, checked here where both
+  // executors run. A reply with no JSON in it is not "done with a caveat";
+  // it is the failure the next step would otherwise inherit as garbage.
+  let data: unknown = undefined;
+  if (status === "completed" && opts.output === "json") {
+    const extracted = extractJson(result);
+    if (extracted.ok) {
+      data = extracted.value;
+      emit("info", `output: json — ${describeJson(data)}`);
+    } else {
+      emit("error", `output: json — ${extracted.reason}`);
+      status = "failed";
+    }
   }
 
-  return { status, result, costUsd, usage };
+  // "Done" should mean a check passed, not that the model stopped talking.
+  if (status === "completed" && opts.verify) {
+    const verdict = await checkVerify(agentDir, opts.verify, {
+      env: opts.verifyEnv ?? {},
+      result,
+      data,
+      modelEnv: opts.env,
+    });
+    emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`);
+    if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000));
+    if (!verdict.ok) status = "failed";
+  }
+
+  return { status, result, ...(opts.output ? { data } : {}), costUsd, usage };
+}
+
+// ------------------------------------------------------------ output: json
+
+/**
+ * The one JSON value a reply carries. A ```json fence wins — it is what the
+ * step was asked to write — and the LAST one at that, because a model that
+ * shows its working often quotes an earlier draft first. Without a fence,
+ * the reply's trailing `{…}` or `[…]` is tried, so a model that answered
+ * with bare JSON is not failed for good behaviour.
+ */
+export function extractJson(result: string | null): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const text = (result ?? "").trim();
+  if (!text) return { ok: false, reason: "the reply was empty" };
+  const fences = [...text.matchAll(/```(?:json|JSON)?\s*\n([\s\S]*?)\n\s*```/g)].map((m) => m[1].trim());
+  const candidates = fences.length ? fences.reverse() : [];
+  if (!candidates.length) {
+    // The largest trailing bracketed span: walk back from the end to the
+    // last closing bracket, then forward to the matching opener.
+    const close = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
+    if (close !== -1) {
+      const opener = text[close] === "}" ? "{" : "[";
+      for (let i = text.indexOf(opener); i !== -1 && i < close; i = text.indexOf(opener, i + 1)) {
+        candidates.push(text.slice(i, close + 1));
+      }
+    }
+  }
+  let lastError = "no JSON value found in the reply";
+  for (const c of candidates) {
+    try {
+      return { ok: true, value: JSON.parse(c) };
+    } catch (err) {
+      lastError = `could not parse: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  return { ok: false, reason: lastError };
+}
+
+function describeJson(value: unknown): string {
+  if (Array.isArray(value)) return `an array of ${value.length}`;
+  if (value && typeof value === "object") return `an object with keys ${Object.keys(value).slice(0, 8).join(", ")}`;
+  return `a ${typeof value}`;
+}
+
+// ----------------------------------------------------------------- verify:
+
+/** The eval vocabulary a `verify:` may borrow. Anything else is a shell command. */
+const VERIFY_ASSERTION = /^(contains|not-contains|matches|file|judge):\s*([\s\S]+)$/;
+
+export interface VerifyVerdict {
+  ok: boolean;
+  /** One line for the trace: "exit 0", "found", "PASS"… */
+  headline: string;
+  detail: string;
+}
+
+/**
+ * Decide a `verify:`. Two dialects, one key: an eval assertion, when the
+ * value starts with one of the eval file's assertion words, or a shell
+ * command. The assertion form exists so that a flow and an eval share a
+ * vocabulary — "the output must mention the price" is the same sentence in
+ * both places — and so that the commonest checks need no shell at all.
+ */
+export async function checkVerify(
+  agentDir: string,
+  verify: string,
+  ctx: {
+    env: Record<string, string>;
+    result: string | null;
+    data?: unknown;
+    /** The step's own model environment, for `judge:` — it grades on the
+     *  fast tier through the same credential the step rode. */
+    modelEnv?: Record<string, string | undefined>;
+  },
+): Promise<VerifyVerdict> {
+  const m = verify.trim().match(VERIFY_ASSERTION);
+  if (!m) {
+    const { code, out } = await runVerify(agentDir, verify, ctx.env, ctx.data);
+    return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out };
+  }
+  const [, kind, rawValue] = m;
+  const value = rawValue.trim().replace(/^["']|["']$/g, "");
+  const output = ctx.result ?? "";
+  const hay = output.toLowerCase();
+  switch (kind) {
+    case "contains": {
+      const ok = hay.includes(value.toLowerCase());
+      return { ok, headline: ok ? "found" : `"${value}" not in the reply`, detail: "" };
+    }
+    case "not-contains": {
+      const ok = !hay.includes(value.toLowerCase());
+      return { ok, headline: ok ? "absent" : `"${value}" appeared in the reply`, detail: "" };
+    }
+    case "matches": {
+      try {
+        const ok = new RegExp(value, "i").test(output);
+        return { ok, headline: ok ? "matched" : "no match", detail: "" };
+      } catch {
+        return { ok: false, headline: "invalid regular expression", detail: "" };
+      }
+    }
+    case "file": {
+      const target = path.resolve(agentDir, value);
+      if (!target.startsWith(path.resolve(agentDir) + path.sep)) {
+        return { ok: false, headline: "path escapes the agent directory", detail: "" };
+      }
+      const ok = fs.existsSync(target) && fs.statSync(target).size > 0;
+      return { ok, headline: ok ? "present and non-empty" : `${value} is missing or empty`, detail: "" };
+    }
+    case "judge": {
+      const verdict = await judgeReply(value, output, ctx.modelEnv ?? {});
+      const ok = /^\s*PASS\b/i.test(verdict);
+      return { ok, headline: ok ? "PASS" : "FAIL", detail: verdict.slice(0, 300) };
+    }
+  }
+  return { ok: false, headline: `unknown check "${kind}"`, detail: "" };
+}
+
+/**
+ * A toolless, fast-tier grading call: does the reply satisfy the sentence?
+ * Same shape as the eval judge, and answered with one word first so the
+ * verdict is a prefix test rather than a reading.
+ */
+async function judgeReply(
+  rubric: string,
+  output: string,
+  env: Record<string, string | undefined>,
+): Promise<string> {
+  const texts: string[] = [];
+  try {
+    const q = query({
+      prompt:
+        `You are grading a reply against one requirement. Answer with PASS or FAIL as the ` +
+        `first word, then one sentence of reason.\n\nRequirement: ${rubric}\n\n` +
+        `<reply>\n${output.slice(0, 40_000)}\n</reply>`,
+      options: {
+        model: "haiku",
+        systemPrompt: "You grade text against a stated requirement. Be strict and literal.",
+        tools: [],
+        settingSources: [],
+        env,
+        maxTurns: 1,
+      },
+    });
+    for await (const message of q) {
+      if (message.type === "assistant") {
+        for (const block of message.message.content) {
+          if (block.type === "text") texts.push(block.text);
+        }
+      }
+    }
+  } catch (err) {
+    return `FAIL — the judge could not run: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  return texts.join("\n").trim();
 }
 
 // Verification runs in the agent's directory with its secrets available, so
@@ -193,6 +377,7 @@ function runVerify(
   agentDir: string,
   command: string,
   env: Record<string, string>,
+  data?: unknown,
 ): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
     // No clock of the platform's: a verify like `npm run build` takes what
@@ -200,7 +385,14 @@ function runVerify(
     const child = spawn("bash", ["-lc", command], {
       cwd: agentDir,
       env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    // An `output: json` step's data arrives on stdin, so a check can be
+    // `jq -e '.total > 0'` — arithmetic in a real tool, reading the value
+    // the step actually returned rather than re-parsing its prose.
+    child.stdin.on("error", () => {});
+    if (data !== undefined) child.stdin.end(JSON.stringify(data));
+    else child.stdin.end();
     let out = "";
     const append = (c: Buffer) => {
       if (out.length < 4000) out += c.toString();

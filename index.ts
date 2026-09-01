@@ -37,6 +37,7 @@ export * from "./src/notify.ts";
 export * from "./src/oauth-connect.ts";
 export * from "./src/oauth-clients.ts";
 export * from "./src/webhook.ts";
+export * from "./src/approvals.ts";
 export * from "./src/deploy.ts";
 export * from "./src/tar.ts";
 export * from "./src/git.ts";

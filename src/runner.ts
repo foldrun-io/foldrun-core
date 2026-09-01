@@ -7,7 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
-import { executeStep } from "./step-exec.ts";
+import { executeStep, extractJson } from "./step-exec.ts";
+import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
 import { runStepInK8s, killRunPods } from "./run-k8s.ts";
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
@@ -43,11 +44,14 @@ import {
   type StepRecord,
   STORAGE_DIR,
   adoptLegacyVersionKey,
+  runCost,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
+import { attachOperations, prefetchOpenApi } from "./openapi.ts";
+import { buildSearchTools, buildHistoryTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
@@ -742,6 +746,12 @@ function agentContext(
       }
     }
   }
+  // An `openapi:` document turns one generic HTTP tool into typed ones, one
+  // per operation. Resolved here, host-side, so the operations cross into a
+  // container as values like the rest of the spec.
+  const attached = attachOperations(apis, tenant, path.resolve(agentDir, "..", ".."));
+  const apiWarnings = attached.warnings;
+  apis.splice(0, apis.length, ...attached.specs);
   const apiTools = buildApiTools(tenant, apis, workspace);
   if (apiTools.promptLines.length) {
     parts.push(`# APIs you can call\n\n${apiTools.promptLines.join("\n")}`);
@@ -799,6 +809,10 @@ function agentContext(
   // must never reach the journal is the credential inside it, not the blob.
   const providerSecrets: Record<string, string> = {};
   const providerWarnings: string[] = [];
+  // The declared second supply, resolved the same way. Null when the block
+  // names none; the platform's own fallback still applies to a step that
+  // rides the platform credential.
+  let fallbackEnv: Record<string, string> | null = null;
   const spec = parseProvider(providerBlock);
   if (spec) {
     providerWarnings.push(...spec.warnings);
@@ -830,6 +844,12 @@ function agentContext(
       if (spec.token && resolved === spec.token && spec.token.includes("${")) {
         providerLabel += " — token secret not set";
       }
+    }
+    if (spec.fallback?.baseUrl) {
+      const fb = spec.fallback;
+      const headers = Object.fromEntries(Object.entries(fb.headers).map(([k, v]) => [k, substitute(v)]));
+      fallbackEnv = providerEnvFor({ baseUrl: fb.baseUrl, token: substitute(fb.token), models: fb.models, headers });
+      providerLabel = `${providerLabel ?? "platform"} (fallback: ${fb.baseUrl})`;
     }
   }
 
@@ -938,6 +958,8 @@ function agentContext(
   const disabled: string[] = [];
   const unknownTools: string[] = [];
   const shadowed: string[] = [];
+  let wantSearch = false;
+  let wantHistory = false;
 
   for (const entry of front.tools ?? []) {
     const toolName = typeof entry === "string" ? entry : Object.keys(entry)[0];
@@ -953,6 +975,12 @@ function agentContext(
     if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
+    } else if (toolName === "search" || toolName === "history") {
+      // The platform's own two groups, served in-process — built below,
+      // once the roots and the records are known.
+      if (toolName === "search") wantSearch = true;
+      else wantHistory = true;
+      if (available[toolName]) shadowed.push(toolName);
     } else if (BUILTIN_TOOLS.has(toolName)) {
       allowed.push(toolName);
       if (available[toolName]) shadowed.push(toolName);
@@ -963,6 +991,32 @@ function agentContext(
     }
   }
   allowed.push(...apiTools.toolNames, ...scriptTools.toolNames);
+
+  // tools: [search] — every place a fact of this agent's could be, in the
+  // same nearest-wins order the prompt lists them. tools: [history] — the
+  // workspace's finished runs, minus the one being driven. Both are values
+  // by the time they leave here, so the container can rebuild the servers.
+  const wsRoot = path.resolve(agentDir, "..", "..");
+  const searchRoots: SearchRoot[] = wantSearch
+    ? [
+        { label: "knowledge/", dir: path.join(agentDir, "knowledge") },
+        { label: "memory/", dir: path.join(agentDir, "memory") },
+        { label: "../../knowledge/", dir: path.join(wsRoot, "knowledge") },
+        { label: "../../memory/", dir: path.join(wsRoot, "memory") },
+        { label: "../../state/", dir: path.join(wsRoot, "state") },
+        { label: `../../${STORAGE_DIR}/`, dir: path.join(wsRoot, STORAGE_DIR) },
+        { label: "outputs/", dir: path.join(agentDir, "outputs") },
+        { label: "[library] knowledge/", dir: libraryDir(tenant, "knowledge") },
+        { label: "[library] memory/", dir: libraryDir(tenant, "memory") },
+      ]
+    : [];
+  const historyDigest: RunDigest[] = wantHistory ? digestRuns(listRuns(tenant, workspace), 30, identity.runId) : [];
+  const searchTools = buildSearchTools(searchRoots);
+  const historyTools = wantHistory ? buildHistoryTools(historyDigest) : { server: null, toolNames: [], promptLines: [] };
+  allowed.push(...searchTools.toolNames, ...historyTools.toolNames);
+  if (searchTools.promptLines.length || historyTools.promptLines.length) {
+    parts.push(`# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines].join("\n")}`);
+  }
   // An MCP server declares its tools when it connects, so they can't be listed
   // ahead of time. Server-level specs cover them: granting the server grants
   // what it exposes, which is the unit a person actually reasons about anyway.
@@ -997,6 +1051,10 @@ function agentContext(
     // than using the servers built here.
     apiSpecs: apis,
     scriptSpecs,
+    searchRoots,
+    historyDigest,
+    searchTools,
+    historyTools,
     runtime: { log: runtimeLog, error: runtimeError, executor },
     secretEnv: { ...runtime.env, ...secretEnv },
     formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).foldrun_version).warning,
@@ -1004,6 +1062,8 @@ function agentContext(
     providerLabel,
     providerSecrets,
     providerWarnings,
+    fallbackEnv,
+    apiWarnings,
     secretScopes,
     missingTools,
     size,
@@ -1046,6 +1106,9 @@ async function runStep(
   tags: string[] = [],
   effortOverride?: string | null,
   runId?: string,
+  /** What the previous group returned as DATA (an `output: json` step's
+   *  value), beside the prose in `context`. Undefined when nothing did. */
+  priorData?: unknown,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1088,21 +1151,39 @@ async function runStep(
     const call = step.events.filter((e) => e.text.startsWith("stub call")).length;
     push("info", `stub call ${call + 1}`);
     step.status = "completed";
-    step.result =
-      (answers[Math.min(call, answers.length - 1)] ?? "").trim() +
-      (step.item ? ` [item: ${step.item}]` : "");
-    step.costUsd = 0;
+    // A stub answer may open with `cost: 0.25` — a pretend price, so the
+    // parts of orchestration that watch money (budget:) are testable too.
+    const answer = (answers[Math.min(call, answers.length - 1)] ?? "").trim();
+    const priced = answer.match(/^cost:\s*([\d.]+)\n?/);
+    step.result = (priced ? answer.slice(priced[0].length) : answer).trim() + (step.item ? ` [item: ${step.item}]` : "");
+    step.costUsd = priced ? Number(priced[1]) : 0;
+    // The stub honours the output contract too, so fan-out over data and
+    // the failure of a step that returned no JSON are testable at no cost.
+    if (step.output === "json") {
+      const extracted = extractJson(step.result);
+      if (extracted.ok) step.data = extracted.value;
+      else {
+        push("error", `output: json — ${extracted.reason}`);
+        step.status = "failed";
+      }
+    }
     save();
     return;
   }
 
   try {
+    // An `openapi:` URL is fetched (and cached a day) before the context is
+    // assembled, because assembling it is synchronous and the document has
+    // to be on disk by then. Failures are lines in the trace, not a failed
+    // step: the generic HTTP tool still works without the typed ones.
+    for (const w of await prefetchOpenApi(tenant, openApiSources(agentDir, tenant))) push("error", `openapi: ${w}`);
     const {
       front, clockEnv, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
+      fallbackEnv, apiWarnings, searchRoots, historyDigest, searchTools, historyTools,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
 
     // oauth2 secrets become live access tokens here — the one async moment
@@ -1128,6 +1209,7 @@ async function runStep(
 
     if (providerLabel) push("info", `provider: ${providerLabel}`);
     for (const w of providerWarnings) push("error", w);
+    for (const w of apiWarnings) push("error", `openapi: ${w}`);
     if (formatWarning) push("error", formatWarning);
     for (const t of unknownTools) {
       // The commonest mistake is putting a workspace tool in `tools:`, so say
@@ -1137,7 +1219,7 @@ async function runStep(
         "error",
         isOwnTool
           ? `tools: "${t}" is a tool defined in this workspace — grant it with \`use: [${t}]\`, not \`tools:\`. Nothing was granted for it.`
-          : `tools: "${t}" is not a tool group (web, fetch, read, files, bash) or an SDK tool name — nothing was granted for it`,
+          : `tools: "${t}" is not a tool group (web, fetch, read, files, bash, search, history) or an SDK tool name — nothing was granted for it`,
       );
     }
     for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
@@ -1252,6 +1334,29 @@ async function runStep(
       ? resolveDocLinks(step.instruction, workspaceRoot)
       : "Begin your run now, following your instructions.";
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
+    if (priorData !== undefined) {
+      // The value itself, beside the prose that mentioned it. This is the
+      // lossless half of a handoff: a URL step 1 returned reaches step 3 as
+      // the URL, not as whatever a re-reading of step 1's paragraph yields.
+      const json = JSON.stringify(priorData, null, 2);
+      prompt +=
+        `\n\n<previous_step_data>\n${json.length > 60000 ? `${json.slice(0, 60000)}\n…[truncated]` : json}\n</previous_step_data>`;
+    }
+    if (step.output === "json") {
+      // The contract the runner parses back out — stated in the prompt so
+      // the instruction and the parser agree by construction, like delegate:.
+      prompt +=
+        `\n\n<output>\nThis step returns data. End your reply with exactly one JSON value inside a ` +
+        "```json fenced block — the value the next step will compute on. Prose before it is " +
+        `welcome (lead with a one-line headline); nothing may follow the block. If the instruction ` +
+        `names fields, use exactly those names.\n</output>`;
+    }
+    if (step.waitFor === "event" && step.eventPayload !== undefined) {
+      // Not resolved for links, like the previous step's results: it is
+      // whatever the outside world sent, and must not name a file by
+      // happening to contain brackets.
+      prompt += `\n\n<event>\nThis step waited for an external event. What arrived:\n${step.eventPayload}\n</event>`;
+    }
     if (step.approvalNote) {
       // The person at the gate said something while letting the run through.
       // That is the freshest instruction the step has — later than the flow
@@ -1297,6 +1402,20 @@ async function runStep(
     }
     const consultNames = consults.length ? [...mcpNames, "foldrun_agents"] : mcpNames;
 
+    // The last provider refusal this step saw, for the fallback decision —
+    // watched on both paths, because a refusal reads the same from a pod
+    // and from this process.
+    let lastRefusal = "";
+    const pushWatching: typeof push = (type, text) => {
+      if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
+      push(type, text);
+    };
+    // The second supply: the block's own fallback when it declared one (a
+    // BYOK step's provider is the customer's arrangement, and so is its
+    // fallback), else the platform's, and only for a step riding the
+    // platform credential.
+    const secondSupply = fallbackEnv ?? (Object.keys(providerEnv).length === 0 ? platformFallbackEnv() : null);
+
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
     if (isolation === "container" || isolation === "k8s") {
       // The isolated path: the whole loop — model, built-in tools, scripts —
@@ -1322,12 +1441,6 @@ async function runStep(
         ),
       }));
       const runIsolated = isolation === "k8s" ? runStepInK8s : runStepInContainer;
-      // The last provider refusal this step saw, for the fallback decision.
-      let lastRefusal = "";
-      const pushWatching: typeof push = (type, text) => {
-        if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
-        push(type, text);
-      };
       const isolatedArgs = (modelEnv: Record<string, string | undefined>) => ({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
@@ -1349,6 +1462,16 @@ async function runStep(
           consults,
           timeoutSec: step.timeout,
           verify: step.verify,
+          output: step.output,
+          // The container sees the workspace at /workspace and the library
+          // at /library; the roots are named host-side and moved here.
+          search: searchRoots.map((r) => ({
+            label: r.label,
+            dir: r.dir.startsWith(libraryDir(tenant))
+              ? path.posix.join("/library", path.relative(libraryDir(tenant), r.dir).replaceAll("\\", "/"))
+              : path.posix.join("/workspace", path.relative(workspaceRoot, r.dir).replaceAll("\\", "/")),
+          })),
+          history: historyDigest,
         },
         env: Object.fromEntries(
           Object.entries({
@@ -1377,26 +1500,20 @@ async function runStep(
       });
 
       let outcome = await runIsolated(isolatedArgs(platformModelEnv()));
-      // The platform's second supply, tried exactly once, and only when all
-      // three are true: the step rode the platform credential (a BYOK step's
-      // provider is the customer's problem and their bill), the primary
-      // refused over money/auth/limits rather than the work failing, and a
-      // fallback is configured. The retry is a fresh sandbox — the failed
-      // one is gone, and driveRun's whole contract is that re-driving is
-      // safe.
-      const fallback = platformFallbackEnv();
-      if (
-        outcome.status === "failed" &&
-        lastRefusal &&
-        fallback &&
-        Object.keys(providerEnv).length === 0
-      ) {
+      // The second supply, tried exactly once, and only when the primary
+      // refused over money/auth/limits rather than the work failing. The
+      // retry is a fresh sandbox — the failed one is gone, and driveRun's
+      // whole contract is that re-driving is safe. A declared fallback
+      // replaces the provider block's env wholesale, so the spread order in
+      // isolatedArgs (providerEnv last) has to be overridden here.
+      if (outcome.status === "failed" && lastRefusal && secondSupply) {
         push(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
         const first = outcome.timing;
-        outcome = await runIsolated(isolatedArgs(fallback));
+        const retryArgs = isolatedArgs(secondSupply);
+        outcome = await runIsolated({ ...retryArgs, env: { ...retryArgs.env, ...secondSupply } });
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
@@ -1411,6 +1528,7 @@ async function runStep(
       }
       step.status = outcome.status;
       step.result = outcome.result;
+      if (outcome.data !== undefined) step.data = outcome.data;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
       step.tokens = outcome.usage
         ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
@@ -1448,7 +1566,11 @@ async function runStep(
         { ...process.env, ...liveSecrets, ...providerEnv },
         (type, text) => push(type, text),
       );
-      const outcome = await executeStep({
+      // @file secrets become 0600 paths here (host run), cleaned up in the
+      // finally — once, however many attempts follow.
+      const mat = materializeFileSecrets(agentDir, liveSecrets);
+      fileDir = mat.dir;
+      const attemptInProcess = (modelEnv: Record<string, string | undefined>) => executeStep({
         agentDir,
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
@@ -1462,18 +1584,16 @@ async function runStep(
           ...(apiTools.server ? { foldrun_apis: apiTools.server } : {}),
           ...(scriptTools.server ? { foldrun_scripts: scriptTools.server } : {}),
           ...(consultTools.server ? { foldrun_agents: consultTools.server } : {}),
+          ...(searchTools.server ? { foldrun_search: searchTools.server } : {}),
+          ...(historyTools.server ? { foldrun_history: historyTools.server } : {}),
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model
-        // only ever sees the variable names, not the values. @file secrets
-        // become 0600 paths here (host run), cleaned up in the finally.
-        env: (() => {
-          const mat = materializeFileSecrets(agentDir, liveSecrets);
-          fileDir = mat.dir;
-          return { ...process.env, ...clockEnv, ...mat.env, ...providerEnv };
-        })(),
+        // only ever sees the variable names, not the values.
+        env: { ...process.env, ...clockEnv, ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         verify: step.verify,
+        output: step.output,
         // What the scripts saw, the verify sees: a flow can then check that
         // the proof a step left names THIS run, not one that came before —
         // copy-back never propagates a deletion, so a marker from an earlier
@@ -1484,10 +1604,21 @@ async function runStep(
           FOLDRUN_AGENT: step.agent,
           ...liveSecrets,
         },
-        emit: push,
+        emit: pushWatching,
       });
+      let outcome = await attemptInProcess(providerEnv);
+      // Same rule as the isolated path: one retry, on a refusal, on the
+      // declared or platform second supply.
+      if (outcome.status === "failed" && lastRefusal && secondSupply) {
+        push(
+          "info",
+          `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
+        );
+        outcome = await attemptInProcess(secondSupply);
+      }
       step.status = outcome.status;
       step.result = outcome.result;
+      if (outcome.data !== undefined) step.data = outcome.data;
       // A consult's spend belongs to the step that asked.
       const consultCost = consultTools.drainCost();
       const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push);
@@ -1569,6 +1700,29 @@ export function copyTreeBytes(from: string, to: string) {
  * Empty ANTHROPIC_API_KEY on purpose: set, it goes out as x-api-key and a
  * gateway rejects it; the fallback's whole credential is the bearer.
  */
+/**
+ * Every `openapi:` URL the agent's API tools name — its own `apis:` and the
+ * http tools it opted into — so they can be fetched before the context is
+ * assembled. File paths need no fetching and are left out.
+ */
+function openApiSources(agentDir: string, tenant: string): string[] {
+  const out = new Set<string>();
+  try {
+    const { data } = matter(fs.readFileSync(path.join(agentDir, "agent.md"), "utf8"));
+    const front = data as { apis?: unknown; use?: unknown };
+    for (const api of parseApis(front.apis)) if (api.openapi?.startsWith("https://")) out.add(api.openapi);
+    const workspace = path.basename(path.resolve(agentDir, "..", ".."));
+    const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
+    for (const name of Array.isArray(front.use) ? front.use.map(String) : []) {
+      const def = available[name];
+      if (def?.kind === "http" && def.spec.openapi?.startsWith("https://")) out.add(def.spec.openapi);
+    }
+  } catch {
+    // an unreadable agent.md fails the step properly a moment later
+  }
+  return [...out];
+}
+
 function platformFallbackEnv(): Record<string, string> | null {
   const base = process.env.FOLDRUN_FALLBACK_BASE_URL;
   const token = process.env.FOLDRUN_FALLBACK_TOKEN;
@@ -1637,6 +1791,33 @@ function platformModelEnv(): Record<string, string | undefined> {
  * the agent's own instructions do (relative to its folder) and is confined
  * to the workspace: fan-out must not become a way to read past it.
  */
+/**
+ * `each: items` — one instance per element of the previous group's data.
+ * An array is the items; an object with one array-valued field is that
+ * field (the common `{ "leads": [...] }` shape); anything else is nothing,
+ * said out loud. Each item crosses as JSON text, because `item` is what the
+ * instance's prompt quotes and what its result is labelled with.
+ */
+function jsonItems(data: unknown, step: StepRecord, take: number): string[] {
+  let list: unknown[] | null = Array.isArray(data) ? data : null;
+  if (!list && data && typeof data === "object") {
+    const arrays = Object.entries(data as Record<string, unknown>).filter(([, v]) => Array.isArray(v));
+    if (arrays.length === 1) list = arrays[0][1] as unknown[];
+    else if (arrays.length > 1) {
+      step.skipReason = `each: items — the previous data has ${arrays.length} array fields; return the list itself`;
+      return [];
+    }
+  }
+  if (!list) {
+    step.skipReason =
+      data === undefined
+        ? "each: items needs an `output: json` step before it that returned an array"
+        : "each: items — the previous data is not an array";
+    return [];
+  }
+  return list.slice(0, take).map((v) => (typeof v === "string" ? v : JSON.stringify(v)));
+}
+
 function csvItems(workspaceDir: string, step: StepRecord, take: number): string[] {
   const raw = step.eachPath ?? "";
   if (!raw) {
@@ -1714,8 +1895,10 @@ export function createFlowRun(
       max: s.max,
       onFail: s.onFail,
       waitSecs: s.waitSecs,
+      waitFor: s.waitFor,
       ask: s.ask,
       delegate: s.delegate,
+      output: s.output,
       attempts: 0,
       status: "pending",
       events: [],
@@ -1828,6 +2011,7 @@ function driveRunInner(
       })),
     ];
 
+    const written: string[] = [];
     for (const { dir, agent } of dirs) {
       // Each stamped file is a Creation in the bundle's log — that is what the
       // log is for, and an agent's writes are exactly the changes a reader
@@ -1835,8 +2019,12 @@ function driveRunInner(
       // index.md logged nothing about the concept that actually appeared.
       for (const rel of stampBundle(dir, agent)) {
         syncBundleFor(path.join(dir, rel), "Creation");
+        written.push(path.relative(runRoot, path.join(dir, rel)).replaceAll("\\", "/"));
       }
     }
+    // On the record, so the run page can say "this run learned two things"
+    // and a reviewer can open exactly those files.
+    if (written.length) run.memoryWrites = [...(run.memoryWrites ?? []), ...written];
   };
 
   // Archive what a run produced, so history survives the next run's reset.
@@ -1931,12 +2119,64 @@ function driveRunInner(
         for (let i = gi - 1; i >= 0; i--) if (groupResults[i]) return groupResults[i];
         return null;
       };
+      // The data half of the same handoff: what the nearest earlier group
+      // returned through `output: json`. Rebuilt from the record rather than
+      // kept only in memory, so a resumed run hands step 3 the value step 1
+      // returned before the park.
+      const groupData: unknown[] = [];
+      const dataBefore = (gi: number): unknown => {
+        for (let i = gi - 1; i >= 0; i--) if (groupData[i] !== undefined) return groupData[i];
+        return undefined;
+      };
+      const dataOf = (group: StepRecord[]): unknown => {
+        const carrying = group.filter((s) => s.status === "completed" && s.data !== undefined);
+        if (carrying.length === 0) return undefined;
+        if (carrying.length === 1 && !carrying[0].item) return carrying[0].data;
+        return carrying.map((s) => ({ agent: s.agent, ...(s.item ? { item: s.item } : {}), data: s.data }));
+      };
+      // Groups already finished before this drive (a resume) still carry
+      // their data on the record.
+      for (const [i, g] of ordered.entries()) {
+        if (g.every((s) => s.status !== "pending" && s.status !== "running" && s.status !== "awaiting-approval")) {
+          groupData[i] = dataOf(g);
+        }
+      }
+
+      // budget: — the flow's own per-run cap, stamped on the record the first
+      // time it is driven. Between groups, not mid-step: a step in flight is
+      // money already committed, and stopping it half-way keeps the cost
+      // and loses the work.
+      if (run.budgetUsd === undefined) {
+        run.budgetUsd = readFlow(tenant, workspace, run.flow)?.budget ?? null;
+        save();
+      }
 
       let gi = 0;
       let context: string | null = null;
+      let ctxData: unknown = undefined;
       while (gi < ordered.length) {
         const group = ordered[gi];
         context = contextBefore(gi);
+        ctxData = dataBefore(gi);
+
+        if (run.budgetUsd && runCost(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
+          const spent = runCost(run);
+          const last = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
+          last?.events.push({
+            t: new Date().toISOString(),
+            type: "error",
+            text: `over budget — $${spent.toFixed(4)} spent of the flow's $${run.budgetUsd.toFixed(2)} (budget: in the flow file); the remaining steps were not run`,
+          });
+          for (const s of run.steps) {
+            if (s.status === "pending") {
+              s.status = "skipped";
+              s.skipReason = "over budget";
+            }
+          }
+          run.status = "failed";
+          save();
+          break;
+        }
 
         // wait: — the clock starts when the run REACHES the step, so
         // "wait: 3d" means three days after the previous group finished,
@@ -1976,21 +2216,23 @@ function driveRunInner(
         // declared shape stays readable in the file, the width comes from
         // the data. The template survives as a skipped step for the trace.
         for (const step of [...group]) {
-          if ((step.each !== "lines" && step.each !== "rows") || step.status !== "pending" || step.item) continue;
+          if (!step.each || step.status !== "pending" || step.item) continue;
           const cap = Math.min(step.max ?? 10, 20);
           const items =
             step.each === "rows"
               ? csvItems(pDir, step, cap + 1)
-              : (context ?? "")
-                  .split("\n")
-                  .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
-                  .filter(Boolean)
-                  .slice(0, cap + 1);
+              : step.each === "items"
+                ? jsonItems(ctxData, step, cap + 1)
+                : (context ?? "")
+                    .split("\n")
+                    .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
+                    .filter(Boolean)
+                    .slice(0, cap + 1);
           const dropped = items.length > cap ? "at least one" : "";
           const used = items.slice(0, cap);
           step.status = "skipped";
           if (used.length === 0) {
-            step.skipReason = "each: the previous group produced no items";
+            step.skipReason ||= "each: the previous group produced no items";
             continue;
           }
           step.skipReason = `expanded into ${used.length} item${used.length === 1 ? "" : "s"}`;
@@ -2123,8 +2365,10 @@ function driveRunInner(
         // flips the step back to pending.
         // `!s.approvedAt` — a step approved before the process went away is
         // already answered. Filtering on status alone asked again.
+        // `wait: event` parks in the same place: the gate is the same, the
+        // key is held by a machine. A person can still release it by hand.
         const needsApproval = freshGroup.filter(
-          (s) => s.status === "pending" && (s.approve || s.ask) && !s.approvedAt,
+          (s) => s.status === "pending" && (s.approve || s.ask || s.waitFor === "event") && !s.approvedAt,
         );
         if (needsApproval.length) {
           for (const step of needsApproval) {
@@ -2134,7 +2378,11 @@ function driveRunInner(
               type: "info",
               // ask: is the same gate carrying a question — the answer
               // arrives as the approval note and rides into the prompt.
-              text: step.ask ? `waiting for an answer: ${step.ask}` : "waiting for approval before running",
+              text: step.ask
+                ? `waiting for an answer: ${step.ask}`
+                : step.waitFor === "event"
+                  ? `waiting for an external event — release it with POST ${eventUrl(tenant, workspace, run.id)}`
+                  : "waiting for approval before running",
             });
           }
           run.status = "awaiting-approval";
@@ -2161,6 +2409,12 @@ function driveRunInner(
             latest.steps.forEach((s, i) => {
               run.steps[i].status = s.status;
               run.steps[i].events = s.events;
+              // What the decision carried, not just that it happened: the
+              // note and the event payload are what the step's prompt reads,
+              // and copying status alone dropped them on the in-process path.
+              run.steps[i].approvedAt = s.approvedAt;
+              run.steps[i].approvalNote = s.approvalNote;
+              run.steps[i].eventPayload = s.eventPayload;
             });
           }
           run.status = "running";
@@ -2195,6 +2449,7 @@ function driveRunInner(
                   tags,
                   effortOverride,
                   run.id,
+                  ctxData,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -2242,6 +2497,9 @@ function driveRunInner(
             model: step.model,
             effort: step.effort,
             timeout: step.timeout,
+            // The rescuer inherits the contract, not just the job: a step
+            // that promised data still owes data when someone else does it.
+            output: step.output,
             attempts: 0,
             status: "pending",
             events: [],
@@ -2253,12 +2511,13 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id);
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData);
           // runStep mutates rescue.status; widen past TS's "running" narrowing.
           const rescueOutcome: string = rescue.status;
           if (rescueOutcome === "completed") {
             step.status = "completed";
             step.result = rescue.result;
+            if (rescue.data !== undefined) step.data = rescue.data;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
@@ -2290,6 +2549,7 @@ function driveRunInner(
                 : s.result!,
           );
         groupResults[gi] = results.length ? results.join("\n\n") : null;
+        groupData[gi] = dataOf(freshGroup);
 
         // delegate: — the completed chooser's picks become a fresh group
         // right after this one. The choice SET is the file's; only the
