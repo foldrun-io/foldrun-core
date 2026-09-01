@@ -311,9 +311,14 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
         child?.kill();
         resolve(value);
       };
+      // Fail the step, but do NOT delete the pod here: the copy-out below
+      // needs it alive, and the finally deletes it right after. Deleting
+      // first lost every file the step had written — an enricher killed at
+      // 17 minutes left nothing, not even the rows it had finished. The
+      // pod's own activeDeadlineSeconds sits 60s past this backstop, which
+      // is the window the copy-out gets.
       const backstop = setTimeout(() => {
-        args.emit("error", `pod exceeded its ${Math.round(backstopMs / 1000)}s backstop — deleted`);
-        void kc(["delete", podRef, "-n", ns, "--wait=false"]);
+        args.emit("error", `pod exceeded its ${Math.round(backstopMs / 1000)}s backstop — stopping; copying its files out first`);
         finish({ status: "failed", result: null, costUsd: null });
       }, backstopMs);
 
