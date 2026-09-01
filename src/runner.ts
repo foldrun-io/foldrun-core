@@ -92,7 +92,12 @@ const BUILTIN_TOOLS = new Set([
 ]);
 
 const TOOL_MAP: Record<string, string[]> = {
+  // `web` includes Anthropic's server-side WebSearch, the one built-in tool
+  // that runs off the box and bills per call. `fetch` is the local half only:
+  // an agent that searches through the account's own `websearch` tool and
+  // reads pages with WebFetch never leaves the box for anything but tokens.
   web: ["WebSearch", "WebFetch"],
+  fetch: ["WebFetch"],
   // `read` is deliberately separate from `files`: an agent that may inspect a
   // repository but must never modify it is a real and common design.
   read: ["Read", "Glob", "Grep"],
@@ -853,7 +858,14 @@ function agentContext(
   // travels beside secretEnv rather than inside it — a value in there is
   // redacted from every log line that quotes it.
   const timezone = resolveTimezone(workspaceFrontmatter(agentDir, tenant));
-  const clockEnv = { TZ: timezone, FOLDRUN_DATE: localDate(timezone) };
+  const clockEnv = {
+    TZ: timezone,
+    FOLDRUN_DATE: localDate(timezone),
+    // Where the account's own search engine answers, when the install runs
+    // one — the `websearch` library tool reads it. Not a secret; rides with
+    // the clock so it reaches scripts, the sandbox and verify alike.
+    ...(process.env.FOLDRUN_SEARCH_URL ? { FOLDRUN_SEARCH_URL: process.env.FOLDRUN_SEARCH_URL } : {}),
+  };
 
   // Scripts declared as tools — callable by name, no bash required.
   const scriptTools = buildScriptTools(
@@ -1104,7 +1116,7 @@ async function runStep(
         "error",
         isOwnTool
           ? `tools: "${t}" is a tool defined in this workspace — grant it with \`use: [${t}]\`, not \`tools:\`. Nothing was granted for it.`
-          : `tools: "${t}" is not a tool group (web, read, files, bash) or an SDK tool name — nothing was granted for it`,
+          : `tools: "${t}" is not a tool group (web, fetch, read, files, bash) or an SDK tool name — nothing was granted for it`,
       );
     }
     for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
