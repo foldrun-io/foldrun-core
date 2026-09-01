@@ -2122,6 +2122,20 @@ export interface RunRecord {
    *  expressed only as a status, because "failed" and "someone stopped it"
    *  are different facts and the trace should not conflate them. */
   stopRequested?: boolean;
+  /**
+   * What this run concluded, in one line — the first line of the last step
+   * that produced a result, captured when the run finishes.
+   *
+   * A run has always recorded its status and its cost but never its outcome,
+   * so "what did this actually do" could only be answered by opening it and
+   * reading. That does not scale past a couple of flows, and the sentence was
+   * already sitting in the record: agents are asked to lead with it.
+   *
+   * Deliberately NOT a schema the author has to fill in. Nothing new goes in
+   * the folder, nothing new is learned, and an agent that writes no headline
+   * simply gets its first line — which is still better than a status.
+   */
+  summary?: string | null;
   steps: StepRecord[];
 }
 
@@ -2290,6 +2304,41 @@ export function runFailure(run: RunRecord): { agent: string; reason: string } | 
   const errors = step.events.filter((e) => e.type === "error");
   const last = errors[errors.length - 1];
   return { agent: step.agent, reason: last?.text ?? "failed without an error event" };
+}
+
+/**
+ * The one-line outcome, pulled out of the reply that already says it.
+ *
+ * The last step with a result, because that is the one that concluded —
+ * a reporter at the end of a flow, or on a failed run whatever got furthest,
+ * which is the most informative line available either way.
+ *
+ * Markdown decoration is stripped rather than rendered: this lands in an
+ * email subject and a table cell, where `## ` and `**` are noise. Sibling of
+ * runFailure, which puts the reason for a failure on the list for the same
+ * reason — the sentence was in the record all along.
+ */
+export function runSummary(run: RunRecord): string | null {
+  for (let i = run.steps.length - 1; i >= 0; i--) {
+    const result = run.steps[i].result;
+    if (!result) continue;
+    for (const raw of result.split("\n")) {
+      const line = raw
+        .replace(/^\s*#{1,6}\s+/, "") // heading
+        .replace(/^\s*[-*+]\s+/, "") // bullet
+        .replace(/^\s*>\s?/, "") // quote
+        .replace(/\*\*/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      // A line that is only markdown punctuation — a bare `#`, a `---` rule,
+      // a row of asterisks — is decoration, not a headline. Checked after the
+      // strips above rather than folded into them, because `#{1,6}\s*` would
+      // also eat the hash in a line that legitimately opens "#1 priority".
+      if (!line || /^[#>\-*_=\s]*$/.test(line)) continue;
+      return line.length > 200 ? `${line.slice(0, 197)}…` : line;
+    }
+  }
+  return null;
 }
 
 export function listRuns(tenant: string, workspace: string): RunRecord[] {

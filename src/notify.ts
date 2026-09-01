@@ -90,14 +90,23 @@ export async function sendRunNotification(
         ? `✗ ${run.flow} failed${failed.length ? ` at ${failed.join(", ")}` : ""}`
         : `⏸ ${run.flow} is waiting for your approval${waiting.length ? ` (${waiting.join(", ")})` : ""}`;
 
+  // What the run concluded, if it concluded anything. This is the whole point
+  // of the message: "✓ health completed · $0.42" tells you a thing ran and
+  // what it cost, and nothing at all about what it found. A scheduled desk
+  // reporting only its own existence is a desk nobody reads by week three.
+  const summary = run.summary?.trim() || null;
+
   const body = {
     // `text` is what Slack-shaped receivers render; the rest is for anything
     // that wants the data instead of the sentence.
-    text: `${headline} — ${workspace}/${run.id} · $${runCost(run).toFixed(4)}`,
+    text: summary
+      ? `${headline} — ${summary} · ${workspace}/${run.id} · $${runCost(run).toFixed(4)}`
+      : `${headline} — ${workspace}/${run.id} · $${runCost(run).toFixed(4)}`,
     workspace,
     runId: run.id,
     flow: run.flow,
     status: run.status,
+    summary,
     costUsd: runCost(run),
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
@@ -120,9 +129,15 @@ export async function sendRunNotification(
         body: JSON.stringify({
           from: "foldrun <onboarding@resend.dev>",
           to: config.email,
-          subject: body.text,
+          // The subject is the headline and what the run concluded, and
+          // nothing else. Ids and costs belong in the body: a subject line is
+          // read in a list, where the only useful question it can answer is
+          // whether this one needs opening.
+          subject: summary ? `${headline} — ${summary}`.slice(0, 160) : headline,
           text:
-            `${headline}\n\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
+            `${headline}\n` +
+            (summary ? `\n${summary}\n` : "") +
+            `\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
             `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n`,
         }),
         signal: AbortSignal.timeout(8000),

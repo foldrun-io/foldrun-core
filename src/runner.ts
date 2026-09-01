@@ -36,6 +36,7 @@ import {
   checkFormatVersion,
   readRun,
   writeRun,
+  runSummary,
   type FlowStep,
   type McpSpec,
   type RunRecord,
@@ -2378,6 +2379,12 @@ function driveRunInner(
     } finally {
       if (!parked) {
         run.finishedAt = new Date().toISOString();
+        // What this run concluded, in one line, captured before the record is
+        // saved for the last time. Read from the reply that already says it
+        // rather than asked for separately: the folder gains nothing to
+        // learn, and the runs list and the notification stop having to say
+        // only "completed".
+        run.summary = runSummary(run);
         // Archive before the next run resets outputs/ — a failed run's
         // artifacts are usually the most interesting ones, so this runs on
         // failure too.
