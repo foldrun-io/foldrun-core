@@ -99,11 +99,19 @@ export async function claimNextDb(owner: string): Promise<QueueJobRow | null> {
   return rows[0] ? toJob(rows[0]) : null;
 }
 
-/** The job is finished with — parked, completed or failed. */
+/**
+ * The job is finished with — parked, completed or failed.
+ *
+ * Only a row that is still CLAIMED goes: a run that parked on a `wait:`
+ * re-enqueues itself under the same run_id before the worker's finally
+ * reaches here, and the upsert clears claimed_at. Deleting by run_id alone
+ * took that resume job with it, and every run with a wait: step then sat
+ * `queued` forever with nothing in the queue to claim.
+ */
 export async function releaseDb(runId: string): Promise<void> {
   const p = db();
   if (!p) return;
-  await p.query(`DELETE FROM queue WHERE run_id = $1`, [runId]);
+  await p.query(`DELETE FROM queue WHERE run_id = $1 AND claimed_at IS NOT NULL`, [runId]);
 }
 
 /** Drop a run's job wherever it sits, for a stop. */

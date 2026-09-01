@@ -659,7 +659,11 @@ export async function materializeFiles(tenant: string, workspace: string): Promi
     const target = path.join(root, record.path);
     try {
       const stat = fs.statSync(target);
-      if (stat.size === record.size) continue; // already mirrored
+      // Same size is not proof — a date bumped by a day is the same length
+      // as the date before it. Confirm by hash, as the harvest does, before
+      // trusting the mirror: a stale copy here rides into the pod, and the
+      // harvest then writes it back over the upload that should have won.
+      if (stat.size === record.size && sha256(fs.readFileSync(target)) === record.sha) continue;
     } catch {
       // not there yet
     }

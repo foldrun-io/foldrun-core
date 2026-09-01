@@ -251,6 +251,34 @@ function workspaceFrontmatter(agentDir: string, tenant: string): Record<string, 
 }
 
 /**
+ * The calendar an agent works to. `timezone:` in AGENTS.md, nearest-wins like
+ * every other key there; a flow's cron already means its own timezone, this
+ * makes "today" mean it too. Unset is UTC — what the pods run — which for a
+ * Sydney desk made an article dated today "one day in the future" until 10am.
+ * An unknown name falls back to UTC rather than failing every step.
+ */
+export function resolveTimezone(front: Record<string, unknown>): string {
+  const tz = typeof front.timezone === "string" ? front.timezone.trim() : "";
+  const chosen = tz || process.env.FOLDRUN_TIMEZONE?.trim() || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: chosen });
+    return chosen;
+  } catch {
+    return "UTC";
+  }
+}
+
+/** YYYY-MM-DD in a timezone — the date the workspace believes it is. */
+export function localDate(timeZone: string, now = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+}
+
+/**
  * The prose from AGENTS.md, outermost first.
  *
  * This was written by every scaffold, shown in the dashboard, described in the
@@ -821,6 +849,12 @@ function agentContext(
     runtimeError = runtime.error;
   }
 
+  // What day it is, in the workspace's own timezone. Not a secret, so it
+  // travels beside secretEnv rather than inside it — a value in there is
+  // redacted from every log line that quotes it.
+  const timezone = resolveTimezone(workspaceFrontmatter(agentDir, tenant));
+  const clockEnv = { TZ: timezone, FOLDRUN_DATE: localDate(timezone) };
+
   // Scripts declared as tools — callable by name, no bash required.
   const scriptTools = buildScriptTools(
     agentDir,
@@ -834,11 +868,15 @@ function agentContext(
       ...secretEnv,
       ...(identity.runId ? { FOLDRUN_RUN_ID: identity.runId } : {}),
       ...(identity.agent ? { FOLDRUN_AGENT: identity.agent } : {}),
-      FOLDRUN_DATE: new Date().toISOString().slice(0, 10),
+      ...clockEnv,
     },
     libraryDir(tenant, "scripts"),
     runtime.interpreters,
     exec,
+  );
+  parts.push(
+    `# Clock\n\nToday is ${clockEnv.FOLDRUN_DATE} (${timezone}). Use this date for anything you ` +
+    `write or check — it is the workspace's calendar, not the container's clock.`,
   );
   if (scriptTools.promptLines.length) {
     parts.push(
@@ -910,6 +948,7 @@ function agentContext(
 
   return {
     front,
+    clockEnv,
     systemPrompt: parts.join("\n\n"),
     allowed: finalAllowed,
     disabled,
@@ -1026,7 +1065,7 @@ async function runStep(
 
   try {
     const {
-      front, systemPrompt, allowed, disabled, apiTools, scriptTools,
+      front, clockEnv, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size,
@@ -1283,6 +1322,7 @@ async function runStep(
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
             ...(Object.keys(providerEnv).length === 0 ? modelEnv : {}),
+            ...clockEnv,
             ...liveSecrets,
             ...providerEnv,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -1387,7 +1427,7 @@ async function runStep(
         env: (() => {
           const mat = materializeFileSecrets(agentDir, liveSecrets);
           fileDir = mat.dir;
-          return { ...process.env, ...mat.env, ...providerEnv };
+          return { ...process.env, ...clockEnv, ...mat.env, ...providerEnv };
         })(),
         timeoutSec: step.timeout,
         verify: step.verify,
