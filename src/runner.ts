@@ -2298,12 +2298,17 @@ function driveRunInner(
             });
             if (picks.length >= 5) break;
           }
+          // Delegating to nobody is a legitimate answer, not a fault: a
+          // `delegate:` set is who the step MAY call on, and most runs of a
+          // healthy flow need none of them. Logging that as an error put a
+          // red line on a step that did exactly the right thing, which is
+          // how a person learns to stop reading red lines.
           chooser.events.push({
             t: new Date().toISOString(),
-            type: picks.length ? "info" : "error",
+            type: "info",
             text: picks.length
               ? `delegated to ${picks.map((p) => `[[${p.agent}]]`).join(", ")}`
-              : `delegate: no valid picks found in the result (allowed: ${chooser.delegate.join(", ")})`,
+              : `delegate: chose nobody (could have called on ${chooser.delegate.join(", ")})`,
           });
           if (picks.length) {
             run.steps.splice(run.steps.indexOf(chooser) + 1, 0, ...picks);
