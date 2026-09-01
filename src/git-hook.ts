@@ -20,7 +20,9 @@ if (!dir) process.exit(0);
 // skills and knowledge and has no agents by definition. The workspace rules
 // refused every push to it with "no agents". Its sync (syncLibraryFromTree)
 // validates what it accepts on receive; nothing here to add yet.
-if (path.basename(dir.replace(/\/+$/, "")) === "_library.git") process.exit(0);
+// Inside a hook git sets GIT_DIR relative to the repo ("."), so resolve it
+// against the cwd before asking for its name.
+if (path.basename(path.resolve(process.cwd(), dir)) === "_library.git") process.exit(0);
 
 const input = fs.readFileSync(0, "utf8");
 const git = (args: string[]) => {
