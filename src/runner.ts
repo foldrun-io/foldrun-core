@@ -1556,6 +1556,7 @@ async function runStep(
       }
       step.status = outcome.status;
       step.result = outcome.result;
+      step.conclusion = outcome.conclusion;
       if (outcome.data !== undefined) step.data = outcome.data;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
       step.tokens = outcome.usage
@@ -1658,6 +1659,7 @@ async function runStep(
       }
       step.status = outcome.status;
       step.result = outcome.result;
+      step.conclusion = outcome.conclusion;
       if (outcome.data !== undefined) step.data = outcome.data;
       // A consult's spend belongs to the step that asked.
       const consultCost = consultTools.drainCost();
@@ -2557,6 +2559,7 @@ function driveRunInner(
           if (rescueOutcome === "completed") {
             step.status = "completed";
             step.result = rescue.result;
+            step.conclusion = rescue.conclusion;
             if (rescue.data !== undefined) step.data = rescue.data;
             step.events.push({
               t: new Date().toISOString(),

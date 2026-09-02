@@ -99,6 +99,9 @@ export interface StepActuals {
 export interface ContainerStepOutcome {
   status: "completed" | "failed";
   result: string | null;
+  /** The model's final text block — see StepRecord.conclusion. Crosses the
+   *  boundary with the rest of the outcome; the driver spreads it. */
+  conclusion?: string | null;
   /** The parsed JSON of an `output: json` step, crossing back as a value. */
   data?: unknown;
   costUsd: number | null;
@@ -498,6 +501,7 @@ export function parseDriverLine(
         e: "done",
         status: parsed.status === "completed" ? "completed" : "failed",
         result: typeof parsed.result === "string" ? parsed.result : null,
+        conclusion: typeof parsed.conclusion === "string" ? parsed.conclusion : null,
         ...("data" in parsed ? { data: parsed.data } : {}),
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
         usage:

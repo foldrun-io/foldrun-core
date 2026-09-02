@@ -2248,6 +2248,10 @@ export interface StepRecord {
     | "skipped";
   events: RunEvent[];
   result: string | null;
+  /** The model's final text block — its answer, without the narration that
+   *  preceded the tool calls. Absent on steps recorded before this existed,
+   *  which is why every reader falls back to `result`. */
+  conclusion?: string | null;
   costUsd: number | null;
   /** Set on steps copied into a re-run from an earlier run: the run they
    *  actually executed in. Carried steps provide context and are never
@@ -2511,10 +2515,24 @@ export function runFailure(run: RunRecord): { agent: string; reason: string } | 
  */
 export function runSummary(run: RunRecord): string | null {
   for (let i = run.steps.length - 1; i >= 0; i--) {
-    const line = headlineOf(run.steps[i].result);
+    const line = stepHeadline(run.steps[i]);
     if (line) return line;
   }
   return null;
+}
+
+/**
+ * What one step concluded, in a line.
+ *
+ * The model's ANSWER first, falling back to the whole reply. `result` is every
+ * text block joined, and a model that narrates before calling a tool puts
+ * "Now let me read the outputs…" at the top of it — so reading the joined
+ * text reported the plan of every step that used a tool, which is most of
+ * them. Steps recorded before `conclusion` existed have only `result`, and
+ * for those this is exactly what it always was.
+ */
+export function stepHeadline(step: StepRecord): string | null {
+  return headlineOf(step.conclusion) ?? headlineOf(step.result);
 }
 
 /**
@@ -2588,7 +2606,7 @@ export function listAgentSteps(tenant: string, workspace: string, agent: string)
         flow: run.flow,
         status: run.status,
         startedAt: run.startedAt,
-        headline: headlineOf(step.result),
+        headline: stepHeadline(step),
         instruction: step.instruction,
         stepStatus: step.status,
         costUsd: step.costUsd,

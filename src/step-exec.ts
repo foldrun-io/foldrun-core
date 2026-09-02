@@ -19,6 +19,10 @@ import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 export interface ExecOutcome {
   status: "completed" | "failed";
   result: string | null;
+  /** The LAST text block, which is the model's answer. `result` is every
+   *  block joined, and the first of those is usually narration before a tool
+   *  call — so anything wanting "what did this conclude" must read this. */
+  conclusion: string | null;
   /** The JSON an `output: json` step returned — parsed, so the next step
    *  gets the value and not a re-extraction of it from prose. Undefined for
    *  a step that declared no output shape. */
@@ -184,6 +188,12 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     );
   }
   const result = texts.join("\n").trim() || null;
+  // A step's reply is not one message: the model narrates ("Now let me read
+  // the outputs…"), calls tools, and answers last. Joining those and reading
+  // the first line — which is what the run summary did — reports the plan
+  // and never the outcome. The final block is the answer; keep it so the
+  // summary has something true to read.
+  const conclusion = texts.at(-1)?.trim() || null;
 
   // output: json — the declared shape is a contract, checked here where both
   // executors run. A reply with no JSON in it is not "done with a caveat";
@@ -213,7 +223,7 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     if (!verdict.ok) status = "failed";
   }
 
-  return { status, result, ...(opts.output ? { data } : {}), costUsd, usage };
+  return { status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage };
 }
 
 // ------------------------------------------------------------ output: json
