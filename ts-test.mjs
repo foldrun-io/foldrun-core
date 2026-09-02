@@ -48,10 +48,25 @@ if (!fs.existsSync(tsc)) {
   process.exit(2);
 }
 
-// Inside the repo, not /tmp: the compiled core still imports `gray-matter`
-// and the SDK by bare name, and Node resolves those by walking up from the
-// file — which from /tmp finds nothing. Dot-prefixed because it is generated,
-// and removed in the finally below.
+// Compile the TEST only, and link it against the built dist rather than
+// against a compiled copy of core.
+//
+// Compiling core into a scratch tree looked simpler and was wrong: core finds
+// its own package root by walking up for a package.json named @foldrun/core,
+// and uses it to `npm pack` itself into the runner image's build context. A
+// scratch tree has no manifest, no tsconfig and no lockfile, so the container
+// e2e died three different ways as each was faked in turn. dist is the real
+// package — and it is what production runs, so the test exercises the same
+// artifact rather than a lookalike.
+const dist = path.join(ROOT, "packages/core/dist");
+if (!fs.existsSync(dist)) {
+  console.error("[ts-test] packages/core/dist is missing — building it");
+  if (run("npm", ["run", "build"]) !== 0) {
+    console.error("[ts-test] the build failed");
+    process.exit(2);
+  }
+}
+
 // A run killed mid-flight leaves its directory; a leftover one inside the
 // repo is what a deploy trips over, so clear them before making a new one.
 for (const stale of fs.readdirSync(ROOT).filter((f) => f.startsWith(".ts-test-"))) {
@@ -62,8 +77,7 @@ for (const stale of fs.readdirSync(ROOT).filter((f) => f.startsWith(".ts-test-")
   }
 }
 const out = fs.mkdtempSync(path.join(ROOT, ".ts-test-"));
-// Core's own options, so a test compiles exactly the way the code it imports
-// does — including the two that let a `.ts` extension appear in an import.
+
 const core = JSON.parse(fs.readFileSync(path.join(ROOT, "packages/core/tsconfig.json"), "utf8"));
 const config = {
   compilerOptions: {
@@ -72,35 +86,38 @@ const config = {
     rootDir: ".",
     declaration: false,
     noEmit: false,
-    // Types come from the one place this repo installs them.
-    typeRoots: ["./web/node_modules/@types", "./node_modules/@types"],
-    // A test that fails to typecheck should still be runnable: the point here
-    // is to exercise a cluster, not to re-run the typecheck `npm run build`
-    // already does.
     noEmitOnError: false,
+    // The test's imports of core resolve against the sources for typing; the
+    // emitted JS is repointed at dist below.
+    typeRoots: ["./web/node_modules/@types", "./node_modules/@types"],
   },
-  // Core's own sources, not its tests: `packages/core/**/*.ts` drags in
-  // *.test.ts, which core's tsconfig excludes and which therefore does not
-  // typecheck — pages of unrelated errors burying the one that matters.
-  include: [...files, "packages/core/index.ts", "packages/core/src/**/*.ts"],
+  include: files,
 };
 const configPath = path.join(ROOT, `tsconfig.ts-test.${process.pid}.json`);
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
-// `process.exit()` does not run `finally`, so calling it inside the block
-// below leaked the build directory on every run. Under sudo those are
-// root-owned, and rsync — which deploys as an ordinary user — then cannot
-// read or delete them: `deploy exit 23`, from a test runner. Compute the
-// code, clean up, exit last.
 let code = 2;
 try {
-  // Type errors are reported and do not stop the run — see noEmitOnError.
+  // Type errors are reported and do not stop the run — the point here is to
+  // exercise a cluster or a daemon, not to re-run `npm run build`'s typecheck.
   run(tsc, ["-p", configPath]);
   const compiled = files.map((f) => path.join(out, f.replace(/\.ts$/, ".js")));
   const missing = compiled.filter((f) => !fs.existsSync(f));
   if (missing.length) {
     console.error(`[ts-test] tsc produced no output for:\n  ${missing.join("\n  ")}`);
   } else {
+    // `../packages/core/src/x.js` → the real built module. tsc has already
+    // rewritten the .ts extension (rewriteRelativeImportExtensions), so only
+    // the location is wrong.
+    const distUrl = new URL(`${dist}/`, "file://").href;
+    for (const file of compiled) {
+      const src = fs.readFileSync(file, "utf8");
+      fs.writeFileSync(
+        file,
+        src.replaceAll(/(from\s+|import\()(["'])(?:\.\.\/)+packages\/core\/(?:src\/)?/g,
+          (_m, kw, q) => `${kw}${q}${distUrl}src/`),
+      );
+    }
     code = run(process.execPath, ["--test", ...flags, ...compiled]);
   }
 } finally {
