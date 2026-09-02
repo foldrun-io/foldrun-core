@@ -29,6 +29,7 @@ import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
+import { providerPreset, looksOpenAiShaped, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
@@ -2526,6 +2527,13 @@ export function listRuns(tenant: string, workspace: string): RunRecord[] {
  * so neither grows a per-vendor branch in here.
  */
 export interface ProviderSpec {
+  /** The preset this block was built from, when `name:` named one. */
+  name: string | null;
+  /** What the endpoint speaks. `anthropic` is reached directly; `openai`
+   *  through the runtime's own translator on localhost (translator.ts). */
+  format: WireFormat;
+  /** Which header carries the key on an Anthropic-format endpoint. */
+  auth: AuthShape;
   baseUrl: string;
   /** May still contain `${SECRET}` — resolving needs a tenant. */
   token: string;
@@ -2552,8 +2560,33 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
   const block = raw as Record<string, unknown>;
   const warnings: string[] = [];
 
-  const baseUrl = typeof block.base_url === "string" ? block.base_url.trim() : "";
+  // A name resolves to defaults; anything spelled out beside it wins. An
+  // unknown name is a warning and the block reads as if it were absent,
+  // because guessing a URL from a name is how a key ends up at a stranger.
+  const preset = providerPreset(block.name);
+  if (block.name !== undefined && !preset) {
+    warnings.push(`provider.name: "${String(block.name)}" is not a provider this runtime knows — spell out base_url, format and auth instead`);
+  }
+  const baseUrl = (typeof block.base_url === "string" ? block.base_url.trim() : "") || preset?.baseUrl || "";
   const token = typeof block.token === "string" ? block.token.trim() : "";
+  const formatRaw = typeof block.format === "string" ? block.format.trim().toLowerCase() : "";
+  let format: WireFormat = preset?.format ?? "anthropic";
+  if (formatRaw === "anthropic" || formatRaw === "openai") format = formatRaw;
+  else if (formatRaw) warnings.push(`provider.format: "${formatRaw}" is not anthropic or openai — using ${format}`);
+  const authRaw = typeof block.auth === "string" ? block.auth.trim().toLowerCase() : "";
+  let auth: AuthShape = preset?.auth ?? "bearer";
+  if (authRaw === "bearer" || authRaw === "x-api-key") auth = authRaw;
+  else if (authRaw === "api-key" || authRaw === "key" || authRaw === "header") auth = "x-api-key";
+  else if (authRaw) warnings.push(`provider.auth: "${authRaw}" is not bearer or x-api-key — using ${auth}`);
+  if (preset && !baseUrl) {
+    warnings.push(`provider.name: ${preset.name} needs a base_url — ${preset.note ?? "its address is per account"}`);
+  }
+  // A pasted Chat-Completions URL with no format: the runtime would speak
+  // Anthropic at it and get a 404 from the wrong path. Said here, at the
+  // file, not there.
+  if (format === "anthropic" && !preset && baseUrl && looksOpenAiShaped(baseUrl)) {
+    warnings.push(`provider.base_url looks like a Chat-Completions endpoint — add \`format: openai\` to reach it through the translator`);
+  }
 
   const models: Partial<Record<Tier, string>> = {};
   if (block.models && typeof block.models === "object" && !Array.isArray(block.models)) {
@@ -2611,7 +2644,7 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
     }
   }
 
-  return { baseUrl, token, models, headers, warnings, fallback };
+  return { name: preset?.name ?? null, format, auth, baseUrl, token, models, headers, warnings, fallback };
 }
 
 /** The env the SDK reads for a tier remap. Our tier names are ours; these
@@ -2640,14 +2673,24 @@ export function providerEnvFor(spec: {
   baseUrl?: string;
   /** Already secret-substituted. */
   token?: string;
+  /** Which header the key rides in. Bearer unless the endpoint says
+   *  otherwise: the SDK sends ANTHROPIC_API_KEY as x-api-key and
+   *  ANTHROPIC_AUTH_TOKEN as a bearer, and blanks the other so it cannot
+   *  fall back to Anthropic's own endpoint with the wrong credential. */
+  auth?: AuthShape;
   models: Partial<Record<Tier, string>>;
   headers: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {};
   if (spec.baseUrl) env.ANTHROPIC_BASE_URL = spec.baseUrl;
   if (spec.token) {
-    env.ANTHROPIC_AUTH_TOKEN = spec.token;
-    env.ANTHROPIC_API_KEY = "";
+    if (spec.auth === "x-api-key") {
+      env.ANTHROPIC_API_KEY = spec.token;
+      env.ANTHROPIC_AUTH_TOKEN = "";
+    } else {
+      env.ANTHROPIC_AUTH_TOKEN = spec.token;
+      env.ANTHROPIC_API_KEY = "";
+    }
   }
   for (const [tier, id] of Object.entries(spec.models)) {
     if (id) env[TIER_ENV[tier as Tier]] = id;

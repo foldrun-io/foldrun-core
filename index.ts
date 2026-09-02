@@ -16,6 +16,8 @@ export * from "./src/evals.ts";
 export * from "./src/flow-lint.ts";
 export * from "./src/catalog.ts";
 export * from "./src/model-probe.ts";
+export * from "./src/providers.ts";
+export * from "./src/translator.ts";
 export * from "./src/arrange.ts";
 export * from "./src/completions.ts";
 export * from "./src/confine.ts";

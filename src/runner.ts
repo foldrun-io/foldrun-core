@@ -52,6 +52,8 @@ import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { attachOperations, prefetchOpenApi } from "./openapi.ts";
 import { buildSearchTools, buildHistoryTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
+import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
+import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
@@ -813,6 +815,11 @@ function agentContext(
   // names none; the platform's own fallback still applies to a step that
   // rides the platform credential.
   let fallbackEnv: Record<string, string> | null = null;
+  // A Chat-Completions endpoint is reached through the runtime's own
+  // translator; these are its instructions, as values, or null when the
+  // block speaks Anthropic. One for the primary, one for the fallback.
+  let translator: TranslatorSpec | null = null;
+  let fallbackTranslator: TranslatorSpec | null = null;
   const spec = parseProvider(providerBlock);
   if (spec) {
     providerWarnings.push(...spec.warnings);
@@ -831,13 +838,24 @@ function agentContext(
       providerEnv = providerEnvFor({
         baseUrl: spec.baseUrl,
         token: resolved,
+        auth: spec.auth,
         models: spec.models,
         headers,
+      });
+      const preset = providerPreset(spec.name);
+      translator = translatorSpecFor({
+        format: spec.format,
+        baseUrl: spec.baseUrl,
+        token: resolved,
+        headers,
+        name: spec.name,
+        maxTokensParam: preset?.maxTokensParam,
+        reasoningEffort: preset?.reasoningEffort,
       });
       // What the run is actually pointed at, in one line: the endpoint, the
       // tiers this gateway renames, and whether the credential landed.
       const remapped = Object.entries(spec.models).map(([tier, id]) => `${tier}→${id}`);
-      providerLabel = spec.baseUrl;
+      providerLabel = (spec.name ? `${spec.name} ` : "") + spec.baseUrl + (translator ? " via translator" : "");
       if (remapped.length) providerLabel += ` (${remapped.join(", ")})`;
       // An unresolved ${SECRET} would silently fall back to Anthropic's
       // endpoint with the host's key — say so instead.
@@ -848,8 +866,19 @@ function agentContext(
     if (spec.fallback?.baseUrl) {
       const fb = spec.fallback;
       const headers = Object.fromEntries(Object.entries(fb.headers).map(([k, v]) => [k, substitute(v)]));
-      fallbackEnv = providerEnvFor({ baseUrl: fb.baseUrl, token: substitute(fb.token), models: fb.models, headers });
-      providerLabel = `${providerLabel ?? "platform"} (fallback: ${fb.baseUrl})`;
+      const fbToken = substitute(fb.token);
+      fallbackEnv = providerEnvFor({ baseUrl: fb.baseUrl, token: fbToken, auth: fb.auth, models: fb.models, headers });
+      const fbPreset = providerPreset(fb.name);
+      fallbackTranslator = translatorSpecFor({
+        format: fb.format,
+        baseUrl: fb.baseUrl,
+        token: fbToken,
+        headers,
+        name: fb.name,
+        maxTokensParam: fbPreset?.maxTokensParam,
+        reasoningEffort: fbPreset?.reasoningEffort,
+      });
+      providerLabel = `${providerLabel ?? "platform"} (fallback: ${fb.name ?? fb.baseUrl})`;
     }
   }
 
@@ -1063,6 +1092,8 @@ function agentContext(
     providerSecrets,
     providerWarnings,
     fallbackEnv,
+    translator,
+    fallbackTranslator,
     apiWarnings,
     secretScopes,
     missingTools,
@@ -1184,6 +1215,7 @@ async function runStep(
       apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, searchTools, historyTools,
+      translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
 
     // oauth2 secrets become live access tokens here — the one async moment
@@ -1290,6 +1322,9 @@ async function runStep(
     // path — the main one — without any of them.
     const rideEnv: Record<string, string | undefined> =
       Object.keys(providerEnv).length > 0 ? providerEnv : process.env;
+    // Through the translator the endpoint is localhost and the model id is
+    // the provider's own, sent as written; there is no catalogue to ask.
+    if (translator) push("info", `translator: ${translator.label} — Anthropic Messages in, Chat Completions out`);
     // What actually goes on the wire: a tier the gateway remapped is sent
     // as the gateway's id, and that id — not our tier word — is what the
     // catalogue can have an opinion about.
@@ -1297,7 +1332,7 @@ async function runStep(
       { haiku: rideEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
         sonnet: rideEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
         opus: rideEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
-    if (rideEnv.ANTHROPIC_BASE_URL) {
+    if (rideEnv.ANTHROPIC_BASE_URL && !translator) {
       catalog = await loadCatalog(rideEnv.ANTHROPIC_BASE_URL);
       const needsTools = allowed.length > 0 || mcpNames.length > 0;
       const verdict = checkModel(catalog, wireModel, { tools: needsTools });
@@ -1463,6 +1498,7 @@ async function runStep(
           timeoutSec: step.timeout,
           verify: step.verify,
           output: step.output,
+          translator,
           // The container sees the workspace at /workspace and the library
           // at /library; the roots are named host-side and moved here.
           search: searchRoots.map((r) => ({
@@ -1513,7 +1549,13 @@ async function runStep(
         );
         const first = outcome.timing;
         const retryArgs = isolatedArgs(secondSupply);
-        outcome = await runIsolated({ ...retryArgs, env: { ...retryArgs.env, ...secondSupply } });
+        // The fallback's own translator, or none: a fallback that speaks
+        // Anthropic must not inherit the primary's Chat-Completions door.
+        outcome = await runIsolated({
+          ...retryArgs,
+          input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null },
+          env: { ...retryArgs.env, ...secondSupply },
+        });
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
@@ -1606,7 +1648,19 @@ async function runStep(
         },
         emit: pushWatching,
       });
-      let outcome = await attemptInProcess(providerEnv);
+      // With a translator the step's endpoint is the translator: started
+      // here, pointed at by the SDK's env, closed when the attempt ends.
+      const attemptThrough = async (modelEnv: Record<string, string | undefined>, spec: TranslatorSpec | null) => {
+        if (!spec) return attemptInProcess(modelEnv);
+        const t = await startTranslator(spec);
+        try {
+          return await attemptInProcess({ ...modelEnv, ...t.env });
+        } finally {
+          for (const line of t.drainLog()) push("info", line.startsWith("translator") ? line : `translator: ${line}`);
+          await t.close();
+        }
+      };
+      let outcome = await attemptThrough(providerEnv, translator);
       // Same rule as the isolated path: one retry, on a refusal, on the
       // declared or platform second supply.
       if (outcome.status === "failed" && lastRefusal && secondSupply) {
@@ -1614,7 +1668,7 @@ async function runStep(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
-        outcome = await attemptInProcess(secondSupply);
+        outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
       step.status = outcome.status;
       step.result = outcome.result;

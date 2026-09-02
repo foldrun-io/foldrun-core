@@ -31,6 +31,7 @@ import { dataRoot } from "./paths.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
+import type { TranslatorSpec } from "./translator.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -64,6 +65,10 @@ export interface ContainerStepInput {
   search?: SearchRoot[];
   /** tools: [history] — the workspace's recent runs, gathered host-side. */
   history?: RunDigest[];
+  /** A Chat-Completions provider: the driver starts the runtime's translator
+   *  on loopback and points the SDK at it. Null or absent: the env's
+   *  ANTHROPIC_BASE_URL is spoken to directly. */
+  translator?: TranslatorSpec | null;
 }
 
 /**
@@ -269,6 +274,7 @@ try {
   const { buildScriptTools } = await import("@foldrun/core/script-tools");
   const { buildConsultTools } = await import("@foldrun/core/agent-tools");
   const { buildSearchTools, buildHistoryTools } = await import("@foldrun/core/context-tools");
+  const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
 
@@ -306,6 +312,14 @@ try {
     "/library/scripts",
     runtime.interpreters,
   );
+  // The translator, when the provider speaks Chat Completions: a loopback
+  // server for the length of this step. Its env replaces the endpoint the
+  // host assembled; the provider's real URL and key stay inside it.
+  const translator = input.translator ? await startTranslator(input.translator) : null;
+  if (translator) {
+    Object.assign(env, translator.env);
+    emit("info", "translator: listening on " + translator.baseUrl + " for " + (input.translator.label ?? input.translator.upstreamBase));
+  }
   const consult = buildConsultTools(input.consults ?? [], env, emit);
   // The platform's own two groups, rebuilt from values like everything else.
   const search = buildSearchTools(input.search ?? []);
@@ -341,6 +355,10 @@ try {
   });
   for (const line of api.drainLog()) emit("info", "api: " + line);
   for (const line of script.drainLog()) emit("info", "script: " + line);
+  if (translator) {
+    for (const line of translator.drainLog()) emit("info", line.startsWith("translator") ? line : "translator: " + line);
+    await translator.close();
+  }
   // A consult's spend belongs to the step that asked.
   const consultCost = consult.drainCost();
   if (consultCost > 0) outcome.costUsd = (outcome.costUsd ?? 0) + consultCost;

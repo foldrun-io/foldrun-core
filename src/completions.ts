@@ -9,6 +9,8 @@
 // go here. No React, no fetch — so the rules are testable and one component
 // renders them.
 
+import { PROVIDERS } from "./providers.ts";
+
 export interface Vocabulary {
   agents: string[];
   flows: string[];
@@ -143,7 +145,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "disallowedTools", insert: "disallowedTools:\n  - " },
     {
       label: "provider",
-      insert: "provider:\n  base_url: https://\n  token: ${PROVIDER_TOKEN}",
+      insert: "provider:\n  name: \n  token: ${PROVIDER_TOKEN}",
       hint: "an Anthropic-compatible endpoint — omit for Anthropic",
     },
     {
@@ -498,6 +500,15 @@ export function completionsAt(
         { label: "judge: ", hint: "a fast model grades the reply against this sentence" },
       ],
       output: [{ label: "json", hint: "the reply ends with one ```json block" }],
+      name: PROVIDERS.map((p) => ({ label: p.name, hint: `${p.title} — ${p.format}${p.baseUrl ? "" : ", needs base_url"}` })),
+      format: [
+        { label: "anthropic", hint: "spoken to directly (the default)" },
+        { label: "openai", hint: "Chat Completions — through the runtime's translator" },
+      ],
+      auth: [
+        { label: "bearer", hint: "authorization: Bearer (the default)" },
+        { label: "x-api-key", hint: "Anthropic, DeepSeek, Ollama, Cloudflare" },
+      ],
       each: [
         { label: "lines", hint: "one instance per line of the previous result" },
         { label: "items", hint: "one per element of the previous output: json array" },
