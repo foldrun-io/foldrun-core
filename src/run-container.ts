@@ -573,6 +573,35 @@ export interface RunInContainerArgs {
 /** The limits a size class reserves. Large is the install's configured
  *  limits unchanged, so existing installs bill and behave identically;
  *  small defaults to a quarter-ish slice and is env-tunable. */
+/**
+ * A memory figure Kubernetes will accept.
+ *
+ * `sizeLimits` speaks Docker, because that is who asked first: `--memory 2g`.
+ * Kubernetes wants a quantity — `2Gi` — and rejects the lowercase form with
+ * "quantities must match the regular expression", which names neither the
+ * field nor the value. The default size returns `2g`, so every default-size
+ * step failed to create a pod on any install that had not overridden
+ * FOLDRUN_RUNNER_MEMORY. These manifests do override it, which is why this
+ * survived: it broke for self-hosters and for nobody testing here.
+ *
+ * Docker's suffixes are binary, so `g` is `Gi` and not `G`. A value that is
+ * already a Kubernetes quantity passes through, and an unrecognised one is
+ * handed over unchanged so the cluster's own error is the one you read.
+ *
+ * Case decides, because one suffix is ambiguous: `k` is a legal Kubernetes
+ * decimal suffix AND Docker's kibibytes. Everything this is given comes from
+ * sizeLimits, which speaks Docker, so lowercase is read as Docker's — the
+ * difference is 2.4% on a memory limit and the alternative is silently
+ * misreading the default.
+ */
+export function k8sMemory(value: string): string {
+  const s = String(value).trim();
+  if (/^\d+(\.\d+)?(Ki|Mi|Gi|Ti|Pi|[KMGTP])?$/.test(s)) return s;
+  const m = s.match(/^(\d+(?:\.\d+)?)([bkmgt])$/);
+  if (!m) return s;
+  return `${m[1]}${{ b: "", k: "Ki", m: "Mi", g: "Gi", t: "Ti" }[m[2]]}`;
+}
+
 export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
   if (size === "small") {
     return {

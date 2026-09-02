@@ -26,6 +26,7 @@ import {
   parseDriverLine,
   timingLine,
   sizeLimits,
+  k8sMemory,
   RUN_LABEL,
   RUNTIME_CACHE,
   type ContainerStepOutcome,
@@ -192,7 +193,7 @@ export function runPodManifest(
             // install is every tenant's runs and the control plane at once.
             requests: { cpu: "100m" },
             limits: {
-              memory: sizeLimits(size).memory,
+              memory: k8sMemory(sizeLimits(size).memory),
             },
           },
           ...(cache
