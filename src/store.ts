@@ -756,6 +756,13 @@ export interface AgentInfo {
   /** Names still written under the removed `use:` key. Nothing is granted
    *  for them; `foldrun check` and the run log say what to write instead. */
   legacyUse: string[];
+  /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
+   *  consult_<name> tool. The team's edges, as the author drew them. */
+  consults: string[];
+  /** The `skills:` allowlist, or null when the field is absent — which is
+   *  not the same thing: absent inherits every skill in scope, an empty
+   *  list withholds all of them. */
+  skills: string[] | null;
   secrets: string[];
 }
 
@@ -1151,6 +1158,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         apis: parseApis(data.apis),
         ownTools: ownToolNames(data),
         legacyUse: legacyUseNames(data),
+        consults: refNames(data.agents),
+        skills: data.skills === undefined ? null : refNames(data.skills),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
       };
     });
@@ -1259,14 +1268,13 @@ export function parseFlow(file: string, raw: string): FlowInfo {
           step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
         }
       }
-      else if (key === "on-fail" || key === "onfail") step.onFail = value.replace(/^\[\[|\]\]$/g, "");
+      else if (key === "on-fail" || key === "onfail") step.onFail = refNames(value)[0] ?? undefined;
       else if (key === "wait") {
         if (/^event$/i.test(value)) step.waitFor = "event";
         else step.waitSecs = parseWait(value);
       }
       else if (key === "ask") { step.ask = value; }
-      else if (key === "delegate")
-        step.delegate = value.split(",").map((v) => v.trim().replace(/^\[\[|\]\]$/g, "")).filter(Boolean).slice(0, 5);
+      else if (key === "delegate") step.delegate = refNames(value).slice(0, 5);
       else if (key === "max") step.max = Math.min(20, Math.max(1, Number(value) || 0)) || undefined;
     }
   }

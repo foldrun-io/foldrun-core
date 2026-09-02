@@ -28,8 +28,16 @@ export interface FlowWarning {
 const REFERS_BACK =
   /\b(both|above|earlier|previous(ly)?|prior|the (changes|draft|research|results|findings|report|article|fixes|work)|what (they|the others?) (found|shipped|wrote|said))\b/i;
 
-export function lintFlow(flow: FlowInfo): FlowWarning[] {
+/** What exists in the workspace, when the caller knows. Optional: the lint
+ *  is useful without it, and a caller that has the lists gets the reference
+ *  checks too. */
+export interface KnownNames {
+  agents: string[];
+}
+
+export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   const warnings: FlowWarning[] = [];
+  const agentNames = known ? new Set(known.agents) : null;
 
   // Cron's oldest trap, and an expensive one: when day-of-month AND
   // day-of-week are both restricted they are OR'd, not AND'd — the scheduler
@@ -108,6 +116,48 @@ export function lintFlow(flow: FlowInfo): FlowWarning[] {
             "Add `output: json` to the step that produces the list.",
         });
       }
+    }
+
+    // A step's OTHER agent references — the ones no parser validates,
+    // because they are options rather than the step's target. Both fail
+    // silently and at the worst possible moment: a misspelled `delegate:`
+    // name is simply never chosen (the runner filters picks to the declared
+    // set), and a misspelled `on-fail:` is discovered only once something
+    // has already gone wrong.
+    if (agentNames) {
+      for (const name of step.delegate ?? []) {
+        if (!agentNames.has(name)) {
+          warnings.push({
+            step: i,
+            line: step.line,
+            message: `delegate: "${name}" is not an agent in this workspace`,
+            detail:
+              "The runner only accepts picks from the declared set, so this name can never be " +
+              "chosen — the step silently has one fewer colleague to call on. Fix the spelling, " +
+              "or drop the name.",
+          });
+        }
+      }
+      if (step.onFail && !agentNames.has(step.onFail)) {
+        warnings.push({
+          step: i,
+          line: step.line,
+          message: `on-fail: "${step.onFail}" is not an agent in this workspace`,
+          detail:
+            "The recovery path is the one you cannot test by running the flow successfully. As " +
+            "written, a failure here has nowhere to go and the step just fails.",
+        });
+      }
+    }
+    if (step.onFail && step.onFail === step.agent && !step.subflow) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        message: `on-fail: "${step.onFail}" is the agent that just failed`,
+        detail:
+          "The same agent is handed the same instruction with its own failure as context. That is " +
+          "`retry:` with extra steps — name a different agent, or use retry:.",
+      });
     }
 
     // `when:` tests the previous results, which the first group doesn't have.

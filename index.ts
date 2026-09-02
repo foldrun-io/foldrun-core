@@ -24,6 +24,8 @@ export * from "./src/confine.ts";
 export * from "./src/library.ts";
 export * from "./src/tool-programs.ts";
 export * from "./src/linkable.ts";
+export * from "./src/refs.ts";
+export * from "./src/tool-names.ts";
 export * from "./src/observe.ts";
 export * from "./src/ownership.ts";
 export * from "./src/history.ts";
