@@ -25,6 +25,8 @@ import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
+import { ownToolNames, legacyUseNames } from "./tool-names.ts";
+import { refNames } from "./refs.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
@@ -498,7 +500,7 @@ export function workspaceKnowledgeIndex(tenant: string, workspace: string): stri
 // One noun for capability. A tools/<name>.md file declares either an HTTP
 // endpoint or a script — `type:` says which, and it's inferred when omitted
 // (a `base:` means http, a `run:` means script). Both are granted the same
-// way, with `use: [name]`, so "what can this agent do?" has one answer in one
+// way, with `tools: [name]`, so "what can this agent do?" has one answer in one
 // place instead of three (`tools:`, `scripts:`, `apis:`).
 // An MCP server an agent can connect to. MCP is the cross-vendor standard for
 // tools (Anthropic, OpenAI, Google), so accepting a server here is what lets
@@ -528,7 +530,7 @@ export type ToolDef =
 /**
  * The program inside a single-file script tool: the first fenced block whose
  * language tag names a runnable language. By tag, not by position — a body
- * legitimately opens with a \`\`\`yaml example of the use: line, and running
+ * legitimately opens with a \`\`\`yaml example of the tools: line, and running
  * the documentation would be a memorable bug. Untagged fences never qualify:
  * "which block is the program" must be answerable by reading, not guessing.
  */
@@ -748,8 +750,12 @@ export interface AgentInfo {
   model: string;
   tools: string[];
   apis: ApiSpec[];
-  /** Library tools this agent opted into with `use:` — granted capability. */
-  use: string[];
+  /** The author's own tools named in `tools:` — the subset that is not a
+   *  built-in. Same list as `tools`, minus what the runtime provides. */
+  ownTools: string[];
+  /** Names still written under the removed `use:` key. Nothing is granted
+   *  for them; `foldrun check` and the run log say what to write instead. */
+  legacyUse: string[];
   secrets: string[];
 }
 
@@ -1135,9 +1141,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
     .sort()
     .map((name) => {
       const { data } = matter(fs.readFileSync(path.join(dir, name, "agent.md"), "utf8"));
-      const tools = (data.tools ?? []).map((t: unknown) =>
-        typeof t === "string" ? t : Object.keys(t as object)[0],
-      );
+      const tools = refNames(data.tools);
       return {
         name,
         description: data.description ?? "",
@@ -1145,7 +1149,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         effort: data.effort ?? null,
         tools,
         apis: parseApis(data.apis),
-        use: Array.isArray(data.use) ? data.use.map(String) : [],
+        ownTools: ownToolNames(data),
+        legacyUse: legacyUseNames(data),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
       };
     });
@@ -1276,12 +1281,9 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
     budget: Number(data.budget) > 0 ? Number(data.budget) : null,
-    // `after: [[flow:publish]]` is a nested list to YAML; the link spelling
-    // is the format's, so both it and the bare name are read.
-    after: (() => {
-      const raw = Array.isArray(data.after) ? String((data.after as unknown[]).flat(2)[0] ?? "") : typeof data.after === "string" ? data.after : "";
-      return raw.trim().replace(/^\[\[|\]\]$/g, "").replace(/^flow:/, "").trim() || null;
-    })(),
+    // `after: [[flow:publish]]` — a link or a bare name, read the same way
+    // as every other file-naming field (refs.ts).
+    after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,
     on: data.on === "failed" || data.on === "any" ? data.on : "completed",
     at: parseInstant(data.at),
     url: typeof data.url === "string" ? data.url.trim() : null,

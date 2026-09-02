@@ -12,6 +12,8 @@ import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
 import { runStepInK8s, killRunPods } from "./run-k8s.ts";
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError } from "./tool-names.ts";
+import { refNames } from "./refs.ts";
 import {
   accountDir,
   workspaceDir,
@@ -90,27 +92,6 @@ function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerC
       };
 }
 
-// Exact SDK tool names, accepted alongside our group aliases so a Claude Code
-// subagent's `tools: Read, Grep` works unchanged. The aliases exist because
-// vendors rename tools; `web` survives a rename that `WebSearch` would not.
-const BUILTIN_TOOLS = new Set([
-  "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash",
-  "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite",
-]);
-
-const TOOL_MAP: Record<string, string[]> = {
-  // `web` includes Anthropic's server-side WebSearch, the one built-in tool
-  // that runs off the box and bills per call. `fetch` is the local half only:
-  // an agent that searches through the account's own `websearch` tool and
-  // reads pages with WebFetch never leaves the box for anything but tokens.
-  web: ["WebSearch", "WebFetch"],
-  fetch: ["WebFetch"],
-  // `read` is deliberately separate from `files`: an agent that may inspect a
-  // repository but must never modify it is a real and common design.
-  read: ["Read", "Glob", "Grep"],
-  files: ["Read", "Write", "Edit", "Glob", "Grep"],
-  bash: ["Bash"],
-};
 
 export interface DiscoveredSkill {
   name: string;
@@ -559,7 +540,7 @@ function agentContext(
   // `skills:` is Claude Code's field for naming which skills an agent gets.
   // Absent, an agent inherits every skill in scope — knowledge cascades. Named,
   // it's an allowlist, which is how you keep a focused agent focused.
-  const only: string[] = Array.isArray(front.skills) ? front.skills.map(String) : [];
+  const only: string[] = refNames(front.skills);
   const applicable = applicableSkills(skills, only, tags);
   const withheld = skills.length - applicable.length;
 
@@ -587,9 +568,7 @@ function agentContext(
 
   // Memory: the index is loaded every run, and the agent is told how to add
   // to it. Writing is only possible if it has the `files` tool.
-  const canWrite = (front.tools ?? []).some(
-    (t: unknown) => (typeof t === "string" ? t : Object.keys(t as object)[0]) === "files",
-  );
+  const canWrite = refNames(front.tools).includes("files");
   const memoryDir = path.join(agentDir, "memory");
   const memoryIndex = buildMemoryIndex(memoryDir);
   if (memoryIndex || canWrite) {
@@ -690,15 +669,18 @@ function agentContext(
     );
   }
 
-  // APIs — the agent's own definitions, plus workspace tools it opted into
-  // with `use: [name]`. Library tools are defined once and reused.
+  // APIs — the agent's own definitions, plus workspace tools it granted by
+  // name. Library tools are defined once and reused.
   const apis = parseApis(front.apis);
-  // Scripts declared inline on the agent, plus any script-type tool it opted
-  // into — one `use:` list grants both kinds.
+  // Scripts declared inline on the agent, plus any script-type tool it
+  // granted — one list grants both kinds.
   const scriptSpecs = parseScripts(front.scripts);
   // Workspace tools shadow account tools of the same name (nearest wins).
   const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
-  const requested: string[] = Array.isArray(front.use) ? front.use.map(String) : [];
+  // Resolved in one place (tool-names.ts) so nothing downstream can disagree
+  // about which names are the author's.
+  const requested = ownToolNames(front);
+  const legacyUse = legacyUseNames(front);
   const missingTools: string[] = [];
   // MCP servers an agent connects to. `mcpServers:` is Claude Code's spelling
   // for the inline form; a `type: mcp` tool file is the shared form. Both end
@@ -730,14 +712,6 @@ function agentContext(
 
   for (const name of requested) grantOwnTool(name);
 
-  // `tools:` may also name your own tools — resolved after built-ins below.
-  for (const entry of front.tools ?? []) {
-    const n = typeof entry === "string" ? entry : Object.keys(entry)[0];
-    if (!TOOL_MAP[n] && !BUILTIN_TOOLS.has(n) && available[n] && !requested.includes(n)) {
-      grantOwnTool(n);
-    }
-  }
-
   // Inline servers, Claude Code's field name and shape.
   if (front.mcpServers && typeof front.mcpServers === "object") {
     for (const [name, raw] of Object.entries(front.mcpServers as Record<string, unknown>)) {
@@ -762,7 +736,7 @@ function agentContext(
   // Secrets an agent declared become env vars for its scripts and bash.
   //
   // Plus the credentials its API tools reference. An agent that opted into
-  // `use: [email]` has said nothing about RESEND_API_KEY and should not have
+  // `tools: [email]` has said nothing about RESEND_API_KEY and should not have
   // to: the whole point of a tool definition is that the capability travels
   // with its credential and the agent never learns the name. The in-process
   // path always worked this way — buildApiTools resolves what the specs
@@ -916,8 +890,9 @@ function agentContext(
           [path.resolve(agentDir, "..", "..", "scripts")]: "/workspace-scripts",
           [libraryDir(tenant, "scripts")]: "/library-scripts",
         },
-        // Only agents that declared an API need egress.
-        network: parseApis(front.apis).length > 0 || (Array.isArray(front.use) && front.use.length > 0),
+        // Only agents that granted something reaching out — an `apis:` entry
+        // or one of their own tools — get egress.
+        network: parseApis(front.apis).length > 0 || ownToolNames(front).length > 0,
       };
     }
   } else {
@@ -979,8 +954,7 @@ function agentContext(
   );
 
   // One list. `tools:` grants anything: a built-in group, an exact SDK tool
-  // name, or a tool defined in this workspace or account. `use:` still works
-  // and means the same thing — it just can't name a built-in.
+  // name, or a tool defined in this workspace or account.
   //
   // The split used to be ours, not the author's: they don't care whether a
   // capability comes from the SDK or a file, only what the agent may do. Two
@@ -992,18 +966,21 @@ function agentContext(
   let wantSearch = false;
   let wantHistory = false;
 
-  for (const entry of front.tools ?? []) {
-    const toolName = typeof entry === "string" ? entry : Object.keys(entry)[0];
-    const mode = typeof entry === "string" ? "allow" : Object.values(entry)[0];
-    if (mode === "ask") {
+  for (const ref of toolRefs(front)) {
+    const toolName = ref.name;
+    if (ref.mode === "ask") {
       disabled.push(toolName);
       continue;
     }
 
     // Resolution order: built-in group, exact SDK name, then your own tools.
-    // Built-ins win, because their names are a small fixed set — but a tool
-    // hidden by one is worth saying out loud rather than silently ignoring.
-    if (TOOL_MAP[toolName]) {
+    // Built-ins win a bare name, because their names are a small fixed set —
+    // but a tool hidden by one is worth saying out loud rather than silently
+    // ignoring. A `[[link]]` skips the built-ins entirely: the brackets mean
+    // "my file", which is how a tool named `search` is granted at all.
+    if (ref.linked) {
+      // Granted above through ownToolNames, or reported missing there.
+    } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
     } else if (toolName === "search" || toolName === "history") {
@@ -1016,8 +993,8 @@ function agentContext(
       allowed.push(toolName);
       if (available[toolName]) shadowed.push(toolName);
     } else if (available[toolName]) {
-      // Already granted above, alongside `use:` — nothing more to do here.
-    } else {
+      // Already granted above — nothing to do here.
+    } else if (!missingTools.includes(toolName)) {
       unknownTools.push(toolName);
     }
   }
@@ -1059,9 +1036,7 @@ function agentContext(
     allowed.length = 0;
     allowed.push(...TOOL_MAP.read, ...apiTools.toolNames, ...scriptTools.toolNames);
   }
-  const denied: string[] = Array.isArray(front.disallowedTools)
-    ? front.disallowedTools.map(String)
-    : [];
+  const denied: string[] = refNames(front.disallowedTools);
   const finalAllowed = allowed.filter((t) => !denied.includes(t));
 
   return {
@@ -1072,12 +1047,12 @@ function agentContext(
     disabled,
     unknownTools,
     shadowed,
-    knownToolNames: Object.keys(available),
+    legacyUse,
     mcpServers,
     mcpNames,
     apiTools,
     scriptTools,
-    // The merged spec lists — inline plus use:-granted — for the isolated
+    // The merged spec lists — inline plus tools:-granted — for the isolated
     // path, which serialises specs across the container boundary rather
     // than using the servers built here.
     apiSpecs: apis,
@@ -1213,7 +1188,7 @@ async function runStep(
     const {
       front, clockEnv, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
-      unknownTools, shadowed, knownToolNames, mcpServers, mcpNames,
+      unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, searchTools, historyTools,
@@ -1245,20 +1220,16 @@ async function runStep(
     for (const w of providerWarnings) push("error", w);
     for (const w of apiWarnings) push("error", `openapi: ${w}`);
     if (formatWarning) push("error", formatWarning);
+    if (legacyUse.length) push("error", legacyUseError(legacyUse));
     for (const t of unknownTools) {
-      // The commonest mistake is putting a workspace tool in `tools:`, so say
-      // so explicitly rather than just reporting that the name is unknown.
-      const isOwnTool = knownToolNames.includes(t);
       push(
         "error",
-        isOwnTool
-          ? `tools: "${t}" is a tool defined in this workspace — grant it with \`use: [${t}]\`, not \`tools:\`. Nothing was granted for it.`
-          : `tools: "${t}" is not a tool group (web, fetch, read, files, bash, search, history) or an SDK tool name — nothing was granted for it`,
+        `tools: "${t}" is not a tool group (web, fetch, read, files, bash, search, history), an SDK tool name, or a tool in this workspace's library — nothing was granted for it`,
       );
     }
     for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
     for (const name of shadowed) {
-      push("error", `tools: "${name}" is a built-in, so your tool of the same name was not granted — rename one of them`);
+      push("error", `tools: "${name}" is a built-in, so your tool of the same name was not granted — write it as [[${name}]] to mean yours`);
     }
     for (const t of disabled) push("info", `tool ${t}: ask-mode is disabled for platform runs`);
     for (const s of missingSecrets) {
@@ -1461,9 +1432,9 @@ async function runStep(
       // secrets are substituted into API headers before the specs cross,
       // and reach scripts as env.
       push("info", `isolation: ${isolation}`);
-      // The *merged* lists — inline declarations plus everything `use:`
+      // The *merged* lists — inline declarations plus everything `tools:`
       // granted — not a re-parse of the frontmatter. Rebuilding from `front`
-      // here silently dropped every use:-granted http and script tool on
+      // here silently dropped every tools:-granted http and script tool on
       // the isolated path (mcp grants survived only because mcpServers is
       // passed as the merged object): the agent's prompt promised a tool
       // the function list didn't have, and the step failed as the model
@@ -1765,11 +1736,11 @@ function openApiSources(agentDir: string, tenant: string): string[] {
   const out = new Set<string>();
   try {
     const { data } = matter(fs.readFileSync(path.join(agentDir, "agent.md"), "utf8"));
-    const front = data as { apis?: unknown; use?: unknown };
+    const front = data as { apis?: unknown; tools?: unknown };
     for (const api of parseApis(front.apis)) if (api.openapi?.startsWith("https://")) out.add(api.openapi);
     const workspace = path.basename(path.resolve(agentDir, "..", ".."));
     const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
-    for (const name of Array.isArray(front.use) ? front.use.map(String) : []) {
+    for (const name of ownToolNames(front)) {
       const def = available[name];
       if (def?.kind === "http" && def.spec.openapi?.startsWith("https://")) out.add(def.spec.openapi);
     }

@@ -158,7 +158,7 @@ export async function testTool(
     const dir = workspaceDir(tenant, workspace);
     const agents = listAgents(tenant, workspace);
     const caller =
-      agents.find((a) => a.use?.includes(def.name)) ?? agents[0] ?? null;
+      agents.find((a) => a.ownTools.includes(def.name)) ?? agents[0] ?? null;
     // With no agents at all there is nothing at that depth to stand in; the
     // workspace root is wrong but it exists, and the note says so rather
     // than failing a test over a workspace that cannot run anything yet.

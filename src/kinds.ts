@@ -190,7 +190,7 @@ headers:
 Notes for whoever maintains this. Agents opt in with:
 
 \`\`\`yaml
-use: [${name}]
+tools: [${name}]
 \`\`\`
 `,
   },
@@ -432,7 +432,7 @@ runtime:
 Agents opt in with:
 
 \`\`\`yaml
-use: [${name}]
+tools: [${name}]
 \`\`\`
 
 Run it by hand while you are writing it:
@@ -463,7 +463,7 @@ env:
 Every tool this server exposes reaches the agent that opts in with:
 
 \`\`\`yaml
-use: [${name}]
+tools: [${name}]
 \`\`\`
 `,
       },

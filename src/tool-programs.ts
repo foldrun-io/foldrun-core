@@ -21,7 +21,7 @@ import { libraryDir, libraryTools } from "./library.ts";
 import { resolveRunPath } from "./script-tools.ts";
 
 export interface MissingProgram {
-  /** The tool's name, as an agent would write it in `use:`. */
+  /** The tool's name, as an agent would write it in `tools:`. */
   name: string;
   /** Which shelf it came off — the two resolve differently. */
   scope: "workspace" | "account";
@@ -34,7 +34,7 @@ export interface MissingProgram {
 /**
  * Every script tool an agent here could call whose program is not on disk.
  *
- * Both shelves, because `use:` reaches both and the runtime resolves
+ * Both shelves, because a grant reaches both and the runtime resolves
  * nearest-wins across them — a checker that only read the workspace would
  * call a working account tool broken.
  */

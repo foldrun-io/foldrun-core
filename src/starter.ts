@@ -367,11 +367,10 @@ description: Finds and summarises sources.
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
-tools: [WebSearch, Read, Write]
+tools: [WebSearch, Read, my-folder-tool]  # built-ins and your own tools/, one list
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool
-use: [my-folder-tool]       # from tools/
 apis: [{ name: crm }]       # an HTTP API, as a tool
 mcpServers: {}              # an MCP server, as a tool
 agents: [writer]            # colleagues this one may consult

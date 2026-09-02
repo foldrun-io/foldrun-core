@@ -135,7 +135,6 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "model", insert: "model: default" },
     { label: "effort", insert: "effort: high", hint: "how hard it thinks" },
     { label: "tools", insert: "tools:\n  - files", hint: "what the runtime gives it" },
-    { label: "use", insert: "use:\n  - ", hint: "tools you built" },
     { label: "secrets", insert: "secrets:\n  - ", hint: "credentials it may spend" },
     { label: "skills", insert: "skills:\n  - ", hint: "allowlist; omit to inherit all" },
     { label: "scripts", insert: "scripts:\n  - name: \n    run: \n    description: " },
@@ -359,6 +358,33 @@ export function completionsAt(
   const open = before.lastIndexOf("[[");
   if (open !== -1 && !before.slice(open).includes("]]") && !before.slice(open).includes("\n")) {
     const query = before.slice(open + 2);
+
+    // Inside a frontmatter list that names files — `tools: [read, [[` or
+    // `  - [[` under `skills:` — the bracket means "one of mine", so offer
+    // that field's files and nothing else. `[[search]]` in tools: is how a
+    // tool named after a runtime group gets granted; offering the group
+    // here would defeat the point of the brackets.
+    const inlineOwner = line.match(/^\s*([a-zA-Z_]+):\s*(?:\[.*)?\[\[[^\]]*$/)?.[1];
+    const blockOwner = /^\s+-\s*\[\[/.test(line)
+      ? before.slice(0, lineStart).split("\n").reverse().find((l) => /^\s*[a-zA-Z_]+:\s*$/.test(l))?.trim().replace(":", "")
+      : undefined;
+    const owner = inlineOwner ?? blockOwner;
+    const byField: Record<string, Completion[]> = {
+      tools: vocab.tools.map((t) => ({ label: t, hint: "your tool" })),
+      skills: vocab.skills.map((sk) => ({ label: sk, hint: "skill" })),
+      agents: vocab.agents.map((a) => ({ label: a, hint: "agent" })),
+      delegate: vocab.agents.map((a) => ({ label: a, hint: "agent" })),
+      after: vocab.flows.map((f) => ({ label: `flow:${f}`, hint: "flow" })),
+    };
+    if (owner && byField[owner]) {
+      return {
+        from: open + 2,
+        query,
+        items: filter(byField[owner], query).map((i) => ({ ...i, insert: `${i.label}]]` })),
+        title: `${owner} — a link names one of your files; a bare name may be a built-in`,
+      };
+    }
+
     const items: Completion[] = [
       ...vocab.agents.map((a) => ({ label: a, hint: "agent" })),
       ...vocab.flows.map((f) => ({ label: `flow:${f}`, hint: "flow" })),
@@ -407,14 +433,13 @@ export function completionsAt(
   const inlineList = line.match(/^(\s*)([a-zA-Z_]+):\s*\[([^\]]*)$/);
   if (inlineList) {
     const [, , key, inside] = inlineList;
-    // The inline and block forms of a list are the same field — `use: [a, b]`
-    // and `use:\n  - a` must complete identically, or the shorthand people
+    // The inline and block forms of a list are the same field — `tools: [a, b]`
+    // and `tools:\n  - a` must complete identically, or the shorthand people
     // actually write is the one the editor abandons.
     const options: Record<string, Completion[]> = {
       methods: METHODS,
       tags: [],
       tools: [...TOOL_GROUPS, ...vocab.tools.map((t) => ({ label: t, hint: "your tool" })), ...SDK_TOOL_NAMES],
-      use: vocab.tools.map((t) => ({ label: t, hint: "tool" })),
       secrets: vocab.secrets.map((se) => ({ label: se, hint: "secret" })),
       skills: vocab.skills.map((sk) => ({ label: sk, hint: "skill" })),
       agents: vocab.agents.map((a) => ({ label: a, hint: "consult mid-run" })),
@@ -541,7 +566,6 @@ export function completionsAt(
         ...vocab.tools.map((t) => ({ label: t, hint: "your tool" })),
         ...SDK_TOOL_NAMES,
       ],
-      use: vocab.tools.map((t) => ({ label: t, hint: "tool" })),
       secrets: vocab.secrets.map((s) => ({ label: s, hint: "secret" })),
       skills: vocab.skills.map((s) => ({ label: s, hint: "skill" })),
       disallowedTools: [...TOOL_GROUPS, { label: "Bash" }, { label: "Write" }],
@@ -552,7 +576,6 @@ export function completionsAt(
     if (items) {
       const titles: Record<string, string> = {
         tools: "tools — built-ins and your own; anything here is granted",
-        use: "use — tools defined in this workspace or account",
         secrets: "secrets — resolved server-side, never shown to the model",
         skills: "skills — omit the list entirely to inherit all of them",
       };

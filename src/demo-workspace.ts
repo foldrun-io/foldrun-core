@@ -98,7 +98,7 @@ bounce-checking step does with live domains.
       content: `---
 name: uploader
 description: Runs the pretend CRM import and reports its summary.
-use: [crm-upload]
+tools: [crm-upload]
 ---
 
 Call the crm-upload tool ONCE with csv=../../files/leads-enriched.csv.

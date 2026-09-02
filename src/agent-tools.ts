@@ -22,6 +22,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { resolveModel, resolveEffort, type Effort } from "./store.ts";
 import { executeStep } from "./step-exec.ts";
+import { refNames } from "./refs.ts";
 
 export interface ConsultSpec {
   name: string;
@@ -41,7 +42,7 @@ export function gatherConsults(
   workspaceRoot: string,
   names: unknown,
 ): { consults: ConsultSpec[]; missing: string[] } {
-  const list = Array.isArray(names) ? names.map(String) : [];
+  const list = refNames(names);
   const consults: ConsultSpec[] = [];
   const missing: string[] = [];
   for (const name of list) {

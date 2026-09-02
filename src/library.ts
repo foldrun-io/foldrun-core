@@ -253,7 +253,7 @@ export function deleteLibraryPath(
 
 // ---------- consumed by the runner ----------
 
-/** Library tool definitions, keyed by name — http or script, both `use:`-able. */
+/** Library tool definitions, keyed by name — http or script, both grantable by name in `tools:`. */
 export function libraryTools(tenant: string): Record<string, ToolDef> {
   return readToolDir(libraryDir(tenant, "tools"), "account");
 }
@@ -297,7 +297,7 @@ export const LIBRARY_TEMPLATES: Record<LibraryKind, (name: string) => { path: st
  *
  * Two relations, because the shared scopes work in two different ways:
  *
- *   use       an explicit opt-in. Only tools have one (`use: [name]`), which
+ *   use       an explicit grant. Only tools have one (`tools: [name]`), which
  *             is exactly why tools are the kind worth tracing: a credential
  *             reaches precisely the agents that named it, and no others.
  *
@@ -329,10 +329,10 @@ export function libraryUsage(tenant: string, kind: LibraryKind, name: string): L
     const dir = workspaceDir(tenant, ws.name);
     const agents = listAgents(tenant, ws.name);
 
-    // Explicit opt-in. Only tools have one.
+    // Explicit grant. Only tools have one.
     if (kind === "tools") {
       for (const a of agents) {
-        if (a.use.includes(name)) out.push({ workspace: ws.name, agent: a.name, relation: "use" });
+        if (a.ownTools.includes(name)) out.push({ workspace: ws.name, agent: a.name, relation: "use" });
       }
     }
 
