@@ -748,6 +748,10 @@ export interface AgentInfo {
   name: string;
   description: string;
   model: string;
+  /** The other half of model selection. listAgents has always returned it;
+   *  the interface did not say so, so every consumer had to re-read the file
+   *  to show it. */
+  effort: string | null;
   tools: string[];
   apis: ApiSpec[];
   /** The author's own tools named in `tools:` — the subset that is not a
@@ -2507,27 +2511,92 @@ export function runFailure(run: RunRecord): { agent: string; reason: string } | 
  */
 export function runSummary(run: RunRecord): string | null {
   for (let i = run.steps.length - 1; i >= 0; i--) {
-    const result = run.steps[i].result;
-    if (!result) continue;
-    for (const raw of result.split("\n")) {
-      const line = raw
-        .replace(/^\s*#{1,6}\s+/, "") // heading
-        .replace(/^\s*[-*+]\s+/, "") // bullet
-        .replace(/^\s*>\s?/, "") // quote
-        .replace(/\*\*/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      // A line that is only markdown punctuation — a bare `#`, a `---` rule,
-      // a row of asterisks — is decoration, not a headline. Checked after the
-      // strips above rather than folded into them, because `#{1,6}\s*` would
-      // also eat the hash in a line that legitimately opens "#1 priority".
-      // A code fence, or a line that is only brackets, is the shape of an
-      // `output: json` reply, not its headline either.
-      if (!line || /^[#>\-*_=\s`{}\[\],]*$/.test(line) || line.startsWith("```")) continue;
-      return line.length > 200 ? `${line.slice(0, 197)}…` : line;
-    }
+    const line = headlineOf(run.steps[i].result);
+    if (line) return line;
   }
   return null;
+}
+
+/**
+ * The first line of a reply that a person would recognise as its point.
+ *
+ * Markdown decoration is stripped rather than skipped, so a reply that opens
+ * with `## Done: 4 findings` still has a headline. A line that is only
+ * punctuation — a bare `#`, a rule, a row of asterisks — is decoration, and a
+ * code fence is the shape of an `output: json` reply, not its headline.
+ *
+ * Exported because a run's summary and one agent's step both want it, and two
+ * copies would be two answers to the same question.
+ */
+export function headlineOf(result: string | null | undefined): string | null {
+  if (!result) return null;
+  for (const raw of result.split("\n")) {
+    const line = raw
+      .replace(/^\s*#{1,6}\s+/, "") // heading
+      .replace(/^\s*[-*+]\s+/, "") // bullet
+      .replace(/^\s*>\s?/, "") // quote
+      .replace(/\*\*/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    // A line that is only markdown punctuation — a bare `#`, a `---` rule,
+    // a row of asterisks — is decoration, not a headline. Checked after the
+    // strips above rather than folded into them, because `#{1,6}\s*` would
+    // also eat the hash in a line that legitimately opens "#1 priority".
+    // A code fence, or a line that is only brackets, is the shape of an
+    // `output: json` reply, not its headline either.
+    if (!line || /^[#>\-*_=\s`{}\[\],]*$/.test(line) || line.startsWith("```")) continue;
+    return line.length > 200 ? `${line.slice(0, 197)}…` : line;
+  }
+  return null;
+}
+
+/** One step this agent ran, with the run it belongs to. */
+export interface AgentStep {
+  runId: string;
+  flow: string;
+  status: RunRecord["status"];
+  startedAt: string;
+  /** The step's own first line — what THIS agent concluded, which is not
+   *  the run's summary unless it happened to run last. */
+  headline: string | null;
+  instruction: string;
+  stepStatus: StepRecord["status"];
+  costUsd: number | null;
+  /** Set on a fan-out instance: the item this one worked on. */
+  item?: string;
+}
+
+/**
+ * Everything one agent has done, newest first.
+ *
+ * The runs list answers "what ran"; it is keyed by flow, so an agent that
+ * appears in four flows has its work scattered across four filters and an
+ * agent used by none is invisible unless someone remembers the `adhoc:`
+ * prefix. This is the other axis, and the one you want when the question is
+ * "is this agent any good" rather than "did Monday's flow finish".
+ */
+export function listAgentSteps(tenant: string, workspace: string, agent: string): AgentStep[] {
+  const out: AgentStep[] = [];
+  for (const run of listRuns(tenant, workspace)) {
+    for (const step of run.steps) {
+      if (step.agent !== agent) continue;
+      // A fan-out template expands into instances and produces nothing
+      // itself; listing it would be a row that never has a result.
+      if (step.status === ("expanded" as StepRecord["status"])) continue;
+      out.push({
+        runId: run.id,
+        flow: run.flow,
+        status: run.status,
+        startedAt: run.startedAt,
+        headline: headlineOf(step.result),
+        instruction: step.instruction,
+        stepStatus: step.status,
+        costUsd: step.costUsd,
+        item: step.item,
+      });
+    }
+  }
+  return out;
 }
 
 export function listRuns(tenant: string, workspace: string): RunRecord[] {

@@ -953,6 +953,19 @@ function agentContext(
     "Write deliverables for people to ../../storage/ (kept and downloadable); write working text for later steps to outputs/.",
   );
 
+  // The run's one-line summary is the first meaningful line of the last step
+  // that produced a result — read, never declared (runSummary in store.ts).
+  // That convention was load-bearing and unstated: it decides the runs-list
+  // row, the notification subject, and what `recall_runs()` shows a later
+  // run, and an agent that opened with "I'll start by cloning the repo" made
+  // all three useless. Asking here rather than in each agent.md means every
+  // agent obeys it, including the ones written before the summary existed.
+  parts.push(
+    "Open your reply with one sentence saying what you concluded or produced — the outcome, " +
+      "not your plan. Everything else follows it. That sentence is what a person sees in the " +
+      "run list and in the notification, without opening the run.",
+  );
+
   // One list. `tools:` grants anything: a built-in group, an exact SDK tool
   // name, or a tool defined in this workspace or account.
   //
