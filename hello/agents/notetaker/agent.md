@@ -4,7 +4,6 @@ description: Reads the house style, writes one short note, checks its length, an
 model: fast
 tools:
   - files
-use:
   - wordcount
 ---
 
