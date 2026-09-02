@@ -1176,6 +1176,33 @@ export function parseInstant(raw: unknown): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/**
+ * Strip the quotes a person wrapped a whole value in, and only those.
+ *
+ * `schedule: "0 8 * * *"` is quoted so YAML-minded readers are comfortable,
+ * and the cron parser must not see the quotes. But the rule that did this
+ * removed a leading OR a trailing quote independently, so a value that
+ * merely *ended* with one lost it — and
+ *
+ *   verify: test "$(cat ../../storage/draft/published.run)" = "$FOLDRUN_RUN_ID"
+ *
+ * reached bash unbalanced, which exited 2 with "unexpected EOF" on every
+ * run. The step could never pass, whatever the agent did, and nothing said
+ * why: the trace printed the command the parser had already broken.
+ *
+ * So a pair is only stripped when the value opens and closes with the same
+ * quote AND contains no other instance of it — which is what "the whole
+ * value is quoted" actually means. `"a" = "b"` keeps its quotes, because
+ * they are two pairs, not one wrapper.
+ */
+export function unquote(raw: string): string {
+  const value = raw.trim();
+  const q = value[0];
+  if ((q !== '"' && q !== "'") || value.length < 2 || !value.endsWith(q)) return value;
+  const inner = value.slice(1, -1);
+  return inner.includes(q) ? value : inner;
+}
+
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
@@ -1205,7 +1232,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     if (opt && steps.length) {
       const step = steps[steps.length - 1];
       const [, key, rawValue] = opt;
-      const value = rawValue.trim().replace(/^["']|["']$/g, "");
+      const value = unquote(rawValue);
       if (key === "approve") step.approve = value !== "false";
       else if (key === "when") step.when = value;
       else if (key === "case") step.case = value;
