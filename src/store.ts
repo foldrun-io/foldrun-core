@@ -29,7 +29,7 @@ import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
-import { providerPreset, looksOpenAiShaped, type WireFormat, type AuthShape } from "./providers.ts";
+import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
@@ -2541,6 +2541,11 @@ export interface ProviderSpec {
   models: Partial<Record<Tier, string>>;
   /** Header name → value; values may contain `${SECRET}`. */
   headers: Record<string, string>;
+  /** Extra request fields for a translated (`format: openai`) endpoint,
+   *  merged into the outgoing body verbatim. `null` removes a field the
+   *  translation would otherwise send. The escape hatch for every knob this
+   *  format deliberately does not model. */
+  params: Record<string, unknown>;
   /** Things wrong enough to say out loud but not to fail a run over. */
   warnings: string[];
   /** A second endpoint, tried once when the first refuses over money, auth
@@ -2609,6 +2614,29 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
     warnings.push("provider.models: expected a map of tier → model id — ignored");
   }
 
+  // `params:` — the provider's own request fields, passed through as
+  // written. Not validated against any vendor's schema: the endpoint is the
+  // authority on what it accepts, and a list here would be stale in a month.
+  const params: Record<string, unknown> = {};
+  if (block.params && typeof block.params === "object" && !Array.isArray(block.params)) {
+    for (const [key, value] of Object.entries(block.params as Record<string, unknown>)) {
+      const name = key.trim();
+      if (!name) continue;
+      if ((PROTECTED_PARAMS as readonly string[]).includes(name)) {
+        warnings.push(`provider.params.${name}: that is the conversation, not a setting — ignored`);
+        continue;
+      }
+      params[name] = value;
+    }
+  } else if (block.params !== undefined) {
+    warnings.push("provider.params: expected a map of field → value — ignored");
+  }
+  if (Object.keys(params).length && format !== "openai") {
+    warnings.push(
+      "provider.params only reaches a `format: openai` endpoint — an Anthropic-shaped one is spoken to directly, so set its knobs at the provider (an OpenRouter preset, say) instead",
+    );
+  }
+
   const headers: Record<string, string> = {};
   if (block.headers && typeof block.headers === "object" && !Array.isArray(block.headers)) {
     for (const [name, value] of Object.entries(block.headers as Record<string, unknown>)) {
@@ -2644,7 +2672,7 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
     }
   }
 
-  return { name: preset?.name ?? null, format, auth, baseUrl, token, models, headers, warnings, fallback };
+  return { name: preset?.name ?? null, format, auth, baseUrl, token, models, headers, params, warnings, fallback };
 }
 
 /** The env the SDK reads for a tier remap. Our tier names are ours; these

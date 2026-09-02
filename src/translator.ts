@@ -20,6 +20,7 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
+import { PROTECTED_PARAMS } from "./providers.ts";
 
 // ------------------------------------------------------------------ shapes
 
@@ -36,6 +37,9 @@ export interface TranslatorSpec {
   maxTokensParam?: "max_tokens" | "max_completion_tokens";
   /** Map Anthropic `thinking:` to OpenAI `reasoning_effort`; off drops it. */
   reasoningEffort?: boolean;
+  /** The provider block's `params:` — merged into the outgoing body after
+   *  the translation, so a file can set what this format does not model. */
+  params?: Record<string, unknown>;
   /** How the endpoint is named in the trace. */
   label?: string;
 }
@@ -98,7 +102,13 @@ function imagePart(block: Json): Json | null {
  */
 export function toChatCompletions(
   req: Json,
-  opts: { maxTokensParam?: "max_tokens" | "max_completion_tokens"; reasoningEffort?: boolean; stream: boolean },
+  opts: {
+    maxTokensParam?: "max_tokens" | "max_completion_tokens";
+    reasoningEffort?: boolean;
+    stream: boolean;
+    /** Merged in last, so the file wins over the translation. */
+    params?: Record<string, unknown>;
+  },
   drop: Dropped = dropped(),
 ): Json {
   const out: Json = { model: req.model, stream: opts.stream };
@@ -215,6 +225,17 @@ export function toChatCompletions(
   if (effort) {
     if (opts.reasoningEffort) out.reasoning_effort = effort;
     else drop.add("thinking / effort");
+  }
+
+  // The author's own fields, last, so the file wins over anything decided
+  // above — including a `reasoning_effort` they would rather set by hand.
+  // `null` removes a field the translation would otherwise have sent, which
+  // is the only way to say "do not send temperature at all" to an endpoint
+  // that rejects it. Structural keys were dropped at parse time.
+  for (const [key, value] of Object.entries(opts.params ?? {})) {
+    if ((PROTECTED_PARAMS as readonly string[]).includes(key)) continue;
+    if (value === null) delete out[key];
+    else out[key] = value;
   }
 
   return out;
@@ -510,7 +531,7 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
       }
       const stream = body.stream === true;
       const drop = dropped();
-      const chat = toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, stream }, drop);
+      const chat = toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, stream }, drop);
       for (const line of drop.lines()) if (!log.includes(line)) log.push(line);
 
       let upstream: Response;
@@ -632,6 +653,7 @@ export function translatorSpecFor(spec: {
   baseUrl: string;
   token: string;
   headers: Record<string, string>;
+  params?: Record<string, unknown>;
   name?: string | null;
   maxTokensParam?: "max_tokens" | "max_completion_tokens";
   reasoningEffort?: boolean;
@@ -641,6 +663,7 @@ export function translatorSpecFor(spec: {
     upstreamBase: spec.baseUrl,
     upstreamKey: spec.token,
     headers: spec.headers,
+    params: spec.params,
     maxTokensParam: spec.maxTokensParam,
     reasoningEffort: spec.reasoningEffort,
     label: spec.name ? `${spec.name} (${spec.baseUrl})` : spec.baseUrl,

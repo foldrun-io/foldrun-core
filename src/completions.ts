@@ -509,6 +509,12 @@ export function completionsAt(
         { label: "bearer", hint: "authorization: Bearer (the default)" },
         { label: "x-api-key", hint: "Anthropic, DeepSeek, Ollama, Cloudflare" },
       ],
+      params: [
+        { label: "temperature", insert: "temperature: 0.2" },
+        { label: "seed", insert: "seed: 7", hint: "repeatable sampling, where supported" },
+        { label: "top_p", insert: "top_p: null", hint: "null removes it from the request" },
+        { label: "response_format", insert: "response_format:\n    type: json_object" },
+      ],
       each: [
         { label: "lines", hint: "one instance per line of the previous result" },
         { label: "items", hint: "one per element of the previous output: json array" },

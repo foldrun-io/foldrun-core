@@ -106,6 +106,19 @@ export const PROVIDERS: readonly ProviderPreset[] = [
   { name: "hyperbolic", title: "Hyperbolic", format: "openai", baseUrl: "https://api.hyperbolic.xyz/v1", auth: "bearer" },
 ];
 
+/**
+ * Request fields `params:` may not set.
+ *
+ * These are not the provider's knobs, they are the conversation: the
+ * messages, the tools the agent declared, whether the reply streams, and
+ * which model the tier resolved to. A file that could overwrite them could
+ * silently break the agent loop — or make `model: fast` mean something else
+ * — from a line that looks like a tuning option. Everything else passes
+ * through untouched, because a vendor's own parameters are the vendor's
+ * business and this format will never model them.
+ */
+export const PROTECTED_PARAMS = ["messages", "tools", "stream", "stream_options", "model"] as const;
+
 /** A preset by any spelling a person reaches for: case-insensitive, and
  *  "z.ai" / "z-ai" / "hugging-face" all land. */
 export function providerPreset(name: unknown): ProviderPreset | null {
