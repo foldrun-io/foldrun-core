@@ -12,10 +12,10 @@
 // unit-tested is a security rule that will be quietly broken by a refactor.
 // The store stays where it is; only the decision moved.
 //
-// Deliberately a boolean, not a role table. Two states — owns it, or does not
-// — is the whole of what has been decided, and a permission matrix would be
-// inventing distinctions nobody has asked for and would be far harder to take
-// back than to add later.
+// A boolean, not a role table: ownership is a fact about one member, and it
+// stays that way now that roles exist beside it (permissions.ts). The owner
+// is whoever this file says; their role is derived from that, never stored,
+// so an account can never carry two.
 
 export interface Membership {
   id: string;
@@ -59,6 +59,10 @@ export class OwnershipError extends Error {
  * Throws rather than returning a boolean because every caller of this must
  * refuse, and a boolean is a thing a caller can forget to check — which is
  * the exact shape of the bug being fixed.
+ *
+ * The owner-only form. With roles, the rule is assertCanRemoveMember in
+ * permissions.ts, which lets an admin remove the people below them; this
+ * stays as the stricter check for a caller that wants owner-only semantics.
  */
 export function assertCanRemove(
   members: Membership[],
