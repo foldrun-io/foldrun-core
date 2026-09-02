@@ -52,6 +52,15 @@ if (!fs.existsSync(tsc)) {
 // and the SDK by bare name, and Node resolves those by walking up from the
 // file — which from /tmp finds nothing. Dot-prefixed because it is generated,
 // and removed in the finally below.
+// A run killed mid-flight leaves its directory; a leftover one inside the
+// repo is what a deploy trips over, so clear them before making a new one.
+for (const stale of fs.readdirSync(ROOT).filter((f) => f.startsWith(".ts-test-"))) {
+  try {
+    fs.rmSync(path.join(ROOT, stale), { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[ts-test] could not remove ${stale}: ${err.message}`);
+  }
+}
 const out = fs.mkdtempSync(path.join(ROOT, ".ts-test-"));
 // Core's own options, so a test compiles exactly the way the code it imports
 // does — including the two that let a `.ts` extension appear in an import.
@@ -78,6 +87,12 @@ const config = {
 const configPath = path.join(ROOT, `tsconfig.ts-test.${process.pid}.json`);
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
+// `process.exit()` does not run `finally`, so calling it inside the block
+// below leaked the build directory on every run. Under sudo those are
+// root-owned, and rsync — which deploys as an ordinary user — then cannot
+// read or delete them: `deploy exit 23`, from a test runner. Compute the
+// code, clean up, exit last.
+let code = 2;
 try {
   // Type errors are reported and do not stop the run — see noEmitOnError.
   run(tsc, ["-p", configPath]);
@@ -85,10 +100,11 @@ try {
   const missing = compiled.filter((f) => !fs.existsSync(f));
   if (missing.length) {
     console.error(`[ts-test] tsc produced no output for:\n  ${missing.join("\n  ")}`);
-    process.exit(2);
+  } else {
+    code = run(process.execPath, ["--test", ...flags, ...compiled]);
   }
-  process.exit(run(process.execPath, ["--test", ...flags, ...compiled]));
 } finally {
   fs.rmSync(configPath, { force: true });
   fs.rmSync(out, { recursive: true, force: true });
 }
+process.exit(code);
