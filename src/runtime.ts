@@ -197,6 +197,24 @@ function wire(root: string, spec: RuntimeSpec, note: string): PreparedRuntime {
     env.VIRTUAL_ENV = path.join(root, "venv");
   }
   if (wantsNode(spec) && fs.existsSync(nodeModules)) env.NODE_PATH = nodeModules;
+
+  // A `.ready` root that cannot actually satisfy the declaration is worse than
+  // no cache: it reports "cached", wires nothing, and the failure surfaces
+  // much later as "Cannot find package 'x'" inside someone's script — which
+  // reads as a broken tool, not a broken runtime. Only packages that were
+  // asked for by name are checked: `node: true` with no npm list installs
+  // nothing and legitimately has no node_modules.
+  const missing: string[] = [];
+  if (spec.packages.length > 0 && !fs.existsSync(venvPython)) missing.push("the python venv");
+  if (spec.npm.length > 0 && !fs.existsSync(nodeModules)) missing.push("node_modules");
+  if (missing.length > 0) {
+    return {
+      interpreters,
+      env,
+      log: [note],
+      error: `${note.replace(/: .*$/, "")}: marked ready but ${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} missing — the cache entry is incomplete. Delete ${root} to rebuild it.`,
+    };
+  }
   return { interpreters, env, log: [note], error: null };
 }
 

@@ -1074,7 +1074,13 @@ function agentContext(
     historyDigest,
     searchTools,
     historyTools,
-    runtime: { log: runtimeLog, error: runtimeError, executor },
+    // `spec` is the MERGED declaration — the agent's own block or its
+    // workspace's, plus every granted tool's. The isolated path builds its
+    // runtime from this; passing the agent's frontmatter alone silently drops
+    // what the tools declared, and a tool whose program needs a package it
+    // asked for by name fails inside the container with "cannot find" while
+    // the host path, which uses this same merged spec, works fine.
+    runtime: { log: runtimeLog, error: runtimeError, executor, spec: runtimeSpec },
     secretEnv: { ...runtime.env, ...secretEnv },
     formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).foldrun_version).warning,
     providerEnv,
@@ -1479,7 +1485,9 @@ async function runStep(
           mcpServers,
           apis: substitutedApis,
           scripts: scriptSpecs,
-          runtime: parseRuntime(front.runtime),
+          // The merged spec, not `front.runtime` — see the plan's `runtime`
+          // field. A tool's own `runtime:` is part of what this step needs.
+          runtime: runtime.spec,
           consults,
           timeoutSec: step.timeout,
           verify: step.verify,
