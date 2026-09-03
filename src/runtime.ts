@@ -150,10 +150,29 @@ export interface PreparedRuntime {
 
 const EMPTY: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
 
+/**
+ * Run an installer and always be able to say why it failed.
+ *
+ * `spawnSync` reports three different failures and only one of them writes to
+ * stdout or stderr. A command that cannot be spawned at all — not installed,
+ * not on PATH — sets `error` and leaves both streams null; one killed by the
+ * timeout sets `signal`; only a command that ran and exited non-zero has
+ * output to quote. Reporting the streams alone produced the least useful
+ * message a build can give: "npm install failed: " with nothing after it.
+ */
 function run(cmd: string, args: string[], cwd: string, timeoutMs = 300_000) {
   const res = spawnSync(cmd, args, { cwd, timeout: timeoutMs, encoding: "utf8" });
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
-  return { ok: res.status === 0, out };
+  if (res.status === 0) return { ok: true, out };
+  const why = res.error
+    ? `could not run \`${cmd}\` — ${res.error.message}`
+    : res.signal
+      ? `\`${cmd}\` was killed by ${res.signal}${res.signal === "SIGTERM" ? ` (the ${Math.round(timeoutMs / 1000)}s limit)` : ""}`
+      : `\`${cmd}\` exited ${res.status}`;
+  // The reason first, then whatever it managed to say. Never just the output,
+  // because the output is empty in exactly the cases that are hardest to
+  // diagnose from a distance.
+  return { ok: false, out: out ? `${why}\n${out}` : why };
 }
 
 /** Wire an already-built root up, without installing anything. */
@@ -318,7 +337,10 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
         path.join(root, "package.json"),
         JSON.stringify({ name: `foldrun-runtime-${fp}`, private: true }, null, 2),
       );
-      const installed = run("npm", ["install", "--no-fund", "--no-audit", "--silent", ...spec.npm], root);
+      // Not --silent: it sets npm's loglevel to silent, which suppresses the
+      // explanation along with the noise. A build log nobody reads is cheaper
+      // than a failure nobody can explain.
+      const installed = run("npm", ["install", "--no-fund", "--no-audit", "--no-progress", ...spec.npm], root);
       if (!installed.ok) {
         return { ...EMPTY, error: `npm install failed: ${installed.out.slice(-500)}` };
       }
