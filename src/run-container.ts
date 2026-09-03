@@ -190,6 +190,13 @@ export function applyContainerChanges(
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, entry.name);
       const rel = path.relative(containerWs, abs);
+      // Never a symlink. docker cp preserves them, and a link the step
+      // planted is resolved HERE, on the host, by the read below: `ln -s
+      // /proc/self/environ leak.txt` in the sandbox came back as a regular
+      // file holding the platform's environment — the install key included.
+      // A link to a directory threw EISDIR and aborted the whole copy-out.
+      // (kubectl cp already skips symlinks; this makes the two tiers agree.)
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         if (allowedBack(rel + "/")) walk(abs);
         continue;

@@ -2162,14 +2162,29 @@ function driveRunInner(
       // never happened, which reconcile can then never see. Reset it to
       // pending and it simply runs again; driveRun's whole contract is that
       // re-driving a partly-finished record is safe.
+      let orphaned = false;
       for (const step of run.steps) {
         if (step.status !== "running") continue;
+        orphaned = true;
         step.status = "pending";
         step.events.push({
           t: new Date().toISOString(),
           type: "info",
           text: "interrupted mid-step (platform restart) — running again from the start of the step",
         });
+      }
+      if (orphaned) {
+        // The sandbox outlives the process that created it — a step with no
+        // `timeout:` carries no pod deadline at all — so the orphaned step
+        // may still be executing, non-idempotent work included, while the
+        // new attempt starts. Destroy it first; re-driving is only safe
+        // once nothing else is driving.
+        try {
+          if (process.env.FOLDRUN_RUN_ISOLATION === "k8s") killRunPods(run.id);
+          else if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+        } catch {
+          // a sandbox we cannot reach must not stop the run from resuming
+        }
       }
       save();
 
@@ -2558,6 +2573,12 @@ function driveRunInner(
                 // so TS doesn't keep the "running" narrowing from above.
                 const outcome: string = step.status;
                 if (outcome !== "failed" || attempt === attempts) break;
+                // A stop destroys the step's sandbox, which reads here as a
+                // failed attempt — and a failed attempt used to be retried in
+                // a fresh sandbox, so a stopped `retry: 2` step ran twice
+                // more. save() merges the flag from the record.
+                save();
+                if (run.stopRequested) break;
                 step.events.push({
                   t: new Date().toISOString(),
                   type: "info",
@@ -2573,7 +2594,11 @@ function driveRunInner(
         // failure in front of it, and its success is the step's success —
         // the trace keeps both records, so "who actually did this" stays
         // answerable.
+        // Not after a stop: the failure a stop leaves behind is not one a
+        // rescuer should take over. The merge in save() surfaces the flag.
+        save();
         for (const step of freshGroup) {
+          if (run.stopRequested) break;
           if (step.status !== "failed" || !step.onFail) continue;
           const rescuerDir = path.join(pDir, "agents", step.onFail);
           if (!fs.existsSync(path.join(rescuerDir, "agent.md"))) {

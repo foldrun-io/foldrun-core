@@ -108,9 +108,17 @@ export async function claimNextDb(owner: string): Promise<QueueJobRow | null> {
  * took that resume job with it, and every run with a wait: step then sat
  * `queued` forever with nothing in the queue to claim.
  */
-export async function releaseDb(runId: string): Promise<void> {
+export async function releaseDb(runId: string, owner?: string): Promise<void> {
   const p = db();
   if (!p) return;
+  // And only OUR claim. Between handBack's upsert (which clears the claim)
+  // and the worker's finally there is an await gap in which another worker
+  // can legitimately claim the row; deleting by run_id alone took that live
+  // claim with it, leaving a run being driven with nothing to recover from.
+  if (owner) {
+    await p.query(`DELETE FROM queue WHERE run_id = $1 AND claimed_by = $2`, [runId, owner]);
+    return;
+  }
   await p.query(`DELETE FROM queue WHERE run_id = $1 AND claimed_at IS NOT NULL`, [runId]);
 }
 

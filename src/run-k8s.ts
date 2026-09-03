@@ -144,6 +144,11 @@ export function runPodManifest(
     },
     spec: {
       restartPolicy: "Never",
+      // Model-directed code runs in here. The namespace's default token has
+      // no RBAC, but it is still a bearer credential the API server accepts
+      // from anywhere that can reach it — and a run pod has no business
+      // holding one at all.
+      automountServiceAccountToken: false,
       // A k8s-native backstop that does not depend on the platform staying
       // alive. The in-process watch below also deletes an overrunning pod, but
       // if the platform restarts mid-run it loses that handle and the shim can
@@ -392,6 +397,13 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
         if (settled) return;
         if (full.status === 0) {
           const lines = full.out.split("\n");
+          // The log ends with a newline, so the split's last element is an
+          // empty string, not a line. Counting it put `seen` one past the
+          // stream's own count, and the re-attach then skipped the first
+          // NEW line — which, after a quiet model call, is usually the
+          // `done` line. The step then hung until the shim gave up, was
+          // marked failed, and its copy-out hit a terminated pod.
+          if (lines.length && lines[lines.length - 1] === "") lines.pop();
           for (let i = seen; i < lines.length; i += 1) {
             if (handle(lines[i])) return;
           }
@@ -400,9 +412,19 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
         const phase = await kc(["get", "pod", name, "-n", ns, "-o", "jsonpath={.status.phase}"]);
         if (settled) return;
         const alive = phase.status === 0 && (phase.out === "Running" || phase.out === "Pending");
-        if (alive && reattaches < MAX_REATTACH) {
+        // The API server not answering is not the pod being gone: a k3s
+        // restart or a blip fails both the log re-read and this lookup, and
+        // failing the step for that fails work that is still running.
+        const unknown = phase.status !== 0;
+        if ((alive || unknown) && reattaches < MAX_REATTACH) {
           reattaches += 1;
-          args.emit("info", `log stream dropped, pod still running — reattaching (${reattaches}/${MAX_REATTACH})`);
+          if (unknown) {
+            args.emit("info", `cluster not answering — retrying the log stream in 5s (${reattaches}/${MAX_REATTACH})`);
+            await new Promise((r) => setTimeout(r, 5000));
+            if (settled) return;
+          } else {
+            args.emit("info", `log stream dropped, pod still running — reattaching (${reattaches}/${MAX_REATTACH})`);
+          }
           attach(seen);
           return;
         }

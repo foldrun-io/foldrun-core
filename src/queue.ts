@@ -35,7 +35,7 @@ import {
   type FlowStep,
   type RunRecord,
 } from "./store.ts";
-import { createFlowRun, driveRun } from "./runner.ts";
+import { createFlowRun, driveRun, drivingRuns } from "./runner.ts";
 import { killRunSandboxes } from "./run-container.ts";
 import { killRunPods } from "./run-k8s.ts";
 import { accrueDaily, assertFunds, billingEnabled, recordRunCost } from "./ledger.ts";
@@ -48,6 +48,7 @@ import { databaseEnabled, db } from "./db.ts";
 import { cacheEnabled, leaseHeld, releaseLease, takeLease } from "./cache.ts";
 import {
   claimNextDb,
+  touchClaimDb,
   enqueueDb,
   hasJobDb,
   inFlightDb,
@@ -501,7 +502,7 @@ export async function claimNext(): Promise<
     if (!job) return null;
     return {
       job: job as QueueJob,
-      release: () => releaseDb(job.runId),
+      release: () => releaseDb(job.runId, WORKER_OWNER),
     };
   }
 
@@ -791,7 +792,7 @@ export function startWorker() {
     // Not the holder → not a worker this tick. A web replica pointed at the
     // same data, or a second worker from a misapplied manifest, idles here
     // instead of double-driving runs.
-    if (!holdsWorkerLease()) return;
+    if (!(await holdsWorkerLease())) return;
     while (inFlight < concurrency()) {
       // Reserve the slot BEFORE awaiting the claim. The await yields, and a
       // second tick arriving in that window would read the same inFlight and
@@ -805,9 +806,29 @@ export function startWorker() {
       }
 
       void (async () => {
+        // Renew the claim for as long as this run is driven. recoverStaleDb
+        // hands back any claim older than the stale window, and nothing used
+        // to renew one — so a run longer than that window was handed to the
+        // next worker to boot while this one was still driving it, and both
+        // drove. No-op on the file queue, where a claim is a renamed file.
+        const heartbeat = setInterval(
+          () => void touchClaimDb(claim.job.runId, WORKER_OWNER).catch(() => {}),
+          Math.max(10_000, Math.floor(CLAIM_STALE_MS / 3)),
+        );
+        heartbeat.unref?.();
         try {
           const { tenant, workspace, runId, modelOverride, tags } = claim.job;
           const run = readRun(tenant, workspace, runId);
+          if (run && drivingRuns.has(runId)) {
+            // Already being driven in this process: reconcile resumes an
+            // idle parked run directly, outside the queue, and this job was
+            // minted for the same resume while every slot was busy. Two
+            // loops on one record run every remaining step twice. The live
+            // driver re-enqueues the run if it parks again, so the job is
+            // simply dropped.
+            console.log(`[foldrun] worker: run ${runId} is already being driven here — dropping the duplicate job`);
+            return;
+          }
           // Drive anything not finished and not still waiting on a person.
           // `queued` and (via boot recovery) `running` trivially qualify; a
           // parked run qualifies once no step is still asking — and if one
@@ -892,6 +913,7 @@ export function startWorker() {
           await claim.release().catch((err) =>
             console.error(`[foldrun] worker: releasing ${claim.job.runId}:`, err),
           );
+          clearInterval(heartbeat);
           inFlight -= 1;
         }
       })();
@@ -941,7 +963,7 @@ export function startWorker() {
     }
   };
   setInterval(() => void accrue().catch((err) => console.error("[foldrun] hourly accrual:", err)), 60 * 60 * 1000).unref();
-  accrue();
+  accrue().catch((err) => console.error("[foldrun] startup accrual:", err));
 }
 
 /** The queue, described: what /healthz and the metrics endpoint report.

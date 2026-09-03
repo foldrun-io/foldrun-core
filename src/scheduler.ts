@@ -433,11 +433,20 @@ let started = false;
 export function startScheduler() {
   if (started || process.env.FOLDRUN_DISABLE_SCHEDULER === "1") return;
   started = true;
+  // One tick at a time. A tick's `trigger: watch` pass fetches every watched
+  // URL serially, up to 8s each, and lastFired is only written back at the
+  // end — so a tick that outran the 30s interval overlapped the next one,
+  // which read the OLD state and enqueued every due cron flow a second time.
+  let ticking = false;
   setInterval(() => {
+    if (ticking) return;
+    ticking = true;
     // The tick is async now (enqueueing can be a database write), so its
     // failure is a rejected promise rather than a throw a try/catch here would
     // ever see — an unhandled one takes the process down.
-    void tick().catch((err) => console.error("[scheduler] tick failed:", err));
+    void tick()
+      .catch((err) => console.error("[scheduler] tick failed:", err))
+      .finally(() => { ticking = false; });
   }, TICK_MS).unref?.();
   console.log("[scheduler] started (30s tick)");
 }
