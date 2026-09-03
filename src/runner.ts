@@ -59,6 +59,7 @@ import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
+import { syncPublicShares } from "./shares.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
@@ -1108,6 +1109,30 @@ function agentContext(
  * tokens itself, its number replaces the SDK's, and the trace says so —
  * a silently different bill is the one kind nobody forgives.
  */
+/**
+ * Publish whatever this step left in `storage/public/` and record the URLs.
+ *
+ * Runs after every step, on both execution paths, because the file has to be
+ * on the host (copy-back has happened) and the manifest has to be in place
+ * before the next step's sandbox is filled from that same workspace. A step
+ * generates an image; the step after it reads the URL from a plain file.
+ *
+ * Never fails a step: a link is bookkeeping, and a run that did its work must
+ * not be marked failed because a URL could not be minted.
+ */
+function publishPublicDir(
+  tenant: string,
+  workspace: string,
+  push: (type: "info" | "error", text: string) => void,
+) {
+  try {
+    const { added } = syncPublicShares(tenant, workspace);
+    if (added.length) push("info", `shared: ${added.join(", ")}`);
+  } catch (err) {
+    push("error", `shares: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function repriced(
   catalog: Catalog | null,
   model: string,
@@ -1562,6 +1587,7 @@ async function runStep(
           outcome = { ...outcome, timing: first };
         }
       }
+      publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
       step.result = outcome.result;
       step.conclusion = outcome.conclusion;
@@ -1665,6 +1691,7 @@ async function runStep(
         );
         outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
+      publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
       step.result = outcome.result;
       step.conclusion = outcome.conclusion;

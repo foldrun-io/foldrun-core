@@ -35,6 +35,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
 import { workspaceDir } from "./store.ts";
+import { publicUrl } from "./webhook.ts";
 
 export interface Share {
   token: string;
@@ -221,6 +222,87 @@ export function pruneShares(olderThanDays = 30): number {
   return shares.length - keep.length;
 }
 
+/** Anything here is published. The directory name is the whole contract. */
+export const PUBLIC_DIR = "storage/public";
+
+/**
+ * Where the URLs are written back, deliberately OUTSIDE `storage/public/` so
+ * the index of what is public is not itself public.
+ */
+export const PUBLIC_URLS_FILE = "storage/public-urls.json";
+
+/**
+ * Give every file under `storage/public/` a link, and write the map where the
+ * next step can read it.
+ *
+ * This exists because the agent cannot mint its own. A run's sandbox is denied
+ * every private network range on purpose — it may reach the internet, never
+ * this platform's API — so an agent that needed a public URL had no way to ask
+ * for one, and handing sandboxes an API key to fix that would give every step
+ * editor rights over the whole account.
+ *
+ * So the platform does it, at the one moment it can: after a step's files have
+ * been copied back to the host, before the next step's sandbox is filled from
+ * them. A step writes an image to `storage/public/`, the step ends, and the
+ * step after it reads the URL out of a plain JSON file with no network at all.
+ *
+ * Auto-shares do not expire. A directory called `public` is a deliberate
+ * publish, and an asset URL that dies in a week — inside a live Google post,
+ * an email, a client's browser tab — is a silent breakage nobody connects back
+ * to this. Revocation stays available and is the intended way to take one
+ * down.
+ */
+export function syncPublicShares(
+  tenant: string,
+  workspace: string,
+): { added: string[]; urls: Record<string, string> } {
+  const root = workspaceDir(tenant, workspace);
+  const dir = path.join(root, PUBLIC_DIR);
+  if (!fs.existsSync(dir)) return { added: [], urls: {} };
+  // No public origin means no honest URL to write. Say nothing and change
+  // nothing rather than filling the manifest with links that resolve nowhere.
+  if (!publicUrl()) return { added: [], urls: {} };
+
+  const files: string[] = [];
+  const walk = (abs: string) => {
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      const child = path.join(abs, entry.name);
+      if (entry.isDirectory()) walk(child);
+      else if (entry.isFile()) {
+        files.push(path.relative(root, child).replaceAll("\\", "/"));
+      }
+    }
+  };
+  walk(dir);
+
+  const live = listShares(tenant, workspace).filter((s) => isLive(s));
+  const byPath = new Map(live.map((s) => [s.path, s]));
+  const added: string[] = [];
+  const urls: Record<string, string> = {};
+
+  for (const rel of files.sort()) {
+    let share = byPath.get(rel);
+    if (!share) {
+      try {
+        share = createShare(tenant, workspace, rel, { ttlDays: null, createdBy: "storage/public" });
+        added.push(rel);
+      } catch {
+        continue; // a name the path rule refuses is skipped, never fatal
+      }
+    }
+    urls[rel] = shareUrl(share.token);
+  }
+
+  const manifest = path.join(root, PUBLIC_URLS_FILE);
+  const next = JSON.stringify(urls, null, 2) + "\n";
+  const before = fs.existsSync(manifest) ? fs.readFileSync(manifest, "utf8") : "";
+  if (before !== next) {
+    fs.mkdirSync(path.dirname(manifest), { recursive: true });
+    fs.writeFileSync(manifest, next);
+  }
+  return { added, urls };
+}
+
 /**
  * The absolute URL for a token. `FOLDRUN_PUBLIC_URL` is the origin the outside
  * world reaches this install on — and if it is unset there is no honest answer,
@@ -228,7 +310,7 @@ export function pruneShares(olderThanDays = 30): number {
  * somewhere and quietly fail for everyone but us.
  */
 export function shareUrl(token: string): string {
-  const base = process.env.FOLDRUN_PUBLIC_URL?.trim().replace(/\/+$/, "");
+  const base = publicUrl();
   if (!base) {
     throw new Error(
       "FOLDRUN_PUBLIC_URL is not set — a share link needs the origin this install is reachable at from outside",
