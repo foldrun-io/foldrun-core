@@ -160,8 +160,19 @@ const EMPTY: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null
  * output to quote. Reporting the streams alone produced the least useful
  * message a build can give: "npm install failed: " with nothing after it.
  */
-function run(cmd: string, args: string[], cwd: string, timeoutMs = 300_000) {
-  const res = spawnSync(cmd, args, { cwd, timeout: timeoutMs, encoding: "utf8" });
+function run(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  timeoutMs = 300_000,
+  extraEnv: Record<string, string> = {},
+) {
+  const res = spawnSync(cmd, args, {
+    cwd,
+    timeout: timeoutMs,
+    encoding: "utf8",
+    env: { ...process.env, ...extraEnv },
+  });
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
   if (res.status === 0) return { ok: true, out };
   const why = res.error
@@ -340,7 +351,22 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
       // Not --silent: it sets npm's loglevel to silent, which suppresses the
       // explanation along with the noise. A build log nobody reads is cheaper
       // than a failure nobody can explain.
-      const installed = run("npm", ["install", "--no-fund", "--no-audit", "--no-progress", ...spec.npm], root);
+      const installed = run(
+        "npm",
+        ["install", "--no-fund", "--no-audit", "--no-progress", ...spec.npm],
+        root,
+        300_000,
+        {
+          // npm keeps its cache under $HOME/.npm. A sandbox runs as a user
+          // with no home directory, so that resolves to /.npm, which it may
+          // not create — and npm fails with ENOENT before it fetches
+          // anything. Every tool declaring `npm:` failed this way, on every
+          // executor, which is a long time for a feature to be broken
+          // quietly. The cache belongs beside the runtime it is building.
+          HOME: root,
+          npm_config_cache: path.join(root, ".npm-cache"),
+        },
+      );
       if (!installed.ok) {
         return { ...EMPTY, error: `npm install failed: ${installed.out.slice(-500)}` };
       }
