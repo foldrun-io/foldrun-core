@@ -25,6 +25,7 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec, type Effort } from "./store.ts";
+import type { EventExtra } from "./step-exec.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
 import { dataRoot } from "./paths.ts";
@@ -254,7 +255,7 @@ const DRIVER = `// The runner container's entrypoint. Reads one step, executes i
 // same core the server uses, speaks JSONL on stdout, exits.
 import fs from "node:fs";
 const input = JSON.parse(fs.readFileSync("/opt/runner/job/input.json", "utf8"));
-const emit = (type, text) => process.stdout.write(JSON.stringify({ e: "event", type, text }) + "\\n");
+const emit = (type, text, extra) => process.stdout.write(JSON.stringify({ e: "event", type, text, ...extra }) + "\\n");
 // What this sandbox actually touched, read at the last moment from the
 // kernel's own books: cgroup v2 for CPU busy-time and peak memory,
 // /proc/net/dev for bytes on the wire. Every read is best-effort — gVisor
@@ -518,12 +519,21 @@ export function ensureRunnerImage(): { tag: string; log: string[] } {
 
 export function parseDriverLine(
   line: string,
-): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string } | { e: "done" } & ContainerStepOutcome | null {
+): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean } | { e: "done" } & ContainerStepOutcome | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
     const parsed = JSON.parse(trimmed);
-    if (parsed.e === "event" && typeof parsed.text === "string") return parsed;
+    if (parsed.e === "event" && typeof parsed.text === "string") {
+      return {
+        e: "event",
+        type: parsed.type,
+        text: parsed.text,
+        ...(typeof parsed.call === "string" ? { call: parsed.call } : {}),
+        ...(typeof parsed.ms === "number" ? { ms: parsed.ms } : {}),
+        ...(parsed.err === true ? { err: true } : {}),
+      };
+    }
     if (parsed.e === "done") {
       return {
         e: "done",
@@ -588,7 +598,7 @@ export interface RunInContainerArgs {
   input: ContainerStepInput;
   /** Secret + provider env — crosses as an env file, never argv. */
   env: Record<string, string>;
-  emit: (type: "text" | "tool" | "info" | "error", text: string) => void;
+  emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
   /** The run this step belongs to. Stamped on the sandbox as a label so a
    *  person stopping the run can reach the thing actually burning money —
    *  without it, "stop" could only mean "stop after this step", and a
@@ -799,7 +809,10 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
           const parsed = parseDriverLine(line);
           if (!parsed) continue;
           firstOutputAt ??= Date.now();
-          if (parsed.e === "event") args.emit(parsed.type, parsed.text);
+          if (parsed.e === "event") {
+            const { e: _e, type, text, ...extra } = parsed;
+            args.emit(type, text, extra);
+          }
           else done = parsed;
         }
       });

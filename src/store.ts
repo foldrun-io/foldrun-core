@@ -2167,6 +2167,14 @@ export interface RunEvent {
   t: string;
   type: "text" | "tool" | "error" | "info";
   text: string;
+  /** Tool events come in pairs: the call, and its completion. Both carry
+   *  the provider's tool_use id so a reader can pair them; the completion
+   *  also carries how long the tool ran and whether it errored. The
+   *  timeline draws a span from the pair; the trace shows one line. Absent
+   *  on records from before this existed — then a tool is a tick, not a bar. */
+  call?: string;
+  ms?: number;
+  err?: boolean;
 }
 
 export interface StepRecord {
@@ -2188,6 +2196,14 @@ export interface StepRecord {
   verify?: string;
   /** Attempts made so far, for the run trace. */
   attempts?: number;
+  /** When the step actually started and finished executing — not when the
+   *  run reached it. A step's events approximate this (first and last), but
+   *  a model can think for minutes before its first tool call, and a step
+   *  parked at a gate has events long before it runs. Kept across retries:
+   *  startedAt is the first attempt's, finishedAt the last's. Absent on
+   *  records from before this existed; readers fall back to the events. */
+  startedAt?: string;
+  finishedAt?: string;
   /** Why a step was skipped, shown in the trace. */
   skipReason?: string;
   /** Evaluator loop, carried from the flow — see FlowStep. `loopRemaining`

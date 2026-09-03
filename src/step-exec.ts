@@ -65,8 +65,11 @@ export interface ExecOptions {
    *  container): the SDK's bash sandbox is then redundant and would block
    *  declared network use. Default (undefined/true) keeps it on. */
   sandboxBash?: boolean;
-  emit: (type: "text" | "tool" | "info" | "error", text: string) => void;
+  emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
+
+/** The pairing fields on a tool event — see RunEvent in store.ts. */
+export type EventExtra = { call?: string; ms?: number; err?: boolean };
 
 export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
@@ -143,6 +146,10 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
 
   const deadline = opts.timeoutSec ? Date.now() + opts.timeoutSec * 1000 : null;
 
+  // Open tool calls, by the provider's id, so the result can be paired with
+  // its call and the trace can say how long each tool ran.
+  const openCalls = new Map<string, { name: string; at: number }>();
+
   for await (const message of q) {
     if (deadline && Date.now() > deadline) {
       emit("error", `step exceeded its ${opts.timeoutSec}s timeout`);
@@ -155,7 +162,25 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
           texts.push(block.text);
           emit("text", block.text);
         } else if (block.type === "tool_use") {
-          emit("tool", block.name);
+          openCalls.set(block.id, { name: block.name, at: Date.now() });
+          emit("tool", block.name, { call: block.id });
+        }
+      }
+    } else if (message.type === "user") {
+      // Tool results ride back as user turns. The completion event closes
+      // the span the call opened; the runner's journal keeps both.
+      const content = message.message.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type !== "tool_result") continue;
+          const open = openCalls.get(block.tool_use_id);
+          if (!open) continue;
+          openCalls.delete(block.tool_use_id);
+          emit("tool", open.name, {
+            call: block.tool_use_id,
+            ms: Date.now() - open.at,
+            ...(block.is_error ? { err: true } : {}),
+          });
         }
       }
     } else if (message.type === "result") {

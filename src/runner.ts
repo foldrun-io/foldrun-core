@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
-import { executeStep, extractJson } from "./step-exec.ts";
+import { executeStep, extractJson, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
 import { runStepInK8s, killRunPods } from "./run-k8s.ts";
@@ -1185,10 +1185,15 @@ async function runStep(
     return out;
   };
 
-  const push = (type: StepRecord["events"][number]["type"], text: string) => {
-    step.events.push({ t: new Date().toISOString(), type, text: redact(text) });
+  const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
+    step.events.push({ t: new Date().toISOString(), type, text: redact(text), ...extra });
     save();
   };
+
+  // The clock on the step itself. `??=` so a retry extends the first
+  // attempt's span rather than starting a new one; finishedAt is stamped on
+  // every exit below and the last attempt's stands.
+  step.startedAt ??= new Date().toISOString();
 
   // The test seam: FOLDRUN_STUB_STEP=1 completes the step from a canned
   // script instead of a model, so the orchestration around steps — loops,
@@ -1219,6 +1224,7 @@ async function runStep(
         step.status = "failed";
       }
     }
+    step.finishedAt = new Date().toISOString();
     save();
     return;
   }
@@ -1458,9 +1464,9 @@ async function runStep(
     // watched on both paths, because a refusal reads the same from a pod
     // and from this process.
     let lastRefusal = "";
-    const pushWatching: typeof push = (type, text) => {
+    const pushWatching: typeof push = (type, text, extra) => {
       if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
-      push(type, text);
+      push(type, text, extra);
     };
     // The second supply: the block's own fallback when it declared one (a
     // BYOK step's provider is the customer's arrangement, and so is its
@@ -1716,6 +1722,7 @@ async function runStep(
       // best-effort — a leftover scratch file is swept with the run's outputs
     }
   }
+  step.finishedAt = new Date().toISOString();
   save();
 }
 
