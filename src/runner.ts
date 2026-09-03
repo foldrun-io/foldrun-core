@@ -2065,7 +2065,26 @@ function driveRunInner(
   const effortOverride = opts.effortOverride ?? null;
   const pDir = workspaceDir(tenant, workspace);
   const runRoot = pDir;
-  const save = () => writeRun(tenant, workspace, run);
+  /**
+   * Persist the run — carrying forward a stop that arrived while we were busy.
+   *
+   * A stop is written to the record by another process (stopRun), and this
+   * loop holds the run in memory for as long as a group takes. Without the
+   * merge below, the next save silently overwrote `stopRequested`, and the
+   * between-groups check then read back the value it had just erased. A run
+   * stopped mid-group carried on to the end of the flow as if nothing had
+   * happened — observed on 2026-09-03, when a run stopped at 04:52 published
+   * to five live Google Business Profiles at 06:05.
+   *
+   * The flag is one-way: nothing here clears it, so the read-modify-write can
+   * only ever turn a stop on, never off.
+   */
+  const save = () => {
+    if (!run.stopRequested && readRun(tenant, workspace, run.id)?.stopRequested) {
+      run.stopRequested = true;
+    }
+    writeRun(tenant, workspace, run);
+  };
 
   // Provenance: a memory an agent wrote gets stamped with who wrote it, per
   // OKF v0.2. Without this a fact the model invented and a fact a person
