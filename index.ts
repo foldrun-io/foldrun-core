@@ -28,6 +28,7 @@ export * from "./src/refs.ts";
 export * from "./src/tool-names.ts";
 export * from "./src/observe.ts";
 export * from "./src/ownership.ts";
+export * from "./src/signup.ts";
 export * from "./src/permissions.ts";
 export * from "./src/history.ts";
 export * from "./src/gitrepo.ts";
