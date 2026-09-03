@@ -198,17 +198,37 @@ export function parseCron(expr: string): Cron | null {
 }
 
 // Wall-clock fields for a date in an IANA timezone.
+// One formatter per zone, kept.
+//
+// Constructing an Intl.DateTimeFormat is expensive — far more so than using
+// one — and this function is called once per minute examined. The scheduler
+// asks it for every flow on every tick, and the settings page walks forty
+// days a minute at a time to preview the next fire: 57,600 formatters per
+// flow, twice, which took tens of seconds and blocked the event loop long
+// enough that a pooled database connection timed out underneath it. The
+// formatter for a zone never changes, so there is nothing to invalidate.
+const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(timeZone: string): Intl.DateTimeFormat {
+  let fmt = FORMATTERS.get(timeZone);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      weekday: "short",
+      hour12: false,
+    });
+    FORMATTERS.set(timeZone, fmt);
+  }
+  return fmt;
+}
+
 function zoned(date: Date, timeZone: string) {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "numeric",
-    minute: "numeric",
-    weekday: "short",
-    hour12: false,
-  });
+  const fmt = formatterFor(timeZone);
   const parts: Record<string, string> = {};
   for (const p of fmt.formatToParts(date)) parts[p.type] = p.value;
   return {
