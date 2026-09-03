@@ -2389,6 +2389,56 @@ export function registerRunDeletionListener(fn: typeof onRunDeleted) {
   onRunDeleted = fn;
 }
 
+export interface RunOutputFile {
+  agent: string;
+  /** Relative to that agent's outputs/ — the name the agent wrote. */
+  path: string;
+  bytes: number;
+}
+
+/**
+ * What a run archived: every file its agents left in outputs/, copied under
+ * runs/<id>/outputs/<agent>/ when the run finished (runner.ts, archive()).
+ *
+ * Per agent, not per step — the archive is a copy of each agent's folder,
+ * and the record cannot say which step wrote which file. An agent that
+ * steps twice in one run shows the same files against both steps.
+ */
+export function listRunOutputs(tenant: string, workspace: string, runId: string): RunOutputFile[] {
+  const root = path.join(workspaceDir(tenant, workspace), "runs", runId, "outputs");
+  if (!fs.existsSync(root)) return [];
+  const out: RunOutputFile[] = [];
+  const walk = (agent: string, dir: string, rel: string) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(agent, full, r);
+      else if (e.isFile()) out.push({ agent, path: r, bytes: fs.statSync(full).size });
+    }
+  };
+  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+    if (e.isDirectory()) walk(e.name, path.join(root, e.name), "");
+  }
+  return out.sort((a, b) => a.agent.localeCompare(b.agent) || a.path.localeCompare(b.path));
+}
+
+/** The absolute path of one archived output, or null when the name escapes
+ *  the archive or names nothing — the API serves only what this returns. */
+export function runOutputPath(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  agent: string,
+  rel: string,
+): string | null {
+  if (!agent || !rel || agent.includes("/") || agent.includes("\\") || agent.startsWith(".")) return null;
+  const root = path.resolve(workspaceDir(tenant, workspace), "runs", runId, "outputs", agent);
+  const full = path.resolve(root, rel);
+  if (full !== root && !full.startsWith(root + path.sep)) return null;
+  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+  return full;
+}
+
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
   const p = runFilePath(tenant, workspace, runId);
   return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
