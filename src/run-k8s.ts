@@ -417,7 +417,7 @@ export async function runStepInK8s(args: RunInContainerArgs): Promise<ContainerS
     fs.mkdirSync(wsOut);
     const back = await kc(["cp", `${ns}/${name}:/workspace/.`, wsOut]);
     if (back.status === 0) {
-      applyContainerChanges(args.workspaceRoot, wsOut);
+      applyContainerChanges(args.workspaceRoot, wsOut, wsIn);
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.out.slice(0, 500)}`);
     }

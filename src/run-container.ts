@@ -142,6 +142,10 @@ const DENY_BACK_GIT_RE = /(^|\/)\.git(\/|$)/;
 const DENY_BACK_SECRET_FILES = /(^|\/)\.secret-files\//;
 // And per-agent knowledge, at any depth under agents/<name>/.
 const DENY_BACK_RE = /^agents\/[^/]+\/knowledge\//;
+// A dependency tree is not workspace content. Nothing authored lives in
+// node_modules, it is enormous, and a runtime linked into a tool's directory
+// so ESM can resolve it would otherwise be copied back file by file.
+const DENY_BACK_NODE_MODULES = /(^|\/)node_modules(\/|$)/;
 
 /** Should this container-side path be applied back to the host workspace? */
 export function allowedBack(rel: string): boolean {
@@ -152,16 +156,34 @@ export function allowedBack(rel: string): boolean {
   if (DENY_BACK_RE.test(norm)) return false;
   if (DENY_BACK_GIT_RE.test(norm)) return false;
   if (DENY_BACK_SECRET_FILES.test(norm)) return false;
+  if (DENY_BACK_NODE_MODULES.test(norm)) return false;
   return true;
 }
 
 /**
- * Apply what the container's workspace copy now holds onto the real one —
- * additive and overwriting, never deleting: an agent organising its own
- * files gains nothing from deleting on the host that it can't get by
- * writing, and a bug in a deletion sync destroys authored work.
+ * Apply what the STEP changed onto the real workspace — additive and
+ * overwriting, never deleting: an agent organising its own files gains
+ * nothing from deleting on the host that it can't get by writing, and a bug
+ * in a deletion sync destroys authored work.
+ *
+ * `baseline` is the copy that was handed to the container at the start of the
+ * step. Without it this function compares the container against the HOST, and
+ * that is a different question with a worse answer: a file the step never
+ * touched, edited on the host while the step ran, differs — so it was written
+ * back from the container's stale copy and the edit vanished. It happened on
+ * 2026-09-03: a tool.md fixed mid-run was reverted eight minutes later by a
+ * step that had never read it, and the repository kept the fix while the
+ * workspace lost it.
+ *
+ * With the baseline the rule is simply: identical to what we handed in means
+ * the step did not touch it, so it is not ours to write back. Concurrent
+ * edits survive, and a step that genuinely changed a file still wins.
  */
-export function applyContainerChanges(hostWs: string, containerWs: string): string[] {
+export function applyContainerChanges(
+  hostWs: string,
+  containerWs: string,
+  baseline?: string,
+): string[] {
   const applied: string[] = [];
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -172,8 +194,14 @@ export function applyContainerChanges(hostWs: string, containerWs: string): stri
         continue;
       }
       if (!allowedBack(rel)) continue;
-      const target = path.join(hostWs, rel);
       const next = fs.readFileSync(abs);
+      // Untouched by this step: whatever the host says now is more current
+      // than what we handed in, including a change made while it ran.
+      if (baseline) {
+        const was = path.join(baseline, rel);
+        if (fs.existsSync(was) && fs.readFileSync(was).equals(next)) continue;
+      }
+      const target = path.join(hostWs, rel);
       if (fs.existsSync(target) && fs.readFileSync(target).equals(next)) continue;
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, next);
@@ -797,7 +825,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(wsOut);
     const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
     if (back.status === 0) {
-      applyContainerChanges(args.workspaceRoot, wsOut);
+      applyContainerChanges(args.workspaceRoot, wsOut, wsIn);
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }
