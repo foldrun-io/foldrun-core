@@ -1764,8 +1764,12 @@ export function listAccountFiles(tenant: string, cap = 4000): string[] {
       const next = rel ? `${rel}/${e.name}` : e.name;
       if (e.isSymbolicLink()) continue;
       // Content-addressed blobs and a run's copied outputs are bytes under a
-      // hash — thousands of names that mean nothing to a reader.
-      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git)$/.test(next)) continue;
+      // hash — thousands of names that mean nothing to a reader. The
+      // revision store (.history), the runtime cache (.runtimes, with npm's
+      // _cacache under it) and the file-store indexes (storage/) are the
+      // platform's own bookkeeping: real paths, but not files anyone reads
+      // here, and between them most of what the page used to list.
+      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git|\.history|\.runtimes|\.npm-cache|_cacache|storage|previews)$/.test(next)) continue;
       if (ACCOUNT_BOOKKEEPING.test(next)) continue;
       if (e.isDirectory()) walk(path.join(abs, e.name), next, depth + 1);
       else out.push(next);
