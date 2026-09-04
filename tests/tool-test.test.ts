@@ -9,8 +9,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { testTool } from "../packages/core/src/tool-test.ts";
-import { workspaceTools } from "../packages/core/src/store.ts";
+import { testTool } from "../src/tool-test.ts";
+import { workspaceTools } from "../src/store.ts";
 
 /** A throwaway installation with one workspace, for one callback. */
 function withWorkspace(files: Record<string, string>, run: () => Promise<void>) {

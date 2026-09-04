@@ -9,10 +9,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startFlowRun, waitForRun } from "../packages/core/src/runner.ts";
-import { parseFlow, readRun, type FlowStep } from "../packages/core/src/store.ts";
-import { deliverEvent } from "../packages/core/src/approvals.ts";
-import { eventToken, approveToken, eventUrl } from "../packages/core/src/webhook.ts";
+import { startFlowRun, waitForRun } from "../src/runner.ts";
+import { parseFlow, readRun, type FlowStep } from "../src/store.ts";
+import { deliverEvent } from "../src/approvals.ts";
+import { eventToken, approveToken, eventUrl } from "../src/webhook.ts";
 
 function workspace(agents: Record<string, string>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-event-"));

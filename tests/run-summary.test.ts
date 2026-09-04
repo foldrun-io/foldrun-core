@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runSummary, type RunRecord, type StepRecord } from "../packages/core/src/store.ts";
+import { runSummary, type RunRecord, type StepRecord } from "../src/store.ts";
 
 const step = (agent: string, result: string | null, status: StepRecord["status"] = "completed") =>
   ({ agent, instruction: "", group: 1, optional: false, attempts: 1, status, events: [], result }) as unknown as StepRecord;

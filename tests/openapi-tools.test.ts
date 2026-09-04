@@ -23,9 +23,9 @@ import {
   loadOpenApiDocument,
   attachOperations,
   MAX_OPERATIONS,
-} from "../packages/core/src/openapi.ts";
-import { parseApis, parseRate, type ApiSpec } from "../packages/core/src/store.ts";
-import { buildApiTools, typedToolName, TokenBucket } from "../packages/core/src/api-tools.ts";
+} from "../src/openapi.ts";
+import { parseApis, parseRate, type ApiSpec } from "../src/store.ts";
+import { buildApiTools, typedToolName, TokenBucket } from "../src/api-tools.ts";
 
 const DOC = {
   openapi: "3.0.3",

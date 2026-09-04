@@ -18,8 +18,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { listWorkspaceFiles, writeWorkspaceFile } from "../packages/core/src/store.ts";
-import { starterFiles } from "../packages/core/src/starter.ts";
+import { listWorkspaceFiles, writeWorkspaceFile } from "../src/store.ts";
+import { starterFiles } from "../src/starter.ts";
 
 function withWorkspace(run: (root: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-state-"));
@@ -58,7 +58,7 @@ test("state holds data, so it is not restricted to markdown", () => {
 // condition that was missing for as long as the directory has existed.
 test("the runtime names state/ to the agent, with a reachable path", () => {
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/core/src/runner.ts"),
+    path.join(import.meta.dirname, "..", "src/runner.ts"),
     "utf8",
   );
 
@@ -98,7 +98,7 @@ test("a new workspace ignores its own secret key and run store", () => {
 // are two statements about one path, and only one of them is enforceable.
 test("the secret key really does live under .foldrun/", () => {
   const cli = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/cli/bin/foldrun.mjs"),
+    path.join(import.meta.dirname, "..", "../foldrun-cli/bin/foldrun.mjs"),
     "utf8",
   );
   // The guarantee, not the wording: when a workspace keeps its own store, that

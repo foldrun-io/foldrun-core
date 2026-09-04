@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareRuntime, parseRuntime, fingerprint, safeTenantSegment } from "../packages/core/src/runtime.ts";
+import { prepareRuntime, parseRuntime, fingerprint, safeTenantSegment } from "../src/runtime.ts";
 
 const SPEC = { python: true as const, packages: [], npm: [] };
 const FP = fingerprint(SPEC);

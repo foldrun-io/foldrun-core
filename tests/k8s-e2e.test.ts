@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { runStepInK8s } from "../packages/core/src/run-k8s.ts";
+import { runStepInK8s } from "../src/run-k8s.ts";
 
 const enabled = process.env.FOLDRUN_K8S_E2E === "1";
 

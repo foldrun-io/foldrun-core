@@ -34,7 +34,7 @@ if (fs.existsSync(envFile)) {
 process.env.FOLDRUN_DATA = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "r2-verify-"));
 process.env.FOLDRUN_STORAGE_DRIVER = "s3";
 
-const { s3Config, driverFor, blobKey } = await import("../packages/core/src/storage.ts");
+const { s3Config, driverFor, blobKey } = await import("../src/storage.ts");
 
 const cfg = s3Config();
 if (!cfg) {

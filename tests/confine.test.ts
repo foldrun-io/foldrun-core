@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { checkPaths, checkBash } from "../packages/core/src/confine.ts";
+import { checkPaths, checkBash } from "../src/confine.ts";
 
 const WORKSPACE = "/data/acme/workspaces/desk";
 const ROOTS = {

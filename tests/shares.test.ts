@@ -21,7 +21,7 @@ import {
   isLive,
   shareUrl,
   syncPublicShares,
-} from "../packages/core/src/shares.ts";
+} from "../src/shares.ts";
 
 /** A throwaway FOLDRUN_DATA holding one workspace with one file in storage/. */
 function inTempData<T>(fn: (root: string, ws: string) => T): T {

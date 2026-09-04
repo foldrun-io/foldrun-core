@@ -11,7 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { unquote, parseFlow } from "../packages/core/src/store.ts";
+import { unquote, parseFlow } from "../src/store.ts";
 
 test("a wholly wrapped value loses its wrapper", () => {
   assert.equal(unquote('"0 8 * * *"'), "0 8 * * *");

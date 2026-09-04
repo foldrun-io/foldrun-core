@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolveDocLinks } from "../packages/core/src/runner.ts";
+import { resolveDocLinks } from "../src/runner.ts";
 
 function withWorkspace(body: (root: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-links-"));

@@ -15,7 +15,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertSignupAllowed, type SignupState } from "../packages/core/src/signup.ts";
+import { assertSignupAllowed, type SignupState } from "../src/signup.ts";
 
 /** The refusal for one attempt, or "(allowed)". */
 const refusal = (state: Partial<SignupState>): string => {

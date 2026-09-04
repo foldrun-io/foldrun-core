@@ -17,8 +17,8 @@ import {
   ledgerSummary,
   noteRunDeleted,
   accrueDaily,
-} from "../packages/core/src/ledger.ts";
-import { accountUsage } from "../packages/core/src/usage.ts";
+} from "../src/ledger.ts";
+import { accountUsage } from "../src/usage.ts";
 
 async function withAccount(body: () => void | Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-ledger-"));

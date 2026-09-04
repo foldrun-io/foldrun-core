@@ -8,10 +8,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { commitChanges, gitAvailable, listRefs, repoDir } from "../packages/core/src/gitrepo.ts";
-import { saveWorkspace, workspaceDir, listWorkspaces } from "../packages/core/src/store.ts";
-import { previewName, syncPreviews, readPreview, isPreview, previewsOf, readPreviewNotes, deletePreviewsOf } from "../packages/core/src/preview.ts";
-import { parseCron, nextFire } from "../packages/core/src/scheduler.ts";
+import { commitChanges, gitAvailable, listRefs, repoDir } from "../src/gitrepo.ts";
+import { saveWorkspace, workspaceDir, listWorkspaces } from "../src/store.ts";
+import { previewName, syncPreviews, readPreview, isPreview, previewsOf, readPreviewNotes, deletePreviewsOf } from "../src/preview.ts";
+import { parseCron, nextFire } from "../src/scheduler.ts";
 
 const HAVE_GIT = gitAvailable();
 

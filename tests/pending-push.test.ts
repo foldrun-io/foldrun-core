@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { applyPendingPush, writePushNote, readPushNote } from "../packages/core/src/deploy.ts";
-import { workspaceDir } from "../packages/core/src/store.ts";
+import { applyPendingPush, writePushNote, readPushNote } from "../src/deploy.ts";
+import { workspaceDir } from "../src/store.ts";
 
 const FILES = [
   { path: "AGENTS.md", content: "---\nname: desk\n---\n" },

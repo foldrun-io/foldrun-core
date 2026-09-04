@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { parseFlow, listRuns, type RunRecord } from "../packages/core/src/store.ts";
+import { parseFlow, listRuns, type RunRecord } from "../src/store.ts";
 import {
   chainedFlows,
   fireChainedFlows,
@@ -20,9 +20,9 @@ import {
   normaliseInboundEmail,
   emailTask,
   withTask,
-} from "../packages/core/src/triggers.ts";
-import { findDueFlows, checkWatches } from "../packages/core/src/scheduler.ts";
-import { setSecret } from "../packages/core/src/secrets.ts";
+} from "../src/triggers.ts";
+import { findDueFlows, checkWatches } from "../src/scheduler.ts";
+import { setSecret } from "../src/secrets.ts";
 
 function workspace(flows: Record<string, string>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-triggers-"));
@@ -236,7 +236,7 @@ test("watch: first sight records, a change fires with the new content, unchanged
 // ------------------------------------------------------------------ lint
 
 test("foldrun check names a trigger that can never fire", async () => {
-  const { lintFlow } = await import("../packages/core/src/flow-lint.ts");
+  const { lintFlow } = await import("../src/flow-lint.ts");
   const msgs = (src: string) => lintFlow(parseFlow("f.md", src)).map((w) => w.message);
   assert.ok(msgs("---\ntrigger: once\n---\n1. [[a]] — x\n").some((m) => /at:/.test(m)));
   assert.ok(msgs("---\ntrigger: watch\n---\n1. [[a]] — x\n").some((m) => /url:/.test(m)));

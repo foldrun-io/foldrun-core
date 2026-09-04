@@ -23,9 +23,9 @@ import {
   holdsWorkerLease,
   peekWorkerLease,
   queueStats,
-} from "../packages/core/src/queue.ts";
-import { driveRun } from "../packages/core/src/runner.ts";
-import { deleteRun, flowHasLiveRun, listFlows, readRun, writeRun, runDisplayStatus, runMeter, type RunRecord } from "../packages/core/src/store.ts";
+} from "../src/queue.ts";
+import { driveRun } from "../src/runner.ts";
+import { deleteRun, flowHasLiveRun, listFlows, readRun, writeRun, runDisplayStatus, runMeter, type RunRecord } from "../src/store.ts";
 
 /** A tenant/workspace on disk, and core pointed at it. */
 function withWorkspace(body: () => void | Promise<void>) {

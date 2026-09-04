@@ -8,13 +8,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import matter from "gray-matter";
-import { GALLERY, galleryTemplate, installGalleryTool } from "../packages/core/src/gallery.ts";
-import { readLibraryFile } from "../packages/core/src/library.ts";
-import { parseToolDef, readWorkspaceFile, saveWorkspace, workspaceTools, writeWorkspaceFile } from "../packages/core/src/store.ts";
-import { missingToolPrograms } from "../packages/core/src/tool-programs.ts";
-import { isEditablePath, listWorkspaceFiles } from "../packages/core/src/store.ts";
-import { SCRIPT_LANGUAGES, toolStarter } from "../packages/core/src/kinds.ts";
-import { fencedCode } from "../packages/core/src/store.ts";
+import { GALLERY, galleryTemplate, installGalleryTool } from "../src/gallery.ts";
+import { readLibraryFile } from "../src/library.ts";
+import { parseToolDef, readWorkspaceFile, saveWorkspace, workspaceTools, writeWorkspaceFile } from "../src/store.ts";
+import { missingToolPrograms } from "../src/tool-programs.ts";
+import { isEditablePath, listWorkspaceFiles } from "../src/store.ts";
+import { SCRIPT_LANGUAGES, toolStarter } from "../src/kinds.ts";
+import { fencedCode } from "../src/store.ts";
 
 function withData(body: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gallery-"));

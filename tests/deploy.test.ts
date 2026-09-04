@@ -19,8 +19,8 @@ import {
   deployWorkspace,
   deployedCommit,
   runsInFlight,
-} from "../packages/core/src/deploy.ts";
-import type { DeployFile } from "../packages/core/src/store.ts";
+} from "../src/deploy.ts";
+import type { DeployFile } from "../src/store.ts";
 
 function withData(body: (root: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-deploy-"));

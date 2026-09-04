@@ -12,7 +12,7 @@ import path from "node:path";
 // Journal history, not git: the test wants a file, not a repository.
 process.env.FOLDRUN_HISTORY = "journal";
 
-import { promoteRunToEval, listEvals, parseEval } from "../packages/core/src/evals.ts";
+import { promoteRunToEval, listEvals, parseEval } from "../src/evals.ts";
 
 function withWorkspace(runs: unknown[], body: (ws: string) => Promise<void> | void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-promote-"));

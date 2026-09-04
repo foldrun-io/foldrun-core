@@ -19,7 +19,7 @@ import path from "node:path";
 import {
   ensureRunnerImage,
   runStepInContainer,
-} from "../packages/core/src/run-container.ts";
+} from "../src/run-container.ts";
 
 const enabled = process.env.FOLDRUN_CONTAINER_E2E === "1";
 const opts = { skip: enabled ? false : "set FOLDRUN_CONTAINER_E2E=1 to run (needs Docker)" };

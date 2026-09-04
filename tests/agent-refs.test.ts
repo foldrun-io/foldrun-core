@@ -14,8 +14,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { lintFlow } from "../packages/core/src/flow-lint.ts";
-import { listAgents, parseFlow } from "../packages/core/src/store.ts";
+import { lintFlow } from "../src/flow-lint.ts";
+import { listAgents, parseFlow } from "../src/store.ts";
 
 const flow = (body: string) => parseFlow("flows/x.md", `---\nname: x\n---\n\n${body}`);
 const KNOWN = { agents: ["writer", "editor", "recovery"] };

@@ -14,7 +14,7 @@ import {
   isOwner,
   ownerOf,
   type Membership,
-} from "../packages/core/src/ownership.ts";
+} from "../src/ownership.ts";
 
 // The store's shape, minus the parts ownership does not read. `web/server`
 // imports through a bundler alias and cannot be loaded here, which is exactly

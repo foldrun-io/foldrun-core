@@ -17,7 +17,7 @@ import {
   materializeSecrets,
   listSecrets,
   setSecret,
-} from "../packages/core/src/secrets.ts";
+} from "../src/secrets.ts";
 
 function withVault(body: () => void | Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-oauth-"));
@@ -73,7 +73,7 @@ function tokenServer(): Promise<{ url: string; calls: () => number; close: () =>
 // an https-looking wrapper. Simpler: relax is not offered; craft configs
 // through setOAuth2Secret only for the https test, and store test configs
 // with a direct helper below.
-import { getSecret } from "../packages/core/src/secrets.ts";
+import { getSecret } from "../src/secrets.ts";
 
 function storeTestOAuth(tenant: string, name: string, config: object, workspace?: string) {
   // What setOAuth2Secret writes, minus its https guard — tests talk to

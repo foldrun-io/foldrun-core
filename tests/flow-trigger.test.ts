@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setFlowTrigger, parseFlow } from "../packages/core/src/store.ts";
+import { setFlowTrigger, parseFlow } from "../src/store.ts";
 
 const FLOW = `---
 name: digest

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { headlineOf, listAgentSteps, runSummary, stepHeadline, writeRun, type RunRecord } from "../packages/core/src/store.ts";
+import { headlineOf, listAgentSteps, runSummary, stepHeadline, writeRun, type RunRecord } from "../src/store.ts";
 
 test("a headline is the first line a person would recognise as the point", () => {
   assert.equal(headlineOf("## Done: 4 findings\n\nDetail follows."), "Done: 4 findings");
@@ -105,7 +105,7 @@ test("the runtime asks for the sentence the summary reads", () => {
   // The convention was load-bearing and unstated: every agent.md had to think
   // of it, and the ones written before summaries existed never did.
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages", "core", "src", "runner.ts"),
+    path.join(import.meta.dirname, "..", "src", "runner.ts"),
     "utf8",
   );
   assert.match(src, /Open your reply with one sentence/);

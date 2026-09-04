@@ -24,9 +24,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { resolveDocLinks } from "../packages/core/src/runner.ts";
-import { linkableDocs } from "../packages/core/src/linkable.ts";
-import { completionsAt, resolvesLinks, type Vocabulary } from "../packages/core/src/completions.ts";
+import { resolveDocLinks } from "../src/runner.ts";
+import { linkableDocs } from "../src/linkable.ts";
+import { completionsAt, resolvesLinks, type Vocabulary } from "../src/completions.ts";
 
 const VOCAB: Vocabulary = {
   agents: ["writer"],

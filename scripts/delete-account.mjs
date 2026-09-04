@@ -15,8 +15,8 @@
 // The ledger is kept: it is the record of money that moved, holds no secret,
 // and deleting a paying customer's financial history is its own problem.
 
-import { deleteTenant } from "../packages/core/dist/src/tenant-delete.js";
-import { loadTenantKeys } from "../packages/core/dist/src/tenant-keys.js";
+import { deleteTenant } from "../dist/src/tenant-delete.js";
+import { loadTenantKeys } from "../dist/src/tenant-keys.js";
 
 const [tenant, flag, confirm] = process.argv.slice(2);
 if (!tenant || flag !== "--confirm" || !confirm) {

@@ -10,9 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { commitChanges, deleteBranch, diffRefs, gitAvailable, headSha, listCommits, listRefs, mergeBranch, repoDir, listTree } from "../packages/core/src/gitrepo.ts";
-import { syncLibraryFromTree, libraryDir, listLibrary } from "../packages/core/src/library.ts";
-import { listRevisions } from "../packages/core/src/history.ts";
+import { commitChanges, deleteBranch, diffRefs, gitAvailable, headSha, listCommits, listRefs, mergeBranch, repoDir, listTree } from "../src/gitrepo.ts";
+import { syncLibraryFromTree, libraryDir, listLibrary } from "../src/library.ts";
+import { listRevisions } from "../src/history.ts";
 
 const HAVE_GIT = gitAvailable();
 
@@ -110,7 +110,7 @@ test("the pre-receive check refuses a push whose tree fails the deploy checks", 
     gitIn(repoDir("acme", "desk"), "update-ref", "refs/heads/main", ok);
 
     const run = (line: string) =>
-      spawnSync(process.execPath, ["--experimental-strip-types", path.join(import.meta.dirname, "../packages/core/src/git-hook.ts")], {
+      spawnSync(process.execPath, ["--experimental-strip-types", path.join(import.meta.dirname, "../src/git-hook.ts")], {
         input: line,
         env: { ...process.env, GIT_DIR: repoDir("acme", "desk") },
         encoding: "utf8",

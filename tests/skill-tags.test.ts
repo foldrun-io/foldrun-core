@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { applicableSkills } from "../packages/core/src/runner.ts";
+import { applicableSkills } from "../src/runner.ts";
 
 const skill = (name: string, when: string[] = []) => ({ name, when });
 
@@ -85,7 +85,7 @@ test("being allowlisted does not exempt a skill from its own `when:`", () => {
 // have to survive every hop between startFlowRun and the filter.
 test("every hop from the run record to the filter carries the tags", () => {
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/core/src/runner.ts"),
+    path.join(import.meta.dirname, "..", "src/runner.ts"),
     "utf8",
   );
 

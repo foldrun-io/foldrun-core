@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatScope, parseScope, scopeAllows, describeScope } from "../packages/core/src/scope.ts";
+import { formatScope, parseScope, scopeAllows, describeScope } from "../src/scope.ts";
 
 test("all, none and some round-trip through the invite's text", () => {
   assert.equal(formatScope(null), "*");

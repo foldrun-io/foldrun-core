@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { deleteTenant } from "../packages/core/src/tenant-delete.ts";
+import { deleteTenant } from "../src/tenant-delete.ts";
 
 function withAccounts(body: (root: string) => Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-del-"));

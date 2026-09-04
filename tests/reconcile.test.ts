@@ -13,8 +13,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { reconcileRuns, reconcileAllRuns, drivingRuns } from "../packages/core/src/runner.ts";
-import { listTenants } from "../packages/core/src/store.ts";
+import { reconcileRuns, reconcileAllRuns, drivingRuns } from "../src/runner.ts";
+import { listTenants } from "../src/store.ts";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -263,7 +263,7 @@ test("the scheduler closes abandoned runs without a restart", async () => {
       }),
     );
 
-    const { tick, RECONCILE_EVERY } = await import("../packages/core/src/scheduler.ts");
+    const { tick, RECONCILE_EVERY } = await import("../src/scheduler.ts");
     const status = () =>
       JSON.parse(fs.readFileSync(path.join(ws, "runs/r1.json"), "utf8")).status;
 
@@ -351,7 +351,7 @@ test("a run whose approval was granted, then abandoned, is picked back up", asyn
 // itself — otherwise resuming a run means re-interrupting the same person.
 test("the approval gate skips a step a person already approved", () => {
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/core/src/runner.ts"),
+    path.join(import.meta.dirname, "..", "src/runner.ts"),
     "utf8",
   );
   const gate = src.match(/const needsApproval = freshGroup\.filter\(([\s\S]*?)\);/);
@@ -364,7 +364,7 @@ test("the approval gate skips a step a person already approved", () => {
 // step to `pending`, which is indistinguishable from never having been asked.
 test("approving records that it happened, not just its effect", () => {
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/core/src/approvals.ts"),
+    path.join(import.meta.dirname, "..", "src/approvals.ts"),
     "utf8",
   );
   assert.match(src, /s\.approvedAt = /, "approving must stamp approvedAt");

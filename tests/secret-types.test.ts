@@ -21,9 +21,9 @@ import {
   listSecrets,
   isFileValue,
   fileContent,
-} from "../packages/core/src/secrets.ts";
-import { setOAuth2Secret } from "../packages/core/src/secrets.ts";
-import { materializeFileSecrets, cleanupFileSecrets } from "../packages/core/src/secret-files.ts";
+} from "../src/secrets.ts";
+import { setOAuth2Secret } from "../src/secrets.ts";
+import { materializeFileSecrets, cleanupFileSecrets } from "../src/secret-files.ts";
 
 function withVault(body: () => void | Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-types-"));

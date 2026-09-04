@@ -7,8 +7,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCron, cronMatches } from "../packages/core/src/scheduler.ts";
-import { resolveTimezone, localDate } from "../packages/core/src/runner.ts";
+import { parseCron, cronMatches } from "../src/scheduler.ts";
+import { resolveTimezone, localDate } from "../src/runner.ts";
 
 // 2026-08-31T23:30Z is already 1 September in Sydney (UTC+10).
 const late = new Date("2026-08-31T23:30:00Z");

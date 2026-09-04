@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseEval } from "../packages/core/src/evals.ts";
+import { parseEval } from "../src/evals.ts";
 
 const CASE = `## a case\ntask: say hi\nexpect:\n  - contains: hi\n`;
 

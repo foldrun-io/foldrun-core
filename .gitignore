@@ -1,1 +1,12 @@
-/dist
+node_modules/
+dist/
+*.tsbuildinfo
+# Single-workspace mode puts the run store and secret key here.
+.foldrun/
+outputs/
+templates/*/runs/
+*.log
+.DS_Store
+.env
+# scripts/ts-test.mjs compiles here when Node cannot strip types
+.ts-test-*

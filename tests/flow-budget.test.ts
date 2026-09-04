@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startFlowRun, waitForRun } from "../packages/core/src/runner.ts";
-import { parseFlow, type FlowStep } from "../packages/core/src/store.ts";
+import { startFlowRun, waitForRun } from "../src/runner.ts";
+import { parseFlow, type FlowStep } from "../src/store.ts";
 
 async function withStubbedRun(
   agents: Record<string, string>,

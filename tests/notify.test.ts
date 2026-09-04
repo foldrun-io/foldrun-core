@@ -9,9 +9,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { notifyConfig, sendRunNotification } from "../packages/core/src/notify.ts";
-import { setSecret } from "../packages/core/src/secrets.ts";
-import type { RunRecord } from "../packages/core/src/store.ts";
+import { notifyConfig, sendRunNotification } from "../src/notify.ts";
+import { setSecret } from "../src/secrets.ts";
+import type { RunRecord } from "../src/store.ts";
 
 function withWorkspace(
   agentsMd: string | null,

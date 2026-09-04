@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { searchRoots, digestRuns, buildSearchTools, buildHistoryTools } from "../packages/core/src/context-tools.ts";
-import type { RunRecord } from "../packages/core/src/store.ts";
+import { searchRoots, digestRuns, buildSearchTools, buildHistoryTools } from "../src/context-tools.ts";
+import type { RunRecord } from "../src/store.ts";
 
 function bundle(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-search-"));

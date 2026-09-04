@@ -24,7 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import matter from "gray-matter";
-import { conformanceIssues, syncIndex } from "../packages/core/src/okf.ts";
+import { conformanceIssues, syncIndex } from "../src/okf.ts";
 
 /** OKF reserves these two, and only these two. */
 const RESERVED = new Set(["index.md", "log.md"]);
@@ -138,8 +138,8 @@ test("unparseable frontmatter is reported, not thrown", () => {
 // disk, so a brand-new workspace shipped valid concepts inside something no
 // reader could identify the version of. The demo is the first OKF anyone sees.
 test("a freshly scaffolded workspace is a valid bundle, not just valid files", async () => {
-  const { starterFiles, syncWorkspaceBundles } = await import("../packages/core/src/okf.ts").then(
-    async (okf) => ({ ...okf, ...(await import("../packages/core/src/starter.ts")) }),
+  const { starterFiles, syncWorkspaceBundles } = await import("../src/okf.ts").then(
+    async (okf) => ({ ...okf, ...(await import("../src/starter.ts")) }),
   );
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-scaffold-"));

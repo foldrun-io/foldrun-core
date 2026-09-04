@@ -14,10 +14,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import matter from "gray-matter";
-import { refList, refNames, stripLink } from "../packages/core/src/refs.ts";
-import { ownToolNames, toolRefs } from "../packages/core/src/tool-names.ts";
-import { listAgents, parseFlow } from "../packages/core/src/store.ts";
-import { completionsAt, type Vocabulary } from "../packages/core/src/completions.ts";
+import { refList, refNames, stripLink } from "../src/refs.ts";
+import { ownToolNames, toolRefs } from "../src/tool-names.ts";
+import { listAgents, parseFlow } from "../src/store.ts";
+import { completionsAt, type Vocabulary } from "../src/completions.ts";
 
 test("every shape a list can arrive in reads to the same names", () => {
   // What gray-matter hands back for each spelling.

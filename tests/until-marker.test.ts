@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { saysUntilMarker } from "../packages/core/src/runner.ts";
+import { saysUntilMarker } from "../src/runner.ts";
 
 test("a bare marker on its own line passes", () => {
   assert.equal(saysUntilMarker("Looks good to me.\nAPPROVED", "APPROVED"), true);

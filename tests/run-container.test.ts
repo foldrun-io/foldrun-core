@@ -13,7 +13,7 @@ import {
   allowedBack,
   applyContainerChanges,
   parseDriverLine,
-} from "../packages/core/src/run-container.ts";
+} from "../src/run-container.ts";
 
 test("what the spec says agents own comes back; what they must not touch does not", () => {
   assert.ok(allowedBack("agents/writer/outputs/report.md"));

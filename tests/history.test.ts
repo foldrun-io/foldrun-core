@@ -21,13 +21,13 @@ import {
   listRevisions,
   readRevision,
   recordRevision,
-} from "../packages/core/src/history.ts";
+} from "../src/history.ts";
 import {
   deleteWorkspacePath,
   saveWorkspace,
   writeWorkspaceFile,
-} from "../packages/core/src/store.ts";
-import { writeEvalResult, readEvalHistory, type EvalResult } from "../packages/core/src/evals.ts";
+} from "../src/store.ts";
+import { writeEvalResult, readEvalHistory, type EvalResult } from "../src/evals.ts";
 
 function withData(run: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-history-"));

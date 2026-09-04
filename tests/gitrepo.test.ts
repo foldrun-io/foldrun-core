@@ -10,9 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { commitChanges, filesAt, gitAvailable, headSha, listCommits, listRefs, listTree, readCommit, repoDir, repoExists } from "../packages/core/src/gitrepo.ts";
-import { ensureImported, listRevisions, readRevision, latestRevisionId } from "../packages/core/src/history.ts";
-import { saveWorkspace, writeWorkspaceFile, deleteWorkspacePath, listWorkspaceFiles } from "../packages/core/src/store.ts";
+import { commitChanges, filesAt, gitAvailable, headSha, listCommits, listRefs, listTree, readCommit, repoDir, repoExists } from "../src/gitrepo.ts";
+import { ensureImported, listRevisions, readRevision, latestRevisionId } from "../src/history.ts";
+import { saveWorkspace, writeWorkspaceFile, deleteWorkspacePath, listWorkspaceFiles } from "../src/store.ts";
 
 const HAVE_GIT = gitAvailable();
 

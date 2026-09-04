@@ -13,10 +13,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import matter from "gray-matter";
-import { GALLERY, galleryTemplate, installGalleryTool } from "../packages/core/src/gallery.ts";
-import { readLibraryFile } from "../packages/core/src/library.ts";
-import { fencedCode, parseToolDef, saveWorkspace, workspaceTools } from "../packages/core/src/store.ts";
-import { missingToolPrograms } from "../packages/core/src/tool-programs.ts";
+import { GALLERY, galleryTemplate, installGalleryTool } from "../src/gallery.ts";
+import { readLibraryFile } from "../src/library.ts";
+import { fencedCode, parseToolDef, saveWorkspace, workspaceTools } from "../src/store.ts";
+import { missingToolPrograms } from "../src/tool-programs.ts";
 
 const sql = GALLERY.find((t) => t.name === "sql")!;
 const browser = GALLERY.find((t) => t.name === "browser")!;

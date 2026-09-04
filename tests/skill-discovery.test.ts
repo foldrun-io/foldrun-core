@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { discoverSkills } from "../packages/core/src/runner.ts";
+import { discoverSkills } from "../src/runner.ts";
 
 function fixture(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-skills-"));

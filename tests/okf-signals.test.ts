@@ -24,8 +24,8 @@ import matter from "gray-matter";
 import {
   buildIndex, readBundle, provenanceMarks, stampGenerated, PRODUCER, UNKNOWN_ACTOR,
   dateIssues, conformanceIssues, stampBundle,
-} from "../packages/core/src/okf.ts";
-import { buildMemoryIndex } from "../packages/core/src/store.ts";
+} from "../src/okf.ts";
+import { buildMemoryIndex } from "../src/store.ts";
 
 function withBundle(files: Record<string, string>, run: (dir: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-signals-"));

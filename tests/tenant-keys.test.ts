@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { setSecret, getSecret, encryptValue, decryptValue } from "../packages/core/src/secrets.ts";
+import { setSecret, getSecret, encryptValue, decryptValue } from "../src/secrets.ts";
 
 function withInstall(body: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-keys-"));
@@ -84,7 +84,7 @@ test("a tampered ciphertext is refused, not returned as garbage", () => {
 // part that has to be right BEFORE a provider is added — a stored blob whose
 // origin cannot be told is a key nobody can migrate.
 
-import { wrappedBy } from "../packages/core/src/tenant-keys.ts";
+import { wrappedBy } from "../src/tenant-keys.ts";
 
 test("a wrapped key says which provider sealed it", () => {
   assert.equal(wrappedBy("env:AAAA"), "env");

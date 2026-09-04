@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { sharedInstructions } from "../packages/core/src/runner.ts";
-import { ensureAccountFiles } from "../packages/core/src/store.ts";
+import { sharedInstructions } from "../src/runner.ts";
+import { ensureAccountFiles } from "../src/store.ts";
 
 /**
  * A laptop-layout account: `library/` and AGENTS.md beside the workspace.

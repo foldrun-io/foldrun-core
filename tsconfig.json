@@ -18,9 +18,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": [
       "node"
-    ],
-    "typeRoots": [
-      "../../web/node_modules/@types"
     ]
   },
   "include": [

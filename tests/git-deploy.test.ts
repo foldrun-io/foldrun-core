@@ -14,8 +14,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
-import { readTarGz, stripRoot, filesFromTarball } from "../packages/core/src/tar.ts";
-import { verifySignature, parsePush, gitSecret, fetchTarball } from "../packages/core/src/git.ts";
+import { readTarGz, stripRoot, filesFromTarball } from "../src/tar.ts";
+import { verifySignature, parsePush, gitSecret, fetchTarball } from "../src/git.ts";
 
 /** A real tarball, rooted at one directory the way GitHub's are. */
 function tarball(files: Record<string, string>, root = "owner-repo-9f2c1ab"): Buffer {
@@ -190,7 +190,7 @@ test("a repo or commit that could rewrite the URL is refused", async () => {
 // workspace out. The two halves are tested apart above; this is the seam,
 // which is where a format mismatch would actually bite.
 test("a tarball becomes a deployed workspace", async () => {
-  const { deployWorkspace, deployedCommit } = await import("../packages/core/src/deploy.ts");
+  const { deployWorkspace, deployedCommit } = await import("../src/deploy.ts");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-push-"));
   const previousData = process.env.FOLDRUN_DATA;
   const previousWs = process.env.FOLDRUN_WORKSPACE;

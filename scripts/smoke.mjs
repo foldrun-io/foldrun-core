@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "../packages/cli/bin/foldrun.mjs");
+const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../foldrun-cli/bin/foldrun.mjs");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-smoke-"));
 const workspace = path.join(dir, "desk");
 

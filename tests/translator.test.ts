@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { toChatCompletions, fromChatCompletion, StreamTranslator, startTranslator } from "../packages/core/src/translator.ts";
+import { toChatCompletions, fromChatCompletion, StreamTranslator, startTranslator } from "../src/translator.ts";
 
 type Json = Record<string, unknown>;
 

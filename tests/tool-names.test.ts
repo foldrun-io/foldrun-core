@@ -14,9 +14,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ownToolNames, isRuntimeTool, legacyUseNames, legacyUseError } from "../packages/core/src/tool-names.ts";
-import { libraryUsage } from "../packages/core/src/library.ts";
-import { listAgents } from "../packages/core/src/store.ts";
+import { ownToolNames, isRuntimeTool, legacyUseNames, legacyUseError } from "../src/tool-names.ts";
+import { libraryUsage } from "../src/library.ts";
+import { listAgents } from "../src/store.ts";
 import { convert } from "../scripts/migrate-use-to-tools.mjs";
 
 test("a built-in name is never one of the author's own", () => {

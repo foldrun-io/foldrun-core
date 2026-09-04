@@ -5,8 +5,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runPodManifest, envFileShell } from "../packages/core/src/run-k8s.ts";
-import { k8sMemory } from "../packages/core/src/run-container.ts";
+import { runPodManifest, envFileShell } from "../src/run-k8s.ts";
+import { k8sMemory } from "../src/run-container.ts";
 
 test("the pod carries the same hardening as the docker flags", () => {
   const pod = runPodManifest("foldrun-run-x", "foldrun-runner:abc") as {

@@ -58,9 +58,9 @@ if (!fs.existsSync(tsc)) {
 // e2e died three different ways as each was faked in turn. dist is the real
 // package — and it is what production runs, so the test exercises the same
 // artifact rather than a lookalike.
-const dist = path.join(ROOT, "packages/core/dist");
+const dist = path.join(ROOT, "dist");
 if (!fs.existsSync(dist)) {
-  console.error("[ts-test] packages/core/dist is missing — building it");
+  console.error("[ts-test] dist is missing — building it");
   if (run("npm", ["run", "build"]) !== 0) {
     console.error("[ts-test] the build failed");
     process.exit(2);
@@ -78,7 +78,7 @@ for (const stale of fs.readdirSync(ROOT).filter((f) => f.startsWith(".ts-test-")
 }
 const out = fs.mkdtempSync(path.join(ROOT, ".ts-test-"));
 
-const core = JSON.parse(fs.readFileSync(path.join(ROOT, "packages/core/tsconfig.json"), "utf8"));
+const core = JSON.parse(fs.readFileSync(path.join(ROOT, "tsconfig.json"), "utf8"));
 const config = {
   compilerOptions: {
     ...core.compilerOptions,
@@ -106,7 +106,7 @@ try {
   if (missing.length) {
     console.error(`[ts-test] tsc produced no output for:\n  ${missing.join("\n  ")}`);
   } else {
-    // `../packages/core/src/x.js` → the real built module. tsc has already
+    // `../src/x.js` → the real built module. tsc has already
     // rewritten the .ts extension (rewriteRelativeImportExtensions), so only
     // the location is wrong.
     const distUrl = new URL(`${dist}/`, "file://").href;
@@ -114,7 +114,7 @@ try {
       const src = fs.readFileSync(file, "utf8");
       fs.writeFileSync(
         file,
-        src.replaceAll(/(from\s+|import\()(["'])(?:\.\.\/)+packages\/core\/(?:src\/)?/g,
+        src.replaceAll(/(from\s+|import\()(["'])(?:\.\.\/)+(?:foldrun-core\/)?src\//g,
           (_m, kw, q) => `${kw}${q}${distUrl}src/`),
       );
     }

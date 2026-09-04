@@ -8,8 +8,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { evalTrends, evaluateDeployed, readEvalHistory, writeEvalResult, type EvalResult } from "../packages/core/src/evals.ts";
-import { writeDeployedCommit } from "../packages/core/src/deploy.ts";
+import { evalTrends, evaluateDeployed, readEvalHistory, writeEvalResult, type EvalResult } from "../src/evals.ts";
+import { writeDeployedCommit } from "../src/deploy.ts";
 
 function withWorkspace(run: (tenant: string, ws: string) => Promise<void> | void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-evalhist-"));

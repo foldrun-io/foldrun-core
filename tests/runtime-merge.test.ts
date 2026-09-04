@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { mergeRuntimes, parseRuntime, fingerprint } from "../packages/core/src/runtime.ts";
+import { mergeRuntimes, parseRuntime, fingerprint } from "../src/runtime.ts";
 
 test("nothing declared anywhere is no runtime", () => {
   assert.equal(mergeRuntimes(null, undefined, null), null);
@@ -88,7 +88,7 @@ test("a runtime that cannot be built says why, even when the installer printed n
 // from the correct merged spec.
 test("the runtime that crosses into the sandbox is the merged one", () => {
   const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "packages/core/src/runner.ts"),
+    path.join(import.meta.dirname, "..", "src/runner.ts"),
     "utf8",
   );
 

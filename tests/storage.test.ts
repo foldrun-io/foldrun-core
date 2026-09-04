@@ -27,8 +27,8 @@ import {
   harvestFiles,
   blobPath,
   mimeFor,
-} from "../packages/core/src/storage.ts";
-import { workspaceDir, isPlatformPath, saveWorkspace, adoptLegacyFilesDir } from "../packages/core/src/store.ts";
+} from "../src/storage.ts";
+import { workspaceDir, isPlatformPath, saveWorkspace, adoptLegacyFilesDir } from "../src/store.ts";
 
 let root: string;
 const TENANT = "default";
@@ -255,7 +255,7 @@ test("a presigned GET is signed as an attachment, and expires", async () => {
   process.env.FOLDRUN_S3_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE";
   process.env.FOLDRUN_S3_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
   try {
-    const { downloadUrl } = await import("../packages/core/src/storage.ts");
+    const { downloadUrl } = await import("../src/storage.ts");
     const url = (await downloadUrl(TENANT, WS, {
       path: "out/report.html",
       sha: "a".repeat(64),

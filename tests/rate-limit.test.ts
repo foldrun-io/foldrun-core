@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rateLimit, rateLimitReset, cacheEnabled } from "../packages/core/src/cache.ts";
+import { rateLimit, rateLimitReset, cacheEnabled } from "../src/cache.ts";
 
 test("no Redis configured means the local counter, not an open door", async () => {
   delete process.env.FOLDRUN_REDIS_URL;

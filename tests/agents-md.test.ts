@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import matter from "gray-matter";
-import { patchFrontmatter } from "../packages/core/src/agents-md.ts";
+import { patchFrontmatter } from "../src/agents-md.ts";
 
 const FILE = `---
 name: leads

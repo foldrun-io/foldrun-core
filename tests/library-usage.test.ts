@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { libraryTools, libraryUsage, listLibrary, type LibraryUse } from "../packages/core/src/library.ts";
-import { brokenToolReport, workspaceTools } from "../packages/core/src/store.ts";
-import { commandFor } from "../packages/core/src/script-tools.ts";
+import { libraryTools, libraryUsage, listLibrary, type LibraryUse } from "../src/library.ts";
+import { brokenToolReport, workspaceTools } from "../src/store.ts";
+import { commandFor } from "../src/script-tools.ts";
 
 /** Build a throwaway account on disk and point core at it for one callback. */
 function withAccount(files: Record<string, string>, run: () => void) {

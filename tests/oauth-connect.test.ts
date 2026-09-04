@@ -10,8 +10,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { startOAuthConnect, completeOAuthConnect } from "../packages/core/src/oauth-connect.ts";
-import { listSecrets, resolveSecrets } from "../packages/core/src/secrets.ts";
+import { startOAuthConnect, completeOAuthConnect } from "../src/oauth-connect.ts";
+import { listSecrets, resolveSecrets } from "../src/secrets.ts";
 
 function withVault(body: () => void | Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-connect-"));
@@ -149,7 +149,7 @@ import {
   listOAuthClients,
   getOAuthClient,
   deleteOAuthClient,
-} from "../packages/core/src/oauth-clients.ts";
+} from "../src/oauth-clients.ts";
 
 test("a saved client round-trips, lists without its secret, and runs the flow", () =>
   withVault(async () => {

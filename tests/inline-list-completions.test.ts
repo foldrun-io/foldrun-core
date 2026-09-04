@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { completionsAt, type Vocabulary } from "../packages/core/src/completions.ts";
+import { completionsAt, type Vocabulary } from "../src/completions.ts";
 
 const VOCAB: Vocabulary = {
   agents: ["enricher", "emailer"],

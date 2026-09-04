@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { observeWorkspace, parseToolLog, sampled } from "../packages/core/src/observe.ts";
+import { observeWorkspace, parseToolLog, sampled } from "../src/observe.ts";
 
 function withRuns(runs: object[], run: (tenant: string, ws: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-observe-"));

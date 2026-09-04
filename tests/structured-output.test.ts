@@ -11,10 +11,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startFlowRun, waitForRun } from "../packages/core/src/runner.ts";
-import { parseFlow, readRun, runSummary, type FlowStep, type RunRecord } from "../packages/core/src/store.ts";
-import { extractJson, checkVerify } from "../packages/core/src/step-exec.ts";
-import { lintFlow } from "../packages/core/src/flow-lint.ts";
+import { startFlowRun, waitForRun } from "../src/runner.ts";
+import { parseFlow, readRun, runSummary, type FlowStep, type RunRecord } from "../src/store.ts";
+import { extractJson, checkVerify } from "../src/step-exec.ts";
+import { lintFlow } from "../src/flow-lint.ts";
 
 async function withStubbedRun(
   agents: Record<string, string>,

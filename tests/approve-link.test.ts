@@ -9,10 +9,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { approveToken, publicUrl, webhookToken } from "../packages/core/src/webhook.ts";
-import { decideApproval } from "../packages/core/src/approvals.ts";
-import { sendRunNotification } from "../packages/core/src/notify.ts";
-import { readRun, writeRun, type RunRecord } from "../packages/core/src/store.ts";
+import { approveToken, publicUrl, webhookToken } from "../src/webhook.ts";
+import { decideApproval } from "../src/approvals.ts";
+import { sendRunNotification } from "../src/notify.ts";
+import { readRun, writeRun, type RunRecord } from "../src/store.ts";
 
 /** A tenant/workspace on disk, core pointed at it, and env restored after. */
 function withWorkspace(body: () => void | Promise<void>, agentsMd = "---\nname: desk\n---\n") {

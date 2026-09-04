@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordTopUp } from "../packages/core/src/ledger.ts";
+import { recordTopUp } from "../src/ledger.ts";
 import {
   walletSummary,
   walletConfig,
@@ -15,9 +15,9 @@ import {
   warnThresholdUsd,
   workspaceBudgetUsd,
   assertWorkspaceBudget,
-} from "../packages/core/src/wallet.ts";
-import { demoWorkspaceFiles } from "../packages/core/src/demo-workspace.ts";
-import { parseFlow } from "../packages/core/src/store.ts";
+} from "../src/wallet.ts";
+import { demoWorkspaceFiles } from "../src/demo-workspace.ts";
+import { parseFlow } from "../src/store.ts";
 
 async function withAccount(body: () => void | Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-wallet-"));

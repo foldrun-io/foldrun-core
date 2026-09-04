@@ -13,7 +13,7 @@ import {
   hookGeneration,
   recordDelivery,
   readDeliveries,
-} from "../packages/core/src/webhook.ts";
+} from "../src/webhook.ts";
 
 function withWorkspace(body: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-hook-"));

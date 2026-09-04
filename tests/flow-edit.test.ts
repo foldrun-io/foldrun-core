@@ -12,7 +12,7 @@ import {
   parseFlow,
   parseWait,
   FLOW_PATTERNS,
-} from "../packages/core/src/store.ts";
+} from "../src/store.ts";
 
 // ---------------------------------------------------------------- templates
 

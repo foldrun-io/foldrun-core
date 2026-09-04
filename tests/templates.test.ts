@@ -25,7 +25,7 @@ import {
   conformanceIssues,
   dateIssues,
   syncWorkspaceBundles,
-} from "../packages/core/src/okf.ts";
+} from "../src/okf.ts";
 
 const ROOT = path.join(import.meta.dirname, "..");
 const TEMPLATES = path.join(ROOT, "templates");

@@ -6,9 +6,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PROVIDERS, providerPreset, looksOpenAiShaped, PROTECTED_PARAMS } from "../packages/core/src/providers.ts";
-import { parseProvider, providerEnvFor } from "../packages/core/src/store.ts";
-import { translatorSpecFor } from "../packages/core/src/translator.ts";
+import { PROVIDERS, providerPreset, looksOpenAiShaped, PROTECTED_PARAMS } from "../src/providers.ts";
+import { parseProvider, providerEnvFor } from "../src/store.ts";
+import { translatorSpecFor } from "../src/translator.ts";
 
 test("every preset has a format, an auth shape, and either an address or a note saying why not", () => {
   const names = new Set<string>();
@@ -111,7 +111,7 @@ test("every preset is in docs/providers.md and the spec names the three keys", a
   const fs = await import("node:fs");
   const path = await import("node:path");
   const root = path.join(import.meta.dirname, "..");
-  const doc = fs.readFileSync(path.join(root, "docs/providers.md"), "utf8");
+  const doc = fs.readFileSync(path.join(root, "../foldrun-docs/providers.md"), "utf8");
   for (const p of PROVIDERS) {
     assert.ok(doc.includes(`| \`${p.name}\` |`), `docs/providers.md does not list ${p.name}`);
   }

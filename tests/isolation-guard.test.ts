@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assertIsolationSafe } from "../packages/core/src/queue.ts";
+import { assertIsolationSafe } from "../src/queue.ts";
 
 function withTenants(names: string[], body: () => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-iso-"));

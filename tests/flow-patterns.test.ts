@@ -11,9 +11,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startFlowRun, waitForRun } from "../packages/core/src/runner.ts";
-import { parseFlow, readRun, type FlowStep } from "../packages/core/src/store.ts";
-import { gatherConsults, buildConsultTools } from "../packages/core/src/agent-tools.ts";
+import { startFlowRun, waitForRun } from "../src/runner.ts";
+import { parseFlow, readRun, type FlowStep } from "../src/store.ts";
+import { gatherConsults, buildConsultTools } from "../src/agent-tools.ts";
 
 /** A workspace whose agents answer from stub.md scripts instead of a model. */
 async function withStubbedRun(

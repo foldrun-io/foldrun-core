@@ -21,7 +21,7 @@ import {
   outranks,
   roleOf,
   type RoleMembership,
-} from "../packages/core/src/permissions.ts";
+} from "../src/permissions.ts";
 
 let clock = 0;
 const member = (id: string, tenant = "acme", extra: Partial<RoleMembership> = {}): RoleMembership => ({
