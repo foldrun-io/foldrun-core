@@ -1583,6 +1583,9 @@ export interface WorkspaceSummary {
    *  which one, which branch, which commit. Read from the marker beside the
    *  directory here rather than through preview.ts, which imports this file. */
   preview?: { source: string; branch: string; commit: string; at: string };
+  /** The workspace's picture, as a URL, when the page that lists it looked
+   *  one up (avatars.ts) — the store itself does not. */
+  avatar?: string | null;
 }
 
 /**
@@ -1769,7 +1772,7 @@ export function listAccountFiles(tenant: string, cap = 4000): string[] {
       // _cacache under it) and the file-store indexes (storage/) are the
       // platform's own bookkeeping: real paths, but not files anyone reads
       // here, and between them most of what the page used to list.
-      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git|\.history|\.runtimes|\.npm-cache|_cacache|storage|previews)$/.test(next)) continue;
+      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git|\.history|\.runtimes|\.npm-cache|_cacache|storage|previews|avatars)$/.test(next)) continue;
       if (ACCOUNT_BOOKKEEPING.test(next)) continue;
       if (e.isDirectory()) walk(path.join(abs, e.name), next, depth + 1);
       else out.push(next);
