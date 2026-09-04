@@ -25,6 +25,7 @@ import { dataRoot } from "./paths.ts";
 import { tenantKey } from "./tenant-keys.ts";
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
+import { readPreview } from "./preview.ts";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
 
@@ -196,6 +197,14 @@ export function getSecret(
   if (workspace) {
     const own = decrypt(tenant, read(tenant, workspace)[name]);
     if (own !== null) return { value: own, scope: "workspace" };
+    // A preview is a branch of its source workspace, and the branch's
+    // agents need the same credentials the source's do. Its own store is
+    // still consulted first, so a preview can override one on purpose.
+    const source = readPreview(tenant, workspace)?.source;
+    if (source) {
+      const inherited = decrypt(tenant, read(tenant, source)[name]);
+      if (inherited !== null) return { value: inherited, scope: "workspace" };
+    }
   }
   const shared = decrypt(tenant, read(tenant)[name]);
   return shared === null ? null : { value: shared, scope: "account" };

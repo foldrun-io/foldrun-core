@@ -1579,6 +1579,10 @@ export interface WorkspaceSummary {
   flows: number;
   deployedAt: string;
   runCount: number;
+  /** Set when this workspace is a branch's preview of another (preview.ts):
+   *  which one, which branch, which commit. Read from the marker beside the
+   *  directory here rather than through preview.ts, which imports this file. */
+  preview?: { source: string; branch: string; commit: string; at: string };
 }
 
 /**
@@ -1636,6 +1640,12 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         }
       }
       const runsDir = path.join(pDir, "runs");
+      let preview: WorkspaceSummary["preview"];
+      try {
+        preview = JSON.parse(fs.readFileSync(path.join(dir, `.${name}.preview.json`), "utf8"));
+      } catch {
+        // not a preview
+      }
       return {
         name,
         description,
@@ -1643,6 +1653,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         flows: listFlows(tenant, name).length,
         deployedAt: fs.statSync(pDir).mtime.toISOString(),
         runCount: fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0,
+        ...(preview ? { preview } : {}),
       };
     })
     .sort((a, b) => b.deployedAt.localeCompare(a.deployedAt));

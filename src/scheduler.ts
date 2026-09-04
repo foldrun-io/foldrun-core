@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { listWorkspaces, listFlows, listTenants, type FlowInfo } from "./store.ts";
+import { isPreview } from "./preview.ts";
 import { reconcileAllRuns } from "./runner.ts";
 import { enqueueFlowRun } from "./queue.ts";
 import { flowHasLiveRun } from "./store.ts";
@@ -240,6 +241,49 @@ function zoned(date: Date, timeZone: string) {
   };
 }
 
+/**
+ * When a cron next fires after `from`, or null when it does not within
+ * `maxDays`. Walks hours, not minutes: a day and hour that cannot match are
+ * skipped in one step, and only a matching hour is examined a minute at a
+ * time — a few thousand formatter reads for two months, not ninety thousand.
+ */
+export function nextFire(cron: Cron, from: Date, timeZone = "UTC", maxDays = 60): Date | null {
+  const start = new Date(from);
+  start.setUTCSeconds(0, 0);
+  start.setUTCMinutes(start.getUTCMinutes() + 1);
+  const end = start.getTime() + maxDays * 24 * 60 * 60 * 1000;
+  // The first (partial) hour from `start`, then whole hours from the top.
+  let hourStart = new Date(start);
+  while (hourStart.getTime() < end) {
+    const hourEnd = new Date(hourStart);
+    hourEnd.setUTCMinutes(60, 0, 0);
+    // A zone's offset is a multiple of fifteen minutes, so inside one UTC
+    // hour the local hour can change at :15, :30 or :45 — probe each.
+    let hourOk = false;
+    for (const offset of [0, 15, 30, 45]) {
+      const at = new Date(hourStart.getTime() + offset * 60_000);
+      if (at.getTime() >= hourEnd.getTime()) break;
+      let probe;
+      try {
+        probe = zoned(at, timeZone);
+      } catch {
+        probe = zoned(at, "UTC");
+      }
+      if (cron.hour.has(probe.hour) && cron.month.has(probe.month) && domDowMatch(cron, probe.dom, probe.dow)) {
+        hourOk = true;
+        break;
+      }
+    }
+    if (hourOk) {
+      for (let t = new Date(hourStart); t.getTime() < hourEnd.getTime(); t.setUTCMinutes(t.getUTCMinutes() + 1)) {
+        if (cronMatches(cron, t, timeZone)) return new Date(t);
+      }
+    }
+    hourStart = hourEnd;
+  }
+  return null;
+}
+
 export function cronMatches(cron: Cron, date: Date, timeZone = "UTC"): boolean {
   let t;
   try {
@@ -248,9 +292,13 @@ export function cronMatches(cron: Cron, date: Date, timeZone = "UTC"): boolean {
     t = zoned(date, "UTC"); // unknown timezone → UTC rather than never firing
   }
   if (!cron.minute.has(t.minute) || !cron.hour.has(t.hour) || !cron.month.has(t.month)) return false;
-  // Standard cron: when both day fields are restricted, either may match.
-  const domOk = cron.dom.has(t.dom);
-  const dowOk = cron.dow.has(t.dow);
+  return domDowMatch(cron, t.dom, t.dow);
+}
+
+// Standard cron: when both day fields are restricted, either may match.
+function domDowMatch(cron: Cron, dom: number, dow: number): boolean {
+  const domOk = cron.dom.has(dom);
+  const dowOk = cron.dow.has(dow);
   if (cron.domRestricted && cron.dowRestricted) return domOk || dowOk;
   if (cron.domRestricted) return domOk;
   if (cron.dowRestricted) return dowOk;
@@ -277,6 +325,10 @@ export function findDueFlows(now: Date, state: ScheduleState, tenants: string[])
   const due: DueFlow[] = [];
   for (const tenant of tenants) {
     for (const workspace of listWorkspaces(tenant)) {
+      // A preview is a branch's copy of a workspace. Its flows exist to be
+      // read and run by hand; a copy of a nightly desk that also fires
+      // nightly would double the bill for every open branch.
+      if (isPreview(tenant, workspace.name)) continue;
       // A push refused only because a run was in flight is a deploy that has
       // not happened yet, and git already told the client it succeeded. Apply
       // it now the runs are done, before deciding what to fire — a schedule
