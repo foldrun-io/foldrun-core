@@ -2679,13 +2679,8 @@ export interface AgentStep {
  * prefix. This is the other axis, and the one you want when the question is
  * "is this agent any good" rather than "did Monday's flow finish".
  */
-/**
- * How many times a step reached for a path outside its workspace and was
- * refused. Each one is a wasted turn and a sign the agent does not know
- * where it is; a prompt that names the exact path brings it to zero (the
- * fix-flow investigator went from 15 to 0 on 2026-09-04). Read from the
- * events so old records count too.
- */
+/** Path refusals in a step — see deniedPaths in the dashboard's
+ *  step-io-model, which is the pure copy the client can import. */
 export function deniedPaths(step: Pick<StepRecord, "events">): number {
   return (step.events ?? []).filter((e) => / was denied: /.test(e.text ?? "")).length;
 }
