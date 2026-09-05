@@ -1,6 +1,6 @@
 # foldrun
 
-**Agents are folders. Write them, check them, run them.**
+**Agents are just folders. Write them, check them, run them.**
 
 An agent is a folder. Its instructions, skills, knowledge, memory, tools and
 tests are files you can read, diff and commit. There is no SDK to learn and no

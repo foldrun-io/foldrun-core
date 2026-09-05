@@ -1,4 +1,4 @@
-# foldrun — agents are just markdown
+# foldrun — agents are just folders
 
 **Spec v0.1 (draft)**
 
