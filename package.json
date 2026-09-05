@@ -43,5 +43,23 @@
     "@types/pg": "^8.23.1",
     "@types/node": "^22",
     "typescript": "^5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/foldrun-io/foldrun-core.git"
+  },
+  "homepage": "https://foldrun.io",
+  "bugs": {
+    "url": "https://github.com/foldrun-io/foldrun-core/issues"
+  },
+  "keywords": [
+    "agents",
+    "llm",
+    "markdown",
+    "workflows",
+    "claude"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
