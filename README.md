@@ -146,11 +146,11 @@ Most people want the CLI, not this package — `npm install -g foldrun`.
 | `okf/WHITE-PAPER.md` | hosting OKF: what the spec leaves to hosts |
 | `tests/` | the runtime's tests (`npm test`) |
 
-The rest of foldrun lives in sibling repositories, checked out side by side:
-`foldrun-cli` (the command), `foldrun-web` (the hosted dashboard),
-`foldrun-docs` (the reference), `foldrun-site` (foldrun.io), `foldrun-infra`
-(deploying it) and `foldrun-deck`. `foldrun-infra/bootstrap-repos.sh` sets
-the folder up.
+The command-line tool is its own repository,
+[`foldrun-cli`](https://github.com/foldrun-io/foldrun-cli), and depends on
+this package. The reference documentation is at
+[docs.foldrun.io](https://docs.foldrun.io). The hosted platform's own
+repositories are private; see "Hosting it" below.
 
 ### Templates and workspaces
 
