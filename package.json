@@ -1,6 +1,6 @@
 {
   "name": "@foldrun/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agents are just folders. The format, the runner, the checks \u2014 run agents written as folders of markdown.",
   "license": "Apache-2.0",
   "type": "module",
@@ -19,6 +19,9 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "src",
+    "index.ts",
+    "templates",
     "README.md"
   ],
   "scripts": {
