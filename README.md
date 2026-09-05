@@ -183,20 +183,14 @@ a hand-edited template cannot ship an index that disagrees with its own files.
 
 ## Hosting it
 
-`infra/` holds the production story: a compose file for one box, k8s
-manifests for a fleet, and the isolation ladder (runc → gVisor). The
-always-on part is one small control plane; run compute is a hardened
-container per step that exists only while the step does — idle agents cost
-storage and nothing else. See [infra/README.md](infra/README.md).
-
-`foldrun-infra/dev/` is a complete single-box installation as code — an
-idempotent bootstrap (k3s, gVisor RuntimeClass, local registry, backup and
-token-refresh timers), manifests behind one `kubectl apply -k`, and a
-deploy script that builds on the target under immutable git-sha tags and
-smoke-tests before it calls a deploy done. A fresh Ubuntu machine plus one
-secrets file reproduces the whole installation. It is the development
-cluster and it is honest about that; `foldrun-infra/prod/` holds the plan
-for a real one and nothing built.
+This package is the framework: everything needed to read a workspace and
+run it on the machine you are on. The hosted platform at
+[foldrun.io](https://foldrun.io) — a queue and its worker, one gVisor pod
+per step, a vault, metering, a team — is built on it, in a separate private
+package that plugs in through `src/platform.ts`. Nothing in this repository
+imports it, so what is here is exactly what is open. There is no
+self-hosted platform; `foldrun deploy` and `git push` move a workspace from
+your machine to the hosted one unchanged.
 
 ## Requirements
 
