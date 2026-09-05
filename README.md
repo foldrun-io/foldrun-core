@@ -189,12 +189,14 @@ always-on part is one small control plane; run compute is a hardened
 container per step that exists only while the step does — idle agents cost
 storage and nothing else. See [infra/README.md](infra/README.md).
 
-`infra/production/` is a complete single-box production as code — an
+`foldrun-infra/dev/` is a complete single-box installation as code — an
 idempotent bootstrap (k3s, gVisor RuntimeClass, local registry, backup and
 token-refresh timers), manifests behind one `kubectl apply -k`, and a
 deploy script that builds on the target under immutable git-sha tags and
 smoke-tests before it calls a deploy done. A fresh Ubuntu machine plus one
-secrets file reproduces the whole installation.
+secrets file reproduces the whole installation. It is the development
+cluster and it is honest about that; `foldrun-infra/prod/` holds the plan
+for a real one and nothing built.
 
 ## Requirements
 
