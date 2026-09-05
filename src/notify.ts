@@ -36,6 +36,19 @@ import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
 
+/**
+ * Who mail from this account says it is from.
+ *
+ * The key is the account's own Resend connection, so the sender has to be
+ * a domain THAT account has verified — our foldrun.io is not verified in a
+ * customer's Resend, and theirs is not in ours. An `EMAIL_FROM` account
+ * secret names it (`foldrun <hello@foldrun.io>` on ours); without one, the
+ * address Resend lets every account send from before verifying a domain.
+ */
+export function emailFrom(tenant: string): string {
+  return getSecret(tenant, "EMAIL_FROM")?.value?.trim() || "foldrun <onboarding@resend.dev>";
+}
+
 export interface NotifyConfig {
   url?: string;
   email?: string;
@@ -170,7 +183,7 @@ export async function sendRunNotification(
         method: "POST",
         headers: { authorization: `Bearer ${key.value}`, "content-type": "application/json" },
         body: JSON.stringify({
-          from: "foldrun <onboarding@resend.dev>",
+          from: emailFrom(tenant),
           to: config.email,
           // The subject is the headline and what the run concluded, and
           // nothing else. Ids and costs belong in the body: a subject line is
