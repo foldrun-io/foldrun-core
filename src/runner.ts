@@ -94,6 +94,25 @@ function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerC
 }
 
 
+/** How much of the earlier groups' output a step is handed, in characters.
+ *  Newest groups are kept when the total is over it. */
+export const CONTEXT_CHARS = 30_000;
+
+/**
+ * What a group is handed from the groups before it: all of them, oldest
+ * first, so a group-3 reporter sees what group 1 measured and not only what
+ * group 2 diagnosed. When the total is over the cap, the oldest groups are
+ * dropped whole before anything is cut mid-text — the newest is the one the
+ * step is most likely to be about.
+ */
+export function joinEarlierGroups(groupResults: (string | null)[], gi: number, cap = CONTEXT_CHARS): string | null {
+  const parts: string[] = [];
+  for (let i = 0; i < gi; i++) if (groupResults[i]) parts.push(groupResults[i]!);
+  if (parts.length === 0) return null;
+  while (parts.length > 1 && parts.reduce((n, t) => n + t.length + 2, 0) > cap) parts.shift();
+  return parts.join("\n\n");
+}
+
 export interface DiscoveredSkill {
   name: string;
   description: string;
@@ -951,7 +970,10 @@ function agentContext(
   }
 
   parts.push(
-    "Write deliverables for people to ../../storage/ (kept and downloadable); write working text for later steps to outputs/.",
+    "Write deliverables for people to workspace/storage/ (kept and downloadable); write working text for later steps to outputs/; " +
+      "what the next run needs goes to workspace/state/. Paths are relative to your agent directory, or start with workspace/ " +
+      "for the workspace root (../../storage/ and workspace/storage/ are the same place). There is no /tmp for you: a " +
+      "directory a tool made outside the workspace, such as a checkout, is reached only through that tool.",
   );
 
   // The run's one-line summary is the first meaningful line of the last step
@@ -1212,7 +1234,13 @@ async function runStep(
     // parts of orchestration that watch money (budget:) are testable too.
     const answer = (answers[Math.min(call, answers.length - 1)] ?? "").trim();
     const priced = answer.match(/^cost:\s*([\d.]+)\n?/);
-    step.result = (priced ? answer.slice(priced[0].length) : answer).trim() + (step.item ? ` [item: ${step.item}]` : "");
+    const body = (priced ? answer.slice(priced[0].length) : answer).trim();
+    // A `===` line inside an answer separates earlier turns from the final
+    // one, so the handoffs that read a conclusion rather than a transcript
+    // are testable: result is everything joined, conclusion the last part.
+    const turns = body.split(/\n===\n/);
+    step.result = turns.join("\n").trim() + (step.item ? ` [item: ${step.item}]` : "");
+    step.conclusion = turns.length > 1 ? turns.at(-1)!.trim() : null;
     step.costUsd = priced ? Number(priced[1]) : 0;
     // The stub honours the output contract too, so fan-out over data and
     // the failure of a step that returned no JSON are testable at no cost.
@@ -1391,7 +1419,7 @@ async function runStep(
     let prompt = step.instruction
       ? resolveDocLinks(step.instruction, workspaceRoot)
       : "Begin your run now, following your instructions.";
-    if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, 30000)}\n</previous_step_results>`;
+    if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, CONTEXT_CHARS)}\n</previous_step_results>`;
     if (priorData !== undefined) {
       // The value itself, beside the prose that mentioned it. This is the
       // lossless half of a handoff: a URL step 1 returned reaches step 3 as
@@ -2233,10 +2261,15 @@ function driveRunInner(
       // winds back can hand the re-run the same upstream context the first
       // pass saw, instead of its own stale output.
       const groupResults: (string | null)[] = [];
-      const contextBefore = (gi: number) => {
-        for (let i = gi - 1; i >= 0; i--) if (groupResults[i]) return groupResults[i];
-        return null;
-      };
+      const groupConclusions: (string | null)[] = [];
+      // Every earlier group, oldest first, so a group-3 reporter sees what
+      // group 1 measured and not only what group 2 diagnosed. This used to
+      // hand back the nearest earlier group alone, and a reporter two groups
+      // after the measurement went looking on disk for a feed that was
+      // already in the run. The cap (CONTEXT_CHARS, applied where the prompt
+      // is assembled) keeps the newest: when the total is over it, the
+      // oldest groups are dropped whole before anything is cut mid-text.
+      const contextBefore = (gi: number) => joinEarlierGroups(groupResults, gi);
       // The data half of the same handoff: what the nearest earlier group
       // returned through `output: json`. Rebuilt from the record rather than
       // kept only in memory, so a resumed run hands step 3 the value step 1
@@ -2252,10 +2285,34 @@ function driveRunInner(
         if (carrying.length === 1 && !carrying[0].item) return carrying[0].data;
         return carrying.map((s) => ({ agent: s.agent, ...(s.item ? { item: s.item } : {}), data: s.data }));
       };
-      // Groups already finished before this drive (a resume) still carry
-      // their data on the record.
+      const resultsOf = (group: StepRecord[]): string | null => {
+        const results = group
+          .filter((s) => s.status === "completed" && s.result)
+          .map((s) =>
+            s.item
+              ? `## Result for item: ${s.item.slice(0, 80)} (${s.agent})\n\n${s.result}`
+              : group.length > 1
+                ? `## Result from ${s.agent}\n\n${s.result}`
+                : s.result!,
+          );
+        return results.length ? results.join("\n\n") : null;
+      };
+      // What each step concluded — its final turn — for the handoffs that
+      // should read a conclusion rather than a transcript (`each: lines`).
+      const conclusionsOf = (group: StepRecord[]): string | null => {
+        const out = group
+          .filter((s) => s.status === "completed" && (s.conclusion || s.result))
+          .map((s) => s.conclusion || s.result!);
+        return out.length ? out.join("\n") : null;
+      };
+      // Groups already finished before this drive (a resume, or a run picked
+      // up after a gate) still carry their results and data on the record.
+      // Rebuilding all three here is what lets the step after an approval
+      // read what came before it, not only the gate's question.
       for (const [i, g] of ordered.entries()) {
         if (g.every((s) => s.status !== "pending" && s.status !== "running" && s.status !== "awaiting-approval")) {
+          groupResults[i] = resultsOf(g);
+          groupConclusions[i] = conclusionsOf(g);
           groupData[i] = dataOf(g);
         }
       }
@@ -2333,6 +2390,12 @@ function driveRunInner(
         // previous group's result, capped, all in this same group — the
         // declared shape stays readable in the file, the width comes from
         // the data. The template survives as a skipped step for the trace.
+        // `each: lines` splits what the previous group CONCLUDED — each step's
+        // final turn — not every turn joined. A translator that narrated one
+        // line per file write put the same sentence in front of eight
+        // validators; its final turn was the list. Falls back to the joined
+        // result for records made before `conclusion` existed.
+        const eachSource = gi > 0 ? (groupConclusions[gi - 1] ?? groupResults[gi - 1]) : null;
         for (const step of [...group]) {
           if (!step.each || step.status !== "pending" || step.item) continue;
           const cap = Math.min(step.max ?? 10, 20);
@@ -2341,7 +2404,7 @@ function driveRunInner(
               ? csvItems(pDir, step, cap + 1)
               : step.each === "items"
                 ? jsonItems(ctxData, step, cap + 1)
-                : (context ?? "")
+                : (eachSource ?? "")
                     .split("\n")
                     .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
                     .filter(Boolean)
@@ -2668,16 +2731,8 @@ function driveRunInner(
           break;
         }
 
-        const results = freshGroup
-          .filter((s) => s.status === "completed" && s.result)
-          .map((s) =>
-            s.item
-              ? `## Result for item: ${s.item.slice(0, 80)} (${s.agent})\n\n${s.result}`
-              : freshGroup.length > 1
-                ? `## Result from ${s.agent}\n\n${s.result}`
-                : s.result!,
-          );
-        groupResults[gi] = results.length ? results.join("\n\n") : null;
+        groupResults[gi] = resultsOf(freshGroup);
+        groupConclusions[gi] = conclusionsOf(freshGroup);
         groupData[gi] = dataOf(freshGroup);
 
         // delegate: — the completed chooser's picks become a fresh group
@@ -2751,6 +2806,8 @@ function driveRunInner(
             }
             groupResults[gi] = null;
             groupResults[gi - 1] = null;
+            groupConclusions[gi] = null;
+            groupConclusions[gi - 1] = null;
             save();
             gi -= 1;
             continue;

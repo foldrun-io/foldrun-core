@@ -138,6 +138,32 @@ const FS_TOOLS = new Set([
 
 export const isFilesystemTool = (toolName: string) => FS_TOOLS.has(toolName);
 
+/**
+ * The path the agent probably meant. Most escapes are one of three guesses —
+ * an invented `/tmp/outputs/…`, an absolute spelling of a workspace
+ * directory, or a directory a tool made outside the workspace — and a
+ * refusal that names the correction is taken on the next turn, where a
+ * generic one is followed by two more wrong guesses. Nothing here is
+ * enforced; it is advice in the error text.
+ */
+export function suggestPath(raw: string): string {
+  const posix = raw.split(path.sep).join("/");
+  const m = posix.match(/(?:^|\/)(outputs|storage|state|memory|knowledge)\/(.+)$/);
+  if (m) {
+    const [, dir, rest] = m;
+    return dir === "outputs"
+      ? `Did you mean outputs/${rest} (relative to your agent directory)?`
+      : `Did you mean workspace/${dir}/${rest}?`;
+  }
+  if (/^\/tmp\//.test(posix)) {
+    return (
+      `There is no /tmp for you. If a tool cloned or built something there, reach it through that tool ` +
+      `(for example its read or find action); scratch files go to outputs/.`
+    );
+  }
+  return `Use a path relative to your agent directory, or workspace/<dir>/… for the workspace root (workspace/storage/, workspace/state/).`;
+}
+
 /** Expand a virtual prefix to a real absolute path, or null if it has none. */
 export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnly: boolean } | null {
   for (const v of VIRTUAL) {
@@ -203,7 +229,7 @@ export function checkPaths(
         ok: false,
         reason:
           `${toolName} was denied: "${raw}" is outside this workspace. Agents may only read and ` +
-          `write inside their own workspace. Use a path relative to your agent directory.`,
+          `write inside their own workspace. ${suggestPath(raw)}`,
       };
     }
 

@@ -240,6 +240,7 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     const verdict = await checkVerify(agentDir, opts.verify, {
       env: opts.verifyEnv ?? {},
       result,
+      conclusion,
       data,
       modelEnv: opts.env,
     });
@@ -318,6 +319,13 @@ export async function checkVerify(
   ctx: {
     env: Record<string, string>;
     result: string | null;
+    /** The final turn — what the step concluded. `contains:`, `not-contains:`
+     *  and `matches:` test this, because it is also what the run's headline
+     *  is read from: a reporter that narrated between tool calls ("Now let
+     *  me write the report…") failed `matches: ^BAD\b` with a correct
+     *  headline while the check read every turn joined. `judge:` still grades
+     *  the whole result. */
+    conclusion?: string | null;
     data?: unknown;
     /** The step's own model environment, for `judge:` — it grades on the
      *  fast tier through the same credential the step rode. */
@@ -331,7 +339,7 @@ export async function checkVerify(
   }
   const [, kind, rawValue] = m;
   const value = rawValue.trim().replace(/^["']|["']$/g, "");
-  const output = ctx.result ?? "";
+  const output = (kind === "judge" ? ctx.result : (ctx.conclusion ?? ctx.result)) ?? "";
   const hay = output.toLowerCase();
   switch (kind) {
     case "contains": {
