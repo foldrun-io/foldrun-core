@@ -10,7 +10,14 @@ import { spawn } from "node:child_process";
 import { executeStep, extractJson, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
-import { runStepInK8s, killRunPods } from "./run-k8s.ts";
+import { platform } from "./platform.ts";
+
+/** Does this process run steps in a sandbox — the container core ships, or
+ *  one the platform registered (a pod)? */
+const isolatedRun = () => {
+  const mode = process.env.FOLDRUN_RUN_ISOLATION;
+  return mode === "container" || (!!mode && mode in platform.isolation);
+};
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
@@ -59,7 +66,6 @@ import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
-import { syncPublicShares } from "./shares.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
@@ -646,10 +652,7 @@ function agentContext(
   // The library's path depends on where this run executes: isolated runs see
   // it at /library, host runs at its real location. Printing the host path
   // into a container's prompt handed the model files it could never open.
-  const libraryScriptsRoot =
-    process.env.FOLDRUN_RUN_ISOLATION === "container" || process.env.FOLDRUN_RUN_ISOLATION === "k8s"
-      ? "/library/scripts"
-      : libraryDir(tenant, "scripts");
+  const libraryScriptsRoot = isolatedRun() ? "/library/scripts" : libraryDir(tenant, "scripts");
   const global = listDir(libraryDir(tenant, "scripts"), `${libraryScriptsRoot}/`);
 
   if (own.length || shared.length || global.length) {
@@ -1148,7 +1151,7 @@ function publishPublicDir(
   push: (type: "info" | "error", text: string) => void,
 ) {
   try {
-    const { added } = syncPublicShares(tenant, workspace);
+    const { added } = platform.syncPublicShares(tenant, workspace);
     if (added.length) push("info", `shared: ${added.join(", ")}`);
   } catch (err) {
     push("error", `shares: ${err instanceof Error ? err.message : String(err)}`);
@@ -1503,7 +1506,7 @@ async function runStep(
     const secondSupply = fallbackEnv ?? (Object.keys(providerEnv).length === 0 ? platformFallbackEnv() : null);
 
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
-    if (isolation === "container" || isolation === "k8s") {
+    if (isolatedRun()) {
       // The isolated path: the whole loop — model, built-in tools, scripts —
       // runs inside a throwaway container (a docker sibling, or a pod), and
       // only filtered file changes come back. The vault stays out here:
@@ -1526,7 +1529,7 @@ async function runStep(
           ]),
         ),
       }));
-      const runIsolated = isolation === "k8s" ? runStepInK8s : runStepInContainer;
+      const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
       const isolatedArgs = (modelEnv: Record<string, string | undefined>) => ({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
@@ -2208,8 +2211,8 @@ function driveRunInner(
         // new attempt starts. Destroy it first; re-driving is only safe
         // once nothing else is driving.
         try {
-          if (process.env.FOLDRUN_RUN_ISOLATION === "k8s") killRunPods(run.id);
-          else if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+          if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+          else platform.killRunSandboxes(run.id);
         } catch {
           // a sandbox we cannot reach must not stop the run from resuming
         }
@@ -3084,8 +3087,8 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
       // `timeout:` has no pod deadline, so an orphan from a mid-step restart
       // is reaped here, by the run that owned it, not by a clock.
       try {
-        if (process.env.FOLDRUN_RUN_ISOLATION === "k8s") killRunPods(run.id);
-        else killRunSandboxes(run.id);
+        if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+        else platform.killRunSandboxes(run.id);
       } catch {
         // a sandbox we cannot reach must not stop the reconcile
       }

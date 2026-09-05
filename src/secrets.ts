@@ -22,10 +22,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
-import { tenantKey } from "./tenant-keys.ts";
+import { platform } from "./platform.ts";
+
+// The account's own data key, when the platform holds one; the install key
+// otherwise. See platform.ts — locally there is no account key.
+const tenantKey = (tenant: string) => platform.tenantKey(tenant);
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
-import { readPreview } from "./preview.ts";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
 
@@ -200,7 +203,7 @@ export function getSecret(
     // A preview is a branch of its source workspace, and the branch's
     // agents need the same credentials the source's do. Its own store is
     // still consulted first, so a preview can override one on purpose.
-    const source = readPreview(tenant, workspace)?.source;
+    const source = platform.previewSourceOf(tenant, workspace);
     if (source) {
       const inherited = decrypt(tenant, read(tenant, source)[name]);
       if (inherited !== null) return { value: inherited, scope: "workspace" };

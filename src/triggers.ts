@@ -13,6 +13,7 @@
 // an agent reads it — the same rule as every other handoff in the format.
 
 import crypto from "node:crypto";
+import { platform } from "./platform.ts";
 import { listFlows, readRun, type FlowInfo, type FlowStep, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 
@@ -61,7 +62,6 @@ export function chainedFlows(tenant: string, workspace: string, finished: RunRec
 export async function fireChainedFlows(tenant: string, workspace: string, finished: RunRecord): Promise<string[]> {
   const flows = chainedFlows(tenant, workspace, finished);
   if (flows.length === 0) return [];
-  const { enqueueFlowRun } = await import("./queue.ts");
   const started: string[] = [];
   const result = (runResult(finished) ?? "").slice(0, 20_000);
   const body =
@@ -70,7 +70,7 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
     (result ? `\n${result}` : "");
   for (const flow of flows) {
     try {
-      const run = await enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
+      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
         `after:${finished.flow}`,
       ]);
       started.push(run.id);
@@ -114,7 +114,6 @@ export async function fireStorageTriggers(
   }
   if (flows.length === 0) return [];
   const writerFlow = by.startsWith("run:") ? readRun(tenant, workspace, by.slice(4))?.flow ?? null : null;
-  const { enqueueFlowRun } = await import("./queue.ts");
   const started: string[] = [];
   for (const flow of flows) {
     if (writerFlow === flow.name) continue;
@@ -122,7 +121,7 @@ export async function fireStorageTriggers(
     if (hits.length === 0) continue;
     try {
       const body = `by: ${by}\n${hits.map((h) => `- storage/${h}`).join("\n")}`;
-      const run = await enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
+      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
         "storage",
       ]);
       started.push(run.id);

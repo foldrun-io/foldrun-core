@@ -48,7 +48,7 @@ import {
   type Effort,
 } from "./store.ts";
 import { startFlowRun, loadFlow } from "./runner.ts";
-import { enqueueFlowRun } from "./queue.ts";
+import { platform } from "./platform.ts";
 import type { FlowStep } from "./store.ts";
 
 export type Assertion =
@@ -412,7 +412,7 @@ async function beginEvalRun(
     ...(s.model || !model ? {} : { model }),
     ...(s.effort || !effort ? {} : { effort }),
   }));
-  return enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, []);
+  return platform.enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, []);
 }
 
 // Waits for as long as the run runs. There was a cap here (5 minutes, then

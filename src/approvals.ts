@@ -11,7 +11,7 @@
 // it.
 
 import { readRun, writeRun, type RunRecord } from "./store.ts";
-import { enqueueResume } from "./queue.ts";
+import { platform } from "./platform.ts";
 
 export interface ApprovalDecision {
   decision: "approve" | "reject";
@@ -90,7 +90,7 @@ export async function decideApproval(
   // Runs without the marker still have their starter polling the file, and
   // enqueueing those too would put two drivers on one record.
   if (run.parkedAt && run.steps.every((s) => s.status !== "awaiting-approval")) {
-    await enqueueResume(tenant, workspace, run.id);
+    await platform.enqueueResume(tenant, workspace, run.id);
   }
 
   return { run, steps: waiting.map(({ i }) => i) };

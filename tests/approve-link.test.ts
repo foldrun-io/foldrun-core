@@ -11,6 +11,7 @@ import path from "node:path";
 import http from "node:http";
 import { approveToken, publicUrl, webhookToken } from "../src/webhook.ts";
 import { decideApproval } from "../src/approvals.ts";
+import { registerPlatform, resetPlatform } from "../src/platform.ts";
 import { sendRunNotification } from "../src/notify.ts";
 import { readRun, writeRun, type RunRecord } from "../src/store.ts";
 
@@ -146,14 +147,24 @@ test("a link clicked twice is a 409, not a second approval", () =>
     );
   }));
 
-test("a parked run is lined up again once nothing is waiting", () =>
+test("a parked run is handed back to the platform once nothing is waiting", () =>
   withWorkspace(async () => {
-    writeRun("acme", "desk", parkedRun("run-p", { parkedAt: new Date().toISOString() }));
-    await decideApproval("acme", "desk", "run-p", { decision: "approve", by: "via emailed link" });
-    const pending = path.join(process.env.FOLDRUN_DATA!, "queue/pending");
-    const jobs = fs.existsSync(pending) ? fs.readdirSync(pending).filter((f) => f.endsWith(".json")) : [];
-    assert.equal(jobs.length, 1, "the worker that parked it gave its slot back; the decision must re-queue it");
-    assert.equal(JSON.parse(fs.readFileSync(path.join(pending, jobs[0]), "utf8")).runId, "run-p");
+    // The queue is the platform's; core only says "this run needs a driver
+    // again". The platform's own tests cover what the queue does with it.
+    const resumed: string[] = [];
+    registerPlatform({ enqueueResume: async (_t, _w, runId) => void resumed.push(runId) });
+    try {
+      writeRun("acme", "desk", parkedRun("run-p", { parkedAt: new Date().toISOString() }));
+      await decideApproval("acme", "desk", "run-p", { decision: "approve", by: "via emailed link" });
+      assert.deepEqual(resumed, ["run-p"], "the worker that parked it gave its slot back; the decision must re-queue it");
+      // A run whose starter is still polling the record is not re-queued:
+      // two drivers on one record is worse than none.
+      writeRun("acme", "desk", parkedRun("run-q"));
+      await decideApproval("acme", "desk", "run-q", { decision: "approve", by: "via emailed link" });
+      assert.deepEqual(resumed, ["run-p"]);
+    } finally {
+      resetPlatform();
+    }
   }));
 
 // ----------------------------------------------------------- notification
