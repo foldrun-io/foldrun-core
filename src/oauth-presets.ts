@@ -42,9 +42,9 @@ export const OAUTH_PRESETS: Record<string, OAuthPreset> = {
   linkedin: {
     authorize_url: "https://www.linkedin.com/oauth/v2/authorization",
     token_url: "https://www.linkedin.com/oauth/v2/accessToken",
-    scopes_example: "openid profile w_organization_social r_organization_social",
+    scopes_example: "openid profile r_organization_admin r_organization_social w_organization_social",
     hint:
-      "Posting as a company page needs w_organization_social and a page admin signing in. " +
+      "Posting as a company page needs w_organization_social and a page admin signing in; r_organization_admin lets the token list the pages it may post to. " +
       "Access tokens last 60 days; a refresh token is issued only to apps LinkedIn has enabled for it, " +
       "otherwise the token is stored as is and you connect again when it expires. " +
       "The redirect URL must match what the app registers exactly, and only localhost may be plain http.",
