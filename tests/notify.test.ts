@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { notifyConfig, sendRunNotification, isQuietFlow } from "../src/notify.ts";
+import { notifyConfig, sendRunNotification, isQuietFlow, notifyMail, platformMail } from "../src/notify.ts";
 import { setSecret } from "../src/secrets.ts";
 import type { RunRecord } from "../src/store.ts";
 
@@ -169,4 +169,25 @@ test("a bare string destination is read as what it looks like", () =>
 test("a bare URL string stays a webhook", () =>
   withWorkspace("---\nname: desk\nnotify: https://ntfy.sh/topic\n---\n", () => {
     assert.equal(notifyConfig("acme", "desk")!.url, "https://ntfy.sh/topic");
+  }));
+
+test("a run notification is the account's mail first; the platform's is the fallback", () =>
+  withWorkspace("---\nnotify: ops@example.com\n---\n", () => {
+    const hadKey = process.env.FOLDRUN_RESEND_API_KEY;
+    const hadFrom = process.env.FOLDRUN_EMAIL_FROM;
+    try {
+      process.env.FOLDRUN_RESEND_API_KEY = "re_platform";
+      process.env.FOLDRUN_EMAIL_FROM = "foldrun <hello@foldrun.io>";
+      // No account key: the platform's connection carries the notification.
+      assert.deepEqual(notifyMail("acme"), { key: "re_platform", from: "foldrun <hello@foldrun.io>" });
+      // The account chose its own: that wins for notifications, and the
+      // platform's mail (an invite, a low balance) still goes as the platform.
+      setSecret("acme", "RESEND_API_KEY", "re_theirs");
+      setSecret("acme", "EMAIL_FROM", "Owner Inspections <marketing@ownerinspections.com.au>");
+      assert.deepEqual(notifyMail("acme"), { key: "re_theirs", from: "Owner Inspections <marketing@ownerinspections.com.au>" });
+      assert.deepEqual(platformMail("acme"), { key: "re_platform", from: "foldrun <hello@foldrun.io>" });
+    } finally {
+      if (hadKey === undefined) delete process.env.FOLDRUN_RESEND_API_KEY; else process.env.FOLDRUN_RESEND_API_KEY = hadKey;
+      if (hadFrom === undefined) delete process.env.FOLDRUN_EMAIL_FROM; else process.env.FOLDRUN_EMAIL_FROM = hadFrom;
+    }
   }));

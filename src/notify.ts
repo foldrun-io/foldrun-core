@@ -37,25 +37,41 @@ import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
 
 /**
- * The platform's own mail: notifications, invites, a low balance.
+ * The platform's own mail: an invite, a low balance.
  *
  * These are from foldrun, about the platform, to the account's owner — so
  * they go through the platform's Resend key and sender (FOLDRUN_RESEND_API_KEY,
- * FOLDRUN_EMAIL_FROM), never through anything the customer configured. A
- * customer's agents that send mail bring their own connection: the `email`
- * tool reads the account's RESEND_API_KEY, and that key is theirs to choose.
+ * FOLDRUN_EMAIL_FROM), never through anything the customer configured.
  *
  * Without a platform key — the CLI on a laptop, a test — the account's own
- * key and EMAIL_FROM are the fallback, so `notify:` still works for one
- * person running one desk with no platform in front of them.
+ * key and EMAIL_FROM are the fallback.
  */
 export function platformMail(tenant: string): { key: string; from: string } | null {
   const key = process.env.FOLDRUN_RESEND_API_KEY;
   if (key) return { key, from: process.env.FOLDRUN_EMAIL_FROM || "foldrun <hello@foldrun.io>" };
+  return accountMail(tenant);
+}
+
+/** The account's own Resend key and sender, or null when it has none. */
+export function accountMail(tenant: string): { key: string; from: string } | null {
   const own = getSecret(tenant, "RESEND_API_KEY");
   if (!own) return null;
   const from = getSecret(tenant, "EMAIL_FROM")?.value?.trim() || "foldrun <onboarding@resend.dev>";
   return { key: own.value, from };
+}
+
+/**
+ * A run notification is the account's mail, not the platform's: it is a
+ * desk telling its owner what it found, and the owner chose the sender —
+ * their RESEND_API_KEY and EMAIL_FROM on the account, the same connection
+ * their agents' `email` tool uses. So it comes from the address they
+ * expect, under their own domain's reputation and their own inbox rules;
+ * 2026-09-06, every notification from the platform's address was in the
+ * owner's bin. The platform's key is the fallback for an account that set
+ * none, so `notify:` works before anyone has configured mail at all.
+ */
+export function notifyMail(tenant: string): { key: string; from: string } | null {
+  return accountMail(tenant) ?? platformMail(tenant);
 }
 
 export interface NotifyConfig {
@@ -190,9 +206,9 @@ export async function sendRunNotification(
 
   try {
     if (config.email) {
-      const mail = platformMail(tenant);
+      const mail = notifyMail(tenant);
       if (!mail) {
-        console.error(`[foldrun] notify: email configured but no mail credential — set FOLDRUN_RESEND_API_KEY on the platform (or RESEND_API_KEY on the account ${tenant})`);
+        console.error(`[foldrun] notify: email configured but no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account ${tenant}, or FOLDRUN_RESEND_API_KEY on the platform`);
         return false;
       }
       const res = await fetch("https://api.resend.com/emails", {
