@@ -57,7 +57,17 @@ const local: PlatformHooks = {
   tenantKey: () => null,
 };
 
-export const platform: PlatformHooks = { ...local };
+// One object per PROCESS, not per module instance. A bundler that compiles
+// the boot file and each route handler separately (Next does) gives every
+// bundle its own copy of this module; registerPlatform() in the boot bundle
+// then filled one copy while the approval route read another, still on the
+// local defaults — and enqueueResume was a no-op there. An approved run sat
+// parked until the worker's periodic reconcile happened to find it, minutes
+// later, with an empty queue and nothing in any log. globalThis is the one
+// thing every bundle in a process shares.
+const KEY = Symbol.for("foldrun.platform");
+const g = globalThis as unknown as Record<symbol, PlatformHooks | undefined>;
+export const platform: PlatformHooks = (g[KEY] ??= { ...local });
 
 /** Install the platform's implementations. Partial: what is not given keeps its local default. */
 export function registerPlatform(hooks: Partial<PlatformHooks>): void {
