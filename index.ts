@@ -34,6 +34,7 @@ export * from "./src/history.ts";
 export * from "./src/gitrepo.ts";
 export * from "./src/storage.ts";
 export * from "./src/secrets.ts";
+export * from "./src/oauth-presets.ts";
 export * from "./src/secret-files.ts";
 export * from "./src/notify.ts";
 export * from "./src/webhook.ts";
