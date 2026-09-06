@@ -2091,6 +2091,16 @@ export function startFlowRun(
  * stopped. Without it (the CLI, whose process belongs to the person waiting)
  * the gate blocks in place exactly as before.
  */
+/** Store what a run has left in storage/ so far. Never fails the run: a
+ *  store that is down costs the gate its thumbnail, not the run its step. */
+async function harvestQuietly(tenant: string, workspace: string, run: RunRecord): Promise<void> {
+  try {
+    await harvestFiles(tenant, workspace, `run:${run.id}`);
+  } catch {
+    // bookkeeping only
+  }
+}
+
 /**
  * The runs this process is driving right now. The one fact reconcile needs:
  * a run in here is alive however quiet its step is, and a `running` run not
@@ -2397,7 +2407,9 @@ function driveRunInner(
           save();
           if (opts.parkOnApproval) {
             // Back to the queue with a not-before — a three-day wait must
-            // not hold a worker slot, a process, or survive on either.
+            // not hold a worker slot, a process, or survive on either. The
+            // files so far are stored first, as at an approval park.
+            await harvestQuietly(tenant, workspace, run);
             run.status = "queued";
             run.parkedAt = new Date().toISOString();
             parked = true;
@@ -2593,6 +2605,12 @@ function driveRunInner(
           save();
 
           if (opts.parkOnApproval) {
+            // What the run has produced so far becomes stored files NOW, not
+            // at the end: the gate shows the thumbnail a step is about to
+            // publish, and the Storage page answers "what did it make" while
+            // the person decides. Unchanged files are skipped by hash, and
+            // the local copies stay for the resumed step to read.
+            await harvestQuietly(tenant, workspace, run);
             // Hand the slot back. The approval API sees parkedAt and
             // re-enqueues; re-entering this loop skips finished groups and
             // lands back here with the decision already on the record.
