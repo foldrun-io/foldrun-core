@@ -9,7 +9,7 @@ import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import { executeStep, extractJson, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
-import { runStepInContainer, sizeLimits, killRunSandboxes } from "./run-container.ts";
+import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { platform } from "./platform.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
@@ -1610,7 +1610,23 @@ async function runStep(
         size,
       });
 
+      // A busy provider gets another moment on the SAME supply before the
+      // fallback is considered: under a fan-out, twenty steps against one
+      // key are told "too many requests" together, and failing them all is
+      // a broken run where a few seconds would have been a slow one. Each
+      // attempt holds its own sandbox, so the meter owes the sum.
       let outcome = await runIsolated(isolatedArgs(platformModelEnv()));
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+        const wait = backoffMs(n, lastRefusal);
+        push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
+        await sleep(wait);
+        // Judged fresh: the next attempt's own failure decides what happens
+        // next, not the one that sent us here.
+        lastRefusal = "";
+        const previous = outcome.timing;
+        outcome = await runIsolated(isolatedArgs(platformModelEnv()));
+        outcome = withEarlierTiming(outcome, previous);
+      }
       // The second supply, tried exactly once, and only when the primary
       // refused over money/auth/limits rather than the work failing. The
       // retry is a fresh sandbox — the failed one is gone, and driveRun's
@@ -1634,14 +1650,7 @@ async function runStep(
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
-        if (first && outcome.timing) {
-          outcome = {
-            ...outcome,
-            timing: { ...outcome.timing, totalMs: outcome.timing.totalMs + first.totalMs },
-          };
-        } else if (first && !outcome.timing) {
-          outcome = { ...outcome, timing: first };
-        }
+        outcome = withEarlierTiming(outcome, first);
       }
       publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
@@ -1739,6 +1748,15 @@ async function runStep(
         }
       };
       let outcome = await attemptThrough(providerEnv, translator);
+      // Same rule as the isolated path: a busy provider is waited out on
+      // the supply it refused from, before any fallback is considered.
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+        const wait = backoffMs(n, lastRefusal);
+        push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
+        await sleep(wait);
+        lastRefusal = "";
+        outcome = await attemptThrough(providerEnv, translator);
+      }
       // Same rule as the isolated path: one retry, on a refusal, on the
       // declared or platform second supply.
       if (outcome.status === "failed" && lastRefusal && secondSupply) {
@@ -1886,6 +1904,59 @@ function isProviderRefusal(text: string): boolean {
   // answer is about the ACCOUNT; anything about the work or the sandbox is
   // not, however similar the vocabulary.
   return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded/i.test(text);
+}
+
+/** How many times a busy provider is given another moment, and the longest
+ *  any one wait may be. Three is the industry's habit and the point where
+ *  waiting longer stops being kinder than failing. */
+export const OVERLOAD_RETRIES = 3;
+const MAX_BACKOFF_MS = 30_000;
+
+/**
+ * A refusal the SAME supply may answer in a moment — the provider is busy,
+ * not the account broken.
+ *
+ * The distinction is the whole point. 429 means "too many requests", and a
+ * provider says it for two unrelated reasons: the endpoint is momentarily
+ * saturated (wait, and it works), or the account is out of credit or over
+ * its quota (wait forever, it never works). Money words decide it: a 429
+ * that mentions credit, quota or billing is the account, and belongs to the
+ * fallback provider, not to a retry that can only fail again.
+ */
+export function isTransientOverload(text: string): boolean {
+  if (/credits?\b|quota|billing|insufficient|payment|401|402|403/i.test(text)) return false;
+  return /\b(429|503|529)\b|overloaded|rate.?limit|too many requests|try again/i.test(text);
+}
+
+/**
+ * How long to wait before attempt `n` (1-based). A `retry-after` the
+ * provider named wins — it knows when it will be ready. Otherwise
+ * exponential, with jitter: twenty steps of a fan-out that all failed
+ * together must not all come back together, or the second wave is the first
+ * wave again. Capped, because a step waiting half a minute is already the
+ * limit of what a slow run should cost a person watching it.
+ */
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Carry an earlier attempt's sandbox time into the outcome that replaced
+ * it. Every attempt rented a pod; the meter owes all of them, and a record
+ * that shows only the last one under-bills the platform and lies to the
+ * customer about how long their step actually took.
+ */
+function withEarlierTiming<T extends { timing?: StepTiming | null }>(outcome: T, earlier: StepTiming | null | undefined): T {
+  if (!earlier) return outcome;
+  if (!outcome.timing) return { ...outcome, timing: earlier };
+  return { ...outcome, timing: { ...outcome.timing, totalMs: outcome.timing.totalMs + earlier.totalMs } };
+}
+
+export function backoffMs(attempt: number, text = "", random: () => number = Math.random): number {
+  // retry-after, retry_after, "retryAfter": — every spelling a provider or
+  // its SDK has used for the same header.
+  const named = text.match(/retry[-_\s]?after["':\s]+(\d+)/i);
+  if (named) return Math.min(Math.max(Number(named[1]), 1) * 1000, MAX_BACKOFF_MS);
+  const base = Math.min(2 ** attempt * 1000, MAX_BACKOFF_MS);
+  return Math.round(base * (0.5 + random() * 0.5));
 }
 
 function platformModelEnv(): Record<string, string | undefined> {
