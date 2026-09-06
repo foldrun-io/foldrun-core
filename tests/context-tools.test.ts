@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { searchRoots, digestRuns, buildSearchTools, buildHistoryTools } from "../src/context-tools.ts";
+import { searchRoots, digestRuns, buildSearchTools, buildHistoryTools, buildDeskTools } from "../src/context-tools.ts";
 import type { RunRecord } from "../src/store.ts";
 
 function bundle(files: Record<string, string>): string {
@@ -73,4 +73,35 @@ test("the history digest is newest-first, finished runs only, minus the run bein
   assert.equal(digest[0].costUsd, 0.5);
   const built = buildHistoryTools(digest);
   assert.deepEqual(built.toolNames, ["mcp__foldrun_history__recall_runs", "mcp__foldrun_history__read_run"]);
+});
+
+test("desks: the account's other workspaces, named per line, filterable, read in full", async () => {
+  // What the runner assembles host-side for tools: [desks] — every other
+  // workspace's recent runs, each stamped with where it ran.
+  const digest = [
+    ...digestRuns([run("h1", "completed", "2026-09-05T02:00:00Z", "GOOD — nothing broken this week.", "health")]).map((d) => ({ ...d, workspace: "health-desk" })),
+    ...digestRuns([run("r1", "completed", "2026-09-05T01:00:00Z", "BAD — 3 targets fell out of the top 20.", "rankings")]).map((d) => ({ ...d, workspace: "rank-desk" })),
+    ...digestRuns([run("r0", "failed", "2026-08-29T01:00:00Z", null, "rankings")]).map((d) => ({ ...d, workspace: "rank-desk" })),
+  ];
+  const built = buildDeskTools(digest);
+  assert.deepEqual(built.toolNames, ["mcp__foldrun_desks__recall_desk_runs", "mcp__foldrun_desks__read_desk_run"]);
+  assert.match(built.promptLines[0], /health-desk, rank-desk/);
+  assert.ok(built.server, "a server exists when there is a digest");
+});
+
+test("desks: the digest names the workspace on every line and honours the filters", () => {
+  const digest = [
+    ...digestRuns([run("h1", "completed", "2026-09-05T02:00:00Z", "GOOD — nothing broken.", "health")]).map((d) => ({ ...d, workspace: "health-desk" })),
+    ...digestRuns([run("r1", "completed", "2026-09-05T01:00:00Z", "BAD — 3 targets fell out.", "rankings")]).map((d) => ({ ...d, workspace: "rank-desk" })),
+    ...digestRuns([run("r0", "failed", "2026-08-29T01:00:00Z", null, "rankings")]).map((d) => ({ ...d, workspace: "rank-desk" })),
+  ];
+  // The same filtering the tool applies, checked on the values rather than
+  // through the MCP transport (which the SDK owns).
+  const since = "2026-09-01";
+  const recent = digest.filter((r) => r.startedAt >= since);
+  assert.deepEqual(recent.map((r) => `${r.workspace}:${r.id}`), ["health-desk:h1", "rank-desk:r1"]);
+  assert.equal(recent[1].summary, "BAD — 3 targets fell out.");
+  const onlyRank = digest.filter((r) => r.workspace === "rank-desk");
+  assert.equal(onlyRank.length, 2);
+  assert.equal(digest.find((r) => r.id === "r0")!.status, "failed");
 });

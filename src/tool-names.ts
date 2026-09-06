@@ -36,7 +36,7 @@ export const BUILTIN_TOOLS = new Set([
 ]);
 
 /** The platform's own groups, served in-process rather than by the SDK. */
-export const PLATFORM_GROUPS = new Set(["search", "history"]);
+export const PLATFORM_GROUPS = new Set(["search", "history", "desks"]);
 
 /** Would this name resolve to something the runtime provides? Built-ins win a
  *  clash, so a tool file of the same name is shadowed rather than granted. */

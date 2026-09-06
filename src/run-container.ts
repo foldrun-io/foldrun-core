@@ -66,6 +66,8 @@ export interface ContainerStepInput {
   search?: SearchRoot[];
   /** tools: [history] — the workspace's recent runs, gathered host-side. */
   history?: RunDigest[];
+  /** tools: [desks] — the account's other workspaces' runs, gathered host-side. */
+  desks?: RunDigest[];
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -312,7 +314,7 @@ try {
   const { buildApiTools } = await import("@foldrun/core/api-tools");
   const { buildScriptTools } = await import("@foldrun/core/script-tools");
   const { buildConsultTools } = await import("@foldrun/core/agent-tools");
-  const { buildSearchTools, buildHistoryTools } = await import("@foldrun/core/context-tools");
+  const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
@@ -363,6 +365,7 @@ try {
   // The platform's own two groups, rebuilt from values like everything else.
   const search = buildSearchTools(input.search ?? []);
   const history = input.history?.length ? buildHistoryTools(input.history) : { server: null };
+  const desks = input.desks?.length ? buildDeskTools(input.desks) : { server: null };
 
   const outcome = await executeStep({
     agentDir,
@@ -380,6 +383,7 @@ try {
       ...(consult.server ? { foldrun_agents: consult.server } : {}),
       ...(search.server ? { foldrun_search: search.server } : {}),
       ...(history.server ? { foldrun_history: history.server } : {}),
+      ...(desks.server ? { foldrun_desks: desks.server } : {}),
       ...input.mcpServers,
     },
     env,

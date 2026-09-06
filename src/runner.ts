@@ -60,7 +60,7 @@ import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { attachOperations, prefetchOpenApi } from "./openapi.ts";
-import { buildSearchTools, buildHistoryTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
+import { buildSearchTools, buildHistoryTools, buildDeskTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
 import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
@@ -103,6 +103,8 @@ function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerC
 /** How much of the earlier groups' output a step is handed, in characters.
  *  Newest groups are kept when the total is over it. */
 export const CONTEXT_CHARS = 30_000;
+/** tools: [desks] — how many other-workspace runs cross into a step, in all. */
+export const DESK_RUNS_CAP = 100;
 
 /**
  * What a group is handed from the groups before it: all of them, oldest
@@ -1004,6 +1006,7 @@ function agentContext(
   const shadowed: string[] = [];
   let wantSearch = false;
   let wantHistory = false;
+  let wantDesks = false;
 
   for (const ref of toolRefs(front)) {
     const toolName = ref.name;
@@ -1022,11 +1025,12 @@ function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
-    } else if (toolName === "search" || toolName === "history") {
-      // The platform's own two groups, served in-process — built below,
-      // once the roots and the records are known.
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks") {
+      // The platform's own groups, served in-process — built below, once
+      // the roots and the records are known.
       if (toolName === "search") wantSearch = true;
-      else wantHistory = true;
+      else if (toolName === "history") wantHistory = true;
+      else wantDesks = true;
       if (available[toolName]) shadowed.push(toolName);
     } else if (BUILTIN_TOOLS.has(toolName)) {
       allowed.push(toolName);
@@ -1058,11 +1062,23 @@ function agentContext(
       ]
     : [];
   const historyDigest: RunDigest[] = wantHistory ? digestRuns(listRuns(tenant, workspace), 30, identity.runId) : [];
+  // tools: [desks] — the account's OTHER workspaces, ten runs each. A run
+  // pod cannot reach the platform's API and the library is read-only, so
+  // this is the only way one desk sees what another concluded — and it
+  // stays a value the host chose to send, not a door the sandbox opened.
+  const deskDigest: RunDigest[] = wantDesks
+    ? listWorkspaces(tenant)
+        .filter((w) => w.name !== workspace)
+        .flatMap((w) => digestRuns(listRuns(tenant, w.name), 10).map((d) => ({ ...d, workspace: w.name })))
+        .sort((a, b) => (b.startedAt > a.startedAt ? 1 : -1))
+        .slice(0, DESK_RUNS_CAP)
+    : [];
   const searchTools = buildSearchTools(searchRoots);
   const historyTools = wantHistory ? buildHistoryTools(historyDigest) : { server: null, toolNames: [], promptLines: [] };
-  allowed.push(...searchTools.toolNames, ...historyTools.toolNames);
-  if (searchTools.promptLines.length || historyTools.promptLines.length) {
-    parts.push(`# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines].join("\n")}`);
+  const deskTools = wantDesks ? buildDeskTools(deskDigest) : { server: null, toolNames: [], promptLines: [] };
+  allowed.push(...searchTools.toolNames, ...historyTools.toolNames, ...deskTools.toolNames);
+  if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
+    parts.push(`# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
   }
   // An MCP server declares its tools when it connects, so they can't be listed
   // ahead of time. Server-level specs cover them: granting the server grants
@@ -1098,8 +1114,10 @@ function agentContext(
     scriptSpecs,
     searchRoots,
     historyDigest,
+    deskDigest,
     searchTools,
     historyTools,
+    deskTools,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -1272,7 +1290,7 @@ async function runStep(
       unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
-      fallbackEnv, apiWarnings, searchRoots, historyDigest, searchTools, historyTools,
+      fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
 
@@ -1564,6 +1582,7 @@ async function runStep(
               : path.posix.join("/workspace", path.relative(workspaceRoot, r.dir).replaceAll("\\", "/")),
           })),
           history: historyDigest,
+          desks: deskDigest,
         },
         env: Object.fromEntries(
           Object.entries({
@@ -1686,6 +1705,7 @@ async function runStep(
           ...(consultTools.server ? { foldrun_agents: consultTools.server } : {}),
           ...(searchTools.server ? { foldrun_search: searchTools.server } : {}),
           ...(historyTools.server ? { foldrun_history: historyTools.server } : {}),
+          ...(deskTools.server ? { foldrun_desks: deskTools.server } : {}),
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model

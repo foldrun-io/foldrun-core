@@ -5,6 +5,8 @@
 //                      memory, state and storage, all three scopes
 //   tools: [history]   recall_runs / read_run — what this workspace's earlier
 //                      runs concluded, and what their steps said
+//   tools: [desks]     recall_desk_runs / read_desk_run — the same, for every
+//                      OTHER workspace in the account
 //
 // Both take values, not stores: a list of directories, a list of run
 // digests. That is what lets the same servers be rebuilt inside a run
@@ -188,6 +190,9 @@ export function buildSearchTools(roots: SearchRoot[]): ContextToolResult {
 // ----------------------------------------------------------------- history
 
 export interface RunDigest {
+  /** Which workspace it ran in. Absent for this workspace's own history,
+   *  where naming it every line would be noise. */
+  workspace?: string;
   id: string;
   flow: string;
   status: string;
@@ -274,6 +279,74 @@ export function buildHistoryTools(digest: RunDigest[]): ContextToolResult {
     promptLines: [
       `- **recall_runs()** / **read_run(id)** — this workspace's last ${digest.length} finished runs and what they concluded. ` +
         `Check before repeating work a recent run already did.`,
+    ],
+  };
+}
+
+/**
+ * The same two verbs across the account's OTHER workspaces.
+ *
+ * A digest agent has to read what six desks concluded this week, and it
+ * cannot: a run pod's network policy denies the platform's own API, and the
+ * account library is mounted read-only, so there is no path from inside a
+ * sandbox to another workspace's files. This is that path, built the way
+ * `history` already is — the host gathers the records, the values cross the
+ * boundary as JSON, and the container serves them. Nothing new is reachable
+ * from a run; what crosses is what the host decided to send.
+ *
+ * Read-only and summary-shaped on purpose: run records, not files. An agent
+ * that needs another desk's *file* is asking for something this platform
+ * deliberately does not have.
+ */
+export function buildDeskTools(digest: RunDigest[]): ContextToolResult {
+  const workspaces = [...new Set(digest.map((d) => d.workspace ?? "?"))].sort();
+  const recall = tool(
+    "recall_desk_runs",
+    `What the account's OTHER workspaces' runs concluded — newest first, one line each ` +
+      `(workspace, id, flow, when, status, cost, summary). The summary is the run's headline: ` +
+      `since every desk's last step opens with its verdict, this is how the week reads at a glance. ` +
+      `Then read_desk_run(id) for a run's steps in full.`,
+    {
+      workspace: z.string().optional().describe("Only this workspace"),
+      flow: z.string().optional().describe("Only runs of this flow"),
+      status: z.enum(["completed", "failed"]).optional(),
+      since: z.string().optional().describe("ISO date; only runs started on or after it"),
+      limit: z.number().int().min(1).max(200).optional().describe("How many (default 30)"),
+    },
+    async (args) => {
+      const rows = digest
+        .filter((r) => !args.workspace || r.workspace === args.workspace)
+        .filter((r) => !args.flow || r.flow === args.flow)
+        .filter((r) => !args.status || r.status === args.status)
+        .filter((r) => !args.since || r.startedAt >= args.since)
+        .slice(0, args.limit ?? 30)
+        .map(
+          (r) =>
+            `${(r.workspace ?? "?").padEnd(12)} ${r.id}  ${r.flow}  ${r.startedAt.slice(0, 16)}  ${r.status}  $${r.costUsd.toFixed(3)}  ${r.summary ?? "(no summary)"}`,
+        );
+      return { content: [{ type: "text" as const, text: rows.length ? rows.join("\n") : "no runs match" }] };
+    },
+  );
+  const read = tool(
+    "read_desk_run",
+    "One run from another workspace in full: each step's agent, status and what it replied (long replies trimmed).",
+    { id: z.string().describe("A run id from recall_desk_runs") },
+    async (args) => {
+      const r = digest.find((d) => d.id === args.id);
+      if (!r) return { content: [{ type: "text" as const, text: `no run ${args.id} in the account's recent history` }], isError: true };
+      const text =
+        `${r.workspace ?? "?"} · ${r.flow} · ${r.status} · started ${r.startedAt}${r.finishedAt ? ` · finished ${r.finishedAt}` : ""} · $${r.costUsd.toFixed(4)}\n` +
+        (r.summary ? `summary: ${r.summary}\n` : "") +
+        r.steps.map((s) => `\n## ${s.agent} (${s.status})\n${s.result ?? "(no reply)"}`).join("\n");
+      return { content: [{ type: "text" as const, text }] };
+    },
+  );
+  return {
+    server: createSdkMcpServer({ name: "foldrun_desks", version: "1.0.0", tools: [recall, read] }),
+    toolNames: ["mcp__foldrun_desks__recall_desk_runs", "mcp__foldrun_desks__read_desk_run"],
+    promptLines: [
+      `- **recall_desk_runs()** / **read_desk_run(id)** — what the account's other workspaces ` +
+        `(${workspaces.join(", ") || "none yet"}) concluded, newest first. Their run records, not their files.`,
     ],
   };
 }
