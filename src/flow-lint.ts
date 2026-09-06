@@ -100,6 +100,21 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       });
     }
 
+    // A gate with no `preview:` shows only the previous step's reply and
+    // whatever files that reply happens to name. The person deciding sees a
+    // summary, not the thing — unless the agent remembered.
+    if ((step.approve || step.ask) && !step.preview?.length) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        message: `"${step.subflow ?? step.agent}" is a gate with no preview:`,
+        detail:
+          "The approval box shows the previous step's reply and any storage/ file it names. " +
+          "Declare what to show — `preview: draft/*.mdx, draft/images/*.webp` — so the approver " +
+          "always sees the document, not a pointer, even when the agent forgets to name it.",
+      });
+    }
+
     // `each: items` fans out over DATA, and only an `output: json` step in
     // an earlier group produces any. Without one the step expands to
     // nothing every time, quietly — the exact failure this file exists for.

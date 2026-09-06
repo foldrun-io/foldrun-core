@@ -2032,6 +2032,7 @@ export function createFlowRun(
       waitSecs: s.waitSecs,
       waitFor: s.waitFor,
       ask: s.ask,
+      preview: s.preview,
       delegate: s.delegate,
       output: s.output,
       attempts: 0,
@@ -2091,6 +2092,40 @@ export function startFlowRun(
  * stopped. Without it (the CLI, whose process belongs to the person waiting)
  * the gate blocks in place exactly as before.
  */
+/**
+ * Turn a gate's `preview:` patterns into the files under storage/ that
+ * exist right now, relative to storage/. `*` matches within a segment,
+ * `**` across segments; a pattern with no wildcard is kept only if the file
+ * is there. Sorted, deduplicated, capped — a preview is a handful of files,
+ * not a directory dump.
+ */
+export function resolvePreview(storageDir: string, patterns: string[], cap = 12): string[] {
+  const out = new Set<string>();
+  for (const pattern of patterns) {
+    if (!/[*?]/.test(pattern)) {
+      if (fs.existsSync(path.join(storageDir, pattern))) out.add(pattern);
+      continue;
+    }
+    const re = new RegExp(
+      "^" + pattern
+        .split("**").map((part) => part.split("*").map((x) => x.replace(/[.+^${}()|[\]\\?]/g, "\\$&")).join("[^/]*"))
+        .join(".*") + "$",
+    );
+    const walk = (dir: string, rel: string) => {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue;
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(path.join(dir, e.name), r);
+        else if (re.test(r)) out.add(r);
+      }
+    };
+    walk(storageDir, "");
+  }
+  return [...out].sort().slice(0, cap);
+}
+
 /** Store what a run has left in storage/ so far. Never fails the run: a
  *  store that is down costs the gate its thumbnail, not the run its step. */
 async function harvestQuietly(tenant: string, workspace: string, run: RunRecord): Promise<void> {
@@ -2604,6 +2639,13 @@ function driveRunInner(
           run.status = "awaiting-approval";
           save();
 
+          // The gate's declared preview, resolved now against what the run
+          // has actually produced — a glob at park time, a list of files on
+          // the record for as long as the run waits.
+          for (const s of needsApproval) {
+            if (s.preview?.length) s.previewFiles = resolvePreview(path.join(workspaceDir(tenant, workspace), "storage"), s.preview);
+          }
+          save();
           if (opts.parkOnApproval) {
             // What the run has produced so far becomes stored files NOW, not
             // at the end: the gate shows the thumbnail a step is about to

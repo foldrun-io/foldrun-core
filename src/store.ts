@@ -1014,6 +1014,11 @@ export interface FlowStep {
   /** A question for a human. The step parks like an approval; the answer
    *  typed at the gate reaches the step's prompt. */
   ask?: string;
+  /** What the gate shows before a person decides: paths under storage/,
+   *  globs allowed (`draft/*.mdx, draft/images/*.webp`). Declared in the
+   *  flow so the preview does not depend on the previous step remembering
+   *  to name its files. Resolved against storage/ when the run parks. */
+  preview?: string[];
   /** Model-led delegation, bounded by declaration: this step's agent picks
    *  which of THESE agents run next, one instruction each. The choice set
    *  is the file's, the picks are the model's, the record shows both. */
@@ -1278,6 +1283,9 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         else step.waitSecs = parseWait(value);
       }
       else if (key === "ask") { step.ask = value; }
+      else if (key === "preview") {
+        step.preview = value.split(",").map((p) => p.trim().replace(/^(\.\.\/\.\.\/)?storage\//, "")).filter(Boolean);
+      }
       else if (key === "delegate") step.delegate = refNames(value).slice(0, 5);
       else if (key === "max") step.max = Math.min(20, Math.max(1, Number(value) || 0)) || undefined;
     }
@@ -2255,6 +2263,11 @@ export interface StepRecord {
    *  into the step's prompt the way an approval note does. */
   eventPayload?: string;
   ask?: string;
+  /** Carried from the flow — see FlowStep. */
+  preview?: string[];
+  /** `preview:` resolved against storage/ at the moment the run parked —
+   *  the files the gate renders, relative to storage/. */
+  previewFiles?: string[];
   delegate?: string[];
   /** Set once a delegate step's picks have been expanded — the guard that
    *  a loop rewind cannot fan the same choice out twice. */
