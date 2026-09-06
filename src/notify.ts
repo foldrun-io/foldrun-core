@@ -200,7 +200,11 @@ export async function sendRunNotification(
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) {
-        console.error(`[foldrun] notify email: ${tenant}/${workspace} → HTTP ${res.status}`);
+        // Resend's body says WHY — "domain not verified", "can only send to
+        // your own address" — and a status alone sent someone to the wrong
+        // dashboard for twenty minutes on 2026-09-06.
+        const why = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 300);
+        console.error(`[foldrun] notify email: ${tenant}/${workspace} → HTTP ${res.status} ${why}`);
         return false;
       }
       return true;
