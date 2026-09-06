@@ -186,6 +186,16 @@ export async function sendRunNotification(
   const summary = run.summary?.trim() || null;
 
   const links = run.status === "awaiting-approval" ? approvalLinks(tenant, workspace, run.id) : null;
+  // At a gate the reader is being asked something; the question goes in the
+  // mail, and so does what the run has concluded so far — the last finished
+  // step's first line, which is the proposal's own summary ("… ·
+  // TARGETS-PROPOSAL: 1 change"). Without these a gate email said only
+  // that a step was waiting, and the decision meant opening the dashboard.
+  const asks = waitingSteps.map((s) => s.ask?.trim()).filter((a): a is string => Boolean(a));
+  const soFar =
+    run.status === "awaiting-approval" && !summary
+      ? [...run.steps].reverse().find((s) => s.status === "completed" && s.result?.trim())?.result?.trim().split("\n")[0] ?? null
+      : null;
 
   const body = {
     // `text` is what Slack-shaped receivers render; the rest is for anything
@@ -224,7 +234,8 @@ export async function sendRunNotification(
           subject: summary ? `${headline} — ${summary}`.slice(0, 160) : headline,
           text:
             `${headline}\n` +
-            (summary ? `\n${summary}\n` : "") +
+            (summary ? `\n${summary}\n` : soFar ? `\n${soFar}\n` : "") +
+            (asks.length ? `\n${asks.map((a) => `Question: ${a}`).join("\n")}\n` : "") +
             `\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
             `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n` +
             (links ? `\nApprove: ${links.approveUrl}\nReject: ${links.rejectUrl}\n` : ""),
