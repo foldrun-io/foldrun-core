@@ -2128,6 +2128,28 @@ export function resolvePreview(storageDir: string, patterns: string[], cap = 12)
 
 /** Store what a run has left in storage/ so far. Never fails the run: a
  *  store that is down costs the gate its thumbnail, not the run its step. */
+/**
+ * Copy onto the in-memory run any gate decision that reached the record on
+ * disk while this driver was busy — status, stamps, note, the event line —
+ * so the driver's next save keeps it. Returns whether anything landed. Only
+ * steps this copy still shows as asking are touched: everything else on the
+ * record is this driver's own, and newer in memory than on disk.
+ */
+export function adoptDecisions(run: RunRecord, disk: RunRecord | null): boolean {
+  if (!disk) return false;
+  let any = false;
+  run.steps.forEach((s, i) => {
+    const d = disk.steps[i];
+    if (!d || s.status !== "awaiting-approval" || d.status === "awaiting-approval") return;
+    s.status = d.status;
+    s.events = d.events;
+    if (d.approvedAt) s.approvedAt = d.approvedAt;
+    if (d.approvalNote) s.approvalNote = d.approvalNote;
+    any = true;
+  });
+  return any;
+}
+
 async function harvestQuietly(tenant: string, workspace: string, run: RunRecord): Promise<void> {
   try {
     await harvestFiles(tenant, workspace, `run:${run.id}`);
@@ -2653,12 +2675,23 @@ function driveRunInner(
             // the person decides. Unchanged files are skipped by hash, and
             // the local copies stay for the resumed step to read.
             await harvestQuietly(tenant, workspace, run);
+            // The gate has been on the record — and in an inbox — since the
+            // save above, so a decision can land while the harvest runs.
+            // The API wrote it to disk; it did not enqueue a resume, because
+            // parkedAt was not set yet; and the save below, from memory,
+            // would erase it. That was a lost approval and a run that waited
+            // forever (2026-09-06, approved two seconds after it parked).
+            // Take what landed, then do the enqueue the API would have done.
+            const decided = adoptDecisions(run, readRun(tenant, workspace, run.id));
             // Hand the slot back. The approval API sees parkedAt and
             // re-enqueues; re-entering this loop skips finished groups and
             // lands back here with the decision already on the record.
             run.parkedAt = new Date().toISOString();
             parked = true;
             save();
+            if (decided && run.steps.every((s) => s.status !== "awaiting-approval")) {
+              await platform.enqueueResume(tenant, workspace, run.id);
+            }
             return;
           }
 
