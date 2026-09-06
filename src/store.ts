@@ -25,6 +25,19 @@ import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import matter from "gray-matter";
+
+/**
+ * The frontmatter of one markdown file, as the runtime reads it. Exported
+ * for the CLI: `foldrun probe` used to import gray-matter itself, which is
+ * this package's dependency, not the CLI's — on an installed CLI the import
+ * failed, the catch swallowed it, and the workspace's provider block was
+ * silently ignored, so the probe went to Anthropic and reported a model
+ * that "may not exist". Reading through here, the CLI cannot drift from
+ * the runtime, and there is nothing to fail to import.
+ */
+export function readFrontmatter(file: string): Record<string, unknown> {
+  return matter(fs.readFileSync(file, "utf8")).data as Record<string, unknown>;
+}
 import { ownToolNames, legacyUseNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
