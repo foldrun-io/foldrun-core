@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { notifyConfig, sendRunNotification } from "../src/notify.ts";
+import { notifyConfig, sendRunNotification, isQuietFlow } from "../src/notify.ts";
 import { setSecret } from "../src/secrets.ts";
 import type { RunRecord } from "../src/store.ts";
 
@@ -96,6 +96,18 @@ test("an event nobody asked about sends nothing", () =>
     // completed is not in the defaults; an attempted send to that port would
     // error, so `false` here proves no request was even made.
     assert.equal(await sendRunNotification("acme", "desk", run("completed")), false);
+  }));
+
+test("an eval or adhoc run completing is nobody's news; its failure or gate still is", () =>
+  withWorkspace('---\nnotify:\n  url: https://127.0.0.1:1/hook\n  events: [completed, failed, awaiting-approval]\n---\n', async () => {
+    // Port 1 refuses: a send that was attempted resolves false after logging,
+    // a send that was never attempted also resolves false — so the proof is
+    // in the flow name deciding, pinned by isQuietFlow directly.
+    assert.equal(isQuietFlow("eval:post-spec"), true);
+    assert.equal(isQuietFlow("adhoc:local-serp"), true);
+    assert.equal(isQuietFlow("rankings"), false);
+    assert.equal(isQuietFlow("evaluate"), false);
+    assert.equal(await sendRunNotification("acme", "desk", { ...run("completed"), flow: "eval:post-spec" }), false);
   }));
 
 test("a subscribed event POSTs the run, with secrets resolved into the URL", () =>

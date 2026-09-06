@@ -128,6 +128,11 @@ export function approvalLinks(
  * it. Failures are logged and swallowed — a broken Slack hook must never
  * fail the run it is reporting on.
  */
+/** Flows whose completion is nobody's news: eval cases and adhoc runs. */
+export function isQuietFlow(flow: string): boolean {
+  return /^(eval|adhoc):/.test(flow);
+}
+
 export async function sendRunNotification(
   tenant: string,
   workspace: string,
@@ -135,6 +140,12 @@ export async function sendRunNotification(
 ): Promise<boolean> {
   const config = notifyConfig(tenant, workspace);
   if (!config || !config.events.includes(run.status)) return false;
+  // A test is not news. An eval case or an adhoc single-agent run is started
+  // by a person who is watching it, and a desk that emails "completed" for
+  // every one of them buries the weekly verdict under two hundred of these —
+  // on 2026-09-06 the reader's inbox rule had sent the lot to the bin, the
+  // real reports with them. Failures and gates still send: a person asked.
+  if (run.status === "completed" && isQuietFlow(run.flow)) return false;
 
   const failed = run.steps.filter((s) => s.status === "failed").map((s) => s.agent);
   const waitingSteps = run.steps.filter((s) => s.status === "awaiting-approval");

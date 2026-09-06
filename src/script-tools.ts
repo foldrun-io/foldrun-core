@@ -298,6 +298,23 @@ export function resolveRunPath(agentDir: string, run: string, libraryScripts: st
   return path.resolve(agentDir, run);
 }
 
+/**
+ * The schema a script's arguments are offered to the model under. Every
+ * argument becomes a command-line flag, so it is text on the way out — but a
+ * model reading "depth: how many results (default 20)" sends 10, the number,
+ * and the SDK refuses the call before the handler's String() ever runs; on
+ * the fast tier the model then announced a retry and ended its turn. A
+ * number or a boolean is accepted and written out as the text it would
+ * have been.
+ */
+export function scriptArgShape(args: Record<string, string>): Record<string, z.ZodTypeAny> {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [arg, desc] of Object.entries(args)) {
+    shape[arg] = z.union([z.string(), z.number(), z.boolean()]).optional().describe(desc);
+  }
+  return shape;
+}
+
 export function buildScriptTools(
   agentDir: string,
   scripts: ScriptSpec[],
@@ -312,10 +329,7 @@ export function buildScriptTools(
   const log: string[] = [];
 
   const tools = scripts.map((spec) => {
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [arg, desc] of Object.entries(spec.args)) {
-      shape[arg] = z.string().optional().describe(desc);
-    }
+    const shape = scriptArgShape(spec.args);
     return tool(
       spec.name,
       `${spec.description || `Run ${spec.run}.`} Runs the workspace script ${spec.run}; returns its output. ` +
