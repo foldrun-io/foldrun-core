@@ -382,6 +382,11 @@ export interface EvalResult {
   failed: number;
   costUsd: number;
   cases: CaseResult[];
+  /** Why the eval could not run at all — a missing secret, an agent that
+   *  failed to load. Set only when `cases` is empty for that reason, so a
+   *  0-of-n result says what went wrong instead of looking like n wrong
+   *  answers. */
+  error?: string;
 }
 
 /** Wait for a run to finish, with a ceiling so a hung agent can't hang an eval. */
@@ -571,7 +576,17 @@ export async function runEval(
       }
       output = finished.steps.map((s) => s.result ?? "").join("\n\n");
       costUsd = finished.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
-      if (finished.status === "failed" && !output.trim()) error = "the run failed and produced nothing";
+      if (finished.status === "failed" && !output.trim()) {
+        // Quote the run's own last error. "Produced nothing" on a fresh
+        // workspace is almost always "secret X is not set" or a tool that
+        // did not load, and the eval page is where the developer is looking.
+        const why = finished.steps
+          .flatMap((s) => s.events ?? [])
+          .filter((e) => e.type === "error")
+          .map((e) => e.text.split("\n")[0].slice(0, 300))
+          .pop();
+        error = why ? `the run failed: ${why}` : "the run failed and produced nothing";
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -727,8 +742,14 @@ export function evalTrends(tenant: string, workspace: string): EvalTrend[] {
 export async function evaluateDeployed(
   tenant: string,
   workspace: string,
-  commit: string,
+  // The commit when the deploy knows one (a git push, `deploy --commit`);
+  // otherwise the revision the save just recorded. A plain `foldrun deploy`
+  // passes no commit, and until this defaulted the eval never ran for it —
+  // "every deploy is evaluated" was true only of pushes.
+  commit: string | null = null,
 ): Promise<{ ran: number; skipped: string | null }> {
+  const stamp = commit ?? deployedCommit(tenant, workspace)?.commit ?? latestRevisionId(tenant, workspace);
+  if (!stamp) return { ran: 0, skipped: "no revision to stamp the result with" };
   // Only the evals that asked to run on deploy — a `trigger: manual` eval is
   // one a person runs on purpose, because it costs a whole flow run.
   const evals = listEvals(tenant, workspace).filter((e) => e.trigger !== "manual");
@@ -744,17 +765,19 @@ export async function evaluateDeployed(
   } catch {
     // no lock
   }
-  fs.writeFileSync(lock, commit);
+  fs.writeFileSync(lock, stamp);
   let ran = 0;
   try {
     for (const info of evals) {
       try {
         const result = await runEval(tenant, workspace, info);
-        writeEvalResult(tenant, workspace, result, commit);
+        writeEvalResult(tenant, workspace, result, stamp);
         ran += 1;
       } catch (err) {
         // One eval failing to run must not stop the rest; it is recorded as
-        // a run with nothing passing, so the series shows the gap.
+        // a run with nothing passing, so the series shows the gap — and with
+        // the reason, so "0 of 2" on a fresh workspace reads "secret
+        // LINKEDIN_OAUTH is not set" rather than "two wrong answers".
         writeEvalResult(
           tenant,
           workspace,
@@ -766,8 +789,9 @@ export async function evaluateDeployed(
             failed: info.cases.length,
             costUsd: 0,
             cases: [],
+            error: err instanceof Error ? err.message : String(err),
           } as EvalResult,
-          commit,
+          stamp,
         );
       }
     }

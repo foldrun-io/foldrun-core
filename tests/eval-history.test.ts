@@ -98,3 +98,25 @@ test("a deploy with no evals spends nothing, and a running evaluation is not dou
     assert.equal(second.ran, 0);
     assert.match(second.skipped!, /already running/);
   }));
+
+test("a deploy without a commit is still evaluated, and an eval that cannot run says why", () =>
+  withWorkspace(async (t, w) => {
+    // A flow eval naming a flow that does not exist: runEval throws before
+    // any case starts. That is the shape of "secret not set" and "agent
+    // failed to load" too — the eval never reaches its cases.
+    fs.writeFileSync(
+      path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/evals/q.md"),
+      "---\nname: q\nflow: missing\n---\n\n## c\ntask: t\nexpect:\n  - contains: x\n",
+    );
+    // No commit, and no revision either: nothing to stamp with, so nothing runs.
+    assert.deepEqual(await evaluateDeployed(t, w, null), { ran: 0, skipped: "no revision to stamp the result with" });
+
+    writeDeployedCommit(t, w, "ccc3333");
+    const r = await evaluateDeployed(t, w, null);
+    assert.equal(r.skipped, null, "with a revision to stamp, a commit-less deploy evaluates");
+    const file = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/evals/.results/q.json");
+    const saved = JSON.parse(fs.readFileSync(file, "utf8")) as EvalResult;
+    assert.equal(saved.passed, 0);
+    assert.equal(saved.failed, 1);
+    assert.match(saved.cases[0].error!, /flow missing not found/, "the reason survives, so 0/1 is not read as a wrong answer");
+  }));
