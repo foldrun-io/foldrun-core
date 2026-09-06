@@ -12,6 +12,10 @@
 // `format:` + `auth:`, never a requirement: an endpoint this table has
 // never heard of works the same way by spelling those three out.
 //
+// Three formats. `responses` is OpenAI's newer API — the same translator
+// with a second pair of mappings, for an OpenAI key that wants what only
+// that shape carries (a PDF as input, the reasoning knobs). Nobody else
+// implements it, so no preset defaults to it; a block asks for it by name.
 // Two formats, deliberately. `anthropic` is what the runtime speaks, so
 // those endpoints are reached directly. `openai` endpoints are reached
 // through the runtime's own translator (translator.ts), which runs on
@@ -26,7 +30,7 @@
 // which is the only claim that matters for an agent runtime; a name without
 // it is documented, not proven.
 
-export type WireFormat = "anthropic" | "openai";
+export type WireFormat = "anthropic" | "openai" | "responses";
 
 /** Where the key goes for an Anthropic-format endpoint. A translated
  *  endpoint always gets a bearer token, because the translator is the

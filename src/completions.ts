@@ -529,6 +529,7 @@ export function completionsAt(
       format: [
         { label: "anthropic", hint: "spoken to directly (the default)" },
         { label: "openai", hint: "Chat Completions — through the runtime's translator" },
+        { label: "responses", hint: "OpenAI Responses — the translator's second shape; PDFs cross" },
       ],
       auth: [
         { label: "bearer", hint: "authorization: Bearer (the default)" },

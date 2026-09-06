@@ -1,4 +1,5 @@
-// The runtime's own translator: Anthropic Messages in, Chat Completions out.
+// The runtime's own translator: Anthropic Messages in, Chat Completions or
+// Responses out.
 //
 // The Agent SDK speaks one wire format. Most of the providers people bring
 // keys for speak another — OpenAI's Chat Completions, which OpenAI, Gemini,
@@ -8,6 +9,13 @@
 // presents an Anthropic endpoint to the SDK, and rewrites each request and
 // each streamed reply between the two shapes. It exists only for the
 // duration of a step, holds only that step's key, and dies with it.
+//
+// `format: responses` is the third shape: OpenAI's newer Responses API,
+// which OpenAI recommends for new work and almost nobody else implements.
+// Same translator, same server, a second pair of mappings — chosen per
+// provider block, never guessed. It carries one thing Chat Completions
+// cannot: a document block crosses as an input_file, so a PDF an agent
+// reads reaches the model instead of being dropped.
 //
 // It is deliberately small. It translates what the SDK actually sends — a
 // system prompt, text and image blocks, tools with JSON schemas, tool calls
@@ -26,10 +34,14 @@ import { PROTECTED_PARAMS } from "./providers.ts";
 
 type Json = Record<string, unknown>;
 
+export type TranslatorWire = "chat" | "responses";
+
 export interface TranslatorSpec {
-  /** The provider's Chat-Completions base, e.g. https://api.openai.com/v1 —
-   *  `/chat/completions` is appended. */
+  /** The provider's base, e.g. https://api.openai.com/v1 — `/chat/completions`
+   *  or `/responses` is appended, by `wire`. */
   upstreamBase: string;
+  /** Which OpenAI shape the endpoint speaks. Default chat. */
+  wire?: TranslatorWire;
   /** Already resolved. Sent as `Authorization: Bearer`. */
   upstreamKey: string;
   /** Extra headers the provider wants, already resolved. */
@@ -238,6 +250,138 @@ export function toChatCompletions(
     else out[key] = value;
   }
 
+  return out;
+}
+
+/**
+ * An Anthropic Messages request as a Responses request. Pure.
+ *
+ * The Responses shape is flatter than Chat Completions: the system prompt
+ * is `instructions`, a tool call and its result are top-level items rather
+ * than an assistant field and a `tool` role, and a document is an input
+ * file the model reads itself. Order is preserved as written: a
+ * function_call item, then its function_call_output, then whatever else the
+ * user said.
+ */
+export function toResponses(
+  req: Json,
+  opts: {
+    reasoningEffort?: boolean;
+    stream: boolean;
+    params?: Record<string, unknown>;
+  },
+  drop: Dropped = dropped(),
+): Json {
+  const out: Json = { model: req.model, stream: opts.stream, store: false };
+  const system = textOf(req.system);
+  if (system) out.instructions = system;
+
+  const input: Json[] = [];
+  for (const m of (Array.isArray(req.messages) ? req.messages : []) as Json[]) {
+    const content = m.content;
+    if (m.role === "assistant") {
+      const text = textOf(content);
+      if (text) input.push({ role: "assistant", content: [{ type: "output_text", text }] });
+      for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+        if (b.type === "tool_use") {
+          input.push({ type: "function_call", call_id: String(b.id), name: String(b.name), arguments: JSON.stringify(b.input ?? {}) });
+        } else if (b.type === "thinking" || b.type === "redacted_thinking") {
+          drop.add("thinking blocks in the transcript");
+        }
+      }
+      continue;
+    }
+    if (typeof content === "string") {
+      input.push({ role: "user", content });
+      continue;
+    }
+    const parts: Json[] = [];
+    for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+      if (b.type === "tool_result") {
+        const inner = b.content;
+        const text = typeof inner === "string" ? inner : textOf(inner);
+        input.push({ type: "function_call_output", call_id: String(b.tool_use_id), output: text || (b.is_error ? "error" : "ok") });
+        if (Array.isArray(inner) && (inner as Json[]).some((x) => x.type === "image")) drop.add("images inside tool results");
+      } else if (b.type === "text") {
+        parts.push({ type: "input_text", text: String(b.text ?? "") });
+      } else if (b.type === "image") {
+        const src = b.source as Json | undefined;
+        if (src?.type === "base64" && typeof src.data === "string") {
+          parts.push({ type: "input_image", image_url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}`, detail: "auto" });
+        } else if (src?.type === "url" && typeof src.url === "string") {
+          parts.push({ type: "input_image", image_url: src.url, detail: "auto" });
+        }
+      } else if (b.type === "document") {
+        // The one thing this shape can say that Chat Completions cannot.
+        const src = b.source as Json | undefined;
+        const title = typeof b.title === "string" ? b.title : "document.pdf";
+        if (src?.type === "base64" && typeof src.data === "string") {
+          parts.push({ type: "input_file", filename: title, file_data: `data:${String(src.media_type ?? "application/pdf")};base64,${src.data}` });
+        } else if (src?.type === "url" && typeof src.url === "string") {
+          parts.push({ type: "input_file", file_url: src.url });
+        } else if (src?.type === "text" && typeof src.data === "string") {
+          parts.push({ type: "input_text", text: src.data });
+        } else {
+          drop.add("document blocks of that source type");
+        }
+      }
+    }
+    if (parts.length) input.push({ role: "user", content: parts });
+  }
+  out.input = input;
+
+  const tools: Json[] = [];
+  for (const t of (Array.isArray(req.tools) ? req.tools : []) as Json[]) {
+    if (t.type && t.type !== "custom") {
+      drop.add(`server-side tool ${String(t.type)}`);
+      continue;
+    }
+    tools.push({
+      type: "function",
+      name: String(t.name),
+      ...(t.description ? { description: String(t.description) } : {}),
+      parameters: t.input_schema ?? { type: "object", properties: {} },
+      strict: false,
+    });
+  }
+  if (tools.length) out.tools = tools;
+
+  const tc = req.tool_choice as Json | undefined;
+  if (tc && tools.length) {
+    if (tc.type === "auto") out.tool_choice = "auto";
+    else if (tc.type === "any") out.tool_choice = "required";
+    else if (tc.type === "none") out.tool_choice = "none";
+    else if (tc.type === "tool" && tc.name) out.tool_choice = { type: "function", name: String(tc.name) };
+    if (tc.disable_parallel_tool_use === true) out.parallel_tool_calls = false;
+  }
+
+  if (typeof req.max_tokens === "number") out.max_output_tokens = req.max_tokens;
+  if (typeof req.temperature === "number") out.temperature = req.temperature;
+  if (typeof req.top_p === "number") out.top_p = req.top_p;
+  if (req.top_k !== undefined) drop.add("top_k");
+  if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) drop.add("stop_sequences");
+  const meta = req.metadata as Json | undefined;
+  if (meta && typeof meta.user_id === "string") out.safety_identifier = meta.user_id;
+
+  const thinking = req.thinking as Json | undefined;
+  const effortWord =
+    typeof req.effort === "string" ? req.effort : (req.output_config as Json | undefined)?.effort;
+  let effort: string | null = null;
+  if (typeof effortWord === "string") effort = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" }[effortWord] ?? null;
+  else if (thinking && thinking.type === "enabled") {
+    const b = Number(thinking.budget_tokens) || 0;
+    effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
+  } else if (thinking && thinking.type === "adaptive") effort = "medium";
+  if (effort) {
+    if (opts.reasoningEffort !== false) out.reasoning = { effort };
+    else drop.add("thinking / effort");
+  }
+
+  for (const [key, value] of Object.entries(opts.params ?? {})) {
+    if ((PROTECTED_PARAMS as readonly string[]).includes(key)) continue;
+    if (value === null) delete out[key];
+    else out[key] = value;
+  }
   return out;
 }
 
@@ -451,6 +595,185 @@ export class StreamTranslator {
   }
 }
 
+/** A finished Response as an Anthropic message. Pure. */
+export function fromResponses(res: Json, requestedModel: string): Json {
+  const content: Json[] = [];
+  for (const item of (Array.isArray(res.output) ? res.output : []) as Json[]) {
+    if (item.type === "message") {
+      const text = (Array.isArray(item.content) ? (item.content as Json[]) : [])
+        .map((c) => (c.type === "output_text" ? String(c.text ?? "") : c.type === "refusal" ? String(c.refusal ?? "") : ""))
+        .join("");
+      if (text) content.push({ type: "text", text });
+    } else if (item.type === "function_call") {
+      content.push({
+        type: "tool_use",
+        id: String(item.call_id ?? item.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+        name: String(item.name ?? ""),
+        input: parseArgs(item.arguments),
+      });
+    }
+    // reasoning items and server-tool calls have no Anthropic block here
+  }
+  const usage = (res.usage as Json | undefined) ?? {};
+  const incomplete = (res.incomplete_details as Json | undefined)?.reason;
+  const stop = content.some((c) => c.type === "tool_use") ? "tool_use" : incomplete === "max_output_tokens" ? "max_tokens" : "end_turn";
+  return {
+    id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
+    type: "message",
+    role: "assistant",
+    model: String(res.model ?? requestedModel),
+    content,
+    stop_reason: stop,
+    stop_sequence: null,
+    usage: {
+      input_tokens: Number(usage.input_tokens ?? 0),
+      output_tokens: Number(usage.output_tokens ?? 0),
+    },
+  };
+}
+
+/**
+ * The Responses stream as Anthropic SSE. Simpler than the Chat-Completions
+ * machine because the other side already speaks in items: an output item
+ * is added, its text or arguments arrive as deltas, it is done. Each item
+ * becomes one Anthropic block; `response.completed` carries the usage and
+ * the reason.
+ */
+export class ResponsesStreamTranslator {
+  private started = false;
+  private nextIndex = 0;
+  /** Responses output_index → Anthropic block index and kind. */
+  private blocks = new Map<number, { block: number; kind: "text" | "tool"; argsSeen: boolean }>();
+  private usage: { input: number; output: number } | null = null;
+  private incomplete: string | null = null;
+  private sawTool = false;
+  private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
+  private readonly model: string;
+  constructor(model: string) {
+    this.model = model;
+  }
+
+  private event(name: string, data: Json): string {
+    return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  private start(response?: Json): string[] {
+    if (this.started) return [];
+    this.started = true;
+    if (response && typeof response.id === "string") this.id = response.id;
+    return [
+      this.event("message_start", {
+        type: "message_start",
+        message: {
+          id: this.id,
+          type: "message",
+          role: "assistant",
+          model: String(response?.model ?? this.model),
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+    ];
+  }
+
+  /** One parsed event in, zero or more SSE events out. */
+  feed(ev: Json): string[] {
+    const type = String(ev.type ?? "");
+    const out = this.start(ev.response as Json | undefined);
+    if (type === "response.output_item.added") {
+      const item = (ev.item as Json | undefined) ?? {};
+      const idx = Number(ev.output_index ?? this.blocks.size);
+      if (item.type === "message") {
+        const block = this.nextIndex++;
+        this.blocks.set(idx, { block, kind: "text", argsSeen: false });
+        out.push(this.event("content_block_start", { type: "content_block_start", index: block, content_block: { type: "text", text: "" } }));
+      } else if (item.type === "function_call") {
+        const block = this.nextIndex++;
+        this.blocks.set(idx, { block, kind: "tool", argsSeen: false });
+        this.sawTool = true;
+        out.push(
+          this.event("content_block_start", {
+            type: "content_block_start",
+            index: block,
+            content_block: {
+              type: "tool_use",
+              id: String(item.call_id ?? item.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+              name: String(item.name ?? ""),
+              input: {},
+            },
+          }),
+        );
+      }
+      return out;
+    }
+    if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      const text = String(ev.delta ?? "");
+      if (entry && entry.kind === "text" && text) {
+        out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "text_delta", text } }));
+      }
+      return out;
+    }
+    if (type === "response.function_call_arguments.delta") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      const args = String(ev.delta ?? "");
+      if (entry && entry.kind === "tool" && args) {
+        entry.argsSeen = true;
+        out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: args } }));
+      }
+      return out;
+    }
+    if (type === "response.output_item.done") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      if (entry) {
+        if (entry.kind === "tool" && !entry.argsSeen) {
+          // The arguments may have come whole on the done item rather than
+          // as deltas; Anthropic wants them as json deltas inside the block.
+          const item = (ev.item as Json | undefined) ?? {};
+          const args = typeof item.arguments === "string" && item.arguments.trim() ? item.arguments : "{}";
+          out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: args } }));
+          entry.argsSeen = true;
+        }
+        out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+        this.blocks.delete(Number(ev.output_index));
+      }
+      return out;
+    }
+    if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+      const r = (ev.response as Json | undefined) ?? {};
+      const u = r.usage as Json | undefined;
+      if (u) this.usage = { input: Number(u.input_tokens ?? 0), output: Number(u.output_tokens ?? 0) };
+      const reason = (r.incomplete_details as Json | undefined)?.reason;
+      if (typeof reason === "string") this.incomplete = reason;
+      return out;
+    }
+    return out;
+  }
+
+  /** The stream ended: close what is still open, say why, and stop. */
+  finishStream(): string[] {
+    const out = this.start();
+    for (const entry of this.blocks.values()) {
+      if (entry.kind === "tool") {
+        if (!entry.argsSeen) out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: "{}" } }));
+      }
+      out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+    }
+    const reason = this.sawTool && this.incomplete !== "max_output_tokens" ? "tool_use" : this.incomplete === "max_output_tokens" ? "max_tokens" : "end_turn";
+    out.push(
+      this.event("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: reason, stop_sequence: null },
+        usage: { input_tokens: this.usage?.input ?? 0, output_tokens: this.usage?.output ?? 0 },
+      }),
+    );
+    out.push(this.event("message_stop", { type: "message_stop" }));
+    return out;
+  }
+}
+
 // ---------------------------------------------------------------- errors
 
 function errorType(status: number): string {
@@ -531,19 +854,22 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
       }
       const stream = body.stream === true;
       const drop = dropped();
-      const chat = toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, stream }, drop);
+      const responses = spec.wire === "responses";
+      const outbound = responses
+        ? toResponses(body, { reasoningEffort: spec.reasoningEffort, params: spec.params, stream }, drop)
+        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, stream }, drop);
       for (const line of drop.lines()) if (!log.includes(line)) log.push(line);
 
       let upstream: Response;
       try {
-        upstream = await fetch(`${base}/chat/completions`, {
+        upstream = await fetch(`${base}${responses ? "/responses" : "/chat/completions"}`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${spec.upstreamKey}`,
             ...(spec.headers ?? {}),
           },
-          body: JSON.stringify(chat),
+          body: JSON.stringify(outbound),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -570,11 +896,11 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
           return send(502, errorBody(502, `translator: ${label} answered with something that is not JSON`));
         }
         log.push(`POST ${label} → 200 (${Date.now() - started}ms, ${model})`);
-        return send(200, JSON.stringify(fromChatCompletion(parsed, model)));
+        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model)));
       }
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      const machine = new StreamTranslator(model);
+      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model);
       const reader = upstream.body?.getReader();
       if (!reader) {
         for (const e of machine.finishStream()) res.write(e);
@@ -658,8 +984,9 @@ export function translatorSpecFor(spec: {
   maxTokensParam?: "max_tokens" | "max_completion_tokens";
   reasoningEffort?: boolean;
 }): TranslatorSpec | null {
-  if (spec.format !== "openai") return null;
+  if (spec.format !== "openai" && spec.format !== "responses") return null;
   return {
+    wire: spec.format === "responses" ? "responses" : "chat",
     upstreamBase: spec.baseUrl,
     upstreamKey: spec.token,
     headers: spec.headers,

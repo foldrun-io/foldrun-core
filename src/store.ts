@@ -2806,8 +2806,8 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
   const token = typeof block.token === "string" ? block.token.trim() : "";
   const formatRaw = typeof block.format === "string" ? block.format.trim().toLowerCase() : "";
   let format: WireFormat = preset?.format ?? "anthropic";
-  if (formatRaw === "anthropic" || formatRaw === "openai") format = formatRaw;
-  else if (formatRaw) warnings.push(`provider.format: "${formatRaw}" is not anthropic or openai — using ${format}`);
+  if (formatRaw === "anthropic" || formatRaw === "openai" || formatRaw === "responses") format = formatRaw;
+  else if (formatRaw) warnings.push(`provider.format: "${formatRaw}" is not anthropic, openai or responses — using ${format}`);
   const authRaw = typeof block.auth === "string" ? block.auth.trim().toLowerCase() : "";
   let auth: AuthShape = preset?.auth ?? "bearer";
   if (authRaw === "bearer" || authRaw === "x-api-key") auth = authRaw;
@@ -2861,9 +2861,9 @@ export function parseProvider(raw: unknown): ProviderSpec | null {
   } else if (block.params !== undefined) {
     warnings.push("provider.params: expected a map of field → value — ignored");
   }
-  if (Object.keys(params).length && format !== "openai") {
+  if (Object.keys(params).length && format === "anthropic") {
     warnings.push(
-      "provider.params only reaches a `format: openai` endpoint — an Anthropic-shaped one is spoken to directly, so set its knobs at the provider (an OpenRouter preset, say) instead",
+      "provider.params only reaches a `format: openai` or `format: responses` endpoint — an Anthropic-shaped one is spoken to directly, so set its knobs at the provider (an OpenRouter preset, say) instead",
     );
   }
 
