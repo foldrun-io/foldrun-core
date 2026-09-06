@@ -37,16 +37,25 @@ import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
 
 /**
- * Who mail from this account says it is from.
+ * The platform's own mail: notifications, invites, a low balance.
  *
- * The key is the account's own Resend connection, so the sender has to be
- * a domain THAT account has verified — our foldrun.io is not verified in a
- * customer's Resend, and theirs is not in ours. An `EMAIL_FROM` account
- * secret names it (`foldrun <hello@foldrun.io>` on ours); without one, the
- * address Resend lets every account send from before verifying a domain.
+ * These are from foldrun, about the platform, to the account's owner — so
+ * they go through the platform's Resend key and sender (FOLDRUN_RESEND_API_KEY,
+ * FOLDRUN_EMAIL_FROM), never through anything the customer configured. A
+ * customer's agents that send mail bring their own connection: the `email`
+ * tool reads the account's RESEND_API_KEY, and that key is theirs to choose.
+ *
+ * Without a platform key — the CLI on a laptop, a test — the account's own
+ * key and EMAIL_FROM are the fallback, so `notify:` still works for one
+ * person running one desk with no platform in front of them.
  */
-export function emailFrom(tenant: string): string {
-  return getSecret(tenant, "EMAIL_FROM")?.value?.trim() || "foldrun <onboarding@resend.dev>";
+export function platformMail(tenant: string): { key: string; from: string } | null {
+  const key = process.env.FOLDRUN_RESEND_API_KEY;
+  if (key) return { key, from: process.env.FOLDRUN_EMAIL_FROM || "foldrun <hello@foldrun.io>" };
+  const own = getSecret(tenant, "RESEND_API_KEY");
+  if (!own) return null;
+  const from = getSecret(tenant, "EMAIL_FROM")?.value?.trim() || "foldrun <onboarding@resend.dev>";
+  return { key: own.value, from };
 }
 
 export interface NotifyConfig {
@@ -170,20 +179,16 @@ export async function sendRunNotification(
 
   try {
     if (config.email) {
-      // The same connection the email tool uses; a run's own credential
-      // vocabulary. Until the sending domain is verified at Resend, delivery
-      // is limited to the account owner's address — Resend's rule, reported
-      // as its own 403 rather than hidden here.
-      const key = getSecret(tenant, "RESEND_API_KEY", workspace);
-      if (!key) {
-        console.error(`[foldrun] notify: email configured but RESEND_API_KEY is not set for ${tenant}`);
+      const mail = platformMail(tenant);
+      if (!mail) {
+        console.error(`[foldrun] notify: email configured but no mail credential — set FOLDRUN_RESEND_API_KEY on the platform (or RESEND_API_KEY on the account ${tenant})`);
         return false;
       }
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
-        headers: { authorization: `Bearer ${key.value}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
         body: JSON.stringify({
-          from: emailFrom(tenant),
+          from: mail.from,
           to: config.email,
           // The subject is the headline and what the run concluded, and
           // nothing else. Ids and costs belong in the body: a subject line is
