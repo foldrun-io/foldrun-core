@@ -21,7 +21,7 @@
 // Face, Cloudflare's own models — so one translation reaches all of them.
 //
 // URLs and header shapes were checked against each provider's own
-// documentation on 2026-09-02 (see docs/providers.md). `verified` says
+// documentation on 2026-09-02 and again on 2026-09-06 (see docs/providers.md). `verified` says
 // whether a tool loop was actually driven through the endpoint from here,
 // which is the only claim that matters for an agent runtime; a name without
 // it is documented, not proven.
@@ -58,17 +58,20 @@ export interface ProviderPreset {
 
 export const PROVIDERS: readonly ProviderPreset[] = [
   // ------------------------------------------------ Anthropic-shaped, direct
-  { name: "anthropic", title: "Anthropic", format: "anthropic", baseUrl: "https://api.anthropic.com", auth: "x-api-key", verified: true },
+  { name: "anthropic", title: "Anthropic", format: "anthropic", baseUrl: "https://api.anthropic.com", auth: "x-api-key", verified: true,
+    note: "Models newer than Opus 4.6 reject top_k with a 400; the runtime never sends it unless a params: block does." },
   { name: "openrouter", title: "OpenRouter", format: "anthropic", baseUrl: "https://openrouter.ai/api", auth: "bearer", verified: true,
     note: "Hundreds of models behind one key. Its own docs disagree on how well non-Anthropic models hold a tool loop on this endpoint — probe the model you mean to use." },
   { name: "deepseek", title: "DeepSeek", format: "anthropic", baseUrl: "https://api.deepseek.com/anthropic", auth: "x-api-key",
     note: "Ignores top_k, cache_control and thinking budgets; Claude model names are remapped to DeepSeek's." },
-  { name: "kimi", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer" },
-  { name: "moonshot", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer" },
+  { name: "kimi", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer",
+    note: "Own model ids only. Known bug (2026-09): K3 reuses one tool_use id across separate calls, which breaks a tool loop." },
+  { name: "moonshot", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer",
+    note: "Same endpoint as kimi." },
   { name: "zai", title: "z.ai (GLM)", format: "anthropic", baseUrl: "https://api.z.ai/api/anthropic", auth: "bearer" },
   { name: "minimax", title: "MiniMax", format: "anthropic", baseUrl: "https://api.minimax.io/anthropic", auth: "bearer" },
   { name: "qwen", title: "Alibaba Qwen (Model Studio)", format: "anthropic", auth: "x-api-key",
-    note: "base_url is per account: https://<workspace>.<region>.maas.aliyuncs.com/apps/anthropic" },
+    note: "base_url depends on the plan: pay-as-you-go https://<workspace>.<region>.maas.aliyuncs.com/apps/anthropic; Coding Plan https://coding-intl.dashscope.aliyuncs.com/apps/anthropic. Own model ids (qwen3.7-max …), no remap; no reasoning_effort, use thinking." },
   { name: "fireworks", title: "Fireworks AI", format: "anthropic", baseUrl: "https://api.fireworks.ai/inference", auth: "bearer",
     note: "No server-side tools; no adaptive thinking." },
   { name: "deepinfra", title: "DeepInfra", format: "anthropic", baseUrl: "https://api.deepinfra.com/anthropic", auth: "bearer" },
@@ -81,28 +84,32 @@ export const PROVIDERS: readonly ProviderPreset[] = [
   { name: "cloudflare-gateway", title: "Cloudflare AI Gateway", format: "anthropic", auth: "x-api-key",
     note: "base_url is https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic — a pass-through to Anthropic with logging; for Cloudflare's own models use name: cloudflare." },
   { name: "ollama", title: "Ollama (local)", format: "anthropic", baseUrl: "http://localhost:11434", auth: "x-api-key",
-    note: "v0.14+. Ignores tool_choice." },
+    note: "v0.14+. Ignores tool_choice and cache_control; accepts but does not enforce thinking budgets; base64 images only. Any key value is accepted." },
   { name: "lmstudio", title: "LM Studio (local)", format: "anthropic", baseUrl: "http://localhost:1234", auth: "x-api-key" },
-  { name: "vllm", title: "vLLM (yours)", format: "anthropic", auth: "bearer", note: "base_url is your server; Python frontend only." },
+  { name: "vllm", title: "vLLM (yours)", format: "anthropic", auth: "bearer",
+    note: "base_url is your server (default :8000). Start it with --enable-auto-tool-choice and a --tool-call-parser or no tool loop closes." },
 
   // ------------------------------------------- Chat-Completions, translated
   { name: "openai", title: "OpenAI", format: "openai", baseUrl: "https://api.openai.com/v1", auth: "bearer",
-    maxTokensParam: "max_completion_tokens", reasoningEffort: true },
+    maxTokensParam: "max_completion_tokens", reasoningEffort: true,
+    note: "Reached over Chat Completions, which OpenAI keeps supporting; the Responses API is not spoken here, so a reasoning model's reasoning does not carry across tool calls." },
   { name: "gemini", title: "Google Gemini", format: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", auth: "bearer",
     note: "Google's OpenAI-compatible route. Unknown parameters are ignored silently; reasoning cannot be switched off on the newest models." },
-  { name: "xai", title: "xAI Grok", format: "openai", baseUrl: "https://api.x.ai/v1", auth: "bearer", reasoningEffort: true },
-  { name: "groq", title: "Groq", format: "openai", baseUrl: "https://api.groq.com/openai/v1", auth: "bearer" },
+  { name: "xai", title: "xAI Grok", format: "openai", baseUrl: "https://api.x.ai/v1", auth: "bearer",
+    maxTokensParam: "max_completion_tokens", reasoningEffort: true },
+  { name: "groq", title: "Groq", format: "openai", baseUrl: "https://api.groq.com/openai/v1", auth: "bearer",
+    maxTokensParam: "max_completion_tokens", reasoningEffort: true },
   { name: "mistral", title: "Mistral", format: "openai", baseUrl: "https://api.mistral.ai/v1", auth: "bearer" },
   { name: "together", title: "Together AI", format: "openai", baseUrl: "https://api.together.ai/v1", auth: "bearer" },
-  { name: "cerebras", title: "Cerebras", format: "openai", baseUrl: "https://api.cerebras.ai/v1", auth: "bearer" },
-  { name: "perplexity", title: "Perplexity", format: "openai", baseUrl: "https://api.perplexity.ai", auth: "bearer",
-    note: "The Sonar chat route sunsets 2026-09-27; the successor Agent API is not Chat-Completions-shaped." },
+  { name: "cerebras", title: "Cerebras", format: "openai", baseUrl: "https://api.cerebras.ai/v1", auth: "bearer",
+    maxTokensParam: "max_completion_tokens", reasoningEffort: true },
   { name: "huggingface", title: "Hugging Face", format: "openai", baseUrl: "https://router.huggingface.co/v1", auth: "bearer",
     note: "The Inference Providers router; model ids are Hub ids, e.g. meta-llama/Llama-3.3-70B-Instruct." },
   { name: "cloudflare", title: "Cloudflare Workers AI", format: "openai", auth: "bearer",
     note: "base_url is https://api.cloudflare.com/client/v4/accounts/<account>/ai/v1" },
   { name: "nebius", title: "Nebius Token Factory", format: "openai", baseUrl: "https://api.tokenfactory.nebius.com/v1", auth: "bearer" },
-  { name: "novita", title: "Novita", format: "openai", baseUrl: "https://api.novita.ai/openai", auth: "bearer" },
+  { name: "novita", title: "Novita", format: "openai", baseUrl: "https://api.novita.ai/openai", auth: "bearer",
+    note: "Also has an Anthropic-shaped route at https://api.novita.ai/anthropic — spell it out with format: anthropic to skip the translator (header shape unverified)." },
   { name: "hyperbolic", title: "Hyperbolic", format: "openai", baseUrl: "https://api.hyperbolic.xyz/v1", auth: "bearer" },
 ];
 
