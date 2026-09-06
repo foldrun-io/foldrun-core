@@ -429,14 +429,16 @@ RUN apt-get update \\
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
-# A real browser, because directories and portals increasingly render with
-# JavaScript and WebFetch sees only the empty shell. Installed to a fixed
-# path the agent user can read (the default cache would be root's HOME).
-# Chromium's own sandbox is disabled at launch time — in this platform the
-# container/gVisor IS the sandbox, and the two fight.
+# Real browsers, because directories and portals increasingly render with
+# JavaScript and WebFetch sees only the empty shell. Chromium is the one the
+# browser tool drives by default; Firefox and WebKit (Safari's engine) are
+# there for an agent asked to see a page the way those render it. Installed
+# to a fixed path the agent user can read (the default cache would be
+# root's HOME). The browsers' own sandboxes are disabled at launch time — in
+# this platform the container/gVisor IS the sandbox, and the two fight.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 RUN npm install -g playwright@1 >/dev/null \\
- && playwright install --with-deps chromium >/dev/null \\
+ && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && chmod -R a+rX /opt/browser
 WORKDIR /opt/runner
 COPY foldrun-core.tgz driver.mjs entry.sh ./
