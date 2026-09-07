@@ -29,6 +29,7 @@ import {
   WORKSPACE_DIRS,
   assertSafeName,
   type DeployFile,
+  notifyWorkspaceChanged,
 } from "./store.ts";
 import { conformanceIssues } from "./okf.ts";
 import { repoDir } from "./gitrepo.ts";
@@ -373,6 +374,8 @@ export function writePushNote(tenant: string, workspace: string, note: PushNote)
   } catch {
     // The note is a record, not the deploy. Losing it must not fail a push.
   }
+  // A push waiting on a run is the scheduler's to apply; tell it there is one.
+  notifyWorkspaceChanged(tenant, workspace, "push");
 }
 
 /**
@@ -428,6 +431,7 @@ export function deployWorkspace(
   const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: opts.by ?? "deploy", message: opts.message });
   const commit = opts.commit ?? null;
   if (commit) writeDeployedCommit(tenant, workspace, commit);
+  notifyWorkspaceChanged(tenant, workspace, "deploy");
   return { ...plan, applied: true, commit, preserved };
 }
 

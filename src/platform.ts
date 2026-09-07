@@ -45,6 +45,11 @@ export interface PlatformHooks {
   /** The egress proxy — a per-step lease that keeps credentials out of the
    *  sandbox. Default: none, and the runner materialises as it always did. */
   egress: EgressHooks;
+  /** A workspace's files changed — written, deployed, pushed, or the
+   *  workspace deleted. What a scheduler that keeps flows in memory rather
+   *  than re-reading every workspace each tick needs to hear. Default:
+   *  nothing — locally the scheduler reads the disk. Never throws. */
+  workspaceChanged(tenant: string, workspace: string, why: "write" | "deploy" | "push" | "delete"): void;
 }
 
 const local: PlatformHooks = {
@@ -60,6 +65,7 @@ const local: PlatformHooks = {
   previewSourceOf: () => null,
   tenantKey: () => null,
   egress: { lease: async () => null },
+  workspaceChanged() {},
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles

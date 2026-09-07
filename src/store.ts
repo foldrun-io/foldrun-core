@@ -24,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
+import { platform } from "./platform.ts";
 import matter from "gray-matter";
 
 /**
@@ -1895,7 +1896,18 @@ export function writeWorkspaceFile(
   // The revision: what it was, what it is now. Identical content records
   // nothing — see history.ts.
   recordRevision(tenant, workspace, [{ path: norm, before, after: fs.readFileSync(p, "utf8") }], meta);
+  workspaceChanged(tenant, workspace, "write");
 }
+
+/** Tell the platform, and never let its listener fail a write. */
+function workspaceChanged(tenant: string, workspace: string, why: "write" | "deploy" | "push" | "delete") {
+  try {
+    platform.workspaceChanged(tenant, workspace, why);
+  } catch {
+    // a scheduler that could not be told will find out on its next rescan
+  }
+}
+export { workspaceChanged as notifyWorkspaceChanged };
 
 // memory/ and knowledge/ are OKF bundles, so index.md has to stay current —
 // a generated index that drifts is the same class of bug as a memory index
@@ -1990,6 +2002,7 @@ export function renameWorkspaceFile(tenant: string, workspace: string, from: str
   );
   syncBundleFor(src);
   syncBundleFor(dst, "Update");
+  workspaceChanged(tenant, workspace, "write");
 }
 
 /** Every text file under a path, as revision entries recording deletion. */
@@ -2051,12 +2064,14 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
   recordRevision(tenant, workspace, gone, meta);
   // A bundle's index must stop naming what is gone.
   syncBundleFor(p);
+  workspaceChanged(tenant, workspace, "write");
 }
 
 export function deleteWorkspace(tenant: string, workspace: string) {
   const dir = workspaceDir(tenant, workspace);
   if (!fs.existsSync(dir)) throw new Error(`workspace ${workspace} not found`);
   fs.rmSync(dir, { recursive: true, force: true });
+  workspaceChanged(tenant, workspace, "delete");
 }
 
 /**

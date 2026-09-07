@@ -3311,12 +3311,18 @@ export interface Reconciliation {
  * outlives any process. A run whose person already answered is not waiting,
  * and is picked back up — see below.
  */
-export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[] {
+export function reconcileRuns(tenant: string, now = Date.now(), live?: ReadonlySet<string>): Reconciliation[] {
   const closed: Reconciliation[] = [];
 
   for (const workspace of listWorkspaces(tenant)) {
     for (const summary of listRuns(tenant, workspace.name)) {
       if (drivingRuns.has(summary.id)) continue;
+      // Driven by another process — a second worker pod, on a platform with
+      // more than one. The idle window protects a quiet step from THIS
+      // process's judgement only; a worker that boots beside a live one
+      // would otherwise close every long step its neighbour is driving.
+      // The caller says which runs those are (a heartbeated claim).
+      if (live?.has(summary.id)) continue;
       if (now - lastActivity(summary) < ABANDONED_AFTER_MS) continue;
 
       // Approved, then abandoned. Approval only writes to the run record; the
@@ -3396,8 +3402,8 @@ export function reconcileRuns(tenant: string, now = Date.now()): Reconciliation[
  * one hard-coded account left every other account's interrupted runs marked
  * `running` forever, with no process left to finish them.
  */
-export function reconcileAllRuns(now = Date.now()): Reconciliation[] {
-  return listTenants().flatMap((tenant) => reconcileRuns(tenant, now));
+export function reconcileAllRuns(now = Date.now(), live?: ReadonlySet<string>): Reconciliation[] {
+  return listTenants().flatMap((tenant) => reconcileRuns(tenant, now, live));
 }
 
 /**
