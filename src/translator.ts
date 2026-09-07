@@ -90,6 +90,32 @@ function dropped(): Dropped {
 
 // ------------------------------------------------------- request mapping
 
+/**
+ * The SDK's `metadata.user_id` is a long composite string; OpenAI's own
+ * endpoint caps `safety_identifier` (Responses) at 64 characters and
+ * rejects the request outright — a gateway in front of it did not, which is
+ * how this shipped untested. A stable digest keeps the identity property
+ * (same user, same id) inside the limit. Applied to Chat Completions' `user`
+ * too, for the same reason.
+ */
+function stableId(id: string): string {
+  return id.length <= 64 ? id : crypto.createHash("sha256").update(id).digest("hex").slice(0, 64);
+}
+
+/**
+ * Whether a model is one OpenAI's own endpoint refuses a reasoning-effort
+ * parameter for ("Unsupported parameter: 'reasoning.effort'" on gpt-4o-mini).
+ * A gateway in front of it ignored the field, which is how the preset's
+ * reasoningEffort shipped untested against the origin. The families that do
+ * not reason are the ones named — anything else (o-series, gpt-5, grok,
+ * gemini, deepseek-r, qwen thinking) keeps getting the knob, because on a
+ * gateway the id alone cannot say and an ignored field costs nothing.
+ */
+export function modelRejectsReasoning(model: string): boolean {
+  const id = String(model).split("/").pop()?.toLowerCase() ?? "";
+  return /^(gpt-3|gpt-4|chatgpt|gpt-5-chat|davinci|babbage)/.test(id);
+}
+
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -225,7 +251,7 @@ export function toChatCompletions(
   if (req.top_k !== undefined) drop.add("top_k");
   if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) out.stop = req.stop_sequences;
   const meta = req.metadata as Json | undefined;
-  if (meta && typeof meta.user_id === "string") out.user = meta.user_id;
+  if (meta && typeof meta.user_id === "string") out.user = stableId(meta.user_id);
   if (opts.stream) out.stream_options = { include_usage: true };
 
   // Thinking: budget → effort where the endpoint has the word, dropped
@@ -240,8 +266,8 @@ export function toChatCompletions(
     effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
   } else if (thinking && thinking.type === "adaptive") effort = "medium";
   if (effort) {
-    if (opts.reasoningEffort) out.reasoning_effort = effort;
-    else drop.add("thinking / effort");
+    if (opts.reasoningEffort && !modelRejectsReasoning(String(req.model))) out.reasoning_effort = effort;
+    else drop.add(opts.reasoningEffort ? "thinking / effort (this model does not reason)" : "thinking / effort");
   }
 
   // The author's own fields, last, so the file wins over anything decided
@@ -366,7 +392,7 @@ export function toResponses(
   if (req.top_k !== undefined) drop.add("top_k");
   if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) drop.add("stop_sequences");
   const meta = req.metadata as Json | undefined;
-  if (meta && typeof meta.user_id === "string") out.safety_identifier = meta.user_id;
+  if (meta && typeof meta.user_id === "string") out.safety_identifier = stableId(meta.user_id);
 
   const thinking = req.thinking as Json | undefined;
   const effortWord =
@@ -378,8 +404,8 @@ export function toResponses(
     effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
   } else if (thinking && thinking.type === "adaptive") effort = "medium";
   if (effort) {
-    if (opts.reasoningEffort !== false) out.reasoning = { effort };
-    else drop.add("thinking / effort");
+    if (opts.reasoningEffort !== false && !modelRejectsReasoning(String(req.model))) out.reasoning = { effort };
+    else drop.add(opts.reasoningEffort !== false ? "thinking / effort (this model does not reason)" : "thinking / effort");
   }
 
   for (const [key, value] of Object.entries(opts.params ?? {})) {

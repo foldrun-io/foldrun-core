@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { toResponses, fromResponses, ResponsesStreamTranslator, startTranslator, translatorSpecFor } from "../src/translator.ts";
+import { toResponses, fromResponses, ResponsesStreamTranslator, startTranslator, translatorSpecFor, modelRejectsReasoning } from "../src/translator.ts";
 
 type Json = Record<string, unknown>;
 
@@ -45,6 +45,13 @@ test("request: system → instructions; text, image and a PDF cross; tools are f
   ) as Json;
   assert.equal(out.instructions, "Be terse.");
   assert.equal(out.max_output_tokens, 200);
+  // OpenAI caps safety_identifier at 64 characters; the SDK's user id is
+  // longer. A stable digest, same user → same id, inside the limit.
+  const long = toResponses({ model: "m", messages: [], metadata: { user_id: "u".repeat(150) } }, { stream: false }) as Json;
+  assert.equal(String(long.safety_identifier).length, 64);
+  assert.equal(long.safety_identifier, (toResponses({ model: "m", messages: [], metadata: { user_id: "u".repeat(150) } }, { stream: false }) as Json).safety_identifier, "stable");
+  const short = toResponses({ model: "m", messages: [], metadata: { user_id: "user-1" } }, { stream: false }) as Json;
+  assert.equal(short.safety_identifier, "user-1", "a short id passes through");
   assert.equal(out.temperature, 0.2);
   assert.equal(out.store, false, "nothing is kept on the provider's side");
   const user = (out.input as Json[])[0];
@@ -95,6 +102,14 @@ test("request: thinking becomes reasoning.effort; forced tool choice and paralle
     drop,
   ) as Json;
   assert.deepEqual(out.reasoning, { effort: "high" });
+  // A model that does not reason must not be sent the knob: OpenAI rejects
+  // the request outright, and a gateway hid that.
+  const plain = toResponses({ model: "gpt-4o-mini", thinking: { type: "adaptive" }, messages: [] }, { stream: false, reasoningEffort: true }, drop) as Json;
+  assert.equal(plain.reasoning, undefined);
+  assert.ok(drops.some((d) => /does not reason/.test(d)));
+  for (const [id, no] of [["o3-mini", false], ["openai/o4-mini", false], ["gpt-5", false], ["gpt-5-chat-latest", true], ["gpt-oss-120b", false], ["gpt-4o", true], ["openai/gpt-4.1-mini", true], ["grok-4", false], ["deepseek-r1", false], ["llama-3.3-70b-versatile", false]] as const) {
+    assert.equal(modelRejectsReasoning(id), no, id);
+  }
   assert.deepEqual(out.tool_choice, { type: "function", name: "a" });
   assert.equal(out.parallel_tool_calls, false);
   assert.ok(drops.includes("top_k") && drops.includes("stop_sequences"));
