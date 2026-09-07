@@ -953,6 +953,10 @@ function agentContext(
       ...secretEnv,
       ...(identity.runId ? { FOLDRUN_RUN_ID: identity.runId } : {}),
       ...(identity.agent ? { FOLDRUN_AGENT: identity.agent } : {}),
+      // And the workspace: a commit or a record made by a shared library
+      // tool should say which desk made it, and the pod's own paths
+      // (/workspace/agents/<agent>) do not carry the name.
+      FOLDRUN_WORKSPACE: workspace,
       ...clockEnv,
     },
     libraryDir(tenant, "scripts"),
@@ -1678,6 +1682,7 @@ async function runStep(
             // $FOLDRUN_RUN_ID compared it to nothing.
             FOLDRUN_RUN_ID: runId,
             FOLDRUN_AGENT: step.agent,
+            FOLDRUN_WORKSPACE: path.basename(workspaceRoot),
             ...sandboxSecrets,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
@@ -1824,6 +1829,7 @@ async function runStep(
           ...clockEnv,
           ...(runId ? { FOLDRUN_RUN_ID: runId } : {}),
           FOLDRUN_AGENT: step.agent,
+          FOLDRUN_WORKSPACE: path.basename(path.resolve(agentDir, "..", "..")),
           ...liveSecrets,
         },
         emit: pushWatching,
