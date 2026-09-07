@@ -1692,7 +1692,9 @@ async function runStep(
       // key are told "too many requests" together, and failing them all is
       // a broken run where a few seconds would have been a slow one. Each
       // attempt holds its own sandbox, so the meter owes the sum.
-      let outcome = await runIsolated(isolatedArgs(platformModelEnv()));
+      const firstArgs = isolatedArgs(platformModelEnv());
+      await lease?.commit();
+      let outcome = await runIsolated(firstArgs);
       for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
@@ -1701,7 +1703,9 @@ async function runStep(
         // next, not the one that sent us here.
         lastRefusal = "";
         const previous = outcome.timing;
-        outcome = await runIsolated(isolatedArgs(platformModelEnv()));
+        const again = isolatedArgs(platformModelEnv());
+        await lease?.commit();
+        outcome = await runIsolated(again);
         outcome = withEarlierTiming(outcome, previous);
       }
       // The second supply, tried exactly once, and only when the primary
@@ -1720,22 +1724,24 @@ async function runStep(
         const retryArgs = isolatedArgs(secondSupply, fallbackName);
         // The fallback's own translator, or none: a fallback that speaks
         // Anthropic must not inherit the primary's Chat-Completions door.
-        outcome = await runIsolated({
+        const fallbackArgs = {
           ...retryArgs,
           input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null },
           env: Object.fromEntries(
             Object.entries({ ...retryArgs.env, ...proxied(secondSupply, fallbackName) })
               .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
           ),
-        });
+        };
+        await lease?.commit();
+        outcome = await runIsolated(fallbackArgs);
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
         outcome = withEarlierTiming(outcome, first);
       }
       if (lease) {
-        for (const line of lease.drainLog()) push("info", line);
-        lease.release();
+        for (const line of await lease.drainLog()) push("info", line);
+        await lease.release();
       }
       publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;

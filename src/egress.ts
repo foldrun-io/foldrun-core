@@ -91,10 +91,15 @@ export interface EgressGrant {
 export interface EgressLease {
   /** The base the pod sends through: `http://…/e/<token>`. */
   url: string;
+  /** The grant is finished being built — publish it. The runner keeps
+   *  adding grants after the lease exists (the model key's host needs the
+   *  lease URL first), so a store that is not this process's memory has
+   *  to be told when the grant is complete. Call before every attempt. */
+  commit(): Promise<void>;
   /** One line per request, for the run trace. Drained by the runner. */
-  drainLog(): string[];
+  drainLog(): Promise<string[]>;
   /** The step is over: the lease is void and its values are dropped. */
-  release(): void;
+  release(): Promise<void>;
 }
 
 /**
