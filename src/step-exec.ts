@@ -53,6 +53,14 @@ export interface ExecOptions {
   /** The child environment: process env + secrets + provider. */
   env: Record<string, string | undefined>;
   timeoutSec?: number;
+  /** The most this step may spend, in USD, before it is stopped mid-turn.
+   *  The runner derives it from the flow's `budget:` and what the run has
+   *  already spent; absent means no ceiling on this step. */
+  budgetUsd?: number | null;
+  /** Price per token for the model, when the catalogue knows it, so spend
+   *  can be counted turn by turn instead of learned at the end. Without it
+   *  the step prices its turns from the SDK's own running total. */
+  price?: { input: number; output: number } | null;
   /** A check the step must pass to count as done: a shell command that must
    *  exit 0, or an eval-style assertion (`contains: x`, `not-contains: x`,
    *  `matches: re`, `file: path`, `judge: sentence`) — see checkVerify. */
@@ -70,6 +78,32 @@ export interface ExecOptions {
 
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
 export type EventExtra = { call?: string; ms?: number; err?: boolean };
+
+/** Conservative per-token rates for a model the catalogue cannot price —
+ *  Opus-class — so a ceiling still means something on an unknown gateway. */
+export const FALLBACK_PRICE = { input: 15e-6, output: 75e-6 };
+
+/**
+ * What one assistant turn cost. Cache traffic is counted as input at the
+ * input rate, which over-approximates on gateways with cheaper cache reads
+ * — on the money side, the honest direction to be wrong in. Pure.
+ */
+export function priceTurn(u: Record<string, number | undefined>, price: { input: number; output: number } | null): number {
+  const inTok = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  const outTok = u.output_tokens ?? 0;
+  const p = price ?? FALLBACK_PRICE;
+  return inTok * p.input + outTok * p.output;
+}
+
+/**
+ * Each step launched together gets an equal share of what is left of the
+ * run's budget: the shares sum to the remainder, so a group cannot end
+ * over the cap however many steps it fans out to. No budget, no ceiling.
+ */
+export function stepCeiling(budgetUsd: number | null | undefined, spentUsd: number, launching: number): number | null {
+  if (!budgetUsd || budgetUsd <= 0) return null;
+  return Math.max(0, budgetUsd - spentUsd) / Math.max(1, launching);
+}
 
 export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
@@ -145,6 +179,13 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   });
 
   const deadline = opts.timeoutSec ? Date.now() + opts.timeoutSec * 1000 : null;
+  // The hard cap. Spend is counted as each assistant turn arrives — its
+  // usage is in the message — so the step can stop at the ceiling rather
+  // than learn afterwards that it crossed it. Cache traffic is counted as
+  // input at the input rate, which over-approximates: on the money side
+  // that is the honest direction to be wrong in.
+  const ceiling = typeof opts.budgetUsd === "number" && opts.budgetUsd > 0 ? opts.budgetUsd : null;
+  let spentUsd = 0;
 
   // Open tool calls, by the provider's id, so the result can be paired with
   // its call and the trace can say how long each tool ran.
@@ -157,6 +198,15 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
       break;
     }
     if (message.type === "assistant") {
+      const u = (message.message as unknown as { usage?: Record<string, number | undefined> }).usage;
+      if (ceiling && u) {
+        spentUsd += priceTurn(u, opts.price ?? null);
+        if (spentUsd >= ceiling) {
+          emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (budget: in the flow file)`);
+          status = "failed";
+          break;
+        }
+      }
       for (const block of message.message.content) {
         if (block.type === "text" && block.text.trim()) {
           texts.push(block.text);

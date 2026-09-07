@@ -58,6 +58,10 @@ export interface ContainerStepInput {
    *  in here; the callees run toolless, so nothing else need cross. */
   consults: ConsultSpec[];
   timeoutSec?: number;
+  /** The step's spend ceiling and the model's per-token price — see
+   *  step-exec.ts. Values, so the driver can enforce them in the pod. */
+  budgetUsd?: number | null;
+  price?: { input: number; output: number } | null;
   verify?: string;
   /** `output: json` — checked inside, where the reply is. */
   output?: "json";
@@ -388,6 +392,8 @@ try {
     },
     env,
     timeoutSec: input.timeoutSec,
+    budgetUsd: input.budgetUsd,
+    price: input.price,
     verify: input.verify,
     verifyEnv: {},
     output: input.output,

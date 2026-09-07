@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
-import { executeStep, extractJson, type EventExtra } from "./step-exec.ts";
+import { executeStep, extractJson, stepCeiling, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -56,7 +56,7 @@ import {
   adoptLegacyVersionKey,
   runCost,
 } from "./store.ts";
-import { loadCatalog, checkModel, clampEffort, catalogCost, type Catalog } from "./catalog.ts";
+import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, type Catalog } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets } from "./secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
@@ -1205,6 +1205,10 @@ async function runStep(
   /** What the previous group returned as DATA (an `output: json` step's
    *  value), beside the prose in `context`. Undefined when nothing did. */
   priorData?: unknown,
+  /** The most this step may spend before it is stopped mid-turn: the run's
+   *  remaining `budget:`, shared across the steps launched with it. Null
+   *  means the flow set no budget. */
+  stepBudgetUsd: number | null = null,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1386,6 +1390,7 @@ async function runStep(
     // step on knowledge; unknown ids, presets and offline all pass through
     // to the model call, which stays the authority of last resort.
     let catalog: Catalog | null = null;
+    let tokenPrice: { input: number; output: number } | null = null;
     // The env this run's model calls actually ride: the workspace's own
     // provider block when one is declared, otherwise the platform's — the
     // "models included" path, where the host env points every run at the
@@ -1409,6 +1414,12 @@ async function runStep(
       catalog = await loadCatalog(rideEnv.ANTHROPIC_BASE_URL);
       const needsTools = allowed.length > 0 || mcpNames.length > 0;
       const verdict = checkModel(catalog, wireModel, { tools: needsTools });
+      // Also what a token costs here, so a step can count its own spend
+      // turn by turn against its ceiling instead of learning at the end.
+      const priced = findModel(catalog, wireModel);
+      if (priced && priced.promptPrice != null && priced.completionPrice != null) {
+        tokenPrice = { input: priced.promptPrice, output: priced.completionPrice };
+      }
       if (!verdict.ok) {
         push("error", verdict.reason!);
         step.status = "failed";
@@ -1634,6 +1645,8 @@ async function runStep(
           runtime: runtime.spec,
           consults,
           timeoutSec: step.timeout,
+          budgetUsd: stepBudgetUsd,
+          price: tokenPrice,
           verify: step.verify,
           output: step.output,
           translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
@@ -1793,6 +1806,8 @@ async function runStep(
         // only ever sees the variable names, not the values.
         env: { ...process.env, ...clockEnv, ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
+        budgetUsd: stepBudgetUsd,
+        price: tokenPrice,
         verify: step.verify,
         output: step.output,
         // What the scripts saw, the verify sees: a flow can then check that
@@ -2870,9 +2885,15 @@ function driveRunInner(
           }
         }
 
+        // The hard cap: what is left of the flow's budget, shared evenly
+        // across the steps this group launches together. Each step stops
+        // itself mid-turn at its share, so a fan-out of twenty cannot end
+        // twenty steps over — the shares sum to what was left. Between
+        // groups the check above still refuses to start the next one.
+        const launching = freshGroup.filter((s) => s.status === "pending");
+        const ceilingUsd = stepCeiling(run.budgetUsd, runCost(run), launching.length);
         await Promise.all(
-          freshGroup
-            .filter((s) => s.status === "pending")
+          launching
             .map(async (step) => {
               const attempts = (step.retry ?? 0) + 1;
               for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -2890,6 +2911,7 @@ function driveRunInner(
                   effortOverride,
                   run.id,
                   ctxData,
+                  ceilingUsd,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
