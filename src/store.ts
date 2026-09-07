@@ -1091,6 +1091,12 @@ export interface FlowInfo {
    *  overlap) — a default that changed underfoot would surprise every flow
    *  that legitimately runs in parallel. */
   overlap: "skip" | "queue" | null;
+  /** Where this flow's runs stand in the queue against everyone else's:
+   *  "high" is claimed before the round-robin, "low" after it. Adds to the
+   *  account's own priority; the account's cap still bounds how many run
+   *  at once, so a high lane never starves the rest outright. Unset is
+   *  normal — first come, fair across accounts. */
+  priority: "high" | "normal" | "low" | null;
   /** The most one run of this flow may spend, in USD. A literal, never an
    *  expression — the cap is readable off the file, which is the property
    *  the whole grammar exists to keep. Checked between groups: the group
@@ -1321,6 +1327,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     model: data.model ?? null,
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
+    priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
     budget: Number(data.budget) > 0 ? Number(data.budget) : null,
     // `after: [[flow:publish]]` — a link or a bare name, read the same way
     // as every other file-naming field (refs.ts).
