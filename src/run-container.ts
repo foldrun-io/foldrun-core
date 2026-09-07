@@ -774,6 +774,11 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       flags.push("--runtime", process.env.FOLDRUN_RUNNER_RUNTIME);
     }
     flags.push("--network", ensureRunNetwork());
+    // A name for the host, so the egress proxy the platform runs is reachable
+    // from inside a step as host.docker.internal on Linux as it already is on
+    // Docker Desktop. The run bridge has inter-container traffic off; the
+    // host itself stays reachable, which is the one door this needs.
+    flags.push("--add-host", "host.docker.internal:host-gateway");
 
     // The dependency cache: this tenant's built venvs and npm prefixes,
     // mounted where prepareRuntime already looks. Created host-side rather
