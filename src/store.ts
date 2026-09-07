@@ -453,6 +453,13 @@ export function saveWorkspace(
   // deploy writes straight to disk, so nothing else would generate them.
   syncWorkspaceBundles(dir);
 
+  // Here, not in deployWorkspace: a workspace CREATED with files (the API's
+  // create, the CLI's first deploy, a template) comes through this function
+  // without going through deployWorkspace, and the first live check found
+  // exactly that — a new desk's cron was seen on the five-minute rescan, not
+  // the next tick.
+  workspaceChanged(tenant, workspace, "deploy");
+
   return { preserved: preserved.length };
 }
 

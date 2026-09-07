@@ -431,8 +431,7 @@ export function deployWorkspace(
   const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: opts.by ?? "deploy", message: opts.message });
   const commit = opts.commit ?? null;
   if (commit) writeDeployedCommit(tenant, workspace, commit);
-  notifyWorkspaceChanged(tenant, workspace, "deploy");
-  return { ...plan, applied: true, commit, preserved };
+  return { ...plan, applied: true, commit, preserved }; // saveWorkspace told the platform
 }
 
 // Which commit a workspace is running.
