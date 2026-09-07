@@ -1,0 +1,29 @@
+name: ci
+
+# Every push and every pull request. The tests are the specification here —
+# `foldrun check`'s rules, the grammar, the runner's contracts — so a red
+# build is a broken promise, not a style complaint.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npm test

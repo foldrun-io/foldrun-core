@@ -1,0 +1,64 @@
+name: release
+
+# Publishing is what pushing a version tag means. `npm run release` writes
+# the changelog, bumps the version and makes the tag; `git push --follow-tags`
+# is the irreversible step, taken by a person.
+#
+# The build runs here rather than on a laptop so what reaches npm is what is
+# in the tag, and `--provenance` signs that link: npm shows the workflow,
+# the commit and the repository that produced the tarball. That needs
+# `id-token: write` below and an npm *automation* token in NPM_TOKEN
+# (a granular access token, which is exempt from the account's 2FA prompt).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npm test
+
+      # The tag and the manifest must agree. They can disagree exactly once
+      # — a tag pushed by hand — and the failure that follows is a version
+      # on npm that no tag points at.
+      - name: the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          [ "$tag" = "$pkg" ] || { echo "tag $tag != package.json $pkg"; exit 1; }
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The release notes are the changelog section for this version, taken
+      # verbatim: one description of the change, not two that drift.
+      - name: notes for this version
+        id: notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md." > RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          name: ${{ github.ref_name }}

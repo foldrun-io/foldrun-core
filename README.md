@@ -1,5 +1,9 @@
 # foldrun
 
+[![ci](https://github.com/foldrun-io/foldrun-core/actions/workflows/ci.yml/badge.svg)](https://github.com/foldrun-io/foldrun-core/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@foldrun/core)](https://www.npmjs.com/package/@foldrun/core)
+[![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+
 **Agents are just folders. Write them, check them, run them.**
 
 An agent is a folder. Its instructions, skills, knowledge, memory, tools and
