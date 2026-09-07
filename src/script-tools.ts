@@ -49,6 +49,12 @@ export interface ScriptSpec {
   /** Extension for the materialised file, from the fence's language tag —
    *  it picks the interpreter the same way a run: path's extension does. */
   codeExt?: string;
+  /** `secrets: proxied` — this program sends its secrets through the egress
+   *  proxy (it reads FOLDRUN_EGRESS and sends ${NAME} placeholders), so the
+   *  step need not materialise real values into the sandbox for it. The
+   *  default, `materialised`, is a program that reads values from its
+   *  environment and needs them real — a browser seeding cookies. */
+  secrets?: "proxied" | "materialised";
 }
 
 export function parseScripts(raw: unknown): ScriptSpec[] {
@@ -75,6 +81,7 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
       description: typeof e.description === "string" ? e.description : "",
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
+      secrets: e.secrets === "proxied" ? "proxied" : undefined,
       timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
     });
   }

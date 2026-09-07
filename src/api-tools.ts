@@ -14,6 +14,7 @@
 // a call over the limit waits for its turn rather than failing.
 
 import crypto from "node:crypto";
+import { EGRESS_ENV, viaEgress } from "./egress.ts";
 import { z } from "zod";
 import { createSdkMcpServer, tool, type SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import type { ApiSpec } from "./store.ts";
@@ -159,7 +160,11 @@ async function performRequest(
       headers["content-type"] = "application/json";
     }
 
-    const res = await fetch(url, {
+    // Through the egress proxy when this sandbox was given one: the header
+    // still says ${NAME}, and the worker fills it for this host. Without
+    // one, straight to the API with the value the env held — the CLI, tests,
+    // and an install with no proxy.
+    const res = await fetch(viaEgress(env[EGRESS_ENV], url.href), {
       method: req.method,
       headers,
       body: req.body,

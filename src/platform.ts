@@ -14,6 +14,7 @@
 
 import type { FlowStep, RunRecord } from "./store.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.ts";
+import type { EgressHooks } from "./egress.ts";
 
 export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
@@ -41,6 +42,9 @@ export interface PlatformHooks {
   previewSourceOf(tenant: string, workspace: string): string | null;
   /** This account's own data key, or null to use the install key. */
   tenantKey(tenant: string): Buffer | null;
+  /** The egress proxy — a per-step lease that keeps credentials out of the
+   *  sandbox. Default: none, and the runner materialises as it always did. */
+  egress: EgressHooks;
 }
 
 const local: PlatformHooks = {
@@ -55,6 +59,7 @@ const local: PlatformHooks = {
   syncPublicShares: () => ({ added: [] }),
   previewSourceOf: () => null,
   tenantKey: () => null,
+  egress: { lease: async () => null },
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles

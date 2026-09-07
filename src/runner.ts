@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { executeStep, extractJson, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
@@ -1538,17 +1539,80 @@ async function runStep(
       // passed as the merged object): the agent's prompt promised a tool
       // the function list didn't have, and the step failed as the model
       // politely reporting the gap.
+      // The egress lease: the sandbox sends through the worker, which holds
+      // the values and fills each ${NAME} for the host that secret was
+      // granted to. Built from what this step declared — every http tool's
+      // secrets for that tool's host, the model key for the provider's —
+      // before anything is copied in. Null where no proxy is configured
+      // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
+      // everything below materialises exactly as it always did.
+      const grant: EgressGrant = { secrets: {} };
+      for (const api of apiSpecs) {
+        const host = hostOf(api.base);
+        if (!host) continue;
+        for (const v of [...Object.values(api.headers), ...Object.values(api.query)]) {
+          for (const name of placeholderNames(v)) if (name in liveSecrets) addGrant(grant, name, liveSecrets[name], host);
+        }
+      }
+      const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant });
+      // Which secrets must still be real inside the sandbox: a script tool
+      // reads them from its environment, and unless it says `secrets:
+      // proxied` it needs the value, not the name. bash is a script by
+      // another route. The record says which way it went, and why.
+      const materialisers = [
+        ...scriptSpecs.filter((sc) => sc.secrets !== "proxied").map((sc) => sc.name),
+        ...(allowed.includes("Bash") ? ["bash"] : []),
+      ];
+      const materialise = !lease || materialisers.length > 0;
+      const declared = Object.keys(liveSecrets);
+      if (lease) {
+        push(
+          "info",
+          declared.length
+            ? materialise
+              ? `secrets: ${declared.join(", ")} materialised in the sandbox for ${materialisers.join(", ")}; api tools and the model key go through the egress proxy`
+              : `secrets: ${declared.join(", ")} proxied — nothing in the sandbox but the names`
+            : "secrets: none declared; the model key goes through the egress proxy",
+        );
+      }
+      // Sandbox env for the declared secrets: the value, or its own name as
+      // a placeholder that the proxy fills on the way out.
+      const sandboxSecrets: Record<string, string> = materialise
+        ? liveSecrets
+        : Object.fromEntries(declared.map((name) => [name, `\${${name}}`]));
       const substitutedApis = apiSpecs.map((api) => ({
         ...api,
         headers: Object.fromEntries(
           Object.entries(api.headers).map(([k, v]) => [
             k,
-            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => liveSecrets[name] ?? whole),
+            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => sandboxSecrets[name] ?? whole),
           ]),
         ),
       }));
+      // The provider's own key and headers, when the step has a lease: the
+      // key becomes ${FOLDRUN_MODEL_KEY}, the base URL goes via the proxy,
+      // and a translator's upstream request does the same. The fallback
+      // supply gets its own placeholder name — two keys, two names.
+      const proxied = <T extends Record<string, string | undefined>>(env: T, name: string): T =>
+        lease ? (proxyModelEnv(env, lease.url, grant, providerSecrets, name) as T) : env;
+      const proxiedTranslator = (spec: TranslatorSpec | null, name: string): TranslatorSpec | null => {
+        if (!spec || !lease) return spec;
+        const host = hostOf(spec.upstreamBase);
+        if (!host) return spec;
+        addGrant(grant, name, spec.upstreamKey, host);
+        return {
+          ...spec,
+          egress: lease.url,
+          upstreamKey: `\${${name}}`,
+          headers: Object.fromEntries(
+            Object.entries(spec.headers ?? {}).map(([k, v]) => [k, unsubstitute(v, providerSecrets, host, grant)]),
+          ),
+        };
+      };
+      const primaryTranslator = proxiedTranslator(translator, MODEL_KEY_NAME);
+      const secondTranslator = proxiedTranslator(fallbackTranslator, `${MODEL_KEY_NAME}_FALLBACK`);
       const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
-      const isolatedArgs = (modelEnv: Record<string, string | undefined>) => ({
+      const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
         // Keys this step's dependency cache. Per-account by design — see
@@ -1572,7 +1636,7 @@ async function runStep(
           timeoutSec: step.timeout,
           verify: step.verify,
           output: step.output,
-          translator,
+          translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
           // The container sees the workspace at /workspace and the library
           // at /library; the roots are named host-side and moved here.
           search: searchRoots.map((r) => ({
@@ -1591,7 +1655,8 @@ async function runStep(
             // process holds one key, and every isolated run borrows it.
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
-            ...(Object.keys(providerEnv).length === 0 ? modelEnv : {}),
+            ...proxied(Object.keys(providerEnv).length === 0 ? modelEnv : providerEnv, keyName),
+            ...(lease ? { [EGRESS_ENV]: lease.url } : {}),
             ...clockEnv,
             // Who is running: the in-process path stamps scripts with these
             // host-side, but a container rebuilds its tools from its own
@@ -1600,8 +1665,7 @@ async function runStep(
             // $FOLDRUN_RUN_ID compared it to nothing.
             FOLDRUN_RUN_ID: runId,
             FOLDRUN_AGENT: step.agent,
-            ...liveSecrets,
-            ...providerEnv,
+            ...sandboxSecrets,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
         emit: pushWatching,
@@ -1639,18 +1703,26 @@ async function runStep(
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
         const first = outcome.timing;
-        const retryArgs = isolatedArgs(secondSupply);
+        const fallbackName = `${MODEL_KEY_NAME}_FALLBACK`;
+        const retryArgs = isolatedArgs(secondSupply, fallbackName);
         // The fallback's own translator, or none: a fallback that speaks
         // Anthropic must not inherit the primary's Chat-Completions door.
         outcome = await runIsolated({
           ...retryArgs,
-          input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null },
-          env: { ...retryArgs.env, ...secondSupply },
+          input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null },
+          env: Object.fromEntries(
+            Object.entries({ ...retryArgs.env, ...proxied(secondSupply, fallbackName) })
+              .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+          ),
         });
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
         outcome = withEarlierTiming(outcome, first);
+      }
+      if (lease) {
+        for (const line of lease.drainLog()) push("info", line);
+        lease.release();
       }
       publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;

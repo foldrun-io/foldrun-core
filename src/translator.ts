@@ -29,6 +29,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { PROTECTED_PARAMS } from "./providers.ts";
+import { viaEgress } from "./egress.ts";
 
 // ------------------------------------------------------------------ shapes
 
@@ -54,6 +55,10 @@ export interface TranslatorSpec {
   params?: Record<string, unknown>;
   /** How the endpoint is named in the trace. */
   label?: string;
+  /** The step's egress lease, when the sandbox must not hold the key: the
+   *  upstream request goes through it, and `upstreamKey` is a placeholder
+   *  the proxy fills. */
+  egress?: string;
 }
 
 export interface RunningTranslator {
@@ -862,7 +867,7 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
 
       let upstream: Response;
       try {
-        upstream = await fetch(`${base}${responses ? "/responses" : "/chat/completions"}`, {
+        upstream = await fetch(viaEgress(spec.egress, `${base}${responses ? "/responses" : "/chat/completions"}`), {
           method: "POST",
           headers: {
             "content-type": "application/json",
