@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { searchRoots, digestRuns, buildSearchTools, buildHistoryTools, buildDeskTools } from "../src/context-tools.ts";
+import { searchRoots, SearchIndex, digestRuns, buildSearchTools, buildHistoryTools, buildDeskTools } from "../src/context-tools.ts";
 import type { RunRecord } from "../src/store.ts";
 
 function bundle(files: Record<string, string>): string {
@@ -37,6 +37,46 @@ test("search ranks the file about the thing above the file that mentions it once
     assert.ok(!hits.some((h) => /index\.md|log\.md/.test(h.path)));
     assert.deepEqual(searchRoots([{ label: "memory/", dir }], "zzzz"), []);
     assert.deepEqual(searchRoots([{ label: "missing/", dir: path.join(dir, "nope") }], "soil"), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the index reads a file once, notices a change by mtime, and forgets a file that went", () => {
+  const dir = bundle({
+    "a.md": "---\nname: alpha\n---\nThe alpha note mentions rain gauges.",
+    "b.md": "---\nname: beta\n---\nThe beta note is about soil.",
+  });
+  try {
+    const index = new SearchIndex([{ label: "memory/", dir }]);
+    index.refresh();
+    assert.equal(index.lastRead, 2, "first refresh reads everything");
+    assert.equal(index.size, 2);
+    index.refresh();
+    assert.equal(index.lastRead, 0, "nothing changed, nothing re-read");
+    assert.equal(index.search("soil")[0]?.path, "memory/b.md");
+
+    // A file written mid-step — the agent's own state — is found on the next
+    // call, and it is the only file read.
+    fs.writeFileSync(path.join(dir, "c.md"), "---\nname: gamma\n---\nGamma holds the moisture probe price.");
+    index.refresh();
+    assert.equal(index.lastRead, 1);
+    assert.equal(index.search("moisture probe")[0]?.path, "memory/c.md");
+
+    // An edit moves mtime; the old words stop matching and the new ones start.
+    const later = new Date(Date.now() + 5_000);
+    fs.writeFileSync(path.join(dir, "b.md"), "---\nname: beta\n---\nThe beta note is now about drainage.");
+    fs.utimesSync(path.join(dir, "b.md"), later, later);
+    index.refresh();
+    assert.equal(index.lastRead, 1);
+    assert.deepEqual(index.search("soil"), []);
+    assert.equal(index.search("drainage")[0]?.path, "memory/b.md");
+
+    // A deleted file is dropped from the postings, not left as a ghost hit.
+    fs.rmSync(path.join(dir, "a.md"));
+    index.refresh();
+    assert.equal(index.size, 2);
+    assert.deepEqual(index.search("rain gauges"), []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

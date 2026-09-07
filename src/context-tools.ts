@@ -13,11 +13,15 @@
 // container, where the vault, the run journal and the account do not exist
 // — the host gathers, the boundary is crossed as JSON, the container serves.
 //
-// Search is lexical (a BM25-shaped score over tokens), not embeddings. It
-// runs anywhere, needs no vendor, and nothing leaves the box — which is the
-// property the search-on-our-box work already paid for. A workspace with a
-// few hundred memory files is what this is for; at tens of thousands an
-// index would be the next step, and it would be built on the same tool.
+// Search is lexical (BM25 over tokens), not embeddings. It runs anywhere,
+// needs no vendor, and nothing leaves the box — which is the property the
+// search-on-our-box work already paid for. Behind the tool is an inverted
+// index built once per step and refreshed by mtime: a call tokenises only
+// the files that changed since the last one (the agent writing to state/
+// mid-step is the common case) and scores only the postings of the query's
+// terms, so the tenth search over ten thousand files costs what the first
+// one over ten did. Nothing is persisted: a step's index dies with the
+// step, so it can never be stale across a deploy or a hand edit.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -46,16 +50,32 @@ interface Doc {
   head: string;
 }
 
-function tokens(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9$@._-]+/)
-    .map((t) => t.replace(/^[._-]+|[._-]+$/g, ""))
-    .filter((t) => t.length > 1);
+/** A file as the index holds it: tokenised once, refreshed when its mtime moves. */
+interface IndexedDoc extends Doc {
+  abs: string;
+  size: number;
+  mtimeMs: number;
+  tf: Map<string, number>;
+  length: number;
 }
 
-function readDocs(roots: SearchRoot[]): Doc[] {
-  const docs: Doc[] = [];
+function docFrom(root: SearchRoot, abs: string, st: fs.Stats): IndexedDoc | null {
+  try {
+    const text = fs.readFileSync(abs, "utf8");
+    const front = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+    const head = [...front.matchAll(/^(?:name|title|description):\s*(.+)$/gm)].map((m) => m[1]).join(" ");
+    const body = tokens(head + " " + head + " " + head + " " + text);
+    const tf = new Map<string, number>();
+    for (const t of body) tf.set(t, (tf.get(t) ?? 0) + 1);
+    return { label: root.label, rel: path.relative(root.dir, abs).replaceAll("\\", "/"), text, head, abs, size: st.size, mtimeMs: st.mtimeMs, tf, length: body.length };
+  } catch {
+    return null; // unreadable: not a hit
+  }
+}
+
+/** Every indexable file under the roots, with the stat the index compares against. */
+function listFiles(roots: SearchRoot[]): { root: SearchRoot; abs: string; st: fs.Stats }[] {
+  const out: { root: SearchRoot; abs: string; st: fs.Stats }[] = [];
   for (const root of roots) {
     if (!fs.existsSync(root.dir)) continue;
     const walk = (dir: string) => {
@@ -66,7 +86,7 @@ function readDocs(roots: SearchRoot[]): Doc[] {
         return;
       }
       for (const e of entries) {
-        if (docs.length >= MAX_FILES) return;
+        if (out.length >= MAX_FILES) return;
         const abs = path.join(dir, e.name);
         if (e.isDirectory()) {
           if (e.name.startsWith(".") || e.name === "node_modules") continue;
@@ -77,60 +97,120 @@ function readDocs(roots: SearchRoot[]): Doc[] {
         // OKF's generated files describe the bundle, not a fact in it.
         if (e.name === "index.md" || e.name === "log.md") continue;
         try {
-          if (fs.statSync(abs).size > MAX_FILE_BYTES) continue;
-          const text = fs.readFileSync(abs, "utf8");
-          const front = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
-          const head = [...front.matchAll(/^(?:name|title|description):\s*(.+)$/gm)].map((m) => m[1]).join(" ");
-          docs.push({ label: root.label, rel: path.relative(root.dir, abs).replaceAll("\\", "/"), text, head });
+          const st = fs.statSync(abs);
+          if (st.size > MAX_FILE_BYTES) continue;
+          out.push({ root, abs, st });
         } catch {
-          // unreadable: not a hit
+          // vanished between readdir and stat
         }
       }
     };
     walk(root.dir);
   }
-  return docs;
+  return out;
+}
+
+/**
+ * The inverted index over a set of roots, scored BM25's way — term
+ * frequency saturating, rare terms weighing more, long documents not
+ * winning by bulk — with the frontmatter head counted three times, because
+ * a memory file's name and description are what its author thought it was
+ * about. `refresh()` walks the tree (a
+ * stat per file — cheap), re-reads only files whose size or mtime moved,
+ * drops the ones that went, and rebuilds the postings from the per-file
+ * token maps it already holds. `search()` touches only the query terms'
+ * postings.
+ */
+export class SearchIndex {
+  private docs = new Map<string, IndexedDoc>();
+  private postings = new Map<string, { doc: IndexedDoc; tf: number }[]>();
+  private avg = 1;
+  /** How many files the last refresh read from disk — what a test watches. */
+  lastRead = 0;
+
+  private roots: SearchRoot[];
+
+  constructor(roots: SearchRoot[]) {
+    this.roots = roots;
+  }
+
+  refresh(): this {
+    const seen = new Set<string>();
+    let changed = false;
+    this.lastRead = 0;
+    for (const { root, abs, st } of listFiles(this.roots)) {
+      seen.add(abs);
+      const have = this.docs.get(abs);
+      if (have && have.size === st.size && have.mtimeMs === st.mtimeMs) continue;
+      const doc = docFrom(root, abs, st);
+      this.lastRead++;
+      if (doc) this.docs.set(abs, doc);
+      else this.docs.delete(abs);
+      changed = true;
+    }
+    for (const abs of [...this.docs.keys()]) {
+      if (!seen.has(abs)) {
+        this.docs.delete(abs);
+        changed = true;
+      }
+    }
+    if (changed) this.rebuild();
+    return this;
+  }
+
+  private rebuild(): void {
+    this.postings = new Map();
+    let total = 0;
+    for (const doc of this.docs.values()) {
+      total += doc.length;
+      for (const [term, tf] of doc.tf) {
+        let list = this.postings.get(term);
+        if (!list) this.postings.set(term, (list = []));
+        list.push({ doc, tf });
+      }
+    }
+    this.avg = total / this.docs.size || 1;
+  }
+
+  get size(): number {
+    return this.docs.size;
+  }
+
+  search(query: string, limit = 10): SearchHit[] {
+    const q = [...new Set(tokens(query))];
+    if (q.length === 0 || this.docs.size === 0) return [];
+    const n = this.docs.size;
+    const k1 = 1.4;
+    const bParam = 0.75;
+    const scores = new Map<IndexedDoc, number>();
+    for (const term of q) {
+      const list = this.postings.get(term);
+      if (!list) continue;
+      const idf = Math.log(1 + (n - list.length + 0.5) / (list.length + 0.5));
+      for (const { doc, tf } of list) {
+        const part = idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - bParam + bParam * (doc.length / this.avg))));
+        scores.set(doc, (scores.get(doc) ?? 0) + part);
+      }
+    }
+    return [...scores.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, Math.min(Math.max(1, limit), 30))
+      .map(([d, score]) => ({ path: `${d.label}${d.rel}`, score: Math.round(score * 100) / 100, snippet: snippetFor(d.text, q) }));
+  }
+}
+
+function tokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9$@._-]+/)
+    .map((t) => t.replace(/^[._-]+|[._-]+$/g, ""))
+    .filter((t) => t.length > 1);
 }
 
 export interface SearchHit {
   path: string;
   score: number;
   snippet: string;
-}
-
-/**
- * Rank documents for a query. BM25's shape — term frequency saturating,
- * rare terms weighing more, long documents not winning by bulk — with the
- * frontmatter head counted three times, because a memory file's name and
- * description are what its author thought it was about.
- */
-export function rankDocs(docs: Doc[], query: string, limit: number): SearchHit[] {
-  const q = [...new Set(tokens(query))];
-  if (q.length === 0 || docs.length === 0) return [];
-  const bodies = docs.map((d) => tokens(d.head + " " + d.head + " " + d.head + " " + d.text));
-  const avg = bodies.reduce((n, b) => n + b.length, 0) / docs.length || 1;
-  const df = new Map<string, number>();
-  for (const b of bodies) for (const t of new Set(b)) df.set(t, (df.get(t) ?? 0) + 1);
-  const k1 = 1.4;
-  const bParam = 0.75;
-  const scored = docs.map((d, i) => {
-    const b = bodies[i];
-    const tf = new Map<string, number>();
-    for (const t of b) tf.set(t, (tf.get(t) ?? 0) + 1);
-    let score = 0;
-    for (const term of q) {
-      const f = tf.get(term) ?? 0;
-      if (!f) continue;
-      const idf = Math.log(1 + (docs.length - (df.get(term) ?? 0) + 0.5) / ((df.get(term) ?? 0) + 0.5));
-      score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - bParam + bParam * (b.length / avg))));
-    }
-    return { d, score };
-  });
-  return scored
-    .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map(({ d, score }) => ({ path: `${d.label}${d.rel}`, score: Math.round(score * 100) / 100, snippet: snippetFor(d.text, q) }));
 }
 
 /** The line that mentions the most query terms, trimmed — enough to tell
@@ -150,7 +230,7 @@ function snippetFor(text: string, q: string[]): string {
 }
 
 export function searchRoots(roots: SearchRoot[], query: string, limit = 10): SearchHit[] {
-  return rankDocs(readDocs(roots), query, Math.min(Math.max(1, limit), 30));
+  return new SearchIndex(roots).refresh().search(query, limit);
 }
 
 export interface ContextToolResult {
@@ -161,6 +241,9 @@ export interface ContextToolResult {
 
 export function buildSearchTools(roots: SearchRoot[]): ContextToolResult {
   if (roots.length === 0) return { server: null, toolNames: [], promptLines: [] };
+  // One index per server — per step. Built on the first call, not at
+  // start-up, so a step that never searches never pays for it.
+  const index = new SearchIndex(roots);
   const search = tool(
     "search_files",
     `Full-text search over this agent's knowledge, memory, state and stored files (all scopes: own, workspace, account). ` +
@@ -171,7 +254,7 @@ export function buildSearchTools(roots: SearchRoot[]): ContextToolResult {
       limit: z.number().int().min(1).max(30).optional().describe("How many hits (default 10)"),
     },
     async (args) => {
-      const hits = searchRoots(roots, args.query, args.limit ?? 10);
+      const hits = index.refresh().search(args.query, args.limit ?? 10);
       const text = hits.length
         ? hits.map((h) => `${h.path}  (${h.score})\n    ${h.snippet}`).join("\n")
         : "no files mention that";
