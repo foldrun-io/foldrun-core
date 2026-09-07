@@ -6,15 +6,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { priceTurn, stepCeiling, FALLBACK_PRICE } from "../src/step-exec.ts";
 
-test("a turn is priced from the catalogue, cache traffic counted as input", () => {
+test("a turn is priced from the catalogue, cache traffic at cache rates", () => {
   const price = { input: 3e-6, output: 15e-6 };
   const usd = priceTurn({ input_tokens: 1000, cache_read_input_tokens: 4000, cache_creation_input_tokens: 0, output_tokens: 200 }, price);
-  assert.equal(usd, 5000 * 3e-6 + 200 * 15e-6);
+  // A cache READ is a tenth of fresh input. Counting it as input read a
+  // long cached prompt at ten times its price, and stopped steps for
+  // money they had not spent — see step-budget.test.ts.
+  assert.equal(usd, 1000 * 3e-6 + 4000 * 3e-6 * 0.1 + 200 * 15e-6);
   // Missing fields are zero, not NaN.
   assert.equal(priceTurn({}, price), 0);
 });
 
-test("with no catalogue price the fallback is Opus-class — a ceiling still bites on an unknown gateway model", () => {
+test("with no price at all the fallback is Opus-class — a ceiling still bites on an unknown gateway model", () => {
+  // Only for a model no catalogue prices AND whose name says nothing;
+  // haiku/sonnet/opus are priced by name (knownPrice) before this.
   const usd = priceTurn({ input_tokens: 10_000, output_tokens: 1_000 }, null);
   assert.equal(usd, 10_000 * FALLBACK_PRICE.input + 1_000 * FALLBACK_PRICE.output);
   assert.ok(usd > priceTurn({ input_tokens: 10_000, output_tokens: 1_000 }, { input: 3e-6, output: 15e-6 }), "conservative, never cheaper than a real rate");

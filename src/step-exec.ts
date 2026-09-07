@@ -79,20 +79,60 @@ export interface ExecOptions {
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
 export type EventExtra = { call?: string; ms?: number; err?: boolean };
 
-/** Conservative per-token rates for a model the catalogue cannot price —
- *  Opus-class — so a ceiling still means something on an unknown gateway. */
+/** Conservative per-token rates for a model nothing else can price — an
+ *  unknown id on a gateway with no catalogue. Opus-class, so a ceiling
+ *  still means something. Only ever reached when `knownPrice` below does
+ *  not recognise the model either. */
 export const FALLBACK_PRICE = { input: 15e-6, output: 75e-6 };
 
+/** The rates we know without asking anyone: the tiers this runtime resolves
+ *  (`fast`/`default`/`max` → haiku/sonnet/opus) and the model ids that carry
+ *  those words. A gateway with a catalogue still wins — that is the
+ *  authority — but the platform's own Anthropic key has no catalogue, and
+ *  pricing its steps at Opus rates made every mid-turn ceiling read up to
+ *  fifteen times high: an indexing run was stopped at "$1.17" having
+ *  actually spent $0.15 (2026-09-08). Per token, input/output. */
+const KNOWN_PRICES: [RegExp, { input: number; output: number }][] = [
+  [/haiku/i, { input: 1e-6, output: 5e-6 }],
+  [/sonnet/i, { input: 2e-6, output: 10e-6 }],
+  [/\bopus\b/i, { input: 5e-6, output: 25e-6 }],
+];
+
+/** What a token costs on this model, when we can say without a catalogue. */
+export function knownPrice(model: string | undefined): { input: number; output: number } | null {
+  if (!model) return null;
+  return KNOWN_PRICES.find(([re]) => re.test(model))?.[1] ?? null;
+}
+
+/** Anthropic's cache multipliers, and the shape every gateway that bills
+ *  for caching at all has copied: a write costs a quarter more than fresh
+ *  input, a read a tenth of it. Counting both at the full input rate — as
+ *  this did — makes a long cached prompt read about ten times its price,
+ *  which on a ceiling is not "the honest direction to be wrong in", it is
+ *  a step killed for spending money it never spent. */
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
 /**
- * What one assistant turn cost. Cache traffic is counted as input at the
- * input rate, which over-approximates on gateways with cheaper cache reads
- * — on the money side, the honest direction to be wrong in. Pure.
+ * What one assistant turn cost, from the usage the SDK reports. Pure.
+ *
+ * A gateway whose cache is priced differently is over- or under-counted
+ * here by that difference alone; the run record's own cost is repriced
+ * from the catalogue afterwards and stays the authority on the bill. This
+ * number exists to stop a runaway step mid-turn, and wants to be close.
  */
 export function priceTurn(u: Record<string, number | undefined>, price: { input: number; output: number } | null): number {
-  const inTok = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
-  const outTok = u.output_tokens ?? 0;
   const p = price ?? FALLBACK_PRICE;
-  return inTok * p.input + outTok * p.output;
+  const fresh = u.input_tokens ?? 0;
+  const written = u.cache_creation_input_tokens ?? 0;
+  const read = u.cache_read_input_tokens ?? 0;
+  const outTok = u.output_tokens ?? 0;
+  return (
+    fresh * p.input +
+    written * p.input * CACHE_WRITE_MULTIPLIER +
+    read * p.input * CACHE_READ_MULTIPLIER +
+    outTok * p.output
+  );
 }
 
 /**

@@ -7,7 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
-import { executeStep, extractJson, stepCeiling, type EventExtra } from "./step-exec.ts";
+import {
+  knownPrice, executeStep, extractJson, stepCeiling, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -1442,6 +1443,11 @@ async function runStep(
       if (fitted.note) push("info", fitted.note);
       effort = fitted.effort;
     }
+    // No catalogue — the platform's own Anthropic key, or a gateway that
+    // publishes no prices — but the model's NAME is often enough. Without
+    // this the in-pod meter priced haiku and sonnet at Opus rates and a
+    // step was stopped at up to fifteen times what it had spent.
+    tokenPrice ??= knownPrice(wireModel);
 
     fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
     fs.mkdirSync(path.join(agentDir, "memory"), { recursive: true });
