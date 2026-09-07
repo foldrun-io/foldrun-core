@@ -50,6 +50,11 @@ export interface PlatformHooks {
    *  than re-reading every workspace each tick needs to hear. Default:
    *  nothing — locally the scheduler reads the disk. Never throws. */
   workspaceChanged(tenant: string, workspace: string, why: "write" | "deploy" | "push" | "delete"): void;
+  /** Can a step in this isolation mode be re-attached to after the driver
+   *  that started it is gone? True means an orphaned step with a `sandbox`
+   *  on its record is resumed rather than destroyed and run again. Default:
+   *  nothing is. */
+  sandboxResumable(kind: string): boolean;
 }
 
 const local: PlatformHooks = {
@@ -66,6 +71,7 @@ const local: PlatformHooks = {
   tenantKey: () => null,
   egress: { lease: async () => null },
   workspaceChanged() {},
+  sandboxResumable: () => false,
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles

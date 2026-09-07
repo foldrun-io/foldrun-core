@@ -2257,6 +2257,16 @@ export interface StepRecord {
   verify?: string;
   /** Attempts made so far, for the run trace. */
   attempts?: number;
+  /** The sandbox this step is executing in, while it is: which executor,
+   *  its handle (a pod name), and how many of its output lines the driver
+   *  has already applied to this record. What a driver that inherits the
+   *  run — after a deploy rolled the last one, or it crashed — needs to
+   *  re-attach and carry on rather than run the step again. Cleared when
+   *  the step settles. */
+  sandbox?: { kind: string; ref: string; consumed: number; since: string } | null;
+  /** A size class a retry moved the step up to (an evicted or OOM-killed
+   *  attempt), overriding the agent's own `size:` for the attempts after. */
+  sizeUp?: "large" | "heavy";
   /** When the step actually started and finished executing — not when the
    *  run reached it. A step's events approximate this (first and last), but
    *  a model can think for minutes before its first tool call, and a step

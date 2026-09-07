@@ -106,6 +106,10 @@ export interface StepActuals {
 export interface ContainerStepOutcome {
   status: "completed" | "failed";
   result: string | null;
+  /** Why the sandbox ended when the step did not: what the cluster said
+   *  (OOMKilled, Evicted, the pod gone). Absent when the driver finished
+   *  and said so itself. A retry policy reads this. */
+  reason?: string | null;
   /** The model's final text block — see StepRecord.conclusion. Crosses the
    *  boundary with the rest of the outcome; the driver spreads it. */
   conclusion?: string | null;
@@ -186,10 +190,35 @@ export function allowedBack(rel: string): boolean {
  * the step did not touch it, so it is not ours to write back. Concurrent
  * edits survive, and a step that genuinely changed a file still wins.
  */
+/**
+ * What a workspace copy looked like when it went in: the sha256 of every
+ * file the step could hand back. Small enough to ride into the sandbox
+ * beside the input, so a driver that inherits the step can tell what the
+ * step changed without the staging copy the first driver held in /tmp.
+ */
+export function hashTree(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const abs = path.join(d, entry.name);
+      const rel = path.relative(dir, abs).replaceAll("\\", "/");
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (allowedBack(rel + "/")) walk(abs);
+        continue;
+      }
+      if (!allowedBack(rel)) continue;
+      out[rel] = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir);
+  return out;
+}
+
 export function applyContainerChanges(
   hostWs: string,
   containerWs: string,
-  baseline?: string,
+  baseline?: string | Record<string, string>,
 ): string[] {
   const applied: string[] = [];
   const walk = (dir: string) => {
@@ -211,9 +240,12 @@ export function applyContainerChanges(
       const next = fs.readFileSync(abs);
       // Untouched by this step: whatever the host says now is more current
       // than what we handed in, including a change made while it ran.
-      if (baseline) {
+      if (typeof baseline === "string") {
         const was = path.join(baseline, rel);
         if (fs.existsSync(was) && fs.readFileSync(was).equals(next)) continue;
+      } else if (baseline) {
+        const was = baseline[rel.replaceAll("\\", "/")];
+        if (was && was === crypto.createHash("sha256").update(next).digest("hex")) continue;
       }
       const target = path.join(hostWs, rel);
       if (fs.existsSync(target) && fs.readFileSync(target).equals(next)) continue;
@@ -625,6 +657,15 @@ export interface RunInContainerArgs {
   runId?: string;
   /** The reservation class — which limits this step's sandbox holds. */
   size?: "small" | "large" | "heavy";
+  /** Re-attach to a sandbox a previous driver started, instead of creating
+   *  one: its handle, and how many output lines that driver had applied.
+   *  The executor replays nothing before `consumed`, and reads the step's
+   *  files back from the sandbox's own copy-in snapshot. */
+  resume?: { ref: string; consumed: number } | null;
+  /** Called by an executor that can be resumed: when its sandbox exists
+   *  (consumed 0), and before each output line it applies. The runner
+   *  records these on the step, so the next driver knows where to attach. */
+  checkpoint?: (ref: string, consumed: number) => void;
 }
 
 /** The limits a size class reserves. Large is the install's configured

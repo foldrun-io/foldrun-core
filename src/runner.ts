@@ -1297,11 +1297,14 @@ async function runStep(
       front, clockEnv, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
-      apiSpecs, scriptSpecs, brokenTools, size,
+      apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
+    // A retry that moved the step up a class (an evicted or OOM-killed
+    // attempt) wins over the agent's own `size:` for the attempts after.
+    const size = step.sizeUp ?? agentSize;
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
@@ -1690,6 +1693,18 @@ async function runStep(
         // Stamps the sandbox, so stopping this run can destroy it.
         runId,
         size,
+        // Resume: a sandbox a previous driver left running, recorded on the
+        // step. Consumed once — a fresh attempt after this one (a retry, a
+        // fallback) starts its own sandbox.
+        resume: step.sandbox && step.sandbox.kind === isolation ? { ref: step.sandbox.ref, consumed: step.sandbox.consumed } : null,
+        // Checkpoint: where the executor is, on the record, so a driver
+        // that inherits this run can attach where this one left off. The
+        // executor calls it before applying each line; the line's own emit
+        // saves the record, so this only updates the fields.
+        checkpoint: (ref: string, consumed: number) => {
+          step.sandbox = { kind: isolation!, ref, consumed, since: step.sandbox?.since ?? new Date().toISOString() };
+          if (consumed === 0) save();
+        },
       });
 
       // A busy provider gets another moment on the SAME supply before the
@@ -1700,6 +1715,7 @@ async function runStep(
       const firstArgs = isolatedArgs(platformModelEnv());
       await lease?.commit();
       let outcome = await runIsolated(firstArgs);
+      step.sandbox = null; // whatever happens next starts its own
       for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
@@ -1752,6 +1768,10 @@ async function runStep(
       step.status = outcome.status;
       step.result = outcome.result;
       step.conclusion = outcome.conclusion;
+      step.sandbox = null;
+      // The cluster's word on why a sandbox ended without the driver saying
+      // so — OOMKilled, Evicted — on the record, where the retry reads it.
+      if (outcome.status === "failed" && outcome.reason) push("error", `sandbox ended: ${outcome.reason}`);
       if (outcome.data !== undefined) step.data = outcome.data;
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
       step.tokens = outcome.usage
@@ -2450,15 +2470,25 @@ function driveRunInner(
       // never happened, which reconcile can then never see. Reset it to
       // pending and it simply runs again; driveRun's whole contract is that
       // re-driving a partly-finished record is safe.
+      // Unless the step's sandbox outlived its driver AND the executor can
+      // re-attach to it: then the record carries the pod and how far the
+      // last driver got, runStep passes that as `resume`, and the step
+      // carries on from where it was — a deploy no longer costs the run.
       let orphaned = false;
       for (const step of run.steps) {
         if (step.status !== "running") continue;
-        orphaned = true;
+        const resumable = !!step.sandbox && platform.sandboxResumable(step.sandbox.kind);
+        if (!resumable) {
+          orphaned = true;
+          step.sandbox = null;
+        }
         step.status = "pending";
         step.events.push({
           t: new Date().toISOString(),
           type: "info",
-          text: "interrupted mid-step (platform restart) — running again from the start of the step",
+          text: resumable
+            ? `driver changed mid-step — re-attaching to the running sandbox (${step.sandbox!.ref}, ${step.sandbox!.consumed} lines already applied)`
+            : "interrupted mid-step (platform restart) — running again from the start of the step",
         });
       }
       if (orphaned) {
@@ -2908,7 +2938,13 @@ function driveRunInner(
           launching
             .map(async (step) => {
               const attempts = (step.retry ?? 0) + 1;
-              for (let attempt = 1; attempt <= attempts; attempt++) {
+              // A step re-attaching to its sandbox is still on the attempt
+              // that started it; a step re-run after a backoff picks up the
+              // count it left. Only a step nobody has touched starts at 1.
+              const interruptedInBackoff =
+                !step.sandbox && !!step.attempts && /retrying in \d+s/.test(step.events[step.events.length - 1]?.text ?? "");
+              const from = step.sandbox ? Math.max(1, step.attempts ?? 1) : interruptedInBackoff ? Math.min(attempts, step.attempts! + 1) : 1;
+              for (let attempt = from; attempt <= attempts; attempt++) {
                 step.attempts = attempt;
                 step.status = "running";
                 save();
@@ -2935,12 +2971,42 @@ function driveRunInner(
                 // more. save() merges the flag from the record.
                 save();
                 if (run.stopRequested) break;
+                // The retry policy. An attempt the cluster ended for want of
+                // memory or disk is retried one size class up — the same
+                // size would end the same way. Every retry waits: 15 s, 30 s,
+                // 1 m, 2 m, 4 m, jittered, so a provider or a site that was
+                // struggling gets a moment, and twenty fan-out steps do not
+                // hammer it in lock-step. The wait holds a worker slot, not
+                // a sandbox — nothing is rented while it waits — and a stop
+                // ends it. The step is `pending` meanwhile, so a driver that
+                // inherits the run mid-wait simply runs the attempt.
+                const last = [...step.events].reverse().find((e) => e.type === "error")?.text ?? "";
+                let sizeNote = "";
+                if (/OOMKilled|Evicted|ephemeral-storage|out of memory/i.test(last)) {
+                  const up = step.sizeUp === "large" || (!step.sizeUp && step.size === "large") ? "heavy" : step.sizeUp === "heavy" || step.size === "heavy" ? null : "large";
+                  if (up) {
+                    step.sizeUp = up;
+                    sizeNote = ` at size: ${up}`;
+                  }
+                }
+                const waitMs = Math.round(Math.min(retryBaseMs() * 16, retryBaseMs() * 2 ** (attempt - 1)) * (0.75 + Math.random() * 0.5));
+                step.status = "pending";
                 step.events.push({
                   t: new Date().toISOString(),
                   type: "info",
-                  text: `attempt ${attempt} failed — retrying (${attempts - attempt} left)`,
+                  text: `attempt ${attempt} failed — retrying in ${Math.round(waitMs / 1000)}s${sizeNote} (${attempts - attempt} left)`,
                 });
                 save();
+                const until = Date.now() + waitMs;
+                while (Date.now() < until) {
+                  await sleep(Math.min(1000, until - Date.now()));
+                  save();
+                  if (run.stopRequested) break;
+                }
+                if (run.stopRequested) {
+                  step.status = "failed";
+                  break;
+                }
               }
             }),
         );
@@ -3269,6 +3335,10 @@ export function loadFlow(tenant: string, workspace: string, flowName: string) {
 // once it has been quiet for two minutes — the margin is for a record
 // written a beat before its driver registered, not a judgement about pace.
 const ABANDONED_AFTER_MS = 2 * 60 * 1000;
+
+/** The first retry's wait; each one after doubles it, to sixteen times
+ *  this (15 s → 4 min by default). An env, so a test can make it small. */
+const retryBaseMs = () => Number(process.env.FOLDRUN_RETRY_BASE_MS) || 15_000;
 
 /** The most recent moment a run showed any sign of life. */
 function lastActivity(run: RunRecord): number {
