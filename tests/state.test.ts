@@ -96,11 +96,14 @@ test("a new workspace ignores its own secret key and run store", () => {
 // The path the rule has to match, asserted against the code that builds it
 // rather than against a copy of it — the ignore rule and the key's location
 // are two statements about one path, and only one of them is enforceable.
-test("the secret key really does live under .foldrun/", () => {
-  const cli = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "../foldrun-cli/bin/foldrun.mjs"),
-    "utf8",
-  );
+// The CLI is a sibling checkout (see the seven-repo layout), so this only
+// runs where one is present: a dev machine has it, a CI runner that checked
+// out this repository alone does not, and failing there would be the test
+// complaining about the shape of the clone rather than about the code.
+test("the secret key really does live under .foldrun/", (t) => {
+  const cliPath = path.join(import.meta.dirname, "..", "../foldrun-cli/bin/foldrun.mjs");
+  if (!fs.existsSync(cliPath)) return t.skip("no foldrun-cli checkout beside this one");
+  const cli = fs.readFileSync(cliPath, "utf8");
   // The guarantee, not the wording: when a workspace keeps its own store, that
   // store is `.foldrun/` inside it — which is what the shipped .gitignore
   // covers. The CLI may pick a different root for a workspace that belongs to
