@@ -21,14 +21,12 @@ invite — it is yours. Create an API key in Settings, point the CLI at it
   and the step containers' own hardening (non-root, capabilities dropped,
   no-new-privs, gVisor when the host has it) is what stands between an
   agent and the daemon. Do not do this on a box you share with strangers.
-- **linux/amd64.** The published images are amd64 only — a server
-  architecture, which is what this is for. They do not run on Apple Silicon
-  or Graviton, and there is no source build to fall back on: the control
-  plane is not open. If you want foldrun on ARM, open an issue and say so;
-  the build is one flag away and nobody has asked yet.
-
-  This does not affect writing or running agents on an ARM laptop — the CLI
-  is npm and architecture-independent. It is only the self-hosted platform.
+- **linux/amd64 or linux/arm64.** Both images are published for both, as
+  one name: `docker pull` picks the half for your machine, so Apple Silicon
+  and Graviton work with the same compose file and no flag. One honest
+  caveat: the amd64 half is published the moment a version is deployed;
+  the arm64 half is built overnight (it is emulated, and slow), so a
+  version can be amd64-only for up to a day. `latest` always has both.
 - A model credential. Either set `ANTHROPIC_API_KEY` for the whole install
   ("models included" — every run borrows it), or set none and let each
   agent bring its own `provider:` block. ~30 providers work.
