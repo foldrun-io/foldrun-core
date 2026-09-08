@@ -1,0 +1,21 @@
+# Dependency updates, weekly, grouped.
+#
+# Grouped on purpose: this is a small team, and ten separate PRs for ten patch
+# bumps is ten reviews nobody does, which is how a dependency file goes a year
+# without being read. One PR a week for patches and minors is a thing a person
+# actually opens. Majors come separately, because those are a decision.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions:
+        patterns: ["*"]
