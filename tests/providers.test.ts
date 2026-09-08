@@ -107,13 +107,21 @@ test("fallback: carries its own name, format and auth", () => {
 
 // ------------------------------------------------------------------ docs
 
-test("every preset is in docs/providers.md and the spec names the three keys", async () => {
+// docs/ is a sibling checkout (the seven-repo layout), so the half of this
+// that reads it only runs where one is present. SPEC.md is in this
+// repository and is always checked.
+test("every preset is in docs/providers.md and the spec names the three keys", async (t) => {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const root = path.join(import.meta.dirname, "..");
-  const doc = fs.readFileSync(path.join(root, "../foldrun-docs/providers.md"), "utf8");
-  for (const p of PROVIDERS) {
-    assert.ok(doc.includes(`| \`${p.name}\` |`), `docs/providers.md does not list ${p.name}`);
+  const docPath = path.join(root, "../foldrun-docs/providers.md");
+  if (fs.existsSync(docPath)) {
+    const doc = fs.readFileSync(docPath, "utf8");
+    for (const p of PROVIDERS) {
+      assert.ok(doc.includes(`| \`${p.name}\` |`), `docs/providers.md does not list ${p.name}`);
+    }
+  } else {
+    t.diagnostic("no foldrun-docs checkout beside this one — checking SPEC.md only");
   }
   const spec = fs.readFileSync(path.join(root, "SPEC.md"), "utf8");
   for (const key of ["name:", "format: anthropic | openai", "auth: bearer | x-api-key"]) {
