@@ -24,6 +24,17 @@ import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
 
+/**
+ * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
+ * `authTagLength`, Node accepts whatever length `setAuthTag` is handed — 4, 8,
+ * 12, 13, 14, 15 or 16 bytes — so a stored record whose tag had been cut to
+ * four bytes would still "verify" on 32 bits of authentication instead of
+ * 128. The tag comes from the record on disk; the record is the thing an
+ * attacker with file access would edit. One option makes a short tag an
+ * error rather than a weaker check.
+ */
+const GCM = { authTagLength: 16 } as const;
+
 // The account's own data key, when the platform holds one; the install key
 // otherwise. See platform.ts — locally there is no account key.
 const tenantKey = (tenant: string) => platform.tenantKey(tenant);
@@ -135,7 +146,7 @@ export function encryptValue(
 ): { iv: string; tag: string; data: string; k?: "tenant" } {
   const { key, mark } = keyFor(tenant);
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, GCM);
   const enc = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return {
     iv: iv.toString("base64"),
@@ -180,6 +191,7 @@ function decrypt(tenant: string, rec: StoredSecret | undefined): string | null {
       "aes-256-gcm",
       key,
       Buffer.from(rec.iv, "base64"),
+      GCM,
     );
     decipher.setAuthTag(Buffer.from(rec.tag, "base64"));
     return Buffer.concat([
@@ -357,7 +369,7 @@ export function rotateMasterKey(
       }
       let plain: string;
       try {
-        const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"));
+        const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"), GCM);
         d.setAuthTag(Buffer.from(rec.tag, "base64"));
         plain = Buffer.concat([d.update(Buffer.from(rec.data, "base64")), d.final()]).toString("utf8");
       } catch {
@@ -366,7 +378,7 @@ export function rotateMasterKey(
         continue;
       }
       const iv = crypto.randomBytes(12);
-      const c = crypto.createCipheriv("aes-256-gcm", newKey, iv);
+      const c = crypto.createCipheriv("aes-256-gcm", newKey, iv, GCM);
       const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
       next[name] = {
         iv: iv.toString("base64"),
