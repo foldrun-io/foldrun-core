@@ -53,4 +53,6 @@ git push --follow-tags       # this publishes
 ```
 
 The tag is what publishes; CI builds, tests and pushes to npm with
-provenance. Nothing publishes from a laptop.
+provenance. Nothing publishes from a laptop, and there is no publish token
+anywhere — npm trusts this repository and `release.yml` by name (trusted
+publishing), and each run mints its own short-lived credential.

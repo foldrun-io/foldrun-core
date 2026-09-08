@@ -6,9 +6,20 @@ name: release
 #
 # The build runs here rather than on a laptop so what reaches npm is what is
 # in the tag, and `--provenance` signs that link: npm shows the workflow,
-# the commit and the repository that produced the tarball. That needs
-# `id-token: write` below and an npm *automation* token in NPM_TOKEN
-# (a granular access token, which is exempt from the account's 2FA prompt).
+# the commit and the repository that produced the tarball.
+#
+# AUTHENTICATION IS TRUSTED PUBLISHING, NOT A TOKEN. npm disabled classic
+# (non-expiring) tokens in November 2025 and capped write-enabled granular
+# ones at 90 days, so any stored secret here would be a calendar reminder
+# that eventually fails a release at the worst moment. Instead npm trusts
+# this repository and this workflow file by name, and each run mints its
+# own short-lived credential from the OIDC token `id-token: write` grants.
+# Nothing is stored, nothing rotates, nothing can leak.
+#
+# One-time setup, per package, on npmjs.com → the package → Settings →
+# Trusted Publisher: GitHub Actions, this org, this repo, `release.yml`.
+# Until that exists the publish step fails saying so — which is the right
+# failure, because the alternative is a token nobody remembers renewing.
 on:
   push:
     tags: ["v*"]
@@ -41,9 +52,11 @@ jobs:
           pkg="$(node -p "require('./package.json').version")"
           [ "$tag" = "$pkg" ] || { echo "tag $tag != package.json $pkg"; exit 1; }
 
+      # Trusted publishing needs npm 11.5.1 or newer; the one bundled with
+      # Node 22 is older than that.
+      - run: npm install -g npm@latest
+
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # The release notes are the changelog section for this version, taken
       # verbatim: one description of the change, not two that drift.
