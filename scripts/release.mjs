@@ -159,16 +159,27 @@ pkg.version = next;
 fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
 // The lockfile carries the version too; a release that leaves it behind
-// makes the next `npm ci` disagree with the package it just built.
+// makes the next `npm ci` disagree with the package it just built. Only
+// when git actually TRACKS it: a package that gitignores its lockfile
+// still has one on disk, and `git add` on an ignored path fails the whole
+// release — which it did, halfway through, leaving a bumped package.json
+// with no commit and no tag.
 const lockPath = path.join(root, "package-lock.json");
-if (fs.existsSync(lockPath)) {
+const lockTracked = (() => {
+  try {
+    return git("ls-files", "--", "package-lock.json") !== "";
+  } catch {
+    return false;
+  }
+})();
+if (lockTracked) {
   const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
   lock.version = next;
   if (lock.packages?.[""]) lock.packages[""].version = next;
   fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + "\n");
 }
 
-git("add", "CHANGELOG.md", "package.json", ...(fs.existsSync(lockPath) ? ["package-lock.json"] : []));
+git("add", "CHANGELOG.md", "package.json", ...(lockTracked ? ["package-lock.json"] : []));
 git("commit", "-m", `release ${next}`);
 git("tag", "-a", `v${next}`, "-m", `${pkg.name} ${next}`);
 console.log(`\ntagged v${next} — \`git push --follow-tags\` publishes it`);
