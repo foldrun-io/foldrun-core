@@ -188,13 +188,16 @@ a hand-edited template cannot ship an index that disagrees with its own files.
 ## Hosting it
 
 This package is the framework: everything needed to read a workspace and
-run it on the machine you are on. The hosted platform at
-[foldrun.io](https://foldrun.io) — a queue and its worker, one gVisor pod
-per step, a vault, metering, a team — is built on it, in a separate private
-package that plugs in through `src/platform.ts`. Nothing in this repository
-imports it, so what is here is exactly what is open. There is no
-self-hosted platform; `foldrun deploy` and `git push` move a workspace from
-your machine to the hosted one unchanged.
+run it on the machine you are on. The platform — the dashboard, a queue and
+its worker, one sandbox per step, a vault, metering, a team — is built on
+it, in a separate package that plugs in through `src/platform.ts`. Nothing
+in this repository imports it, so what is here is exactly what is open.
+
+**Run the platform yourself:** one container, one command —
+[self-hosting/](self-hosting/). Sign up at `localhost:3900`, and
+`foldrun deploy` moves a workspace from your machine to it unchanged. The
+images are the same builds that run foldrun's own installation, published
+under the same versions.
 
 ## Requirements
 
