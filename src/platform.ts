@@ -18,7 +18,20 @@ import type { EgressHooks } from "./egress.ts";
 
 export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
+/** Who this install is for. `hosted` means someone is paying the operator
+ *  for it — a wallet, a plan, a bill. `self-hosted` is everything else: a
+ *  laptop, a company's own box, the open-source download. */
+export type Edition = "self-hosted" | "hosted";
+
 export interface PlatformHooks {
+  /** Is this a hosted install? The ONE question every commercial surface —
+   *  the wallet, top-ups, plan limits, whatever is added next that assumes
+   *  a customer — asks before it renders or answers. Default: self-hosted,
+   *  which is what a process that never registered a platform is, and what
+   *  the open-source image is unless its operator configures billing. One
+   *  predicate, one place, so "does the community build show X" is a test
+   *  and not an audit. */
+  edition(): Edition;
   /** Put a flow run where a worker will pick it up. Default: start it here, now. */
   enqueueFlowRun(
     tenant: string,
@@ -58,6 +71,7 @@ export interface PlatformHooks {
 }
 
 const local: PlatformHooks = {
+  edition: () => "self-hosted",
   async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = []) {
     // Imported here, not at the top: runner.ts imports this file.
     const { startFlowRun } = await import("./runner.ts");
