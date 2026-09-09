@@ -39,6 +39,7 @@ import {
   parseToolDef,
   parseFlow,
   readFlow,
+  markerPresent,
   parseApis,
   resolveModel,
   parseProvider,
@@ -2798,36 +2799,45 @@ function driveRunInner(
         // `when:` — skip a step whose condition isn't met by prior results.
         for (const step of freshGroup) {
           if (step.status !== "pending" || !step.when) continue;
-          const met = (ctx ?? "").toLowerCase().includes(step.when.toLowerCase());
+          // A marker at the start of a line, not a word anywhere in the
+          // prose — see markerPresent. "There are no BLOCKED items" must
+          // not open a gate keyed on BLOCKED.
+          const met = markerPresent(ctx, step.when);
           if (!met) {
             step.status = "skipped";
             step.skipReason = `condition not met: when "${step.when}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: `skipped — previous results do not mention "${step.when}"`,
+              text: `skipped — no previous result has a line beginning "${step.when}" (when: reads a marker at the start of a line, not a word in a sentence)`,
             });
           }
         }
         save();
 
         // `case:`/`else:` — exclusive routing. Of this group's case steps,
-        // the FIRST whose text appears in the previous results runs; the
-        // rest are routed past. `else:` runs only when no case matched.
+        // the FIRST whose marker leads a line of the previous results runs;
+        // the rest are routed past. `else:` runs only when no case matched.
         // (`when:` above stays independent — every matching when runs —
         // which is why routing is its own vocabulary instead of a mode.)
+        //
+        // Same marker rule as `when:`, and it matters more here: routing is
+        // exclusive, so a label matched out of a sentence does not merely
+        // run an extra step, it sends the flow down the wrong branch and
+        // skips the right one. "This is not a COMPLAINT, it is a QUESTION"
+        // used to route to the complaints handler.
         const caseSteps = freshGroup.filter((s) => s.status === "pending" && s.case);
         if (caseSteps.length || freshGroup.some((s) => s.status === "pending" && s.else)) {
           let matchedCase: StepRecord | null = null;
           for (const step of caseSteps) {
-            if (!matchedCase && (ctx ?? "").toLowerCase().includes(step.case!.toLowerCase())) {
+            if (!matchedCase && markerPresent(ctx, step.case!)) {
               matchedCase = step;
               continue;
             }
             step.status = "skipped";
             step.skipReason = matchedCase
               ? `routed past — "${matchedCase.case}" matched first`
-              : `case not matched: "${step.case}"`;
+              : `case not matched: no previous result has a line beginning "${step.case}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
