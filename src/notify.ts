@@ -36,7 +36,7 @@ import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
-import { noteSecretUse } from "./secret-health.ts";
+import { noteSecretUse, healthKey } from "./secret-health.ts";
 
 /**
  * The platform's own mail: an invite, a low balance.
@@ -74,6 +74,14 @@ export function accountMail(tenant: string): { key: string; from: string } | nul
  */
 export function notifyMail(tenant: string): { key: string; from: string } | null {
   return accountMail(tenant) ?? platformMail(tenant);
+}
+
+/** Was the mail sent on the account's own key? Only then is a refusal from
+ *  Resend a fact about a secret the account holds. Recording a platform-key
+ *  failure against a RESEND_API_KEY the account does not have would send
+ *  them to rotate a key that does not exist. */
+function noteMailUse(tenant: string, status: number): void {
+  if (accountMail(tenant)) noteSecretUse(tenant, healthKey("RESEND_API_KEY", "account"), { host: "api.resend.com", status });
 }
 
 export interface NotifyConfig {
@@ -127,8 +135,8 @@ let warnedNoPublicUrl = false;
  * `x-foldrun-signature` is a hex SHA-256 HMAC over "<timestamp>.<body>",
  * keyed by the named vault secret — the timestamp is inside the signed
  * string so a captured delivery cannot be replayed later with a fresh one.
- * The same shape the inbound side already verifies for `hmac`, read from
- * the other end.
+ * `x-signature` is the plain HMAC of the body beside it, the scheme the
+ * inbound `signature: hmac` verifies.
  *
  * No secret named, no headers: signing is opt-in, and a receiver that does
  * not check one is no worse off than before.
@@ -149,7 +157,13 @@ export function signatureHeaders(
   }
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const mac = crypto.createHmac("sha256", secret.value).update(`${timestamp}.${body}`).digest("hex");
-  return { "x-foldrun-timestamp": timestamp, "x-foldrun-signature": `sha256=${mac}` };
+  // Two headers. `x-foldrun-signature` is the timestamped one, and what a
+  // receiver should check. `x-signature` is the plain HMAC of the body,
+  // which is what the inbound `signature: hmac` verifies — so a foldrun
+  // notification pointed at another foldrun webhook flow is accepted, and
+  // any receiver written against the plain scheme keeps working.
+  const plain = crypto.createHmac("sha256", secret.value).update(body).digest("hex");
+  return { "x-foldrun-timestamp": timestamp, "x-foldrun-signature": `sha256=${mac}`, "x-signature": plain };
 }
 
 /**
@@ -310,7 +324,7 @@ export async function sendTestNotification(
         body: JSON.stringify({ from: mail.from, to: config.email, subject: headline, text: `${headline}\n\n${detail}\n` }),
         signal: AbortSignal.timeout(8000),
       });
-      noteSecretUse(tenant, "RESEND_API_KEY", { host: "api.resend.com", status: res.status });
+      noteMailUse(tenant, res.status);
       const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
       return res.ok
         ? { ok: true, destination: `${config.email} (from ${mail.from})`, detail: "accepted by Resend for delivery" }
@@ -446,7 +460,7 @@ export async function sendRunNotification(
         }),
         signal: AbortSignal.timeout(8000),
       });
-      noteSecretUse(tenant, "RESEND_API_KEY", { host: "api.resend.com", status: res.status });
+      noteMailUse(tenant, res.status);
       if (!res.ok) {
         // Resend's body says WHY — "domain not verified", "can only send to
         // your own address" — and a status alone sent someone to the wrong

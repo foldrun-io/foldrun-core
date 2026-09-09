@@ -176,6 +176,16 @@ export async function testTool(
     // test runs the identical program from the identical directory.
     const inlineCode = typeof def.spec.code === "string" ? def.spec.code : "";
     const inline = !run && !!inlineCode;
+    if (inline && !caller) {
+      // Nowhere to stand: the file would land at the workspace root, which
+      // is not where a run puts it and not somewhere a deploy diff should
+      // find it. Say what is missing instead.
+      return done({
+        ok: false, transport: "script", missingSecrets: [],
+        summary: "no agent to test it from",
+        detail: "This tool carries its code inline and is materialised inside the calling agent's folder. Grant it to an agent (tools:) and test again.",
+      });
+    }
     if (inline) {
       const ext = typeof def.spec.codeExt === "string" ? def.spec.codeExt : ".mjs";
       const codeDir = path.join(cwd, ".tool-code");

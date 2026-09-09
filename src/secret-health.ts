@@ -22,7 +22,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { accountDir } from "./store.ts";
+
+/** How a credential is identified here. A name alone is not enough: the
+ *  account and each workspace can hold a secret by the same name, and they
+ *  are different credentials with different health. */
+export function healthKey(name: string, scope: "account" | "workspace", workspace?: string | null): string {
+  return scope === "workspace" && workspace ? `workspace:${workspace}:${name}` : `account:${name}`;
+}
 
 export interface SecretUse {
   /** ISO time of the most recent use. */
@@ -62,9 +70,51 @@ function read(tenant: string): HealthFile {
 function write(tenant: string, data: HealthFile): void {
   const file = healthFile(tenant);
   if (!fs.existsSync(path.dirname(file))) return;
-  const tmp = `${file}.${process.pid}`;
+  // pid alone is not unique across pods on a shared volume.
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, file);
+}
+
+// Writes are queued and coalesced off the caller's path. The egress proxy
+// notes a use per secret per request, before it streams the response body,
+// and a synchronous read-modify-write of a JSON file there is latency on
+// every proxied call — "never blocks" has to be true, not aspirational.
+// One writer per process; the queue drains in order.
+const pending = new Map<string, { name: string; use: { host: string; status: number | null; at?: string } }[]>();
+let draining = false;
+
+function drain(): void {
+  if (draining) return;
+  draining = true;
+  setImmediate(() => {
+    try {
+      for (const [tenant, uses] of pending) {
+        pending.delete(tenant);
+        const data = read(tenant);
+        for (const { name, use } of uses) apply(data, name, use);
+        write(tenant, data);
+      }
+    } catch {
+      // best effort, always
+    } finally {
+      draining = false;
+      if (pending.size) drain();
+    }
+  });
+}
+
+function apply(data: HealthFile, name: string, use: { host: string; status: number | null; at?: string }): void {
+  const outcome = outcomeFor(use.status);
+  const at = use.at ?? new Date().toISOString();
+  const prev = data[name];
+  data[name] = {
+    last: { at, host: use.host, status: use.status, outcome },
+    // Only a refusal counts against a key. An error at the other end is
+    // the other end's problem and must not accumulate into a false alarm.
+    refusals: outcome === "refused" ? (prev?.refusals ?? 0) + 1 : outcome === "accepted" ? 0 : prev?.refusals ?? 0,
+    lastAccepted: outcome === "accepted" ? at : prev?.lastAccepted ?? null,
+  };
 }
 
 /** 401, 402 and 403 are the credential being refused. Everything else is
@@ -79,32 +129,29 @@ export function outcomeFor(status: number | null): SecretUse["outcome"] {
 }
 
 /**
- * Record one use. Never throws and never blocks: this runs on the hot path
- * of every proxied request, and a diagnostic that can fail a tool call is
- * worse than no diagnostic.
+ * Record one use. `key` is a health key (see healthKey), never a bare name.
+ * Never throws and never blocks: the write is queued and happens off the
+ * caller's path, because this runs on every proxied request.
  */
 export function noteSecretUse(
   tenant: string,
-  name: string,
+  key: string,
   use: { host: string; status: number | null; at?: string },
 ): void {
-  try {
-    if (!name) return;
-    const data = read(tenant);
-    const outcome = outcomeFor(use.status);
-    const at = use.at ?? new Date().toISOString();
-    const prev = data[name];
-    data[name] = {
-      last: { at, host: use.host, status: use.status, outcome },
-      // Only a refusal counts against a key. An error at the other end is
-      // the other end's problem and must not accumulate into a false alarm.
-      refusals: outcome === "refused" ? (prev?.refusals ?? 0) + 1 : outcome === "accepted" ? 0 : prev?.refusals ?? 0,
-      lastAccepted: outcome === "accepted" ? at : prev?.lastAccepted ?? null,
-    };
-    write(tenant, data);
-  } catch {
-    // best effort, always
-  }
+  if (!key) return;
+  const list = pending.get(tenant) ?? [];
+  list.push({ name: key, use: { ...use, at: use.at ?? new Date().toISOString() } });
+  pending.set(tenant, list);
+  drain();
+}
+
+/** Wait for queued writes to land — for tests, and for a process that is
+ *  about to exit. */
+export function flushSecretHealth(): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => (pending.size === 0 && !draining ? resolve() : setImmediate(check));
+    check();
+  });
 }
 
 /** Everything known about this account's credentials, by name. Names the

@@ -1263,6 +1263,16 @@ const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–
 
 const OPTION_RE = /^\s+([a-z-]+):\s*(.+)$/;
 
+/** The option keys a step actually has. An indented `word: rest` that is
+ *  NOT one of these is a line of the instruction — "Warning: do not
+ *  publish" is prose that happens to contain a colon, and it used to be
+ *  swallowed as an unknown option, silently, along with any typo of a real
+ *  key. The consistency suite reads this list against the docs. */
+const STEP_OPTION_KEYS = new Set([
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "loop", "max", "model",
+  "on-fail", "onfail", "output", "preview", "retry", "timeout", "until", "verify", "wait", "when",
+]);
+
 /** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
  *  days: a wait is a pause in a flow, not a second scheduler. */
 export function parseWait(value: string): number | undefined {
@@ -1337,7 +1347,9 @@ export function markerPresent(text: string | null | undefined, marker: string): 
   for (const raw of text.split("\n")) {
     // Strip what markdown puts in front of a headline: heading hashes,
     // quote marks, list bullets, emphasis, backticks.
-    const line = raw.replace(/^[\s>#*_`\-+]*/, "").toLowerCase();
+    // Heading hashes, quote marks, bullets, numbered-list markers, task
+    // checkboxes, a leading table pipe, emphasis, backticks.
+    const line = raw.replace(/^(?:[\s>#*_`\-+|]|\d+[.)](?=\s)|\[[ xX]\])*/, "").toLowerCase();
     if (!line.startsWith(needle)) continue;
     const after = line[needle.length];
     // End of line, or a separator. A letter or digit means this is a longer
@@ -1383,13 +1395,13 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     // Indentation is what makes it a continuation, exactly as it is for an
     // option. Unindented prose between steps is still prose and still
     // ignored, so a flow file's commentary is undisturbed.
-    if (steps.length && /^\s+\S/.test(line) && !OPTION_RE.test(line)) {
+    const opt = line.match(OPTION_RE);
+    if (steps.length && /^\s+\S/.test(line) && !(opt && STEP_OPTION_KEYS.has(opt[1]))) {
       const step = steps[steps.length - 1];
       step.instruction = `${step.instruction} ${line.trim()}`.trim();
       continue;
     }
     // Indented options belong to the step above them.
-    const opt = line.match(OPTION_RE);
     if (opt && steps.length) {
       const step = steps[steps.length - 1];
       const [, key, rawValue] = opt;
@@ -1455,7 +1467,10 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         ? data.signing_secret.trim().replace(/^\$\{|\}$/g, "")
         : null,
     path: typeof data.path === "string" ? data.path.trim().replace(/^\/+/, "") : null,
-    idempotency: typeof data.idempotency === "string" ? data.idempotency.trim().toLowerCase() || null : null,
+    // A header name is case-insensitive on the wire; a JSON field is not.
+    // `body:eventId` lower-cased to `body:eventid` matched nothing, and a
+    // dedupe that matches nothing admits everything.
+    idempotency: typeof data.idempotency === "string" ? idempotencyName(data.idempotency) : null,
     debounce: durationOf(data.debounce),
     throttle: durationOf(data.throttle),
     catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
@@ -1467,6 +1482,12 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     approveWithin: durationOf(data.approve_within),
     steps,
   };
+}
+
+function idempotencyName(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  return v.toLowerCase().startsWith("body:") ? `body:${v.slice(5).trim()}` : v.toLowerCase();
 }
 
 /** A duration frontmatter value — "30m", "2d", or bare seconds — or null.
@@ -2604,9 +2625,6 @@ export interface RunRecord {
    *  Kept so a gate can refuse the one approval nobody should be able to
    *  give — your own. */
   startedBy?: string | null;
-  /** Set once a run has been reported as past its flow's `sla:`, so the
-   *  alarm sounds once rather than on every sweep. */
-  slaNotifiedAt?: string | null;
   /** When this run's gate stops waiting, stamped the moment it parks from
    *  the flow's `approve_within:`. A gate nobody answers by then is rejected
    *  and the run fails, rather than holding a concurrency slot forever. */

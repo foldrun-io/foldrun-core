@@ -86,6 +86,11 @@ export function hostOf(url: string): string | null {
 export interface EgressGrant {
   /** Secret name → the hosts that secret may be substituted for. */
   secrets: Record<string, { value: string; hosts: string[] }>;
+  /** Secret name → the vault entry it came from, as secret-health keys it:
+   *  "account:NAME" or "workspace:<ws>:NAME". Two workspaces each holding an
+   *  API_KEY are two credentials, and one's refusal must not paint the
+   *  other red. Absent for a secret whose origin the runner did not know. */
+  healthKeys?: Record<string, string>;
 }
 
 export interface EgressLease {

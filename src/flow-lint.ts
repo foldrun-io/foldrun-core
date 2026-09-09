@@ -47,10 +47,21 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   // eleven runs where one was meant. Nothing about the expression looks wrong,
   // which is exactly why it needs saying here rather than being discovered on
   // the bill.
-  // A gate that can never be answered. `approvers:` naming addresses that
-  // are nobody, or a flow with an approvers list and no gate at all, is a
-  // rule the author believes is in force and which does nothing — the worst
-  // kind of safety control.
+  // An approvers list only one word can satisfy. `approvers: [editors]` is
+  // a role that is not `admins` and not an address; mayApprove would then
+  // refuse every person, and the gate could only ever be answered by an
+  // emailed link. Said here rather than discovered at the gate.
+  const odd = (flow.approvers ?? []).filter((a) => a !== "admins" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+  if (odd.length) {
+    warnings.push({
+      step: null,
+      message: `approvers: ${odd.join(", ")} — not an email address, and the only role word is admins`,
+      detail: "Each entry is an address that may answer this flow's gates, or the word `admins`. Anything else matches nobody, and a list nobody matches locks every gate.",
+    });
+  }
+  // A flow with an approvers list and no gate at all is a rule the author
+  // believes is in force and which does nothing — the worst kind of safety
+  // control.
   if (flow.approvers?.length && !flow.steps.some((s) => s.approve || s.ask)) {
     warnings.push({
       step: null,
