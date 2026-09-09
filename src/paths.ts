@@ -77,3 +77,32 @@ export function dataRoot(): string {
 export function singleWorkspace(): string | null {
   return process.env.FOLDRUN_WORKSPACE ?? null;
 }
+
+// ------------------------------------------------------- linear trimming
+//
+// `s.replace(/\/+$/, "")` is the obvious way to drop trailing slashes and
+// it is quadratic: the engine tries `\/+` from every position and fails at
+// `$` each time, so a string of ten thousand slashes is fifty million
+// steps. Several of these strings come from a customer's own files — a
+// base_url, a tool's base, a storage prefix — which is exactly the input
+// that must not be able to stall a worker. A loop is linear and reads the
+// same.
+
+/** Without leading and/or trailing slashes. */
+export function trimSlashes(s: string, where: "start" | "end" | "both" = "end"): string {
+  let a = 0;
+  let b = s.length;
+  if (where !== "end") while (a < b && s[a] === "/") a++;
+  if (where !== "start") while (b > a && s[b - 1] === "/") b--;
+  return s.slice(a, b);
+}
+
+/** Without any of `chars` at the ends — the linear form of
+ *  `.replace(/^[chars]+/, "").replace(/[chars]+$/, "")`. */
+export function trimChars(s: string, chars: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && chars.includes(s[a])) a++;
+  while (b > a && chars.includes(s[b - 1])) b--;
+  return s.slice(a, b);
+}

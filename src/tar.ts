@@ -10,6 +10,7 @@
 // argument about which library to add.
 
 import zlib from "node:zlib";
+import { trimSlashes } from "./paths.ts";
 
 const BLOCK = 512;
 
@@ -100,7 +101,7 @@ export function stripRoot(entries: TarEntry[]): TarEntry[] {
  * case, since a repo usually holds more than one thing.
  */
 export function filesFromTarball(gz: Buffer, subdir = ""): { path: string; content: string }[] {
-  const prefix = subdir.replace(/^\/+|\/+$/g, "");
+  const prefix = trimSlashes(subdir, "both");
   const out: { path: string; content: string }[] = [];
 
   for (const entry of stripRoot(readTarGz(gz))) {

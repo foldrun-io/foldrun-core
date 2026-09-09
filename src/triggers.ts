@@ -154,6 +154,19 @@ export async function fireStorageTriggers(
   return started;
 }
 
+/** HTML to the text a prompt reads. Style and script blocks are removed
+ *  until none remain — one pass leaves `<sty<style>le>` behind, which is
+ *  the shape a sanitiser checker (rightly) flags. Nothing here is rendered
+ *  as HTML afterwards; it becomes a task for an agent. */
+function stripTags(html: string): string {
+  let out = html;
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+  }
+  return out.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 // ------------------------------------------------------- idempotency keys
 
 /**
@@ -343,7 +356,7 @@ export function normaliseInboundEmail(contentType: string | null, raw: string): 
   const html = pick("html", "HtmlBody", "body-html");
   const text =
     pick("text", "TextBody", "body-plain", "stripped-text", "plain") ||
-    html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    stripTags(html);
   if (!from && !subject && !text) return null;
   return { from, to: pick("to", "To", "recipient", "ToFull"), subject, text };
 }

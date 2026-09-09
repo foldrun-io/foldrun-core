@@ -47,6 +47,7 @@ import {
 import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
+import { trimSlashes } from "./paths.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -974,7 +975,7 @@ export function parseApis(raw: unknown): ApiSpec[] {
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
       ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
-      base: base.replace(/\/+$/, ""),
+      base: trimSlashes(base),
       description: typeof e.description === "string" ? e.description : "",
       headers: asRecordLocal(e.headers),
       query: asRecordLocal(e.query),
@@ -1259,9 +1260,16 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
 
 // A step targets an agent — `[[writer]]` — or another flow — `[[flow:digest]]`,
 // which is how one flow triggers another.
-const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(.*)$/;
+// `(\S.*|)` rather than `(.*)`: the instruction either starts with a
+// non-space or is empty, so the `\s*` before it has exactly one way to
+// match. With `(.*)` both could own the same spaces, which is quadratic on
+// a line of them — and a flow file is customer input.
+const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(\S.*|)$/;
 
-const OPTION_RE = /^\s+([a-z-]+):\s*(.+)$/;
+// One quantifier after the colon; the value is trimmed by unquote(). A key
+// with nothing after it is an option with an empty value, which is what it
+// says, rather than a line that vanished.
+const OPTION_RE = /^\s+([a-z-]+):(.*)$/;
 
 /** The option keys a step actually has. An indented `word: rest` that is
  *  NOT one of these is a line of the instruction — "Warning: do not

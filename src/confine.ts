@@ -148,7 +148,12 @@ export const isFilesystemTool = (toolName: string) => FS_TOOLS.has(toolName);
  */
 export function suggestPath(raw: string): string {
   const posix = raw.split(path.sep).join("/");
-  const m = posix.match(/(?:^|\/)(outputs|storage|state|memory|knowledge)\/(.+)$/);
+  // By segments, not by regex: an unanchored `(.+)$` re-scans from every
+  // slash, and this runs on a path an agent chose.
+  const KNOWN = ["outputs", "storage", "state", "memory", "knowledge"];
+  const segs = posix.split("/");
+  const at = segs.findIndex((seg, i) => KNOWN.includes(seg) && segs.slice(i + 1).join("/") !== "");
+  const m = at === -1 ? null : ([null, segs[at], segs.slice(at + 1).join("/")] as const);
   if (m) {
     const [, dir, rest] = m;
     return dir === "outputs"

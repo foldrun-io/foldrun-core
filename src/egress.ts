@@ -35,6 +35,8 @@
 // platform's (it needs a long-lived process and a Service); the pod side is
 // here in core, because it is what the runner image runs.
 
+import { trimSlashes } from "./paths.ts";
+
 /** `${NAME}` — the shape a secret reference takes everywhere in foldrun. */
 export const PLACEHOLDER = /\$\{([A-Z][A-Z0-9_]*)\}/g;
 
@@ -51,7 +53,7 @@ export const MODEL_KEY_NAME = "FOLDRUN_MODEL_KEY";
  */
 export function viaEgress(egress: string | undefined | null, target: string): string {
   if (!egress) return target;
-  return `${egress.replace(/\/+$/, "")}/${target}`;
+  return `${trimSlashes(egress)}/${target}`;
 }
 
 /** The names referenced by placeholders in a string. */
