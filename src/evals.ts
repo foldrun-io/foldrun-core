@@ -326,7 +326,7 @@ export function promoteRunToEval(
         409,
       );
     }
-    content = `${existing.replace(/\s+$/, "")}\n\n${caseText}`;
+    content = `${existing.trimEnd()}\n\n${caseText}`;
   } else {
     // A flow eval costs a whole run and touches real systems, so it waits
     // for a person to press Run rather than following every push.
