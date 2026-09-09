@@ -41,6 +41,7 @@ export function readFrontmatter(file: string): Record<string, unknown> {
 }
 import { ownToolNames, legacyUseNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
+import { parseBudget, budgetProblem } from "./budget.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
@@ -790,6 +791,12 @@ export interface AgentInfo {
    *  list withholds all of them. */
   skills: string[] | null;
   secrets: string[];
+  /** `budget:` — the most this agent may spend in ONE run, in USD, across
+   *  every step it takes in it; null is no cap. Per run and nothing else:
+   *  an agent has no calendar, the workspace and the account do. */
+  budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
 }
 
 // Recognised HTTP verbs a tool may declare. Deliberately NOT named
@@ -1104,6 +1111,8 @@ export interface FlowInfo {
    *  that crosses it is the last one that runs. Null: no cap of its own
    *  (the workspace's monthly `budget:` still applies). */
   budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
   /** `trigger: flow` — start when this other flow of the workspace finishes,
    *  with `on:` saying which endings count. The finished run's summary and
    *  result become this run's task. */
@@ -1232,6 +1241,13 @@ export function agentAssets(tenant: string, workspace: string, agent: string): A
   return { skills, memory };
 }
 
+/** A per-run `budget:` as a number, or null. A period other than "run"
+ *  written here is a mistake the lint names; it is not silently a cap. */
+function runBudget(raw: unknown): number | null {
+  const b = parseBudget(raw, "run");
+  return b && b.period === "run" ? b.usd : null;
+}
+
 export function listAgents(tenant: string, workspace: string): AgentInfo[] {
   const dir = path.join(workspaceDir(tenant, workspace), "agents");
   if (!fs.existsSync(dir)) return [];
@@ -1254,6 +1270,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         consults: refNames(data.agents),
         skills: data.skills === undefined ? null : refNames(data.skills),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
+        budget: runBudget(data.budget),
+        budgetProblem: budgetProblem(data.budget, ["run"]),
       };
     });
 }
@@ -1459,7 +1477,8 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
     priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
-    budget: Number(data.budget) > 0 ? Number(data.budget) : null,
+    budget: runBudget(data.budget),
+    budgetProblem: budgetProblem(data.budget, ["run"]),
     // `after: [[flow:publish]]` — a link or a bare name, read the same way
     // as every other file-naming field (refs.ts).
     after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,

@@ -140,6 +140,9 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
 
   // Trigger shapes that can never fire, said at check time rather than
   // discovered as a flow that "never runs".
+  if (flow.budgetProblem) {
+    warnings.push({ step: null, message: flow.budgetProblem, detail: "A flow's `budget:` is the most one run may spend — a number in USD, or `unlimited`. A cap over a day, week or month belongs in the workspace's or the account's AGENTS.md, where it means every run put together." });
+  }
   if (flow.trigger === "once" && !flow.at) {
     warnings.push({ step: null, message: "trigger: once needs an `at:` instant", detail: "Write `at: 2026-09-05T09:00:00+10:00` (ISO 8601). Without a readable instant this flow never fires." });
   }

@@ -9,12 +9,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startFlowRun, waitForRun } from "../src/runner.ts";
-import { parseFlow, type FlowStep } from "../src/store.ts";
+import { parseFlow, listAgents, type FlowStep } from "../src/store.ts";
 
 async function withStubbedRun(
   agents: Record<string, string>,
   flowFile: string,
   body: (run: NonNullable<Awaited<ReturnType<typeof waitForRun>>["run"]>) => void,
+  /** Extra frontmatter lines per agent — `budget: 0.5` and the like. */
+  agentFront: Record<string, string> = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-budget-"));
   const prevData = process.env.FOLDRUN_DATA;
@@ -26,7 +28,7 @@ async function withStubbedRun(
     for (const [name, stub] of Object.entries(agents)) {
       const dir = path.join(ws, "agents", name);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, "agent.md"), `---\nname: ${name}\ndescription: stub\n---\n\nStub.\n`);
+      fs.writeFileSync(path.join(dir, "agent.md"), `---\nname: ${name}\ndescription: stub\n${agentFront[name] ? agentFront[name] + "\n" : ""}---\n\nStub.\n`);
       fs.writeFileSync(path.join(dir, "stub.md"), stub);
     }
     fs.mkdirSync(path.join(ws, "flows"), { recursive: true });
@@ -86,4 +88,34 @@ test("no budget: the record says so and the run is unbounded", () =>
       assert.equal(run.status, "completed");
       assert.equal(run.budgetUsd, null);
     },
+  ));
+
+test("an agent's own budget: is per run — its next step in the same run is refused when it has spent the cap", () =>
+  withStubbedRun(
+    { a: "cost: 0.60\nfirst", b: "cost: 0.10\nsecond" },
+    "---\nname: capped\n---\n1. [[a]] — one\n2. [[b]] — two\n3. [[a]] — again\n",
+    (run) => {
+      assert.equal(run.budgetUsd, null, "the flow itself set no cap");
+      const [one, two, again] = run.steps;
+      assert.equal(one.status, "completed");
+      assert.equal(two.status, "completed", "another agent is not bound by a's cap");
+      assert.equal(again.status, "failed");
+      assert.equal(again.attempts ?? 0, 0, "it was never started");
+      assert.match(again.events.at(-1)!.text, /over budget — nothing left to spend before this step \(budget: on the a agent\)/);
+      assert.equal(run.status, "failed");
+    },
+    { a: "budget: 0.5" },
+  ));
+
+test("an agent's budget: written with a period is not a cap — the lint names it, the run ignores it", () =>
+  withStubbedRun(
+    { a: "cost: 0.60\nfirst" },
+    "---\nname: capped\n---\n1. [[a]] — one\n2. [[a]] — again\n",
+    (run) => {
+      assert.equal(run.status, "completed");
+      const a = listAgents("acme", "desk").find((x) => x.name === "a")!;
+      assert.equal(a.budget, null);
+      assert.match(a.budgetProblem!, /per run/);
+    },
+    { a: "budget: 0.5/day" },
   ));
