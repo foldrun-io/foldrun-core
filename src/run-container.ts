@@ -61,6 +61,7 @@ export interface ContainerStepInput {
   /** The step's spend ceiling and the model's per-token price — see
    *  step-exec.ts. Values, so the driver can enforce them in the pod. */
   budgetUsd?: number | null;
+  budgetNote?: string;
   price?: { input: number; output: number } | null;
   verify?: string;
   /** `output: json` — checked inside, where the reply is. */
@@ -425,6 +426,7 @@ try {
     env,
     timeoutSec: input.timeoutSec,
     budgetUsd: input.budgetUsd,
+    budgetNote: input.budgetNote,
     price: input.price,
     verify: input.verify,
     verifyEnv: {},

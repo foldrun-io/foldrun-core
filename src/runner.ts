@@ -8,7 +8,7 @@ import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import {
-  knownPrice, executeStep, extractJson, stepCeiling, type EventExtra } from "./step-exec.ts";
+  knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -58,6 +58,7 @@ import {
   type StepRecord,
   STORAGE_DIR,
   adoptLegacyVersionKey,
+  listAgents,
   runCost,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, type Catalog } from "./catalog.ts";
@@ -1220,6 +1221,8 @@ async function runStep(
    *  remaining `budget:`, shared across the steps launched with it. Null
    *  means the flow set no budget. */
   stepBudgetUsd: number | null = null,
+  /** Which line set that ceiling, for the error that names it. */
+  stepBudgetNote?: string,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1675,6 +1678,7 @@ async function runStep(
           consults,
           timeoutSec: step.timeout,
           budgetUsd: stepBudgetUsd,
+          budgetNote: stepBudgetNote,
           price: tokenPrice,
           verify: step.verify,
           output: step.output,
@@ -1860,6 +1864,7 @@ async function runStep(
         env: { ...process.env, ...clockEnv, ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
+          budgetNote: stepBudgetNote,
         price: tokenPrice,
         verify: step.verify,
         output: step.output,
@@ -2984,10 +2989,32 @@ function driveRunInner(
         // twenty steps over — the shares sum to what was left. Between
         // groups the check above still refuses to start the next one.
         const launching = freshGroup.filter((s) => s.status === "pending");
-        const ceilingUsd = stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length);
+        const flowShareUsd = stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length);
+        // An agent's own `budget:` — the most it may spend in one run — is
+        // read at launch, so a cap raised mid-run applies to the next step.
+        const agentBudgets = new Map(listAgents(tenant, workspace).map((a) => [a.name, a.budget]));
         await Promise.all(
           launching
             .map(async (step) => {
+              const ceiling = stepCeilingFor(
+                flowShareUsd,
+                agentBudgets.get(step.agent),
+                run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
+                step.agent,
+              );
+              // Nothing left is a refusal, not "no ceiling": a zero passed
+              // down would read as unset, and the one step that must not
+              // run would run with no cap at all.
+              if (ceiling.ceilingUsd === 0) {
+                step.status = "failed";
+                step.events.push({
+                  t: new Date().toISOString(),
+                  type: "error",
+                  text: `over budget — nothing left to spend before this step (${ceiling.note}); it was not started`,
+                });
+                save();
+                return;
+              }
               const attempts = (step.retry ?? 0) + 1;
               // A step re-attaching to its sandbox is still on the attempt
               // that started it; a step re-run after a backoff picks up the
@@ -3010,7 +3037,8 @@ function driveRunInner(
                   effortOverride,
                   run.id,
                   ctxData,
-                  ceilingUsd,
+                  ceiling.ceilingUsd,
+                  ceiling.note,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
