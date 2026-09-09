@@ -38,6 +38,7 @@ import {
   syncBundleFor,
   parseToolDef,
   parseFlow,
+  readFlow,
   parseApis,
   resolveModel,
   parseProvider,
@@ -2196,12 +2197,14 @@ export function createFlowRun(
   flowName: string,
   status: "queued" | "running",
   tags: string[] = [],
+  startedBy: string | null = null,
 ): RunRecord {
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     flow: flowName,
     tags,
     status,
+    ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -2630,8 +2633,11 @@ function driveRunInner(
         context = contextBefore(gi);
         ctxData = dataBefore(gi);
 
-        if (run.budgetUsd && runCost(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
-          const spent = runCost(run);
+        // What the run has spent, not just what its tokens cost: on an
+        // install that prices sandbox seconds, a step that called no model
+        // still spent money, and a cap that ignored it capped nothing.
+        if (run.budgetUsd && platform.runSpend(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
+          const spent = platform.runSpend(run);
           const last = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
           last?.events.push({
             t: new Date().toISOString(),
@@ -2865,6 +2871,20 @@ function driveRunInner(
             });
           }
           run.status = "awaiting-approval";
+          // approve_within: — the deadline is stamped when the gate opens,
+          // not counted from the run's start, so "two days to answer" means
+          // two days from being asked however long the work before it took.
+          // Only a gate that asks a PERSON gets one: an external event has
+          // no one to chase.
+          const within = readFlow(tenant, workspace, run.flow)?.approveWithin ?? null;
+          // Always assigned, never only set: a run with two gates would
+          // otherwise carry the FIRST gate's deadline into the second, and
+          // a deadline already in the past expires a gate the moment it
+          // opens. Null when this gate has none.
+          run.approveBy =
+            within && needsApproval.some((s) => s.waitFor !== "event")
+              ? new Date(Date.now() + within * 1000).toISOString()
+              : null;
           save();
 
           // The gate's declared preview, resolved now against what the run
@@ -2939,7 +2959,7 @@ function driveRunInner(
         // twenty steps over — the shares sum to what was left. Between
         // groups the check above still refuses to start the next one.
         const launching = freshGroup.filter((s) => s.status === "pending");
-        const ceilingUsd = stepCeiling(run.budgetUsd, runCost(run), launching.length);
+        const ceilingUsd = stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length);
         await Promise.all(
           launching
             .map(async (step) => {
@@ -3254,16 +3274,6 @@ function driveRunInner(
       }
     }
   })();
-}
-
-function readFlow(tenant: string, workspace: string, flowName: string) {
-  const dir = path.join(workspaceDir(tenant, workspace), "flows");
-  if (!fs.existsSync(dir)) return null;
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
-    const flow = parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"));
-    if (flow.name === flowName) return flow;
-  }
-  return null;
 }
 
 // Splice `[[flow:other]]` steps into the parent's step list, renumbering

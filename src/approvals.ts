@@ -10,7 +10,7 @@
 // at a desk. So the decision lives in core and the routes only say who made
 // it.
 
-import { readRun, writeRun, type RunRecord } from "./store.ts";
+import { readRun, writeRun, readFlow, mayApprove, type RunRecord } from "./store.ts";
 import { platform } from "./platform.ts";
 
 export interface ApprovalDecision {
@@ -23,6 +23,17 @@ export interface ApprovalDecision {
   step?: number;
   /** Who decided, as it reads after the verb: "by a human", "via emailed link". */
   by: string;
+  /**
+   * The person behind the decision, when a session made it: their email and
+   * the role they hold. A link and an external event have neither, and are
+   * checked by their token instead — the token IS the authority there.
+   *
+   * Two rules read this. `approvers:` in the flow file names who may decide
+   * that flow's gates at all. And nobody approves a run they started
+   * themselves: a gate exists so that a second person looks, and a flow a
+   * person kicked off and then waved through is a gate that never happened.
+   */
+  actor?: { email?: string | null; role?: string | null } | null;
 }
 
 /** An error the HTTP layer can map straight to a status — see errorResponse. */
@@ -51,6 +62,7 @@ export async function decideApproval(
 ): Promise<{ run: RunRecord; steps: number[] }> {
   const run = readRun(tenant, workspace, runId);
   if (!run) throw new ApprovalError("run not found", 404);
+  assertMayDecide(tenant, workspace, run, d);
 
   const waiting = run.steps
     .map((s, i) => ({ s, i }))
@@ -83,6 +95,10 @@ export async function decideApproval(
           : `rejected ${d.by}${reason ? `: ${reason.slice(0, 200)}` : ""}`,
     });
   }
+  // The deadline belonged to the gate that just closed. Leaving it on the
+  // record would hand a later gate in the same run a deadline that has
+  // already passed.
+  if (run.steps.every((s) => s.status !== "awaiting-approval")) run.approveBy = null;
   writeRun(tenant, workspace, run);
 
   // A parked run has no process polling for this decision — the worker
@@ -94,6 +110,67 @@ export async function decideApproval(
   }
 
   return { run, steps: waiting.map(({ i }) => i) };
+}
+
+/**
+ * The two rules a person's decision has to pass. A token-bearing door — the
+ * emailed link, an external event — carries no actor and is not checked
+ * here: possession of a token derived from the run is its own authority,
+ * and the link was mailed to whoever the account told us to ask.
+ *
+ * Throws 403, which the routes surface verbatim: a refusal that does not say
+ * which rule refused sends someone to the wrong settings page.
+ */
+function assertMayDecide(tenant: string, workspace: string, run: RunRecord, d: ApprovalDecision): void {
+  if (!d.actor) return;
+  const email = (d.actor.email ?? "").trim().toLowerCase();
+  // Rejecting your own run is always allowed: stopping something you started
+  // needs no second opinion, and the gate's whole purpose is that it does
+  // not proceed. Only approval needs someone else.
+  if (d.decision === "approve" && email && run.startedBy && run.startedBy === email) {
+    throw new ApprovalError(
+      "you started this run — an approval gate asks a second person, so someone else has to answer it",
+      403,
+    );
+  }
+  const flow = readFlow(tenant, workspace, run.flow);
+  if (!mayApprove(flow, d.actor)) {
+    throw new ApprovalError(
+      `this flow's approvers: list does not include you (${flow?.approvers?.join(", ")})`,
+      403,
+    );
+  }
+}
+
+/**
+ * A gate that ran out of time. `approve_within:` in the flow file stamps a
+ * deadline when the run parks; past it, the gate is rejected and the run
+ * fails, exactly as if a person had said no.
+ *
+ * Rejection, not approval, is the only safe way for a clock to answer a
+ * question a person was asked. The whole reason the step is parked is that
+ * someone wanted to look at it first.
+ *
+ * Returns whether it acted. Called from the same sweep that closes abandoned
+ * runs, so an expiry needs nothing running of its own.
+ */
+export async function expireStaleGate(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  now = Date.now(),
+): Promise<boolean> {
+  if (run.status !== "awaiting-approval" || !run.approveBy) return false;
+  if (now < new Date(run.approveBy).getTime()) return false;
+  // A step waiting on `wait: event` is not waiting on a person and is not
+  // this deadline's business.
+  if (!run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event")) return false;
+  await decideApproval(tenant, workspace, run.id, {
+    decision: "reject",
+    by: "automatically — nobody answered in time",
+    reason: `no decision within the flow's approve_within: (due ${run.approveBy})`,
+  });
+  return true;
 }
 
 /**

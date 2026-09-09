@@ -1125,6 +1125,62 @@ export interface FlowInfo {
   /** `trigger: storage` — a path prefix under storage/; a file landing
    *  there starts the flow with the path as its task. */
   path: string | null;
+
+  // ---- how often a trigger is allowed to become a run ----
+  //
+  // Everything above says what starts a flow. These four say how many of
+  // those starts are real. They are orchestration, so they are keys; they
+  // are literals, so nothing is evaluated; and each answers a question a
+  // person can only answer about their own flow, which is the test the
+  // grammar applies before it grows.
+
+  /** `idempotency:` — the name of the field that identifies a delivery, so
+   *  the same one twice starts one run. A header on the request
+   *  ("x-github-delivery"), or "body:<key>" for a top-level field of a JSON
+   *  body. A name, never an expression: the value is read from the delivery,
+   *  not computed from it. Null: every delivery is its own event. */
+  idempotency: string | null;
+  /** `debounce:` — seconds of quiet before a fired trigger becomes a run.
+   *  A burst of deliveries, storage writes or watched changes collapses into
+   *  one run once they stop. The task is the LAST event's, since that is the
+   *  state the flow is reacting to. Null: every event starts a run. */
+  debounce: number | null;
+  /** `throttle:` — the least time between two runs of this flow. A trigger
+   *  arriving inside the window is dropped, and the trace of the run that
+   *  held the window says how many. Null: no floor. */
+  throttle: number | null;
+  /** `catchup:` — what a scheduled flow does about a fire it missed while
+   *  the platform was not running. "last" is the behaviour that always
+   *  applied: one make-up run for however many were missed. "none" skips
+   *  them, for a flow whose moment has passed by the time anyone notices.
+   *  Null reads as "last". */
+  catchup: "last" | "none" | null;
+
+  // ---- when to stop trusting the flow ----
+
+  /** `disable_after:` — consecutive failed runs after which the platform
+   *  stops firing this flow's schedule and says so. A nightly desk that has
+   *  failed all week is not going to fix itself, and every one of those runs
+   *  costs money and sends mail. Null: never quarantined. */
+  disableAfter: number | null;
+  /** `sla:` — seconds a run of this flow is expected to take. A run still
+   *  going well past it is reported once, as a notification, and keeps
+   *  running: this is a smoke alarm, not a timeout. Null: no expectation. */
+  sla: number | null;
+
+  // ---- who may answer a gate, and for how long it waits ----
+
+  /** `approvers:` — the email addresses that may decide this flow's gates,
+   *  or the single word "admins" for anyone at admin or above. Empty means
+   *  the account's existing rule: any member who can run the workspace.
+   *  Nobody may approve their own run's gate whatever this says. */
+  approvers: string[] | null;
+  /** `approve_within:` — how long a gate waits for a person before the run
+   *  is rejected and fails. A gate with no expiry holds its run, and its
+   *  place in the account's concurrency, for as long as nobody looks.
+   *  Null: it waits indefinitely, which stays the default. */
+  approveWithin: number | null;
+
   steps: FlowStep[];
 }
 
@@ -1344,8 +1400,53 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         ? data.signing_secret.trim().replace(/^\$\{|\}$/g, "")
         : null,
     path: typeof data.path === "string" ? data.path.trim().replace(/^\/+/, "") : null,
+    idempotency: typeof data.idempotency === "string" ? data.idempotency.trim().toLowerCase() || null : null,
+    debounce: durationOf(data.debounce),
+    throttle: durationOf(data.throttle),
+    catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
+    disableAfter: Number.isFinite(Number(data.disable_after)) && Number(data.disable_after) > 0
+      ? Math.min(100, Math.floor(Number(data.disable_after)))
+      : null,
+    sla: durationOf(data.sla),
+    approvers: approverList(data.approvers),
+    approveWithin: durationOf(data.approve_within),
     steps,
   };
+}
+
+/** A duration frontmatter value — "30m", "2d", or bare seconds — or null.
+ *  Shares parseWait's units and its thirty-day ceiling, so every duration in
+ *  the format is written and bounded the same way. */
+function durationOf(raw: unknown): number | null {
+  if (typeof raw === "number") return raw > 0 ? Math.min(Math.round(raw), 30 * 86400) : null;
+  if (typeof raw !== "string") return null;
+  return parseWait(raw) ?? null;
+}
+
+/** `approvers:` — a YAML list, or one address, or "admins". Lower-cased,
+ *  because an email address that differs only in case is the same person and
+ *  a gate that refuses them is a support ticket. */
+function approverList(raw: unknown): string[] | null {
+  const items = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const out = items.map((v) => String(v).trim().toLowerCase()).filter(Boolean);
+  return out.length ? [...new Set(out)] : null;
+}
+
+/** May this person decide a gate of this flow? `approvers:` is an allowlist
+ *  of addresses plus the word "admins"; an empty list defers to whatever
+ *  permission the caller already needed to reach the route.
+ *
+ *  Self-approval is refused separately (see approvals.ts): who STARTED a run
+ *  is a property of the run, not of the flow file. */
+export function mayApprove(
+  flow: Pick<FlowInfo, "approvers"> | null | undefined,
+  who: { email?: string | null; role?: string | null },
+): boolean {
+  const list = flow?.approvers;
+  if (!list || list.length === 0) return true;
+  const email = (who.email ?? "").trim().toLowerCase();
+  if (email && list.includes(email)) return true;
+  return list.includes("admins") && (who.role === "admin" || who.role === "owner");
 }
 
 /** A live run of this flow — the fact overlap: decisions are made on. */
@@ -1606,6 +1707,19 @@ export function listFlows(tenant: string, workspace: string): FlowInfo[] {
     .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8")));
+}
+
+/** One flow of a workspace by name, or null. The same read listFlows makes,
+ *  named so callers that want a single flow — the approval rules, the
+ *  runner's budget stamp — do not each re-implement the directory walk. */
+export function readFlow(tenant: string, workspace: string, flowName: string): FlowInfo | null {
+  const dir = path.join(workspaceDir(tenant, workspace), "flows");
+  if (!fs.existsSync(dir)) return null;
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+    const flow = parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"));
+    if (flow.name === flowName) return flow;
+  }
+  return null;
 }
 
 export interface WorkspaceSummary {
@@ -2430,6 +2544,18 @@ export interface RunRecord {
    *  the agents decided was worth remembering, listed so a person can review
    *  the lesson without diffing the folder. */
   memoryWrites?: string[];
+  /** Who asked for this run, when a person did: their email address. A
+   *  schedule, a webhook and a chained flow have no one, and leave it unset.
+   *  Kept so a gate can refuse the one approval nobody should be able to
+   *  give — your own. */
+  startedBy?: string | null;
+  /** Set once a run has been reported as past its flow's `sla:`, so the
+   *  alarm sounds once rather than on every sweep. */
+  slaNotifiedAt?: string | null;
+  /** When this run's gate stops waiting, stamped the moment it parks from
+   *  the flow's `approve_within:`. A gate nobody answers by then is rejected
+   *  and the run fails, rather than holding a concurrency slot forever. */
+  approveBy?: string | null;
   steps: StepRecord[];
 }
 

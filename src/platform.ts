@@ -12,7 +12,7 @@
 // and calls registerPlatform() once at boot. A process that forgets to is a
 // local install — which is exactly the failure that is safe.
 
-import type { FlowStep, RunRecord } from "./store.ts";
+import type { FlowInfo, FlowStep, RunRecord } from "./store.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.ts";
 import type { EgressHooks } from "./egress.ts";
 
@@ -22,6 +22,14 @@ export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<Container
  *  for it — a wallet, a plan, a bill. `self-hosted` is everything else: a
  *  laptop, a company's own box, the open-source download. */
 export type Edition = "self-hosted" | "hosted";
+
+/** What a trigger gate decided. `admit: false` is never an error: the
+ *  trigger was received and understood, and the flow's own file says this
+ *  one does not become a run. `detail` is what the sender and the log are
+ *  told, because a silent drop reads exactly like a broken hook. */
+export type TriggerAdmission =
+  | { admit: true }
+  | { admit: false; reason: "duplicate" | "throttled" | "quarantined" | "debounced"; detail: string; firesAt?: number };
 
 export interface PlatformHooks {
   /** Is this a hosted install? The ONE question every commercial surface —
@@ -40,10 +48,46 @@ export interface PlatformHooks {
     flowName: string,
     modelOverride?: string | null,
     tags?: string[],
+    /** The person who asked, when one did — their email. A schedule, a
+     *  webhook and a chained flow leave it unset, which is what makes
+     *  "nobody approves their own run" a rule the record can enforce. */
+    startedBy?: string | null,
   ): Promise<RunRecord>;
   /** A parked run was approved and has no driver; line it up. Default: nothing —
    *  locally the starter that parked it is still polling the record. */
   enqueueResume(tenant: string, workspace: string, runId: string): Promise<void>;
+  /**
+   * What a run has spent so far, in the money the customer is actually
+   * billed — tokens AND the sandbox seconds behind them.
+   *
+   * `budget:` says "the most one run may spend", and for a long time it
+   * only ever compared token cost. A step that called no model — a script
+   * looping on a page that never loads, a browser waiting on a selector
+   * that never appears — spent nothing by that reading and was capped by
+   * nothing, while the sandbox billed by the second. The platform has no
+   * clock of its own by design, so the cap is the only backstop there is,
+   * and it has to count the whole bill for that to be true.
+   *
+   * Default: token cost, which is the entire bill on an install that
+   * prices no compute.
+   */
+  runSpend(run: RunRecord): number;
+  /**
+   * Should a trigger become a run? The flow file's `idempotency:`,
+   * `throttle:`, `debounce:` and `disable_after:` are all answered here,
+   * because all four need state that outlives one delivery — what has been
+   * seen, when the last run started, what is still being waited out.
+   *
+   * Default: yes, always. A laptop has no fleet to protect and no duplicate
+   * deliveries to remember; the local runner is the one asking, and it asked
+   * because a person did.
+   */
+  admitTrigger(
+    tenant: string,
+    workspace: string,
+    flow: FlowInfo,
+    opts?: { deliveryKey?: string | null; body?: string; tag?: string },
+  ): TriggerAdmission;
   /** Step executors by FOLDRUN_RUN_ISOLATION value, beyond the `container`
    *  one core ships. The platform adds `k8s`. */
   isolation: Record<string, IsolatedStepRunner>;
@@ -78,6 +122,8 @@ const local: PlatformHooks = {
     return startFlowRun(tenant, workspace, steps, flowName, modelOverride ?? null, tags);
   },
   async enqueueResume() {},
+  admitTrigger: () => ({ admit: true }),
+  runSpend: (run) => run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
   isolation: {},
   killRunSandboxes() {},
   syncPublicShares: () => ({ added: [] }),
