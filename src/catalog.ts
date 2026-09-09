@@ -23,6 +23,7 @@ import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { resolveModel, resolveTier, MODEL_TIERS, EFFORT_LEVELS, type Effort, type Tier, type FlowInfo } from "./store.ts";
 import type { FlowWarning } from "./flow-lint.ts";
+import { trimSlashes } from "./paths.ts";
 
 export interface CatalogModel {
   id: string;
@@ -115,7 +116,7 @@ export async function loadCatalog(baseUrl: string): Promise<Catalog | null> {
   if (cached && Date.now() - Date.parse(cached.fetchedAt) < TTL_MS) return cached;
 
   try {
-    const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/models`, {
+    const res = await fetch(`${trimSlashes(baseUrl)}/v1/models`, {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`${res.status}`);

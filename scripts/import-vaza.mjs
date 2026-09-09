@@ -57,7 +57,8 @@ function frontmatter(raw) {
   return { data, body: m[2] };
 }
 
-const yamlString = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
+// Backslashes first, then quotes — the other order re-escapes the escape.
+const yamlString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
 function write(rel, content) {
   const p = path.join(OUT, rel);

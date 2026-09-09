@@ -91,3 +91,28 @@ test("an indented line with a colon that is not a real option is still the instr
   assert.equal(step.instruction, "do the thing Warning: do not publish before Tuesday");
   assert.equal(step.timeout, 30);
 });
+
+test("hostile input cannot stall the parser — every flagged pattern is linear now", () => {
+  // Each of these was a CodeQL polynomial-backtracking finding. A flow
+  // file, a tool's base URL and an agent's reply are all customer input.
+  const wide = " ".repeat(200_000);
+  const t0 = performance.now();
+  parseFlow("x.md", `---\nname: x\n---\n\n1. [[a]]${wide}\n   verify:${wide}\n`);
+  parseFlow("x.md", `---\nname: x\n---\n\n9 [[-]]${wide}x\n`);
+  const t1 = performance.now();
+  assert.ok(t1 - t0 < 500, `parseFlow took ${Math.round(t1 - t0)}ms on 200k spaces`);
+});
+
+test("the step line still parses every shape it did", () => {
+  const f = flow("1. [[a]] — with a dash\n2! [[b]]\n3? [[c]] no dash\n4. [[flow:sub]] — nested\n   retry: 2\n");
+  assert.deepEqual(
+    f.steps.map((s) => [s.group, s.agent, s.instruction, s.approve ?? false, s.optional]),
+    [
+      [1, "a", "with a dash", false, false],
+      [2, "b", "", true, false],
+      [3, "c", "no dash", false, true],
+      [4, "sub", "nested", false, false],
+    ],
+  );
+  assert.equal(f.steps[3].retry, 2);
+});

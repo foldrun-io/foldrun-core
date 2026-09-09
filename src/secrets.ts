@@ -40,6 +40,7 @@ const GCM = { authTagLength: 16 } as const;
 const tenantKey = (tenant: string) => platform.tenantKey(tenant);
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
+import { trimSlashes } from "./paths.ts";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
 
@@ -582,7 +583,7 @@ export function setServiceAccountSecret(
   for (const field of ["token_url", "issuer", "private_key", "scope"] as const) {
     if (!config[field]?.trim()) throw new Error(`service account secret needs ${field}`);
   }
-  if (!/BEGIN [A-Z ]*PRIVATE KEY/.test(config.private_key)) {
+  if (!/BEGIN [A-Z ]{0,40}PRIVATE KEY/.test(config.private_key)) {
     throw new Error("private_key must be a PEM key (from the service account JSON)");
   }
   setSecret(tenant, name, SERVICE_ACCOUNT_PREFIX + JSON.stringify(config), workspace, "service-account");
@@ -704,7 +705,7 @@ export function setSshSecret(tenant: string, name: string, config: SshConfig, wo
   const hasKey = Boolean(config.private_key?.trim());
   const hasPassword = Boolean(config.password);
   if (hasKey === hasPassword) throw new Error("ssh secret needs a private key or a password (not both)");
-  if (hasKey && !/BEGIN [A-Z ]*PRIVATE KEY/.test(config.private_key!)) {
+  if (hasKey && !/BEGIN [A-Z ]{0,40}PRIVATE KEY/.test(config.private_key!)) {
     throw new Error("private_key must be a PEM/OpenSSH private key");
   }
   if (hasPassword && /[\n\r]/.test(config.password!)) throw new Error("ssh password cannot contain newlines");
@@ -749,7 +750,7 @@ export function setApiSecret(tenant: string, name: string, config: ApiConfig, wo
   if (base && !/^https?:\/\//.test(base)) throw new Error("base_url must be http(s)");
   setSecret(
     tenant, name,
-    API_PREFIX + JSON.stringify({ ...(base ? { base_url: base.replace(/\/+$/, "") } : {}), headers: config.headers }),
+    API_PREFIX + JSON.stringify({ ...(base ? { base_url: trimSlashes(base) } : {}), headers: config.headers }),
     workspace, "api",
   );
 }

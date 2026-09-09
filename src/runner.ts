@@ -75,6 +75,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { trimChars } from "./paths.ts";
 
 // An MCP tool definition becomes an SDK server config. ${SECRET} placeholders
 // in env and headers resolve server-side, so a credential reaches the server
@@ -381,10 +382,9 @@ export function saysUntilMarker(result: string | null, until: string): boolean {
       (line) =>
         // Strip markdown emphasis and punctuation from BOTH ends: "**APPROVED.**"
         // is a decision written by someone using bold, not a sentence.
-        line
-          .trim()
-          .replace(/^[#>\-*_`\s]+/, "")
-          .replace(/[.!:,*_`\s]+$/, "")
+        // trimChars, not a `[…]+$` regex: that one is quadratic on a
+        // line of tabs, and this is a line an agent wrote.
+        trimChars(trimChars(line.trim(), "#>-*_`"), ".!:,*_`").trim()
           .toLowerCase() === marker,
     );
 }
@@ -474,7 +474,10 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       map.set(norm(fwd), `../../${STORAGE_DIR}/${fwd}`);
     }
   }
-  return text.replace(/\[\[([^\]\n]+)\]\]/g, (whole, name: string) => {
+  // `[` excluded from the name: with it allowed, a run of `[[` makes the
+  // engine re-scan to the end from every opening — quadratic on a result
+  // an agent wrote.
+  return text.replace(/\[\[([^\]\[\n]+)\]\]/g, (whole, name: string) => {
     const hit = map.get(norm(name.trim()));
     return hit ? `\`${hit}\`` : whole;
   });
