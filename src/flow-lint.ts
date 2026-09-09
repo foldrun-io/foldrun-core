@@ -35,6 +35,18 @@ export interface KnownNames {
   agents: string[];
 }
 
+/** One @, something either side, a dot in the domain, no whitespace. Written
+ *  as string checks rather than a regex: the obvious pattern backtracks
+ *  polynomially on a domain full of dots, and a lint that can be made slow
+ *  by a flow file is a lint someone will turn off. */
+function looksLikeAddress(a: string): boolean {
+  const at = a.indexOf("@");
+  if (at < 1 || at !== a.lastIndexOf("@") || /\s/.test(a)) return false;
+  const domain = a.slice(at + 1);
+  const dot = domain.indexOf(".");
+  return dot > 0 && dot < domain.length - 1;
+}
+
 export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   const warnings: FlowWarning[] = [];
   const agentNames = known ? new Set(known.agents) : null;
@@ -51,7 +63,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   // a role that is not `admins` and not an address; mayApprove would then
   // refuse every person, and the gate could only ever be answered by an
   // emailed link. Said here rather than discovered at the gate.
-  const odd = (flow.approvers ?? []).filter((a) => a !== "admins" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+  const odd = (flow.approvers ?? []).filter((a) => a !== "admins" && !looksLikeAddress(a));
   if (odd.length) {
     warnings.push({
       step: null,
