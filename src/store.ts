@@ -1309,6 +1309,44 @@ export function unquote(raw: string): string {
   return inner.includes(q) ? value : inner;
 }
 
+/**
+ * Does this text carry the marker a `when:` is looking for?
+ *
+ * At the START OF A LINE, not anywhere in the prose. A plain substring
+ * search is the obvious implementation and it is wrong in a way that is
+ * very hard to see: an agent writing
+ *
+ *   There are no BLOCKED items this week.
+ *
+ * opened a `when: BLOCKED` gate, because the word is right there. Saying a
+ * marker is absent necessarily names it, so the more carefully an agent
+ * explains itself the more likely it is to trip its own condition. It bit
+ * one desk on its first run and sat latent in another.
+ *
+ * A verdict is written as a headline — the line leads with it — so leading
+ * position is what distinguishes "this is my verdict" from "here is a word
+ * I am using in a sentence". Markdown decoration in front of it is fine: a
+ * heading, a bullet or bold is still a line that leads with the marker.
+ *
+ * The marker must also END at a boundary, so BLOCKED does not match
+ * BLOCKEDBY.
+ */
+export function markerPresent(text: string | null | undefined, marker: string): boolean {
+  const needle = marker.trim().toLowerCase();
+  if (!needle || !text) return false;
+  for (const raw of text.split("\n")) {
+    // Strip what markdown puts in front of a headline: heading hashes,
+    // quote marks, list bullets, emphasis, backticks.
+    const line = raw.replace(/^[\s>#*_`\-+]*/, "").toLowerCase();
+    if (!line.startsWith(needle)) continue;
+    const after = line[needle.length];
+    // End of line, or a separator. A letter or digit means this is a longer
+    // word that merely begins the same way.
+    if (after === undefined || !/[a-z0-9]/.test(after)) return true;
+  }
+  return false;
+}
+
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
@@ -1331,6 +1369,23 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         instruction: m[5].trim(),
         line: lineNo + offset,
       });
+      continue;
+    }
+    // An indented line that is not an option continues the instruction.
+    //
+    // Without this it was silently DROPPED. An instruction wrapped over
+    // three lines kept the first and discarded the rest, the run went
+    // green, and the agent worked from an instruction its author had not
+    // written — the worst failure this parser can have, because nothing
+    // anywhere reports it. Twenty-five live instructions across eight desks
+    // were being cut this way.
+    //
+    // Indentation is what makes it a continuation, exactly as it is for an
+    // option. Unindented prose between steps is still prose and still
+    // ignored, so a flow file's commentary is undisturbed.
+    if (steps.length && /^\s+\S/.test(line) && !OPTION_RE.test(line)) {
+      const step = steps[steps.length - 1];
+      step.instruction = `${step.instruction} ${line.trim()}`.trim();
       continue;
     }
     // Indented options belong to the step above them.

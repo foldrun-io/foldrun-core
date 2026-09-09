@@ -633,6 +633,18 @@ Rules:
 
   `when:` is the non-exclusive sibling — every matching `when:` step runs —
   which is why routing is its own vocabulary instead of a mode on `when:`.
+  A `when:` or `case:` marker must **begin a line** of a previous result,
+  with markdown decoration in front of it allowed and a longer word starting
+  the same way not a match. For `case:` it matters more, because routing is
+  exclusive: a label picked out of a sentence sends the flow down the wrong
+  branch and skips the right one. It is not a search of the whole text: an agent writing "there
+  are no BLOCKED items" would open a `when: BLOCKED` gate, and saying a
+  marker is absent necessarily names it. Verdicts are written as headlines,
+  so the two readings agree for anything written the house way.
+
+  An instruction may wrap over several lines. Indent the continuation, as an
+  option is indented, and it is one instruction; unindented prose between
+  steps stays prose.
 - **Evaluator loops** — a step may send the flow back one group until it is satisfied:
 
   ```markdown
