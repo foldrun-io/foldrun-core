@@ -84,3 +84,10 @@ test("case: uses the same marker rule, which matters more because routing is exc
   assert.equal(markerPresent("This is not a COMPLAINT, it is a QUESTION.", "COMPLAINT"), false);
   assert.equal(markerPresent("QUESTION: how do I rotate a key?", "QUESTION"), true);
 });
+
+test("an indented line with a colon that is not a real option is still the instruction", () => {
+  // "Warning: do not publish" used to be swallowed as an unknown option.
+  const [step] = flow("1. [[a]] — do the thing\n   Warning: do not publish before Tuesday\n   timeout: 30\n").steps;
+  assert.equal(step.instruction, "do the thing Warning: do not publish before Tuesday");
+  assert.equal(step.timeout, 30);
+});

@@ -13,6 +13,7 @@ import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
+import { healthKey } from "./secret-health.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
  *  one the platform registered (a pod)? */
@@ -1577,7 +1578,17 @@ async function runStep(
         const host = hostOf(api.base);
         if (!host) continue;
         for (const v of [...Object.values(api.headers), ...Object.values(api.query)]) {
-          for (const name of placeholderNames(v)) if (name in liveSecrets) addGrant(grant, name, liveSecrets[name], host);
+          for (const name of placeholderNames(v)) {
+            if (!(name in liveSecrets)) continue;
+            addGrant(grant, name, liveSecrets[name], host);
+            // Which vault entry this is, so the proxy's record of what the
+            // far end said lands on the right credential.
+            (grant.healthKeys ??= {})[name] = healthKey(
+              name,
+              secretScopes[name] === "workspace" ? "workspace" : "account",
+              path.basename(path.resolve(agentDir, "..", "..")),
+            );
+          }
         }
       }
       const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant });
@@ -2271,8 +2282,9 @@ export function startFlowRun(
   modelOverride?: string | null,
   tags: string[] = [],
   effortOverride?: string | null,
+  startedBy: string | null = null,
 ): RunRecord {
-  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags);
+  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags, startedBy);
   void driveRun(tenant, workspace, run, modelOverride, tags, { effortOverride });
   return run;
 }

@@ -79,18 +79,25 @@ export function recordTriggerEvent(tenant: string, workspace: string, event: Tri
 }
 
 export function readTriggerEvents(tenant: string, workspace: string, limit = 200): TriggerEvent[] {
+  let lines: string[];
   try {
-    return fs
-      .readFileSync(logFile(tenant, workspace), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .slice(-limit)
-      .reverse()
-      .map((line) => JSON.parse(line) as TriggerEvent)
-      .filter((e) => e && typeof e.t === "string");
+    lines = fs.readFileSync(logFile(tenant, workspace), "utf8").split("\n").filter(Boolean);
   } catch {
     return [];
   }
+  // One line at a time: a torn line — an append racing a compaction from
+  // another pod — must lose that line, not the whole log, on exactly the
+  // morning the log exists for.
+  const out: TriggerEvent[] = [];
+  for (const line of lines.slice(-limit).reverse()) {
+    try {
+      const e = JSON.parse(line) as TriggerEvent;
+      if (e && typeof e.t === "string") out.push(e);
+    } catch {
+      // skip the torn line
+    }
+  }
+  return out;
 }
 
 export interface FlowTriggerSummary {

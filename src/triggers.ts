@@ -70,16 +70,21 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
     (result ? `\n${result}` : "");
   for (const flow of flows) {
     try {
-      const gate = platform.admitTrigger(tenant, workspace, flow, { body, tag: "previous_run" });
+      const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "previous_run" });
       if (!gate.admit) {
         console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
         continue;
       }
-      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
-        `after:${finished.flow}`,
-      ]);
-      started.push(run.id);
-      console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
+      try {
+        const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
+          `after:${finished.flow}`,
+        ]);
+        started.push(run.id);
+        console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
+      } catch (err) {
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
     } catch (err) {
       console.error(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
     }
@@ -128,15 +133,20 @@ export async function fireStorageTriggers(
       const body = `by: ${by}\n${hits.map((h) => `- storage/${h}`).join("\n")}`;
       // A deploy that writes forty files under one prefix is one event, not
       // forty runs — which is exactly what `debounce:` is for.
-      const gate = platform.admitTrigger(tenant, workspace, flow, { body, tag: "storage_event" });
+      const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "storage_event" });
       if (!gate.admit) {
         console.log(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
         continue;
       }
-      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
-        "storage",
-      ]);
-      started.push(run.id);
+      try {
+        const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
+          "storage",
+        ]);
+        started.push(run.id);
+      } catch (err) {
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
     } catch (err) {
       console.error(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
     }
@@ -177,7 +187,11 @@ export function deliveryKey(
     try {
       const parsed = JSON.parse(body) as Record<string, unknown>;
       const value = parsed?.[field];
-      return value === undefined || value === null ? null : String(value).slice(0, 200);
+      // A scalar only. An object stringifies to "[object Object]" for every
+      // delivery, which would make the second one and every one after it a
+      // "duplicate" of the first.
+      if (value === undefined || value === null || typeof value === "object") return null;
+      return String(value).slice(0, 200);
     } catch {
       return null; // not JSON, so no field to read
     }

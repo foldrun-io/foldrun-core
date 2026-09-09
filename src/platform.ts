@@ -87,7 +87,17 @@ export interface PlatformHooks {
     workspace: string,
     flow: FlowInfo,
     opts?: { deliveryKey?: string | null; body?: string; tag?: string },
-  ): TriggerAdmission;
+  ): Promise<TriggerAdmission>;
+  /** An admitted trigger whose start then threw. Undoes what admitTrigger
+   *  recorded — the delivery as seen, the throttle window — so the sender's
+   *  retry is a fresh event rather than a "duplicate" of a run that never
+   *  existed. Default: nothing, because the default gate records nothing. */
+  rollbackTrigger(
+    tenant: string,
+    workspace: string,
+    flow: FlowInfo,
+    opts?: { deliveryKey?: string | null; reason?: string },
+  ): Promise<void>;
   /** Step executors by FOLDRUN_RUN_ISOLATION value, beyond the `container`
    *  one core ships. The platform adds `k8s`. */
   isolation: Record<string, IsolatedStepRunner>;
@@ -116,13 +126,14 @@ export interface PlatformHooks {
 
 const local: PlatformHooks = {
   edition: () => "self-hosted",
-  async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = []) {
+  async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = [], startedBy = null) {
     // Imported here, not at the top: runner.ts imports this file.
     const { startFlowRun } = await import("./runner.ts");
-    return startFlowRun(tenant, workspace, steps, flowName, modelOverride ?? null, tags);
+    return startFlowRun(tenant, workspace, steps, flowName, modelOverride ?? null, tags, null, startedBy);
   },
   async enqueueResume() {},
-  admitTrigger: () => ({ admit: true }),
+  admitTrigger: async () => ({ admit: true }),
+  async rollbackTrigger() {},
   runSpend: (run) => run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
   isolation: {},
   killRunSandboxes() {},

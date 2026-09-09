@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import { getSecret } from "./secrets.ts";
-import { noteSecretUse } from "./secret-health.ts";
+import { noteSecretUse, healthKey } from "./secret-health.ts";
 import { accountDir, workspaceDir, listWorkspaces, listAgents, parseProvider, type ProviderSpec } from "./store.ts";
 
 export type HealthVerdict = "ok" | "credential" | "not-found" | "busy" | "unreachable" | "provider-error";
@@ -154,7 +154,8 @@ export async function checkProvider(
       } catch {
         // an unparseable base_url is its own problem, reported above
       }
-      noteSecretUse(tenant, named, { host, status: res.status });
+      const hit = getSecret(tenant, named, workspace ?? undefined);
+      noteSecretUse(tenant, healthKey(named, hit?.scope === "workspace" ? "workspace" : "account", workspace), { host, status: res.status });
     }
     // The provider's own words when it refused. They are the difference
     // between "fix your key" and "fix your model id", and they are only
