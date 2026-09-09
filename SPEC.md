@@ -728,6 +728,21 @@ Step options continued — failure, time, people and delegation:
 - `delegate: a, b, c` — bounded model-led delegation: the step's agent ends its reply with `agent: instruction` lines choosing only from the declared set (at most 5); the picks run as a fresh group immediately after, and both the set and the picks are on the record. The set is who the step **may** call on, not who it must: choosing nobody is a normal outcome and is recorded as one.
 
 `overlap:` in the flow's frontmatter says what a new fire does while a run of the same flow is still live: `skip` consumes the occurrence without starting anything (a cron refiring over yesterday's long run almost never means "run two"), `queue` starts the run but holds it until the live one finishes. Unset, runs may overlap — the historical behaviour, kept as the default so flows that legitimately run in parallel are undisturbed.
+
+A trigger says what starts a flow; four more frontmatter keys say how much of that becomes a run, and every one of them is a literal read off the file:
+
+- `idempotency: x-github-delivery` — the **name** of the header, or `body:<field>` for a top-level field of a JSON body, carrying the delivery's own identifier. The same identifier twice within twenty-four hours starts one run; the duplicate is answered 200 with a reason, because a sender that retries must not be told to try again. Nothing is computed, combined or nested: it names where an identifier is, and the grammar grows no expression to build one.
+- `throttle: 15m` — the least time between two runs of this flow. A trigger inside the window is dropped and logged. Every run resets the window, a person's included: the window is about how often the work happens, not about who asked.
+- `debounce: 2m` — how long the events must go quiet before they become one run. Each event pushes the moment out; the run that eventually starts carries the **last** event, because an earlier event in a burst has been superseded by definition.
+- `disable_after: 5` — consecutive failed runs after which the flow stops firing and says so once. Worked out from the runs themselves rather than stored as a flag, so one success clears it and there is no switch to remember. Runs a person started are not counted: testing a fix is not evidence of failure.
+
+And `catchup:` says what a schedule does about a fire that happened while nothing was running: `last` (the default, and the behaviour that always applied) makes one make-up run however many were missed; `none` skips it and waits for the next real occurrence. A fire under about ninety seconds late is never a make-up run — that is a tick running slightly behind.
+
+`sla: 20m` is what a run of this flow is expected to take. A run past it is reported once and **left running**: the platform sets no clock of its own, and a slow run may still be doing the work.
+
+Two keys govern the gates. `approvers:` lists the addresses that may decide them, or the word `admins` for anyone at admin or above; unset, anyone who can run the workspace can answer. On top of it, and whatever it says, **nobody approves a run they started themselves** — a gate exists so a second person looks. Rejecting your own run is always allowed. `approve_within: 2d` stamps a deadline when the gate opens; past it the gate is **rejected** and the run fails, which is the only safe way for a clock to answer a question a person was asked.
+
+Every duration above is written the way `wait:` is — `45s`, `10m`, `2h`, `3d`, or bare seconds — and capped at thirty days.
 - A required step failing fails the flow; remaining groups are skipped.
 - A workspace with one agent and no flows is perfectly normal — `foldrun run <agent>` runs it directly as a one-step flow, so there is a single execution path whether or not a flow file exists.
 

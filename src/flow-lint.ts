@@ -47,6 +47,60 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   // eleven runs where one was meant. Nothing about the expression looks wrong,
   // which is exactly why it needs saying here rather than being discovered on
   // the bill.
+  // A gate that can never be answered. `approvers:` naming addresses that
+  // are nobody, or a flow with an approvers list and no gate at all, is a
+  // rule the author believes is in force and which does nothing — the worst
+  // kind of safety control.
+  if (flow.approvers?.length && !flow.steps.some((s) => s.approve || s.ask)) {
+    warnings.push({
+      step: null,
+      message: "approvers: is set but no step in this flow is a gate",
+      detail:
+        "Nothing here waits for a person, so the list has no effect. Mark the step that needs " +
+        "a second pair of eyes with `!` (or `approve: true`), or drop the approvers: line.",
+    });
+  }
+  // A deadline on a gate that does not exist reads as a safety net and is not
+  // one. Same reasoning, said separately because the fix is different.
+  if (flow.approveWithin && !flow.steps.some((s) => s.approve || s.ask)) {
+    warnings.push({
+      step: null,
+      message: "approve_within: is set but no step in this flow is a gate",
+      detail: "Nothing waits for a person, so nothing can expire. Mark a step with `!`, or drop the line.",
+    });
+  }
+  // A throttle no schedule can ever trip: the flow cannot run more often
+  // than its cron fires, so a floor below that interval never fires either.
+  // Cheap to write, silently pointless, and a reader will believe it.
+  if (flow.throttle && flow.trigger === "schedule" && flow.schedule) {
+    warnings.push({
+      step: null,
+      message: `throttle: on a scheduled flow — check it is shorter than the schedule, or it will drop runs you meant to happen`,
+      detail:
+        "A schedule already decides how often this runs. A throttle longer than the gap between " +
+        "fires silently skips them; if that is what you want, say it in the cron instead.",
+    });
+  }
+  // `idempotency:` only has a delivery to read on a trigger that receives
+  // one. On a schedule or a chained flow there is no request and no field,
+  // so the key is inert.
+  if (flow.idempotency && flow.trigger !== "webhook" && flow.trigger !== "email") {
+    warnings.push({
+      step: null,
+      message: `idempotency: has nothing to read on trigger: ${flow.trigger}`,
+      detail:
+        "A delivery id comes off an incoming request, so this only does something for " +
+        "trigger: webhook or trigger: email. On any other trigger it is ignored.",
+    });
+  }
+  // `catchup:` is about a fire that was missed, which only a clock can miss.
+  if (flow.catchup && flow.trigger !== "schedule") {
+    warnings.push({
+      step: null,
+      message: `catchup: has no effect on trigger: ${flow.trigger}`,
+      detail: "Only a schedule can miss a fire. Every other trigger happens when it happens.",
+    });
+  }
   if (flow.schedule) {
     const [, , dom, , dow] = flow.schedule.trim().split(/\s+/);
     if (dom && dow && dom !== "*" && dow !== "*") {
