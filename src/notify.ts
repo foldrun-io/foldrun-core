@@ -36,6 +36,7 @@ import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
+import { noteSecretUse } from "./secret-health.ts";
 
 /**
  * The platform's own mail: an invite, a low balance.
@@ -261,6 +262,97 @@ export async function sendPlainNotification(
   }
 }
 
+/**
+ * Prove the notification path works, now, while someone is looking.
+ *
+ * Every run notification is sent when nobody is watching, to a destination
+ * nobody has tested, through a mail domain nobody has verified. On
+ * 2026-09-06 every one of them had been going to a bin for weeks and the
+ * only symptom was silence — which is indistinguishable from nothing having
+ * gone wrong. An alert that has never been proven to arrive is not an alert.
+ *
+ * Unlike every other send here, this one reports its failure in full: the
+ * provider's own words, which are what actually name the problem ("domain
+ * not verified", "you can only send to your own address"). Swallowing them
+ * is right for a run notification and useless for a test.
+ */
+export async function sendTestNotification(
+  tenant: string,
+  workspace: string,
+): Promise<{ ok: boolean; destination: string; detail: string }> {
+  const config = notifyConfig(tenant, workspace);
+  if (!config) {
+    return {
+      ok: false,
+      destination: "none",
+      detail:
+        "no notify: in this workspace's AGENTS.md or the account's — nothing would be sent for a failure or a gate either",
+    };
+  }
+  const sent = new Date().toISOString();
+  const headline = "\u2713 foldrun test notification";
+  const detail = `Sent from ${workspace} at ${sent}. If you are reading this, failures and approval gates will reach you here too.`;
+
+  if (config.email) {
+    const mail = notifyMail(tenant);
+    if (!mail) {
+      return {
+        ok: false,
+        destination: config.email,
+        detail:
+          "email is configured but there is no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account, or FOLDRUN_RESEND_API_KEY on the platform",
+      };
+    }
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
+        body: JSON.stringify({ from: mail.from, to: config.email, subject: headline, text: `${headline}\n\n${detail}\n` }),
+        signal: AbortSignal.timeout(8000),
+      });
+      noteSecretUse(tenant, "RESEND_API_KEY", { host: "api.resend.com", status: res.status });
+      const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
+      return res.ok
+        ? { ok: true, destination: `${config.email} (from ${mail.from})`, detail: "accepted by Resend for delivery" }
+        : { ok: false, destination: config.email, detail: `HTTP ${res.status} from Resend — ${body}` };
+    } catch (err) {
+      return { ok: false, destination: config.email, detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  const raw = config.url ?? "";
+  const url = raw.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
+    const hit = getSecret(tenant, name, workspace);
+    return hit ? hit.value : whole;
+  });
+  // The destination is echoed back with the secret still unresolved: a
+  // Slack webhook URL is itself a credential, and a page that prints it is
+  // a page that leaks it into a screenshot.
+  const shown = raw.includes("${") ? raw : `${url.slice(0, 40)}…`;
+  if (!url || url.includes("${")) {
+    return { ok: false, destination: shown, detail: `the secret named in notify.url is not in this account's vault` };
+  }
+  try {
+    const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
+      body: payload,
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
+    return res.ok
+      ? {
+          ok: true,
+          destination: shown,
+          detail: config.signingSecret ? "accepted, signed with " + config.signingSecret : "accepted",
+        }
+      : { ok: false, destination: shown, detail: `HTTP ${res.status} — ${body}` };
+  } catch (err) {
+    return { ok: false, destination: shown, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function sendRunNotification(
   tenant: string,
   workspace: string,
@@ -354,6 +446,7 @@ export async function sendRunNotification(
         }),
         signal: AbortSignal.timeout(8000),
       });
+      noteSecretUse(tenant, "RESEND_API_KEY", { host: "api.resend.com", status: res.status });
       if (!res.ok) {
         // Resend's body says WHY — "domain not verified", "can only send to
         // your own address" — and a status alone sent someone to the wrong
