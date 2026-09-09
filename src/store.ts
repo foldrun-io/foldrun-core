@@ -1668,9 +1668,9 @@ export function updateFlowStepInstruction(raw: string, index: number, instructio
   const m = line.match(STEP_RE);
   if (!m) throw new Error(`step ${index} is not a step line`);
   // Everything up to where the instruction starts, exactly as written.
-  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.replace(/\s+$/, "")} — `;
+  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.trimEnd()} — `;
   const next = instruction.trim().replace(/\s*\n\s*/g, " ");
-  block.lines = [`${prefix}${next}`.replace(/\s+$/, ""), ...block.lines.slice(1)];
+  block.lines = [`${prefix}${next}`.trimEnd(), ...block.lines.slice(1)];
   // Same regrouping as updateFlowStep: consecutive blocks sharing a number
   // are one parallel group, and emitFlow puts the file back together.
   const groups: FlowBlock[][] = [];
@@ -2095,7 +2095,7 @@ export function writeWorkspaceFile(
   // the editor's line gutter dutifully numbered all of it. Trailing blank
   // lines are not content in any format this holds (markdown, YAML
   // frontmatter, a script), and no author types thirty of them on purpose.
-  fs.writeFileSync(p, `${content.replace(/\s+$/, "")}\n`);
+  fs.writeFileSync(p, `${content.trimEnd()}\n`);
   // Code is executable wherever it lives: the scripts shelf, a skill's
   // bundled scripts/, or a folder tool's own directory. A run.mjs written
   // without the bit fails at exec, which reads as "the tool is broken".
