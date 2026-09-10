@@ -201,9 +201,23 @@ under the same versions.
 
 ## Requirements
 
-Node 22+. Docker or Podman if your agents run scripts. Credentials come from
-`ANTHROPIC_API_KEY` or an existing Claude Code login — `foldrun check` needs
-neither.
+Node 22+. Docker or Podman if your agents run scripts. `foldrun check` needs
+no credential at all.
+
+To *run* an agent you need one of:
+
+- **`ANTHROPIC_API_KEY`** — an API key from
+  [console.anthropic.com](https://console.anthropic.com).
+- **Your own provider.** An agent that names a `provider:` needs no
+  Anthropic key: 29 endpoints are known by name, including `ollama`,
+  `lmstudio` and `vllm`, so a local model is a complete answer. Anything
+  not in that list works by spelling out `base_url:`, `format:` and
+  `auth:`. See [providers](https://docs.foldrun.io/providers).
+
+A **Claude Code or claude.ai subscription login is not one of them**, and
+the CLI will not look for one. Anthropic does not permit products built on
+its Agent SDK to run on consumer subscriptions, so using that login here
+would put you outside their terms — an API key is the supported path.
 
 ## Status
 
