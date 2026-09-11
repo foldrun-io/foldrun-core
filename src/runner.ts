@@ -1658,6 +1658,7 @@ async function runStep(
       const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
+        galleryRoot: platform.galleryDir() ?? undefined,
         // Keys this step's dependency cache. Per-account by design — see
         // run-container.ts#runtimeCacheDir for why it is not shared.
         tenant,

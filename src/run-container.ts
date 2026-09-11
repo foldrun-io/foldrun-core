@@ -655,6 +655,8 @@ function ensureRunNetwork(): string {
 export interface RunInContainerArgs {
   workspaceRoot: string;
   libraryRoot: string;
+  /** The platform's gallery, staged under /library BEFORE the account library so the account's copies win. */
+  galleryRoot?: string;
   /** The account this step belongs to — the key for its dependency cache.
    *  Optional so an embedder that has no tenancy simply gets no cache. */
   tenant?: string;
@@ -771,6 +773,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
     });
     const libIn = path.join(staging, "library");
+    if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });
     else fs.mkdirSync(libIn, { recursive: true });
 

@@ -122,6 +122,14 @@ export interface PlatformHooks {
    *  on its record is resumed rather than destroyed and run again. Default:
    *  nothing is. */
   sandboxResumable(kind: string): boolean;
+  /**
+   * Where the platform's built-in tools sit on disk, materialised at boot —
+   * a shelf every account reads, beneath its own library. A name found in
+   * the workspace wins, then the account's copy, then this. Default: none,
+   * which is what a laptop has; there the gallery is a dashboard feature and
+   * not a directory, and an agent grants only what it or its account owns.
+   */
+  galleryDir(): string | null;
 }
 
 const local: PlatformHooks = {
@@ -143,6 +151,7 @@ const local: PlatformHooks = {
   egress: { lease: async () => null },
   workspaceChanged() {},
   sandboxResumable: () => false,
+  galleryDir: () => null,
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles
