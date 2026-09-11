@@ -11,6 +11,7 @@
 // own file beats its workspace's, which beats the account's. So a team can set
 // a house style once and one agent can still override it.
 
+import { platform } from "./platform.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { dataRoot, singleWorkspace } from "./paths.ts";
@@ -255,7 +256,18 @@ export function deleteLibraryPath(
 
 /** Library tool definitions, keyed by name — http or script, both grantable by name in `tools:`. */
 export function libraryTools(tenant: string): Record<string, ToolDef> {
-  return readToolDir(libraryDir(tenant, "tools"), "account");
+  // The platform's gallery first, the account's own copies over it: a tool
+  // the platform ships is granted by name in every account without anyone
+  // installing it, and an account that installed (copied) one keeps its
+  // copy — that is what "install to customise" means. Both read at account
+  // scope, so a folder tool's `run:` resolves to /library/tools/<name>/…
+  // in the sandbox either way; the staging step lays the gallery down
+  // first and the account library over it for the same reason.
+  const gallery = platform.galleryDir();
+  return {
+    ...(gallery ? readToolDir(path.join(gallery, "tools"), "account") : {}),
+    ...readToolDir(libraryDir(tenant, "tools"), "account"),
+  };
 }
 
 /** Shared memory index — derived from the files, like every other scope. */
