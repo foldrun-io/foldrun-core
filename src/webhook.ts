@@ -133,7 +133,12 @@ export function publicUrl(): string | null {
 export interface HookDelivery {
   t: string;
   flow: string;
-  outcome: "accepted" | "invalid-token" | "invalid-signature" | "not-webhook" | "no-flow" | "error";
+  /** `dropped` is a delivery that arrived, was authentic, and did not
+   *  become a run because the flow's own gates said one was enough —
+   *  a duplicate, a throttled burst, a quarantined flow. Distinct from
+   *  `accepted` so "why did nothing run" has an answer in the log, and
+   *  distinct from the refusals so nobody hunts for a bad token. */
+  outcome: "accepted" | "invalid-token" | "invalid-signature" | "not-webhook" | "no-flow" | "error" | "dropped";
   runId?: string;
   bytes?: number;
   detail?: string;

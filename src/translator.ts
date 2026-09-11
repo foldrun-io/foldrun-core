@@ -30,6 +30,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { PROTECTED_PARAMS } from "./providers.ts";
 import { viaEgress } from "./egress.ts";
+import { trimSlashes } from "./paths.ts";
 
 // ------------------------------------------------------------------ shapes
 
@@ -845,7 +846,7 @@ function upstreamMessage(text: string, status: number): string {
 export async function startTranslator(spec: TranslatorSpec): Promise<RunningTranslator> {
   const key = `fr-${crypto.randomBytes(16).toString("hex")}`;
   const log: string[] = [];
-  const base = spec.upstreamBase.replace(/\/+$/, "");
+  const base = trimSlashes(spec.upstreamBase);
   const label = spec.label ?? base;
 
   const server = http.createServer(async (req, res) => {

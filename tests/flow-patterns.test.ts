@@ -219,7 +219,11 @@ test("consult tools exist exactly when colleagues are declared", () => {
 test("case: first match wins, later cases and else are routed past", () =>
   withStubbedRun(
     {
-      classifier: "This looks like a BUG in the parser.",
+      // A verdict leads the line. Written as prose — "this looks like a BUG"
+      // — routing no longer matches it, deliberately: a label picked out of
+      // a sentence is how "not a COMPLAINT, a QUESTION" reached the
+      // complaints handler.
+      classifier: "BUG: the parser drops wrapped lines",
       debugger: "fixed it",
       writer: "here is prose",
       triager: "unclear",
@@ -266,17 +270,21 @@ test("case: nothing matches, the else route runs", () =>
     },
   ));
 
-test("when: stays independent — routing did not change its semantics", () =>
+test("when: stays independent — two markers in one group both run", () =>
   withStubbedRun(
     {
-      classifier: "urgent and important",
+      // Each marker leads a line, which is how a verdict is written and
+      // what `when:` now looks for. It used to be a substring search
+      // anywhere in the text, which meant an agent saying a marker was
+      // ABSENT still opened the gate — see markerPresent.
+      classifier: "URGENT: the roof\nIMPORTANT: the gutters",
       a: "ran",
       b: "ran too",
     },
     [
       step("classifier", 1),
-      step("a", 2, { when: "urgent" }),
-      step("b", 2, { when: "important" }),
+      step("a", 2, { when: "URGENT" }),
+      step("b", 2, { when: "IMPORTANT" }),
     ],
     (run) => {
       assert.equal(run.steps.filter((s) => s.status === "completed").length, 3, "both whens ran");

@@ -31,10 +31,12 @@
 // that works is the quiet kind of good news, and a channel that pings on
 // every success gets muted, which un-pings the failures too.
 
+import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 import { approveToken, publicUrl } from "./webhook.ts";
+import { noteSecretUse, healthKey } from "./secret-health.ts";
 
 /**
  * The platform's own mail: an invite, a low balance.
@@ -74,10 +76,24 @@ export function notifyMail(tenant: string): { key: string; from: string } | null
   return accountMail(tenant) ?? platformMail(tenant);
 }
 
+/** Was the mail sent on the account's own key? Only then is a refusal from
+ *  Resend a fact about a secret the account holds. Recording a platform-key
+ *  failure against a RESEND_API_KEY the account does not have would send
+ *  them to rotate a key that does not exist. */
+function noteMailUse(tenant: string, status: number): void {
+  if (accountMail(tenant)) noteSecretUse(tenant, healthKey("RESEND_API_KEY", "account"), { host: "api.resend.com", status });
+}
+
 export interface NotifyConfig {
   url?: string;
   email?: string;
   events: string[];
+  /** `signing_secret:` — the NAME of a vault secret, never its value. With
+   *  one, every webhook carries an HMAC of the body it delivers, so the
+   *  receiver can tell a real notification from anyone who learned the URL.
+   *  Inbound hooks have verified a signature since they existed; a delivery
+   *  going the other way is the same problem in the same shape. */
+  signingSecret?: string;
 }
 
 const DEFAULT_EVENTS = ["failed", "awaiting-approval"];
@@ -94,7 +110,7 @@ export function notifyConfig(tenant: string, workspace: string): NotifyConfig | 
       : { url: raw, events: DEFAULT_EVENTS };
   }
   if (typeof raw === "object" && raw !== null) {
-    const o = raw as { url?: unknown; email?: unknown; events?: unknown };
+    const o = raw as { url?: unknown; email?: unknown; events?: unknown; signing_secret?: unknown };
     const url = typeof o.url === "string" ? o.url : undefined;
     const email = typeof o.email === "string" ? o.email : undefined;
     if (!url && !email) return null;
@@ -102,6 +118,8 @@ export function notifyConfig(tenant: string, workspace: string): NotifyConfig | 
       url,
       email,
       events: Array.isArray(o.events) && o.events.length ? o.events.map(String) : DEFAULT_EVENTS,
+      signingSecret:
+        typeof o.signing_secret === "string" ? o.signing_secret.trim().replace(/^\$\{|\}$/g, "") || undefined : undefined,
     };
   }
   return null;
@@ -110,6 +128,43 @@ export function notifyConfig(tenant: string, workspace: string): NotifyConfig | 
 // Said once per process, not once per run: the fix is one env edit, and a
 // line per parked run would bury the failures around it.
 let warnedNoPublicUrl = false;
+
+/**
+ * The headers that prove a delivery came from this install.
+ *
+ * `x-foldrun-signature` is a hex SHA-256 HMAC over "<timestamp>.<body>",
+ * keyed by the named vault secret — the timestamp is inside the signed
+ * string so a captured delivery cannot be replayed later with a fresh one.
+ * `x-signature` is the plain HMAC of the body beside it, the scheme the
+ * inbound `signature: hmac` verifies.
+ *
+ * No secret named, no headers: signing is opt-in, and a receiver that does
+ * not check one is no worse off than before.
+ */
+export function signatureHeaders(
+  tenant: string,
+  workspace: string,
+  config: NotifyConfig,
+  body: string,
+): Record<string, string> {
+  if (!config.signingSecret) return {};
+  const secret = getSecret(tenant, config.signingSecret, workspace);
+  if (!secret) {
+    console.error(
+      `[foldrun] notify: signing_secret names ${config.signingSecret}, which is not in the vault for ${tenant}/${workspace} — sending unsigned`,
+    );
+    return {};
+  }
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const mac = crypto.createHmac("sha256", secret.value).update(`${timestamp}.${body}`).digest("hex");
+  // Two headers. `x-foldrun-signature` is the timestamped one, and what a
+  // receiver should check. `x-signature` is the plain HMAC of the body,
+  // which is what the inbound `signature: hmac` verifies — so a foldrun
+  // notification pointed at another foldrun webhook flow is accepted, and
+  // any receiver written against the plain scheme keeps working.
+  const plain = crypto.createHmac("sha256", secret.value).update(body).digest("hex");
+  return { "x-foldrun-timestamp": timestamp, "x-foldrun-signature": `sha256=${mac}`, "x-signature": plain };
+}
 
 /**
  * The approve/reject links for a run waiting on a person, or null when the
@@ -147,6 +202,169 @@ export function approvalLinks(
 /** Flows whose completion is nobody's news: eval cases and adhoc runs. */
 export function isQuietFlow(flow: string): boolean {
   return /^(eval|adhoc):/.test(flow);
+}
+
+/**
+ * A notification that is not about one run finishing.
+ *
+ * Three things need to say something to the same destination a run
+ * notification goes to, and none of them has a RunRecord to hand: a flow
+ * that has been quarantined, a run that has outlived its `sla:`, and a
+ * budget that is nearly spent. They are the messages a person most needs
+ * and least expects, because each one is about something NOT happening —
+ * the failure mode that never sends mail is the one that costs a week.
+ *
+ * The event name is matched against `events:` exactly like a run status,
+ * so a workspace that wants none of this writes its own list and gets none
+ * of it. They are on by default: an alert nobody opted into is the point.
+ */
+export async function sendPlainNotification(
+  tenant: string,
+  workspace: string,
+  msg: { event: string; headline: string; detail: string; flow?: string; runId?: string },
+): Promise<boolean> {
+  const config = notifyConfig(tenant, workspace);
+  if (!config) return false;
+  // These follow `failed`. Each one IS a failure — a flow that stopped
+  // running, a run that has stalled, a budget about to refuse work — that
+  // happens to produce no failed run for the normal path to report. A
+  // destination hearing about failures hears about these; naming one
+  // explicitly also turns it on; leaving `failed` out silences them.
+  if (!config.events.includes(msg.event) && !config.events.includes("failed")) return false;
+
+  const body = {
+    text: `${msg.headline} — ${msg.detail} · ${workspace}`,
+    workspace,
+    status: msg.event,
+    summary: msg.detail,
+    ...(msg.flow ? { flow: msg.flow } : {}),
+    ...(msg.runId ? { runId: msg.runId } : {}),
+  };
+  try {
+    if (config.email) {
+      const mail = notifyMail(tenant);
+      if (!mail) return false;
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          from: mail.from,
+          to: config.email,
+          subject: `${msg.headline}`.slice(0, 160),
+          text: `${msg.headline}\n\n${msg.detail}\n\nworkspace: ${workspace}\n${msg.flow ? `flow: ${msg.flow}\n` : ""}${msg.runId ? `run: ${msg.runId}\n` : ""}`,
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      return res.ok;
+    }
+    const url = (config.url ?? "").replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
+      const hit = getSecret(tenant, name, workspace);
+      return hit ? hit.value : whole;
+    });
+    if (!url || url.includes("${")) return false;
+    const payload = JSON.stringify(body);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
+      body: payload,
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error(`[foldrun] notify (${msg.event}): ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Prove the notification path works, now, while someone is looking.
+ *
+ * Every run notification is sent when nobody is watching, to a destination
+ * nobody has tested, through a mail domain nobody has verified. On
+ * 2026-09-06 every one of them had been going to a bin for weeks and the
+ * only symptom was silence — which is indistinguishable from nothing having
+ * gone wrong. An alert that has never been proven to arrive is not an alert.
+ *
+ * Unlike every other send here, this one reports its failure in full: the
+ * provider's own words, which are what actually name the problem ("domain
+ * not verified", "you can only send to your own address"). Swallowing them
+ * is right for a run notification and useless for a test.
+ */
+export async function sendTestNotification(
+  tenant: string,
+  workspace: string,
+): Promise<{ ok: boolean; destination: string; detail: string }> {
+  const config = notifyConfig(tenant, workspace);
+  if (!config) {
+    return {
+      ok: false,
+      destination: "none",
+      detail:
+        "no notify: in this workspace's AGENTS.md or the account's — nothing would be sent for a failure or a gate either",
+    };
+  }
+  const sent = new Date().toISOString();
+  const headline = "\u2713 foldrun test notification";
+  const detail = `Sent from ${workspace} at ${sent}. If you are reading this, failures and approval gates will reach you here too.`;
+
+  if (config.email) {
+    const mail = notifyMail(tenant);
+    if (!mail) {
+      return {
+        ok: false,
+        destination: config.email,
+        detail:
+          "email is configured but there is no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account, or FOLDRUN_RESEND_API_KEY on the platform",
+      };
+    }
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
+        body: JSON.stringify({ from: mail.from, to: config.email, subject: headline, text: `${headline}\n\n${detail}\n` }),
+        signal: AbortSignal.timeout(8000),
+      });
+      noteMailUse(tenant, res.status);
+      const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
+      return res.ok
+        ? { ok: true, destination: `${config.email} (from ${mail.from})`, detail: "accepted by Resend for delivery" }
+        : { ok: false, destination: config.email, detail: `HTTP ${res.status} from Resend — ${body}` };
+    } catch (err) {
+      return { ok: false, destination: config.email, detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  const raw = config.url ?? "";
+  const url = raw.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
+    const hit = getSecret(tenant, name, workspace);
+    return hit ? hit.value : whole;
+  });
+  // The destination is echoed back with the secret still unresolved: a
+  // Slack webhook URL is itself a credential, and a page that prints it is
+  // a page that leaks it into a screenshot.
+  const shown = raw.includes("${") ? raw : `${url.slice(0, 40)}…`;
+  if (!url || url.includes("${")) {
+    return { ok: false, destination: shown, detail: `the secret named in notify.url is not in this account's vault` };
+  }
+  try {
+    const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
+      body: payload,
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
+    return res.ok
+      ? {
+          ok: true,
+          destination: shown,
+          detail: config.signingSecret ? "accepted, signed with " + config.signingSecret : "accepted",
+        }
+      : { ok: false, destination: shown, detail: `HTTP ${res.status} — ${body}` };
+  } catch (err) {
+    return { ok: false, destination: shown, detail: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 export async function sendRunNotification(
@@ -242,6 +460,7 @@ export async function sendRunNotification(
         }),
         signal: AbortSignal.timeout(8000),
       });
+      noteMailUse(tenant, res.status);
       if (!res.ok) {
         // Resend's body says WHY — "domain not verified", "can only send to
         // your own address" — and a status alone sent someone to the wrong
@@ -263,10 +482,11 @@ export async function sendRunNotification(
       console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
       return false;
     }
+    const payload = JSON.stringify(body);
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
+      body: payload,
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {

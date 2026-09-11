@@ -70,11 +70,21 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
     (result ? `\n${result}` : "");
   for (const flow of flows) {
     try {
-      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
-        `after:${finished.flow}`,
-      ]);
-      started.push(run.id);
-      console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
+      const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "previous_run" });
+      if (!gate.admit) {
+        console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
+        continue;
+      }
+      try {
+        const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
+          `after:${finished.flow}`,
+        ]);
+        started.push(run.id);
+        console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
+      } catch (err) {
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
     } catch (err) {
       console.error(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
     }
@@ -121,15 +131,85 @@ export async function fireStorageTriggers(
     if (hits.length === 0) continue;
     try {
       const body = `by: ${by}\n${hits.map((h) => `- storage/${h}`).join("\n")}`;
-      const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
-        "storage",
-      ]);
-      started.push(run.id);
+      // A deploy that writes forty files under one prefix is one event, not
+      // forty runs — which is exactly what `debounce:` is for.
+      const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "storage_event" });
+      if (!gate.admit) {
+        console.log(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
+        continue;
+      }
+      try {
+        const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "storage_event", body), flow.name, flow.model, [
+          "storage",
+        ]);
+        started.push(run.id);
+      } catch (err) {
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
     } catch (err) {
       console.error(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
     }
   }
   return started;
+}
+
+/** HTML to the text a prompt reads. Style and script blocks are removed
+ *  until none remain — one pass leaves `<sty<style>le>` behind, which is
+ *  the shape a sanitiser checker (rightly) flags. Nothing here is rendered
+ *  as HTML afterwards; it becomes a task for an agent. */
+function stripTags(html: string): string {
+  let out = html;
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+  }
+  return out.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// ------------------------------------------------------- idempotency keys
+
+/**
+ * The value that identifies this delivery, as the flow's `idempotency:`
+ * names it.
+ *
+ * Two shapes, and only two:
+ *
+ *   idempotency: x-github-delivery   a request header
+ *   idempotency: body:id             a top-level field of a JSON body
+ *
+ * A NAME, never an expression — the grammar has no expressions, and this is
+ * not the place to grow one. Nothing is computed, combined or nested: if the
+ * sender does not put an identifier somewhere a name can reach, the flow
+ * cannot dedupe on it, and saying so is better than inventing a syntax.
+ *
+ * Returns null when the flow asks for no key, or when the delivery does not
+ * carry the one it asked for. A missing key admits the delivery: refusing
+ * one because a sender omitted a header would turn "dedupe when you can"
+ * into an outage.
+ */
+export function deliveryKey(
+  idempotency: string | null,
+  header: (name: string) => string | null,
+  body: string,
+): string | null {
+  if (!idempotency) return null;
+  if (idempotency.startsWith("body:")) {
+    const field = idempotency.slice(5).trim();
+    if (!field) return null;
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      const value = parsed?.[field];
+      // A scalar only. An object stringifies to "[object Object]" for every
+      // delivery, which would make the second one and every one after it a
+      // "duplicate" of the first.
+      if (value === undefined || value === null || typeof value === "object") return null;
+      return String(value).slice(0, 200);
+    } catch {
+      return null; // not JSON, so no field to read
+    }
+  }
+  return header(idempotency)?.slice(0, 200) || null;
 }
 
 // ------------------------------------------------------ signed webhooks
@@ -276,7 +356,7 @@ export function normaliseInboundEmail(contentType: string | null, raw: string): 
   const html = pick("html", "HtmlBody", "body-html");
   const text =
     pick("text", "TextBody", "body-plain", "stripped-text", "plain") ||
-    html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    stripTags(html);
   if (!from && !subject && !text) return null;
   return { from, to: pick("to", "To", "recipient", "ToFull"), subject, text };
 }

@@ -144,7 +144,7 @@ export async function testTool(
   }
 
   if (def.kind === "script") {
-    const run = String(def.spec.run ?? "");
+    let run = String(def.spec.run ?? "");
     // A run's working directory is the calling AGENT's folder, not the
     // workspace root — and scripts rely on that. `path.resolve(cwd, "..",
     // "..", "state", f)` is the ordinary way to reach workspace state, and
@@ -163,7 +163,48 @@ export async function testTool(
     // workspace root is wrong but it exists, and the note says so rather
     // than failing a test over a workspace that cannot run anything yet.
     const cwd = caller ? path.join(dir, "agents", caller.name) : dir;
-    const file = resolveRunPath(path.join(dir, "agents", "_probe"), run, libraryDir(tenant, "scripts"));
+
+    // A single-file tool carries its program in a fenced block rather than
+    // in a file: `run:` is empty and `code:` holds it. The RUNTIME writes it
+    // out at call time (script-tools.ts) and has always worked; the tester
+    // only ever looked for a file, so the Test button failed for every one
+    // of them while the same tool ran fine in a flow — which is the worst
+    // possible way round, since that button is where a developer goes to
+    // find out whether their work is broken.
+    //
+    // Materialised the same way and in the same place a call would, so the
+    // test runs the identical program from the identical directory.
+    const inlineCode = typeof def.spec.code === "string" ? def.spec.code : "";
+    const inline = !run && !!inlineCode;
+    if (inline && !caller) {
+      // Nowhere to stand: the file would land at the workspace root, which
+      // is not where a run puts it and not somewhere a deploy diff should
+      // find it. Say what is missing instead.
+      return done({
+        ok: false, transport: "script", missingSecrets: [],
+        summary: "no agent to test it from",
+        detail: "This tool carries its code inline and is materialised inside the calling agent's folder. Grant it to an agent (tools:) and test again.",
+      });
+    }
+    if (inline) {
+      const ext = typeof def.spec.codeExt === "string" ? def.spec.codeExt : ".mjs";
+      const codeDir = path.join(cwd, ".tool-code");
+      try {
+        fs.mkdirSync(codeDir, { recursive: true });
+        fs.writeFileSync(path.join(codeDir, `${def.name}${ext}`), inlineCode, { mode: 0o755 });
+        run = `.tool-code/${def.name}${ext}`;
+      } catch (err) {
+        return done({
+          ok: false, transport: "script", missingSecrets: [],
+          summary: "its inline code could not be written",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // A materialised file was just written into cwd, so it resolves from
+    // there. A declared `run:` keeps resolving exactly as it always has.
+    const file = resolveRunPath(inline ? cwd : path.join(dir, "agents", "_probe"), run, libraryDir(tenant, "scripts"));
 
     if (!fs.existsSync(file)) {
       return done({

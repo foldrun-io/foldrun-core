@@ -41,12 +41,14 @@ export function readFrontmatter(file: string): Record<string, unknown> {
 }
 import { ownToolNames, legacyUseNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
+import { parseBudget, budgetProblem } from "./budget.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
+import { trimSlashes } from "./paths.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -789,6 +791,12 @@ export interface AgentInfo {
    *  list withholds all of them. */
   skills: string[] | null;
   secrets: string[];
+  /** `budget:` — the most this agent may spend in ONE run, in USD, across
+   *  every step it takes in it; null is no cap. Per run and nothing else:
+   *  an agent has no calendar, the workspace and the account do. */
+  budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
 }
 
 // Recognised HTTP verbs a tool may declare. Deliberately NOT named
@@ -974,7 +982,7 @@ export function parseApis(raw: unknown): ApiSpec[] {
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
       ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
-      base: base.replace(/\/+$/, ""),
+      base: trimSlashes(base),
       description: typeof e.description === "string" ? e.description : "",
       headers: asRecordLocal(e.headers),
       query: asRecordLocal(e.query),
@@ -1103,6 +1111,8 @@ export interface FlowInfo {
    *  that crosses it is the last one that runs. Null: no cap of its own
    *  (the workspace's monthly `budget:` still applies). */
   budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
   /** `trigger: flow` — start when this other flow of the workspace finishes,
    *  with `on:` saying which endings count. The finished run's summary and
    *  result become this run's task. */
@@ -1125,6 +1135,62 @@ export interface FlowInfo {
   /** `trigger: storage` — a path prefix under storage/; a file landing
    *  there starts the flow with the path as its task. */
   path: string | null;
+
+  // ---- how often a trigger is allowed to become a run ----
+  //
+  // Everything above says what starts a flow. These four say how many of
+  // those starts are real. They are orchestration, so they are keys; they
+  // are literals, so nothing is evaluated; and each answers a question a
+  // person can only answer about their own flow, which is the test the
+  // grammar applies before it grows.
+
+  /** `idempotency:` — the name of the field that identifies a delivery, so
+   *  the same one twice starts one run. A header on the request
+   *  ("x-github-delivery"), or "body:<key>" for a top-level field of a JSON
+   *  body. A name, never an expression: the value is read from the delivery,
+   *  not computed from it. Null: every delivery is its own event. */
+  idempotency: string | null;
+  /** `debounce:` — seconds of quiet before a fired trigger becomes a run.
+   *  A burst of deliveries, storage writes or watched changes collapses into
+   *  one run once they stop. The task is the LAST event's, since that is the
+   *  state the flow is reacting to. Null: every event starts a run. */
+  debounce: number | null;
+  /** `throttle:` — the least time between two runs of this flow. A trigger
+   *  arriving inside the window is dropped, and the trace of the run that
+   *  held the window says how many. Null: no floor. */
+  throttle: number | null;
+  /** `catchup:` — what a scheduled flow does about a fire it missed while
+   *  the platform was not running. "last" is the behaviour that always
+   *  applied: one make-up run for however many were missed. "none" skips
+   *  them, for a flow whose moment has passed by the time anyone notices.
+   *  Null reads as "last". */
+  catchup: "last" | "none" | null;
+
+  // ---- when to stop trusting the flow ----
+
+  /** `disable_after:` — consecutive failed runs after which the platform
+   *  stops firing this flow's schedule and says so. A nightly desk that has
+   *  failed all week is not going to fix itself, and every one of those runs
+   *  costs money and sends mail. Null: never quarantined. */
+  disableAfter: number | null;
+  /** `sla:` — seconds a run of this flow is expected to take. A run still
+   *  going well past it is reported once, as a notification, and keeps
+   *  running: this is a smoke alarm, not a timeout. Null: no expectation. */
+  sla: number | null;
+
+  // ---- who may answer a gate, and for how long it waits ----
+
+  /** `approvers:` — the email addresses that may decide this flow's gates,
+   *  or the single word "admins" for anyone at admin or above. Empty means
+   *  the account's existing rule: any member who can run the workspace.
+   *  Nobody may approve their own run's gate whatever this says. */
+  approvers: string[] | null;
+  /** `approve_within:` — how long a gate waits for a person before the run
+   *  is rejected and fails. A gate with no expiry holds its run, and its
+   *  place in the account's concurrency, for as long as nobody looks.
+   *  Null: it waits indefinitely, which stays the default. */
+  approveWithin: number | null;
+
   steps: FlowStep[];
 }
 
@@ -1175,6 +1241,13 @@ export function agentAssets(tenant: string, workspace: string, agent: string): A
   return { skills, memory };
 }
 
+/** A per-run `budget:` as a number, or null. A period other than "run"
+ *  written here is a mistake the lint names; it is not silently a cap. */
+function runBudget(raw: unknown): number | null {
+  const b = parseBudget(raw, "run");
+  return b && b.period === "run" ? b.usd : null;
+}
+
 export function listAgents(tenant: string, workspace: string): AgentInfo[] {
   const dir = path.join(workspaceDir(tenant, workspace), "agents");
   if (!fs.existsSync(dir)) return [];
@@ -1197,15 +1270,34 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         consults: refNames(data.agents),
         skills: data.skills === undefined ? null : refNames(data.skills),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
+        budget: runBudget(data.budget),
+        budgetProblem: budgetProblem(data.budget, ["run"]),
       };
     });
 }
 
 // A step targets an agent — `[[writer]]` — or another flow — `[[flow:digest]]`,
 // which is how one flow triggers another.
-const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(.*)$/;
+// `(\S.*|)` rather than `(.*)`: the instruction either starts with a
+// non-space or is empty, so the `\s*` before it has exactly one way to
+// match. With `(.*)` both could own the same spaces, which is quadratic on
+// a line of them — and a flow file is customer input.
+const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(\S.*|)$/;
 
-const OPTION_RE = /^\s+([a-z-]+):\s*(.+)$/;
+// One quantifier after the colon; the value is trimmed by unquote(). A key
+// with nothing after it is an option with an empty value, which is what it
+// says, rather than a line that vanished.
+const OPTION_RE = /^\s+([a-z-]+):(.*)$/;
+
+/** The option keys a step actually has. An indented `word: rest` that is
+ *  NOT one of these is a line of the instruction — "Warning: do not
+ *  publish" is prose that happens to contain a colon, and it used to be
+ *  swallowed as an unknown option, silently, along with any typo of a real
+ *  key. The consistency suite reads this list against the docs. */
+const STEP_OPTION_KEYS = new Set([
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "loop", "max", "model",
+  "on-fail", "onfail", "output", "preview", "retry", "timeout", "until", "verify", "wait", "when",
+]);
 
 /** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
  *  days: a wait is a pause in a flow, not a second scheduler. */
@@ -1253,6 +1345,46 @@ export function unquote(raw: string): string {
   return inner.includes(q) ? value : inner;
 }
 
+/**
+ * Does this text carry the marker a `when:` is looking for?
+ *
+ * At the START OF A LINE, not anywhere in the prose. A plain substring
+ * search is the obvious implementation and it is wrong in a way that is
+ * very hard to see: an agent writing
+ *
+ *   There are no BLOCKED items this week.
+ *
+ * opened a `when: BLOCKED` gate, because the word is right there. Saying a
+ * marker is absent necessarily names it, so the more carefully an agent
+ * explains itself the more likely it is to trip its own condition. It bit
+ * one desk on its first run and sat latent in another.
+ *
+ * A verdict is written as a headline — the line leads with it — so leading
+ * position is what distinguishes "this is my verdict" from "here is a word
+ * I am using in a sentence". Markdown decoration in front of it is fine: a
+ * heading, a bullet or bold is still a line that leads with the marker.
+ *
+ * The marker must also END at a boundary, so BLOCKED does not match
+ * BLOCKEDBY.
+ */
+export function markerPresent(text: string | null | undefined, marker: string): boolean {
+  const needle = marker.trim().toLowerCase();
+  if (!needle || !text) return false;
+  for (const raw of text.split("\n")) {
+    // Strip what markdown puts in front of a headline: heading hashes,
+    // quote marks, list bullets, emphasis, backticks.
+    // Heading hashes, quote marks, bullets, numbered-list markers, task
+    // checkboxes, a leading table pipe, emphasis, backticks.
+    const line = raw.replace(/^(?:[\s>#*_`\-+|]|\d+[.)](?=\s)|\[[ xX]\])*/, "").toLowerCase();
+    if (!line.startsWith(needle)) continue;
+    const after = line[needle.length];
+    // End of line, or a separator. A letter or digit means this is a longer
+    // word that merely begins the same way.
+    if (after === undefined || !/[a-z0-9]/.test(after)) return true;
+  }
+  return false;
+}
+
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
@@ -1277,8 +1409,25 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       });
       continue;
     }
-    // Indented options belong to the step above them.
+    // An indented line that is not an option continues the instruction.
+    //
+    // Without this it was silently DROPPED. An instruction wrapped over
+    // three lines kept the first and discarded the rest, the run went
+    // green, and the agent worked from an instruction its author had not
+    // written — the worst failure this parser can have, because nothing
+    // anywhere reports it. Twenty-five live instructions across eight desks
+    // were being cut this way.
+    //
+    // Indentation is what makes it a continuation, exactly as it is for an
+    // option. Unindented prose between steps is still prose and still
+    // ignored, so a flow file's commentary is undisturbed.
     const opt = line.match(OPTION_RE);
+    if (steps.length && /^\s+\S/.test(line) && !(opt && STEP_OPTION_KEYS.has(opt[1]))) {
+      const step = steps[steps.length - 1];
+      step.instruction = `${step.instruction} ${line.trim()}`.trim();
+      continue;
+    }
+    // Indented options belong to the step above them.
     if (opt && steps.length) {
       const step = steps[steps.length - 1];
       const [, key, rawValue] = opt;
@@ -1328,7 +1477,8 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
     priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
-    budget: Number(data.budget) > 0 ? Number(data.budget) : null,
+    budget: runBudget(data.budget),
+    budgetProblem: budgetProblem(data.budget, ["run"]),
     // `after: [[flow:publish]]` — a link or a bare name, read the same way
     // as every other file-naming field (refs.ts).
     after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,
@@ -1344,8 +1494,62 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         ? data.signing_secret.trim().replace(/^\$\{|\}$/g, "")
         : null,
     path: typeof data.path === "string" ? data.path.trim().replace(/^\/+/, "") : null,
+    // A header name is case-insensitive on the wire; a JSON field is not.
+    // `body:eventId` lower-cased to `body:eventid` matched nothing, and a
+    // dedupe that matches nothing admits everything.
+    idempotency: typeof data.idempotency === "string" ? idempotencyName(data.idempotency) : null,
+    debounce: durationOf(data.debounce),
+    throttle: durationOf(data.throttle),
+    catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
+    disableAfter: Number.isFinite(Number(data.disable_after)) && Number(data.disable_after) > 0
+      ? Math.min(100, Math.floor(Number(data.disable_after)))
+      : null,
+    sla: durationOf(data.sla),
+    approvers: approverList(data.approvers),
+    approveWithin: durationOf(data.approve_within),
     steps,
   };
+}
+
+function idempotencyName(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  return v.toLowerCase().startsWith("body:") ? `body:${v.slice(5).trim()}` : v.toLowerCase();
+}
+
+/** A duration frontmatter value — "30m", "2d", or bare seconds — or null.
+ *  Shares parseWait's units and its thirty-day ceiling, so every duration in
+ *  the format is written and bounded the same way. */
+function durationOf(raw: unknown): number | null {
+  if (typeof raw === "number") return raw > 0 ? Math.min(Math.round(raw), 30 * 86400) : null;
+  if (typeof raw !== "string") return null;
+  return parseWait(raw) ?? null;
+}
+
+/** `approvers:` — a YAML list, or one address, or "admins". Lower-cased,
+ *  because an email address that differs only in case is the same person and
+ *  a gate that refuses them is a support ticket. */
+function approverList(raw: unknown): string[] | null {
+  const items = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const out = items.map((v) => String(v).trim().toLowerCase()).filter(Boolean);
+  return out.length ? [...new Set(out)] : null;
+}
+
+/** May this person decide a gate of this flow? `approvers:` is an allowlist
+ *  of addresses plus the word "admins"; an empty list defers to whatever
+ *  permission the caller already needed to reach the route.
+ *
+ *  Self-approval is refused separately (see approvals.ts): who STARTED a run
+ *  is a property of the run, not of the flow file. */
+export function mayApprove(
+  flow: Pick<FlowInfo, "approvers"> | null | undefined,
+  who: { email?: string | null; role?: string | null },
+): boolean {
+  const list = flow?.approvers;
+  if (!list || list.length === 0) return true;
+  const email = (who.email ?? "").trim().toLowerCase();
+  if (email && list.includes(email)) return true;
+  return list.includes("admins") && (who.role === "admin" || who.role === "owner");
 }
 
 /** A live run of this flow — the fact overlap: decisions are made on. */
@@ -1483,9 +1687,9 @@ export function updateFlowStepInstruction(raw: string, index: number, instructio
   const m = line.match(STEP_RE);
   if (!m) throw new Error(`step ${index} is not a step line`);
   // Everything up to where the instruction starts, exactly as written.
-  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.replace(/\s+$/, "")} — `;
+  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.trimEnd()} — `;
   const next = instruction.trim().replace(/\s*\n\s*/g, " ");
-  block.lines = [`${prefix}${next}`.replace(/\s+$/, ""), ...block.lines.slice(1)];
+  block.lines = [`${prefix}${next}`.trimEnd(), ...block.lines.slice(1)];
   // Same regrouping as updateFlowStep: consecutive blocks sharing a number
   // are one parallel group, and emitFlow puts the file back together.
   const groups: FlowBlock[][] = [];
@@ -1606,6 +1810,19 @@ export function listFlows(tenant: string, workspace: string): FlowInfo[] {
     .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8")));
+}
+
+/** One flow of a workspace by name, or null. The same read listFlows makes,
+ *  named so callers that want a single flow — the approval rules, the
+ *  runner's budget stamp — do not each re-implement the directory walk. */
+export function readFlow(tenant: string, workspace: string, flowName: string): FlowInfo | null {
+  const dir = path.join(workspaceDir(tenant, workspace), "flows");
+  if (!fs.existsSync(dir)) return null;
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+    const flow = parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"));
+    if (flow.name === flowName) return flow;
+  }
+  return null;
 }
 
 export interface WorkspaceSummary {
@@ -1897,7 +2114,7 @@ export function writeWorkspaceFile(
   // the editor's line gutter dutifully numbered all of it. Trailing blank
   // lines are not content in any format this holds (markdown, YAML
   // frontmatter, a script), and no author types thirty of them on purpose.
-  fs.writeFileSync(p, `${content.replace(/\s+$/, "")}\n`);
+  fs.writeFileSync(p, `${content.trimEnd()}\n`);
   // Code is executable wherever it lives: the scripts shelf, a skill's
   // bundled scripts/, or a folder tool's own directory. A run.mjs written
   // without the bit fails at exec, which reads as "the tool is broken".
@@ -2430,6 +2647,15 @@ export interface RunRecord {
    *  the agents decided was worth remembering, listed so a person can review
    *  the lesson without diffing the folder. */
   memoryWrites?: string[];
+  /** Who asked for this run, when a person did: their email address. A
+   *  schedule, a webhook and a chained flow have no one, and leave it unset.
+   *  Kept so a gate can refuse the one approval nobody should be able to
+   *  give — your own. */
+  startedBy?: string | null;
+  /** When this run's gate stops waiting, stamped the moment it parks from
+   *  the flow's `approve_within:`. A gate nobody answers by then is rejected
+   *  and the run fails, rather than holding a concurrency slot forever. */
+  approveBy?: string | null;
   steps: StepRecord[];
 }
 

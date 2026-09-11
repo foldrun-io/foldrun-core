@@ -61,6 +61,7 @@ export interface ContainerStepInput {
   /** The step's spend ceiling and the model's per-token price — see
    *  step-exec.ts. Values, so the driver can enforce them in the pod. */
   budgetUsd?: number | null;
+  budgetNote?: string;
   price?: { input: number; output: number } | null;
   verify?: string;
   /** `output: json` — checked inside, where the reply is. */
@@ -425,6 +426,7 @@ try {
     env,
     timeoutSec: input.timeoutSec,
     budgetUsd: input.budgetUsd,
+    budgetNote: input.budgetNote,
     price: input.price,
     verify: input.verify,
     verifyEnv: {},
@@ -536,8 +538,17 @@ export function runnerImageTag(): string {
  * has not been built before. `npm pack` of the installed core, so the image
  * runs the same bytes the server does.
  */
-export function ensureRunnerImage(): { tag: string; log: string[] } {
-  const tag = process.env.FOLDRUN_RUNNER_IMAGE ?? runnerImageTag();
+/**
+ * `platform`: build for another architecture — "linux/arm64" on the amd64
+ * box, through QEMU — and name the result with the arch appended so it never
+ * shadows the native image in the daemon. Only the publisher asks for this;
+ * a step always runs the native image. Needs binfmt registered on the host
+ * (tonistiigi/binfmt); the publisher does that itself, every time, because
+ * the registration does not survive a reboot.
+ */
+export function ensureRunnerImage(opts: { platform?: string } = {}): { tag: string; log: string[] } {
+  const arch = opts.platform ? `-${opts.platform.split("/").pop()}` : "";
+  const tag = process.env.FOLDRUN_RUNNER_IMAGE ?? runnerImageTag() + arch;
   const log: string[] = [];
   if (process.env.FOLDRUN_RUNNER_IMAGE) return { tag, log };
 
@@ -556,7 +567,8 @@ export function ensureRunnerImage(): { tag: string; log: string[] } {
     fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
     fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
     log.push(`building runner image ${tag} (first run only)`);
-    const out = spawnSync(cli(), ["build", "-t", tag, build], { encoding: "utf8" });
+    const args = ["build", ...(opts.platform ? ["--platform", opts.platform] : []), "-t", tag, build];
+    const out = spawnSync(cli(), args, { encoding: "utf8" });
     if (out.status !== 0) {
       throw new Error(`runner image build failed:\n${(out.stderr || out.stdout).slice(-2000)}`);
     }

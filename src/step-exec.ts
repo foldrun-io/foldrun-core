@@ -57,6 +57,9 @@ export interface ExecOptions {
    *  The runner derives it from the flow's `budget:` and what the run has
    *  already spent; absent means no ceiling on this step. */
   budgetUsd?: number | null;
+  /** Which line set the ceiling, for the error that names it — "budget: in
+   *  the flow file" or "budget: on the <agent> agent". */
+  budgetNote?: string;
   /** Price per token for the model, when the catalogue knows it, so spend
    *  can be counted turn by turn instead of learned at the end. Without it
    *  the step prices its turns from the SDK's own running total. */
@@ -143,6 +146,28 @@ export function priceTurn(u: Record<string, number | undefined>, price: { input:
 export function stepCeiling(budgetUsd: number | null | undefined, spentUsd: number, launching: number): number | null {
   if (!budgetUsd || budgetUsd <= 0) return null;
   return Math.max(0, budgetUsd - spentUsd) / Math.max(1, launching);
+}
+
+/**
+ * The ceiling a step actually runs under, and which line set it.
+ *
+ * Two caps can apply to one step: the flow's `budget:` gives it an equal
+ * share of what the run has left; the agent's own `budget:` is the most that
+ * agent may spend in one run, less what its earlier steps in this run cost.
+ * The tighter one wins, and the note says which, because "over budget" with
+ * no line to go and raise is a message that sends someone to the wrong file.
+ */
+export function stepCeilingFor(
+  flowShareUsd: number | null,
+  agentBudgetUsd: number | null | undefined,
+  agentSpentUsd: number,
+  agent: string,
+): { ceilingUsd: number | null; note: string } {
+  const flow = { ceilingUsd: flowShareUsd, note: "budget: in the flow file" };
+  if (!agentBudgetUsd || agentBudgetUsd <= 0) return flow;
+  const left = Math.max(0, agentBudgetUsd - agentSpentUsd);
+  if (flowShareUsd !== null && flowShareUsd <= left) return flow;
+  return { ceilingUsd: left, note: `budget: on the ${agent} agent` };
 }
 
 export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
@@ -242,7 +267,7 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
       if (ceiling && u) {
         spentUsd += priceTurn(u, opts.price ?? null);
         if (spentUsd >= ceiling) {
-          emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (budget: in the flow file)`);
+          emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
           status = "failed";
           break;
         }

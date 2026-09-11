@@ -286,7 +286,8 @@ export function promoteRunToEval(
   let expect: string[];
   if (opts.expect && opts.expect.length > 0) {
     expect = opts.expect.map((line) => {
-      const m = oneLine(line).match(/^([a-z-]+):\s*(.*)$/);
+      const m = oneLine(line).match(/^([a-z-]+):(.*)$/);
+      if (m) m[2] = m[2].trim();
       if (!m || !(ASSERTION_TYPES as readonly string[]).includes(m[1]) || !m[2]) {
         throw refuse(
           `"${line}" is not an assertion — expected one of ${ASSERTION_TYPES.map((t) => `${t}:`).join(", ")} followed by a value`,
@@ -325,7 +326,7 @@ export function promoteRunToEval(
         409,
       );
     }
-    content = `${existing.replace(/\s+$/, "")}\n\n${caseText}`;
+    content = `${existing.trimEnd()}\n\n${caseText}`;
   } else {
     // A flow eval costs a whole run and touches real systems, so it waits
     // for a person to press Run rather than following every push.

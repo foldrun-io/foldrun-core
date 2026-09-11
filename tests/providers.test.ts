@@ -120,6 +120,39 @@ test("every preset is in docs/providers.md and the spec names the three keys", a
     for (const p of PROVIDERS) {
       assert.ok(doc.includes(`| \`${p.name}\` |`), `docs/providers.md does not list ${p.name}`);
     }
+
+    // The table's `verified` column, row by row. "Verified" is a claim that
+    // an agent actually completed a tool loop against that endpoint, and
+    // it is the one column a reader decides on — a name marked yes in the
+    // docs and no in the code is the doc promising something nobody
+    // checked.
+    const cellFor = (name: string): string | null => {
+      const row = doc.split("\n").find((l) => l.startsWith(`| \`${name}\` |`));
+      if (!row) return null;
+      return (row.split("|")[6] ?? "").trim().toLowerCase();
+    };
+    for (const p of PROVIDERS) {
+      const cell = cellFor(p.name);
+      assert.notEqual(cell, null, `docs/providers.md has no table row for ${p.name}`);
+      const docSaysVerified = cell === "yes";
+      assert.equal(
+        docSaysVerified,
+        Boolean(p.verified),
+        `docs/providers.md marks ${p.name} verified=${docSaysVerified || "no"}, the code says ${Boolean(p.verified)}`,
+      );
+    }
+
+    // And the sentence above the table, which drifted from 30 to 29 names
+    // without anyone noticing. A number in prose is only true on the day it
+    // is typed unless something checks it.
+    const verified = PROVIDERS.filter((x) => x.verified).length;
+    assert.ok(
+      doc.includes(`**${verified} of ${PROVIDERS.length}**`),
+      `docs/providers.md should say "**${verified} of ${PROVIDERS.length}**" — it does not`,
+    );
+    for (const p of PROVIDERS.filter((x) => x.verified)) {
+      assert.ok(doc.includes(`\`${p.name}\``), `the verified list should name ${p.name}`);
+    }
   } else {
     t.diagnostic("no foldrun-docs checkout beside this one — checking SPEC.md only");
   }
