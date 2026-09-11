@@ -302,8 +302,14 @@ export function s3Config(): S3Config | null {
   };
 }
 
-const sha256 = (b: crypto.BinaryLike) => crypto.createHash("sha256").update(b).digest("hex");
-const hmac = (key: crypto.BinaryLike, data: string) =>
+// Narrower than crypto.BinaryLike on purpose. BinaryLike also covers views
+// over a SharedArrayBuffer, which .update() has never accepted and which
+// @types/node 26 finally says so about — the old typings let this compile by
+// being vaguer than the runtime. Every caller here passes a string or a
+// Buffer, so this is the honest signature, not a workaround.
+type Hashable = string | Uint8Array;
+const sha256 = (b: Hashable) => crypto.createHash("sha256").update(b).digest("hex");
+const hmac = (key: Hashable, data: string) =>
   crypto.createHmac("sha256", key).update(data, "utf8").digest();
 
 /** RFC 3986. encodeURIComponent leaves !'()* alone and SigV4 does not. */
