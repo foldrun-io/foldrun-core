@@ -13,6 +13,15 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # zod is pinned exactly, and 4.5 is why. The Agent SDK's MCP bridge
+      # reads our schemas, and on 4.5.4 building a typed OpenAPI tool dies
+      # inside the SDK with "Cannot read properties of undefined (reading
+      # 'push')" — the two disagree about a schema's internals. Proven by
+      # bisecting the grouped bump: the SDK alone is fine on 4.4.3, zod
+      # alone breaks it. Lift this when the SDK says it supports 4.5.
+      - dependency-name: zod
+        versions: [">=4.5.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly, day: monday }
