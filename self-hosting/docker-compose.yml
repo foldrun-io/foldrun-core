@@ -1,0 +1,117 @@
+# foldrun cloud on one box — the production shape for everything short of a
+# fleet. The platform container is the always-on control plane; every agent
+# step runs in a hardened throwaway container beside it (spawned through the
+# docker socket), so run compute scales to zero by construction: no step, no
+# container, no cost.
+#
+#   FOLDRUN_SECRET_KEY=$(openssl rand -hex 32) docker compose up -d
+#
+# That pulls a published image — no source needed, and nothing to build.
+# The `build:` block below is for the foldrun team: the image is assembled
+# from four sibling checkouts, two of which (foldrun-platform, foldrun-web)
+# are not public. Everyone else pulls.
+#
+# First run: sign up at http://<host>:3900/signup (the first account needs
+# no flag), create an API key in Settings, and `foldrun deploy --url`.
+
+services:
+  platform:
+    image: ${FOLDRUN_IMAGE:-ghcr.io/foldrun-io/platform:latest}
+    # Uncomment to build from the sibling checkouts instead of pulling.
+    # The context is the folder holding foldrun-core, foldrun-platform,
+    # foldrun-web and foldrun-docs — see Dockerfile.
+    # build:
+    #   context: ..
+    #   dockerfile: foldrun-infra/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3900:3900"
+      # The egress proxy: a step sends its API and model requests here with
+      # ${NAME} placeholders and the platform fills them on the way out, so
+      # a credential never enters a step's container. Reached from inside a
+      # step as host.docker.internal, which means the host's interfaces —
+      # bind it to the docker bridge address on a box that faces a LAN, or
+      # leave the lease token (random per step, host-allowlisted) as the
+      # gate on a box that does not.
+      - "${FOLDRUN_EGRESS_BIND:-0.0.0.0}:8090:8090"
+    volumes:
+      # Everything the platform is: workspaces, runs, vault, users, ledger.
+      # Back this directory up and you have backed the product up. A named
+      # volume by default; set FOLDRUN_DATA_DIR to a host path when you want
+      # the files inspectable (a dev box mirroring production, say).
+      - ${FOLDRUN_DATA_DIR:-foldrun-data}:/data
+      # How steps become sibling containers. Mounting the socket makes the
+      # platform root-equivalent on this host — that is the deal on a single
+      # box, and the runner's own hardening (non-root, cap-drop, no-new-privs,
+      # optional gVisor) is what stands between agents and the daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FOLDRUN_DATA: /data
+      FOLDRUN_RUN_ISOLATION: container
+      # The image every step runs in: node, python, git, and Chromium,
+      # Firefox and WebKit for the browser tool. Published, so the first
+      # run does not spend five minutes and 600MB building it. Unset it and
+      # the platform builds its own copy on first use, which is what a
+      # change to the runner's Dockerfile needs.
+      FOLDRUN_RUNNER_IMAGE: ${FOLDRUN_RUNNER_IMAGE:-ghcr.io/foldrun-io/runner:latest}
+      # The key every derived credential hangs off (sessions, hooks, git,
+      # vault). Generate once: openssl rand -hex 32. Losing it logs everyone
+      # out and voids every hook URL; leaking it is game over — treat it like
+      # the root password it is.
+      FOLDRUN_SECRET_KEY: ${FOLDRUN_SECRET_KEY:?set FOLDRUN_SECRET_KEY (openssl rand -hex 32)}
+      # gVisor, if installed on this host (runsc in /etc/docker/daemon.json):
+      # FOLDRUN_RUNNER_RUNTIME: runsc
+      # Strangers allowed? Billing enforced? Off by default on purpose.
+      FOLDRUN_OPEN_SIGNUP: ${FOLDRUN_OPEN_SIGNUP:-}
+      FOLDRUN_BILLING: ${FOLDRUN_BILLING:-}
+      FOLDRUN_CONCURRENCY: ${FOLDRUN_CONCURRENCY:-2}
+      # Where a step reaches the egress proxy. Empty disables it and every
+      # step materialises its secrets into its container as before.
+      FOLDRUN_EGRESS_URL: ${FOLDRUN_EGRESS_URL:-http://host.docker.internal:8090}
+      FOLDRUN_EGRESS_PORT: "8090"
+      # The platform's model credential — "models included". Runs without
+      # their own provider: block borrow exactly this (and nothing else
+      # from the host environment).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Point that credential at OpenRouter (or any Anthropic-compatible
+      # endpoint) instead. The tier ids travel with it — a base URL pointing
+      # elsewhere with Anthropic's model ids attached is a 404 per step.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-}
+      # The second model supply, tried when the first refuses over money or
+      # auth: subscription as the engine, per-token only when it runs dry.
+      FOLDRUN_FALLBACK_BASE_URL: ${FOLDRUN_FALLBACK_BASE_URL:-}
+      FOLDRUN_FALLBACK_TOKEN: ${FOLDRUN_FALLBACK_TOKEN:-}
+      FOLDRUN_FALLBACK_HAIKU_MODEL: ${FOLDRUN_FALLBACK_HAIKU_MODEL:-}
+      FOLDRUN_FALLBACK_SONNET_MODEL: ${FOLDRUN_FALLBACK_SONNET_MODEL:-}
+      FOLDRUN_FALLBACK_OPUS_MODEL: ${FOLDRUN_FALLBACK_OPUS_MODEL:-}
+      # Run/step/compute pricing — see dev/dev.env.example. Unset, a run
+      # is charged provider cost only, which is the self-hoster default.
+      FOLDRUN_MARGIN: ${FOLDRUN_MARGIN:-}
+      FOLDRUN_RUN_FEE: ${FOLDRUN_RUN_FEE:-}
+      FOLDRUN_NET_USD_PER_GB: ${FOLDRUN_NET_USD_PER_GB:-}
+      FOLDRUN_COMPUTE_USD_PER_CORE_SEC: ${FOLDRUN_COMPUTE_USD_PER_CORE_SEC:-}
+      FOLDRUN_COMPUTE_USD_PER_GIB_SEC: ${FOLDRUN_COMPUTE_USD_PER_GIB_SEC:-}
+      FOLDRUN_CPU_USD_PER_BUSY_SEC: ${FOLDRUN_CPU_USD_PER_BUSY_SEC:-}
+      FOLDRUN_RUNNER_CPUS_SMALL: ${FOLDRUN_RUNNER_CPUS_SMALL:-}
+      FOLDRUN_RUNNER_MEMORY_SMALL: ${FOLDRUN_RUNNER_MEMORY_SMALL:-}
+      FOLDRUN_RUNNER_CPUS_HEAVY: ${FOLDRUN_RUNNER_CPUS_HEAVY:-}
+      FOLDRUN_RUNNER_MEMORY_HEAVY: ${FOLDRUN_RUNNER_MEMORY_HEAVY:-}
+      FOLDRUN_STORAGE_USD_PER_GB_MONTH: ${FOLDRUN_STORAGE_USD_PER_GB_MONTH:-}
+      FOLDRUN_BASE_FEE_MONTHLY: ${FOLDRUN_BASE_FEE_MONTHLY:-}
+      FOLDRUN_PLAN_WORKSPACES: ${FOLDRUN_PLAN_WORKSPACES:-}
+      FOLDRUN_PLAN_CONCURRENCY: ${FOLDRUN_PLAN_CONCURRENCY:-}
+      FOLDRUN_RETENTION_DAYS: ${FOLDRUN_RETENTION_DAYS:-}
+      FOLDRUN_COMPUTE_USD_PER_SEC: ${FOLDRUN_COMPUTE_USD_PER_SEC:-}
+      FOLDRUN_MIN_RUN_FEE: ${FOLDRUN_MIN_RUN_FEE:-}
+      FOLDRUN_MAX_RUN_EXPOSURE: ${FOLDRUN_MAX_RUN_EXPOSURE:-}
+      # Card top-ups (optional; the manual ledger API works without them).
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+
+volumes:
+  foldrun-data:

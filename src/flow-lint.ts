@@ -35,6 +35,18 @@ export interface KnownNames {
   agents: string[];
 }
 
+/** One @, something either side, a dot in the domain, no whitespace. Written
+ *  as string checks rather than a regex: the obvious pattern backtracks
+ *  polynomially on a domain full of dots, and a lint that can be made slow
+ *  by a flow file is a lint someone will turn off. */
+function looksLikeAddress(a: string): boolean {
+  const at = a.indexOf("@");
+  if (at < 1 || at !== a.lastIndexOf("@") || /\s/.test(a)) return false;
+  const domain = a.slice(at + 1);
+  const dot = domain.indexOf(".");
+  return dot > 0 && dot < domain.length - 1;
+}
+
 export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   const warnings: FlowWarning[] = [];
   const agentNames = known ? new Set(known.agents) : null;
@@ -47,6 +59,71 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   // eleven runs where one was meant. Nothing about the expression looks wrong,
   // which is exactly why it needs saying here rather than being discovered on
   // the bill.
+  // An approvers list only one word can satisfy. `approvers: [editors]` is
+  // a role that is not `admins` and not an address; mayApprove would then
+  // refuse every person, and the gate could only ever be answered by an
+  // emailed link. Said here rather than discovered at the gate.
+  const odd = (flow.approvers ?? []).filter((a) => a !== "admins" && !looksLikeAddress(a));
+  if (odd.length) {
+    warnings.push({
+      step: null,
+      message: `approvers: ${odd.join(", ")} — not an email address, and the only role word is admins`,
+      detail: "Each entry is an address that may answer this flow's gates, or the word `admins`. Anything else matches nobody, and a list nobody matches locks every gate.",
+    });
+  }
+  // A flow with an approvers list and no gate at all is a rule the author
+  // believes is in force and which does nothing — the worst kind of safety
+  // control.
+  if (flow.approvers?.length && !flow.steps.some((s) => s.approve || s.ask)) {
+    warnings.push({
+      step: null,
+      message: "approvers: is set but no step in this flow is a gate",
+      detail:
+        "Nothing here waits for a person, so the list has no effect. Mark the step that needs " +
+        "a second pair of eyes with `!` (or `approve: true`), or drop the approvers: line.",
+    });
+  }
+  // A deadline on a gate that does not exist reads as a safety net and is not
+  // one. Same reasoning, said separately because the fix is different.
+  if (flow.approveWithin && !flow.steps.some((s) => s.approve || s.ask)) {
+    warnings.push({
+      step: null,
+      message: "approve_within: is set but no step in this flow is a gate",
+      detail: "Nothing waits for a person, so nothing can expire. Mark a step with `!`, or drop the line.",
+    });
+  }
+  // A throttle no schedule can ever trip: the flow cannot run more often
+  // than its cron fires, so a floor below that interval never fires either.
+  // Cheap to write, silently pointless, and a reader will believe it.
+  if (flow.throttle && flow.trigger === "schedule" && flow.schedule) {
+    warnings.push({
+      step: null,
+      message: `throttle: on a scheduled flow — check it is shorter than the schedule, or it will drop runs you meant to happen`,
+      detail:
+        "A schedule already decides how often this runs. A throttle longer than the gap between " +
+        "fires silently skips them; if that is what you want, say it in the cron instead.",
+    });
+  }
+  // `idempotency:` only has a delivery to read on a trigger that receives
+  // one. On a schedule or a chained flow there is no request and no field,
+  // so the key is inert.
+  if (flow.idempotency && flow.trigger !== "webhook" && flow.trigger !== "email") {
+    warnings.push({
+      step: null,
+      message: `idempotency: has nothing to read on trigger: ${flow.trigger}`,
+      detail:
+        "A delivery id comes off an incoming request, so this only does something for " +
+        "trigger: webhook or trigger: email. On any other trigger it is ignored.",
+    });
+  }
+  // `catchup:` is about a fire that was missed, which only a clock can miss.
+  if (flow.catchup && flow.trigger !== "schedule") {
+    warnings.push({
+      step: null,
+      message: `catchup: has no effect on trigger: ${flow.trigger}`,
+      detail: "Only a schedule can miss a fire. Every other trigger happens when it happens.",
+    });
+  }
   if (flow.schedule) {
     const [, , dom, , dow] = flow.schedule.trim().split(/\s+/);
     if (dom && dow && dom !== "*" && dow !== "*") {
@@ -63,6 +140,9 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
 
   // Trigger shapes that can never fire, said at check time rather than
   // discovered as a flow that "never runs".
+  if (flow.budgetProblem) {
+    warnings.push({ step: null, message: flow.budgetProblem, detail: "A flow's `budget:` is the most one run may spend — a number in USD, or `unlimited`. A cap over a day, week or month belongs in the workspace's or the account's AGENTS.md, where it means every run put together." });
+  }
   if (flow.trigger === "once" && !flow.at) {
     warnings.push({ step: null, message: "trigger: once needs an `at:` instant", detail: "Write `at: 2026-09-05T09:00:00+10:00` (ISO 8601). Without a readable instant this flow never fires." });
   }

@@ -8,11 +8,12 @@ import path from "node:path";
 import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import {
-  knownPrice, executeStep, extractJson, stepCeiling, type EventExtra } from "./step-exec.ts";
+  knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
+import { healthKey } from "./secret-health.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
  *  one the platform registered (a pod)? */
@@ -38,6 +39,8 @@ import {
   syncBundleFor,
   parseToolDef,
   parseFlow,
+  readFlow,
+  markerPresent,
   parseApis,
   resolveModel,
   parseProvider,
@@ -55,6 +58,7 @@ import {
   type StepRecord,
   STORAGE_DIR,
   adoptLegacyVersionKey,
+  listAgents,
   runCost,
 } from "./store.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, type Catalog } from "./catalog.ts";
@@ -72,6 +76,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { trimChars } from "./paths.ts";
 
 // An MCP tool definition becomes an SDK server config. ${SECRET} placeholders
 // in env and headers resolve server-side, so a credential reaches the server
@@ -378,10 +383,9 @@ export function saysUntilMarker(result: string | null, until: string): boolean {
       (line) =>
         // Strip markdown emphasis and punctuation from BOTH ends: "**APPROVED.**"
         // is a decision written by someone using bold, not a sentence.
-        line
-          .trim()
-          .replace(/^[#>\-*_`\s]+/, "")
-          .replace(/[.!:,*_`\s]+$/, "")
+        // trimChars, not a `[…]+$` regex: that one is quadratic on a
+        // line of tabs, and this is a line an agent wrote.
+        trimChars(trimChars(line.trim(), "#>-*_`"), ".!:,*_`").trim()
           .toLowerCase() === marker,
     );
 }
@@ -471,7 +475,10 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       map.set(norm(fwd), `../../${STORAGE_DIR}/${fwd}`);
     }
   }
-  return text.replace(/\[\[([^\]\n]+)\]\]/g, (whole, name: string) => {
+  // `[` excluded from the name: with it allowed, a run of `[[` makes the
+  // engine re-scan to the end from every opening — quadratic on a result
+  // an agent wrote.
+  return text.replace(/\[\[([^\]\[\n]+)\]\]/g, (whole, name: string) => {
     const hit = map.get(norm(name.trim()));
     return hit ? `\`${hit}\`` : whole;
   });
@@ -1214,6 +1221,8 @@ async function runStep(
    *  remaining `budget:`, shared across the steps launched with it. Null
    *  means the flow set no budget. */
   stepBudgetUsd: number | null = null,
+  /** Which line set that ceiling, for the error that names it. */
+  stepBudgetNote?: string,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1575,7 +1584,17 @@ async function runStep(
         const host = hostOf(api.base);
         if (!host) continue;
         for (const v of [...Object.values(api.headers), ...Object.values(api.query)]) {
-          for (const name of placeholderNames(v)) if (name in liveSecrets) addGrant(grant, name, liveSecrets[name], host);
+          for (const name of placeholderNames(v)) {
+            if (!(name in liveSecrets)) continue;
+            addGrant(grant, name, liveSecrets[name], host);
+            // Which vault entry this is, so the proxy's record of what the
+            // far end said lands on the right credential.
+            (grant.healthKeys ??= {})[name] = healthKey(
+              name,
+              secretScopes[name] === "workspace" ? "workspace" : "account",
+              path.basename(path.resolve(agentDir, "..", "..")),
+            );
+          }
         }
       }
       const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant });
@@ -1659,6 +1678,7 @@ async function runStep(
           consults,
           timeoutSec: step.timeout,
           budgetUsd: stepBudgetUsd,
+          budgetNote: stepBudgetNote,
           price: tokenPrice,
           verify: step.verify,
           output: step.output,
@@ -1844,6 +1864,7 @@ async function runStep(
         env: { ...process.env, ...clockEnv, ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
+          budgetNote: stepBudgetNote,
         price: tokenPrice,
         verify: step.verify,
         output: step.output,
@@ -2196,12 +2217,14 @@ export function createFlowRun(
   flowName: string,
   status: "queued" | "running",
   tags: string[] = [],
+  startedBy: string | null = null,
 ): RunRecord {
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     flow: flowName,
     tags,
     status,
+    ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -2267,8 +2290,9 @@ export function startFlowRun(
   modelOverride?: string | null,
   tags: string[] = [],
   effortOverride?: string | null,
+  startedBy: string | null = null,
 ): RunRecord {
-  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags);
+  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags, startedBy);
   void driveRun(tenant, workspace, run, modelOverride, tags, { effortOverride });
   return run;
 }
@@ -2630,8 +2654,11 @@ function driveRunInner(
         context = contextBefore(gi);
         ctxData = dataBefore(gi);
 
-        if (run.budgetUsd && runCost(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
-          const spent = runCost(run);
+        // What the run has spent, not just what its tokens cost: on an
+        // install that prices sandbox seconds, a step that called no model
+        // still spent money, and a cap that ignored it capped nothing.
+        if (run.budgetUsd && platform.runSpend(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
+          const spent = platform.runSpend(run);
           const last = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
           last?.events.push({
             t: new Date().toISOString(),
@@ -2792,36 +2819,45 @@ function driveRunInner(
         // `when:` — skip a step whose condition isn't met by prior results.
         for (const step of freshGroup) {
           if (step.status !== "pending" || !step.when) continue;
-          const met = (ctx ?? "").toLowerCase().includes(step.when.toLowerCase());
+          // A marker at the start of a line, not a word anywhere in the
+          // prose — see markerPresent. "There are no BLOCKED items" must
+          // not open a gate keyed on BLOCKED.
+          const met = markerPresent(ctx, step.when);
           if (!met) {
             step.status = "skipped";
             step.skipReason = `condition not met: when "${step.when}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: `skipped — previous results do not mention "${step.when}"`,
+              text: `skipped — no previous result has a line beginning "${step.when}" (when: reads a marker at the start of a line, not a word in a sentence)`,
             });
           }
         }
         save();
 
         // `case:`/`else:` — exclusive routing. Of this group's case steps,
-        // the FIRST whose text appears in the previous results runs; the
-        // rest are routed past. `else:` runs only when no case matched.
+        // the FIRST whose marker leads a line of the previous results runs;
+        // the rest are routed past. `else:` runs only when no case matched.
         // (`when:` above stays independent — every matching when runs —
         // which is why routing is its own vocabulary instead of a mode.)
+        //
+        // Same marker rule as `when:`, and it matters more here: routing is
+        // exclusive, so a label matched out of a sentence does not merely
+        // run an extra step, it sends the flow down the wrong branch and
+        // skips the right one. "This is not a COMPLAINT, it is a QUESTION"
+        // used to route to the complaints handler.
         const caseSteps = freshGroup.filter((s) => s.status === "pending" && s.case);
         if (caseSteps.length || freshGroup.some((s) => s.status === "pending" && s.else)) {
           let matchedCase: StepRecord | null = null;
           for (const step of caseSteps) {
-            if (!matchedCase && (ctx ?? "").toLowerCase().includes(step.case!.toLowerCase())) {
+            if (!matchedCase && markerPresent(ctx, step.case!)) {
               matchedCase = step;
               continue;
             }
             step.status = "skipped";
             step.skipReason = matchedCase
               ? `routed past — "${matchedCase.case}" matched first`
-              : `case not matched: "${step.case}"`;
+              : `case not matched: no previous result has a line beginning "${step.case}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
@@ -2865,6 +2901,20 @@ function driveRunInner(
             });
           }
           run.status = "awaiting-approval";
+          // approve_within: — the deadline is stamped when the gate opens,
+          // not counted from the run's start, so "two days to answer" means
+          // two days from being asked however long the work before it took.
+          // Only a gate that asks a PERSON gets one: an external event has
+          // no one to chase.
+          const within = readFlow(tenant, workspace, run.flow)?.approveWithin ?? null;
+          // Always assigned, never only set: a run with two gates would
+          // otherwise carry the FIRST gate's deadline into the second, and
+          // a deadline already in the past expires a gate the moment it
+          // opens. Null when this gate has none.
+          run.approveBy =
+            within && needsApproval.some((s) => s.waitFor !== "event")
+              ? new Date(Date.now() + within * 1000).toISOString()
+              : null;
           save();
 
           // The gate's declared preview, resolved now against what the run
@@ -2939,10 +2989,32 @@ function driveRunInner(
         // twenty steps over — the shares sum to what was left. Between
         // groups the check above still refuses to start the next one.
         const launching = freshGroup.filter((s) => s.status === "pending");
-        const ceilingUsd = stepCeiling(run.budgetUsd, runCost(run), launching.length);
+        const flowShareUsd = stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length);
+        // An agent's own `budget:` — the most it may spend in one run — is
+        // read at launch, so a cap raised mid-run applies to the next step.
+        const agentBudgets = new Map(listAgents(tenant, workspace).map((a) => [a.name, a.budget]));
         await Promise.all(
           launching
             .map(async (step) => {
+              const ceiling = stepCeilingFor(
+                flowShareUsd,
+                agentBudgets.get(step.agent),
+                run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
+                step.agent,
+              );
+              // Nothing left is a refusal, not "no ceiling": a zero passed
+              // down would read as unset, and the one step that must not
+              // run would run with no cap at all.
+              if (ceiling.ceilingUsd === 0) {
+                step.status = "failed";
+                step.events.push({
+                  t: new Date().toISOString(),
+                  type: "error",
+                  text: `over budget — nothing left to spend before this step (${ceiling.note}); it was not started`,
+                });
+                save();
+                return;
+              }
               const attempts = (step.retry ?? 0) + 1;
               // A step re-attaching to its sandbox is still on the attempt
               // that started it; a step re-run after a backoff picks up the
@@ -2965,7 +3037,8 @@ function driveRunInner(
                   effortOverride,
                   run.id,
                   ctxData,
-                  ceilingUsd,
+                  ceiling.ceilingUsd,
+                  ceiling.note,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -3254,16 +3327,6 @@ function driveRunInner(
       }
     }
   })();
-}
-
-function readFlow(tenant: string, workspace: string, flowName: string) {
-  const dir = path.join(workspaceDir(tenant, workspace), "flows");
-  if (!fs.existsSync(dir)) return null;
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
-    const flow = parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"));
-    if (flow.name === flowName) return flow;
-  }
-  return null;
 }
 
 // Splice `[[flow:other]]` steps into the parent's step list, renumbering
