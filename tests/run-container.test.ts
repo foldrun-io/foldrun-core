@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   allowedBack,
   applyContainerChanges,
+  hashTree,
   parseDriverLine,
 } from "../src/run-container.ts";
 
@@ -172,4 +173,62 @@ test("node_modules never comes back", () => {
   assert.equal(allowedBack("tools/x/node_modules/sharp/package.json"), false);
   assert.equal(allowedBack("node_modules/left-pad/index.js"), false);
   assert.equal(allowedBack("tools/x/index.mjs"), true);
+});
+
+test("two runs appending to the same ledger both keep their rows", () => {
+  // outreach-desk 2026-09-14: the 09:30 run finished after a ledger-check run
+  // and its copy of state/sends.md replaced the live file, erasing the other
+  // run's rows. Both started from the same file; both only appended.
+  for (const baselineKind of ["dir", "hashes"] as const) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-merge-"));
+    const host = path.join(base, "host");
+    const handed = path.join(base, "in");
+    const out = path.join(base, "out");
+    for (const d of [host, handed, out]) fs.mkdirSync(path.join(d, "state"), { recursive: true });
+    const v1 = "| date | run |\n|---|---|\n| 09-08 | legacy |\n";
+    fs.writeFileSync(path.join(handed, "state/sends.md"), v1);
+    // Run A finished first and appended its row to the live file.
+    fs.writeFileSync(path.join(host, "state/sends.md"), v1 + "| 09-14 | run-a |\n");
+    // Run B, started from v1, appends its own.
+    fs.writeFileSync(path.join(out, "state/sends.md"), v1 + "| 09-14 | run-b |\n");
+    const notes: string[] = [];
+    const baseline = baselineKind === "dir" ? handed : hashTree(handed);
+    applyContainerChanges(host, out, baseline, (m) => notes.push(m));
+    assert.equal(
+      fs.readFileSync(path.join(host, "state/sends.md"), "utf8"),
+      v1 + "| 09-14 | run-a |\n| 09-14 | run-b |\n",
+      `${baselineKind}: an append-only file lost a concurrent run's rows`,
+    );
+    assert.deepEqual(notes, []);
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a real conflict keeps the live file and saves the step's copy beside it", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-conflict-"));
+  const host = path.join(base, "host");
+  const handed = path.join(base, "in");
+  const out = path.join(base, "out");
+  for (const d of [host, handed, out]) fs.mkdirSync(path.join(d, "state"), { recursive: true });
+  fs.writeFileSync(path.join(handed, "state/cursor.md"), "offset: 10\n");
+  fs.writeFileSync(path.join(host, "state/cursor.md"), "offset: 20\n");
+  fs.writeFileSync(path.join(out, "state/cursor.md"), "offset: 15\n");
+  const notes: string[] = [];
+  const applied = applyContainerChanges(host, out, hashTree(handed), (m) => notes.push(m));
+  assert.equal(fs.readFileSync(path.join(host, "state/cursor.md"), "utf8"), "offset: 20\n", "live edit was overwritten");
+  const copies = fs.readdirSync(path.join(host, "state")).filter((f) => f.startsWith("cursor.conflict-"));
+  assert.equal(copies.length, 1, "the step's version must be kept, not dropped");
+  assert.equal(fs.readFileSync(path.join(host, "state", copies[0]), "utf8"), "offset: 15\n");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /state\/cursor\.md/);
+  assert.deepEqual(applied, [`state/${copies[0]}`]);
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+test("append merge: host rows without a trailing newline, a rewrite, and a new file on both sides", async () => {
+  const { mergeAppends } = await import("../src/run-container.ts");
+  const b = (s: string) => Buffer.from(s, "utf8");
+  assert.equal(mergeAppends(b("a\n"), b("a\nx"), b("a\ny\n"))!.toString(), "a\nx\ny\n");
+  assert.equal(mergeAppends(b("a\nb\n"), b("a\nB\n"), b("a\nb\nc\n")), null, "a rewritten line is not an append");
+  assert.equal(mergeAppends(null, b("{}\n"), b("[]\n")), null, "two new files are a conflict");
 });

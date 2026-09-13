@@ -216,10 +216,44 @@ export function hashTree(dir: string): Record<string, string> {
   return out;
 }
 
+const sha = (b: Buffer) => crypto.createHash("sha256").update(b).digest("hex");
+
+/**
+ * Both sides changed a file the step was handed. When each is the handed-in
+ * content with lines added on the end — a ledger, history.md, a .jsonl — the
+ * answer is the base, then the host's additions, then the step's. Only the
+ * base's hash may be known, so the base is found as the longest shared
+ * leading run of whole lines whose hash matches. Anything else is null: a
+ * real conflict, which the caller must not settle by dropping one side.
+ */
+export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Buffer): Buffer | null {
+  // Both sides created the same new file: no shared base to append to, and
+  // joining two JSON documents is corruption, not a merge.
+  if (was === null) return null;
+  const h = host.toString("utf8");
+  const n = next.toString("utf8");
+  let common = 0;
+  const max = Math.min(h.length, n.length);
+  while (common < max && h.charCodeAt(common) === n.charCodeAt(common)) common++;
+  for (let end = common; end >= 0; end--) {
+    if (end > 0 && h[end - 1] !== "\n") continue;
+    const prefix = h.slice(0, end);
+    const matches =
+      typeof was === "string" ? sha(Buffer.from(prefix, "utf8")) === was : Buffer.from(prefix, "utf8").equals(was);
+    if (!matches) continue;
+    const hostAdded = h.slice(end);
+    const stepAdded = n.slice(end);
+    const joined = hostAdded && !hostAdded.endsWith("\n") ? hostAdded + "\n" : hostAdded;
+    return Buffer.from(prefix + joined + stepAdded, "utf8");
+  }
+  return null;
+}
+
 export function applyContainerChanges(
   hostWs: string,
   containerWs: string,
   baseline?: string | Record<string, string>,
+  note?: (message: string) => void,
 ): string[] {
   const applied: string[] = [];
   const walk = (dir: string) => {
@@ -238,18 +272,48 @@ export function applyContainerChanges(
         continue;
       }
       if (!allowedBack(rel)) continue;
-      const next = fs.readFileSync(abs);
+      let next: Buffer = fs.readFileSync(abs);
+      // What the step was handed: its bytes (a staging dir) or its hash.
+      // null when the file did not exist then; undefined when no baseline.
+      let was: Buffer | string | null | undefined;
+      if (typeof baseline === "string") {
+        const p = path.join(baseline, rel);
+        was = fs.existsSync(p) ? fs.readFileSync(p) : null;
+      } else if (baseline) {
+        was = baseline[rel.replaceAll("\\", "/")] ?? null;
+      }
+      const same = (b: Buffer) =>
+        was === null || was === undefined ? false : typeof was === "string" ? sha(b) === was : b.equals(was);
       // Untouched by this step: whatever the host says now is more current
       // than what we handed in, including a change made while it ran.
-      if (typeof baseline === "string") {
-        const was = path.join(baseline, rel);
-        if (fs.existsSync(was) && fs.readFileSync(was).equals(next)) continue;
-      } else if (baseline) {
-        const was = baseline[rel.replaceAll("\\", "/")];
-        if (was && was === crypto.createHash("sha256").update(next).digest("hex")) continue;
-      }
+      if (same(next)) continue;
       const target = path.join(hostWs, rel);
-      if (fs.existsSync(target) && fs.readFileSync(target).equals(next)) continue;
+      const hostNow = fs.existsSync(target) ? fs.readFileSync(target) : null;
+      if (hostNow && hostNow.equals(next)) continue;
+      // The host moved too since the step was handed its copy — another run
+      // or a person wrote it. Writing the step's copy over it erased the
+      // other run's ledger rows on 2026-09-14. Merge appends; keep both
+      // sides of anything else.
+      const hostMoved = was !== undefined && hostNow !== null && !same(hostNow);
+      if (hostMoved) {
+        const merged = mergeAppends(was ?? null, hostNow, next);
+        if (merged) {
+          next = merged;
+        } else {
+          const ext = path.extname(rel);
+          const stem = rel.slice(0, rel.length - ext.length);
+          const conflictRel = `${stem}.conflict-${Date.now().toString(36)}${ext}`;
+          const conflictAbs = path.join(hostWs, conflictRel);
+          fs.mkdirSync(path.dirname(conflictAbs), { recursive: true });
+          fs.writeFileSync(conflictAbs, next);
+          applied.push(conflictRel);
+          note?.(
+            `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the workspace while this step ran, ` +
+              `and not only by appending — kept the workspace's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
+          );
+          continue;
+        }
+      }
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, next);
       applied.push(rel);
@@ -918,7 +982,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(wsOut);
     const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
     if (back.status === 0) {
-      applyContainerChanges(args.workspaceRoot, wsOut, wsIn);
+      applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m));
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }
