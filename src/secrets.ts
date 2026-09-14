@@ -511,6 +511,9 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<string>
  */
 export async function materializeSecrets(
   env: Record<string, string>,
+  /** Whose secrets these are, when the caller knows: lets the platform keep
+   *  each OAuth connection's health and quote a reconnect link on failure. */
+  ctx?: { tenant: string; workspace?: string },
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = { ...env };
   for (const [name, value] of Object.entries(env)) {
@@ -531,8 +534,11 @@ export async function materializeSecrets(
         const fp = crypto.createHash("sha256").update(grantMaterial).digest("hex").slice(0, 16);
         out[name] = await exchange(config, `${name}:${config.client_id}:${fp}`);
       } catch (err) {
-        throw new Error(`secret ${name}: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        const link = ctx ? await platform.noteOAuthRefresh(ctx, name, message).catch(() => undefined) : undefined;
+        throw new Error(`secret ${name}: ${message}${link ? ` — reconnect it in one click: ${link}` : ""}`);
       }
+      if (ctx) await platform.noteOAuthRefresh(ctx, name, null).catch(() => undefined);
     } else if (value.startsWith(SERVICE_ACCOUNT_PREFIX)) {
       let config: ServiceAccountConfig;
       try {

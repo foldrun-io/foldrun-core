@@ -1322,7 +1322,7 @@ async function runStep(
     // what crosses into containers, headers and env files is the token. A
     // failed refresh fails the step naming the secret and the provider's
     // reason, which beats a 401 three layers later.
-    const liveSecrets = await materializeSecrets(secretEnv);
+    const liveSecrets = await materializeSecrets(secretEnv, { tenant, workspace: path.basename(workspaceRootOf(agentDir)) });
     // @file values (SSH keys, certs) still carry their content at this point.
     // The in-process branch materialises them to 0600 paths on this host
     // below; the container branch passes the content across and the driver

@@ -130,6 +130,14 @@ export interface PlatformHooks {
    * not a directory, and an agent grants only what it or its account owns.
    */
   galleryDir(): string | null;
+  /**
+   * An oauth2 secret was just refreshed — `error` null when it worked, the
+   * provider's reason when it did not. The platform keeps each connection's
+   * health, emails once when a grant is dead, and answers with the one-click
+   * reconnect address, which the failing step's error then quotes. Default:
+   * nothing to say, which is a laptop.
+   */
+  noteOAuthRefresh(ctx: { tenant: string; workspace?: string }, name: string, error: string | null): Promise<string | undefined>;
 }
 
 const local: PlatformHooks = {
@@ -152,6 +160,7 @@ const local: PlatformHooks = {
   workspaceChanged() {},
   sandboxResumable: () => false,
   galleryDir: () => null,
+  noteOAuthRefresh: async () => undefined,
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles
