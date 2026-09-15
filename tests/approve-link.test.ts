@@ -12,7 +12,8 @@ import http from "node:http";
 import { approveToken, publicUrl, webhookToken } from "../src/webhook.ts";
 import { decideApproval } from "../src/approvals.ts";
 import { registerPlatform, resetPlatform } from "../src/platform.ts";
-import { sendRunNotification } from "../src/notify.ts";
+import { sendRunNotification, approvalLinks } from "../src/notify.ts";
+import { readApproveLink, APPROVE_LINK_DEFAULT_TTL_MS } from "../src/approvals.ts";
 import { readRun, writeRun, type RunRecord } from "../src/store.ts";
 
 /** A tenant/workspace on disk, core pointed at it, and env restored after. */
@@ -185,18 +186,28 @@ async function receiver() {
   return { received, port, close: () => server.close() };
 }
 
-test("a parked run's notification carries its approve and reject links", async () => {
+test("a parked run's notification carries a step-bound approve and reject link, never the run-bound one", async () => {
   const { received, port, close } = await receiver();
   try {
     await withWorkspace(
       async () => {
         process.env.FOLDRUN_PUBLIC_URL = "https://app.example.test/";
         const run = parkedRun("run-n");
+        const before = Date.now();
         assert.equal(await sendRunNotification("acme", "desk", run), true);
         const payload = JSON.parse(received.body!);
-        const token = approveToken("acme", "desk", "run-n");
-        assert.equal(payload.approveUrl, `https://app.example.test/api/approve/acme/desk/run-n?token=${token}`);
+        const prefix = "https://app.example.test/api/approve/acme/desk/run-n?token=";
+        assert.ok(payload.approveUrl.startsWith(prefix), payload.approveUrl);
+        const token = payload.approveUrl.slice(prefix.length);
+        assert.notEqual(token, approveToken("acme", "desk", "run-n"), "the legacy run-bound token is not what a mail carries any more");
+        const read = readApproveLink("acme", "desk", "run-n", token);
+        assert.ok("link" in read && read.link.kind === "step", JSON.stringify(read));
+        assert.equal(read.link.step, 0, "bound to the waiting step");
+        assert.equal(read.link.approver, null, "a webhook has no reader to bind to");
+        const expires = Date.parse(read.link.expiresAt);
+        assert.ok(expires >= before + APPROVE_LINK_DEFAULT_TTL_MS - 1000 && expires <= Date.now() + APPROVE_LINK_DEFAULT_TTL_MS, "a week, the flow having no approve_within:");
         assert.equal(payload.rejectUrl, `${payload.approveUrl}&decision=reject`);
+        assert.deepEqual(payload.links.map((l: { step: number; agent: string }) => [l.step, l.agent]), [[0, "writer"]]);
       },
       `---\nnotify:\n  url: http://127.0.0.1:${port}/hook\n  events: [failed, awaiting-approval]\n---\n`,
     );
@@ -204,6 +215,46 @@ test("a parked run's notification carries its approve and reject links", async (
     close();
   }
 });
+
+test("one link per waiting step, a wait: event park gets none, and a named approver's mail decides as them", () =>
+  withWorkspace(() => {
+    process.env.FOLDRUN_PUBLIC_URL = "https://app.example.test";
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    fs.mkdirSync(path.join(ws, "flows"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "flows/publish.md"), "---\nname: publish\napprovers: [Lead@Example.com]\napprove_within: 2h\n---\n\n1. [[writer]] — draft\n");
+    const base = parkedRun("run-m");
+    const run: RunRecord = {
+      ...base,
+      steps: [
+        { ...base.steps[0], status: "completed" },
+        { ...base.steps[0], agent: "publisher", status: "awaiting-approval" },
+        { ...base.steps[0], agent: "listener", status: "awaiting-approval", waitFor: "event" },
+        { ...base.steps[0], agent: "sender", status: "awaiting-approval" },
+      ],
+    };
+    // A webhook: nobody to bind to.
+    const anon = approvalLinks("acme", "desk", run)!;
+    assert.deepEqual(anon.links.map((l) => [l.step, l.agent]), [[1, "publisher"], [3, "sender"]], "the event park is not a question for a person");
+    assert.equal(anon.approveUrl, anon.links[0].approveUrl, "the first pair stands where receivers written against one pair look");
+    for (const l of anon.links) {
+      const read = readApproveLink("acme", "desk", "run-m", new URL(l.approveUrl).searchParams.get("token")!);
+      assert.ok("link" in read && read.link.kind === "step");
+      assert.equal(read.link.step, l.step);
+      assert.equal(read.link.approver, null);
+      assert.ok(Date.parse(read.link.expiresAt) <= Date.now() + 2 * 3600 * 1000, "approve_within: is the link's lifetime");
+    }
+    // The named approver's mail, however their address was cased.
+    const named = approvalLinks("acme", "desk", run, "lead@example.com")!;
+    for (const l of named.links) {
+      const read = readApproveLink("acme", "desk", "run-m", new URL(l.approveUrl).searchParams.get("token")!);
+      assert.ok("link" in read && read.link.kind === "step");
+      assert.equal(read.link.approver, "lead@example.com", "bound to the person it was sent to");
+    }
+    // Someone else's mail is not an approver's.
+    const other = approvalLinks("acme", "desk", run, "ops@example.com")!;
+    const read = readApproveLink("acme", "desk", "run-m", new URL(other.approveUrl).searchParams.get("token")!);
+    assert.ok("link" in read && read.link.kind === "step" && read.link.approver === null);
+  }));
 
 test("a failed run's notification has no links — there is nothing to decide", async () => {
   const { received, port, close } = await receiver();

@@ -33,9 +33,10 @@
 
 import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
-import { accountDir, workspaceDir, runCost, type RunRecord } from "./store.ts";
+import { accountDir, workspaceDir, runCost, readFlow, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
-import { approveToken, publicUrl } from "./webhook.ts";
+import { publicUrl } from "./webhook.ts";
+import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
 
 /**
@@ -166,11 +167,28 @@ export function signatureHeaders(
   return { "x-foldrun-timestamp": timestamp, "x-foldrun-signature": `sha256=${mac}`, "x-signature": plain };
 }
 
+/** One waiting step's pair of links. */
+export interface StepLinks {
+  /** Index into run.steps. */
+  step: number;
+  agent: string;
+  approveUrl: string;
+  rejectUrl: string;
+}
+
 /**
  * The approve/reject links for a run waiting on a person, or null when the
  * install cannot say where it lives. A notification that only says "waiting
  * for you" sends the reader to find a laptop; one that carries the decision
  * lets them make it where they read it.
+ *
+ * One pair per waiting step, each bound to that step and to a moment (the
+ * flow's `approve_within:`, else a week) — see approvals.ts. A link bound
+ * to the run alone approved every later gate of the run for as long as it
+ * ran. When the notification goes to a named approver — an address in the
+ * flow's `approvers:` — the links are bound to that person too, so a
+ * forwarded mail decides as nobody. `approveUrl`/`rejectUrl` on the result
+ * are the first waiting step's pair, for receivers written against that.
  *
  * The reject link goes to the same page with the choice pre-selected — a
  * GET must not decide anything, because inbox link-checkers follow links.
@@ -178,8 +196,10 @@ export function signatureHeaders(
 export function approvalLinks(
   tenant: string,
   workspace: string,
-  runId: string,
-): { approveUrl: string; rejectUrl: string } | null {
+  run: RunRecord,
+  /** Who the notification is going to, when it is going to one address. */
+  recipient: string | null = null,
+): { approveUrl: string; rejectUrl: string; links: StepLinks[] } | null {
   const base = publicUrl();
   if (!base) {
     if (!warnedNoPublicUrl) {
@@ -190,8 +210,18 @@ export function approvalLinks(
     }
     return null;
   }
-  const approveUrl = `${base}/api/approve/${tenant}/${workspace}/${runId}?token=${approveToken(tenant, workspace, runId)}`;
-  return { approveUrl, rejectUrl: `${approveUrl}&decision=reject` };
+  const flow = readFlow(tenant, workspace, run.flow);
+  const to = (recipient ?? "").trim().toLowerCase();
+  const approver = to && flow?.approvers?.includes(to) ? to : null;
+  const expiresAt = Date.now() + approveLinkTtlMs(flow);
+  const links: StepLinks[] = [];
+  run.steps.forEach((s, i) => {
+    if (s.status !== "awaiting-approval" || s.waitFor === "event") return;
+    const approveUrl = `${base}${approveLinkPath(tenant, workspace, run.id, { step: i, expiresAt, approver })}`;
+    links.push({ step: i, agent: s.agent, approveUrl, rejectUrl: `${approveUrl}&decision=reject` });
+  });
+  if (links.length === 0) return null;
+  return { approveUrl: links[0].approveUrl, rejectUrl: links[0].rejectUrl, links };
 }
 
 /**
@@ -408,7 +438,9 @@ export async function sendRunNotification(
   // reporting only its own existence is a desk nobody reads by week three.
   const summary = run.summary?.trim() || null;
 
-  const links = run.status === "awaiting-approval" ? approvalLinks(tenant, workspace, run.id) : null;
+  // An emailed link is minted for its reader: a named approver's mail
+  // carries links that decide as them. A webhook has no reader.
+  const links = run.status === "awaiting-approval" ? approvalLinks(tenant, workspace, run, config.email ?? null) : null;
   // At a gate the reader is being asked something; the question goes in the
   // mail, and so does what the run has concluded so far — the last finished
   // step's first line, which is the proposal's own summary ("… ·
@@ -461,7 +493,11 @@ export async function sendRunNotification(
             (asks.length ? `\n${asks.map((a) => `Question: ${a}`).join("\n")}\n` : "") +
             `\nworkspace: ${workspace}\nrun: ${run.id}\nflow: ${run.flow}\n` +
             `cost: $${runCost(run).toFixed(4)}\nstarted: ${run.startedAt}\nfinished: ${run.finishedAt ?? "-"}\n` +
-            (links ? `\nApprove: ${links.approveUrl}\nReject: ${links.rejectUrl}\n` : ""),
+            (links
+              ? links.links.length === 1
+                ? `\nApprove: ${links.approveUrl}\nReject: ${links.rejectUrl}\n`
+                : links.links.map((l) => `\nStep ${l.step + 1} (${l.agent})\nApprove: ${l.approveUrl}\nReject: ${l.rejectUrl}\n`).join("")
+              : ""),
         }),
         signal: AbortSignal.timeout(8000),
       });

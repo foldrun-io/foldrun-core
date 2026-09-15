@@ -150,10 +150,6 @@ export function readApproveLink(
 /** A used link is written on the run as a digest, never the token. */
 const linkDigest = (token: string) => crypto.createHash("sha256").update(token).digest("hex").slice(0, 24);
 
-/** The record's field for used links. Not in RunRecord's declared shape —
- *  store.ts owns that — but a record is JSON and carries it. */
-type RunWithLinks = RunRecord & { approvalLinksUsed?: string[] };
-
 /**
  * Everything a link has to pass before it decides anything, answered the
  * same way for the page that shows the gate and the POST that decides it.
@@ -169,7 +165,7 @@ export function checkApproveLink(
   const read = readApproveLink(tenant, workspace, run.id, presented, now);
   if ("error" in read) return { ok: false, status: read.status, message: read.error };
   const { link } = read;
-  if ((run as RunWithLinks).approvalLinksUsed?.includes(linkDigest(presented))) {
+  if (run.approvalLinksUsed?.includes(linkDigest(presented))) {
     return { ok: false, status: 409, message: "this link was already used — a link decides once" };
   }
   // The older, run-bound link: kept for runs already waiting, but not for
@@ -275,8 +271,7 @@ export async function decideApproval(
   // parks again — a loop, a rerun from the gate — is not decided by the
   // same forwarded mail.
   if (d.link !== undefined) {
-    const used = (run as RunWithLinks).approvalLinksUsed ?? [];
-    (run as RunWithLinks).approvalLinksUsed = [...used, linkDigest(d.link)].slice(-50);
+    run.approvalLinksUsed = [...(run.approvalLinksUsed ?? []), linkDigest(d.link)].slice(-50);
   }
   writeRun(tenant, workspace, run);
 

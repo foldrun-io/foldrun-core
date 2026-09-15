@@ -2782,6 +2782,10 @@ export interface RunRecord {
    *  directory. On the record, not in an env var, so a script cannot turn
    *  it off; carried onto every rerun of this run. See test-mode.ts. */
   test?: boolean;
+  /** Digests of the emailed approval links that have already decided a
+   *  step of this run — never the tokens. A link is good once; the second
+   *  click is a 409, not a second approval. Written by approvals.ts. */
+  approvalLinksUsed?: string[];
   steps: StepRecord[];
 }
 
