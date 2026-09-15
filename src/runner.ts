@@ -1251,6 +1251,21 @@ async function runStep(
     return out;
   };
 
+  // The reply, the conclusion and an `output: json` value land on the same
+  // record the events do, and a model that quotes a script's stdout puts
+  // the credential in its answer rather than in a tool event. Same scrub,
+  // same place. The JSON value goes through its text form: a secret inside
+  // a nested field is still a secret, and the key name survives either way.
+  const redactText = (text: string | null) => (text === null ? null : redact(text));
+  const redactData = (value: unknown): unknown => {
+    if (value === undefined || redactions.length === 0) return value;
+    try {
+      return JSON.parse(redact(JSON.stringify(value)));
+    } catch {
+      return value;
+    }
+  };
+
   const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
     step.events.push({ t: new Date().toISOString(), type, text: redact(text), ...extra });
     save();
@@ -1834,13 +1849,13 @@ async function runStep(
       // there is nothing to publish — and a share link is an outward act.
       if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
-      step.result = outcome.result;
-      step.conclusion = outcome.conclusion;
+      step.result = redactText(outcome.result);
+      step.conclusion = redactText(outcome.conclusion);
       step.sandbox = null;
       // The cluster's word on why a sandbox ended without the driver saying
       // so — OOMKilled, Evicted — on the record, where the retry reads it.
       if (outcome.status === "failed" && outcome.reason) push("error", `sandbox ended: ${outcome.reason}`);
-      if (outcome.data !== undefined) step.data = outcome.data;
+      if (outcome.data !== undefined) step.data = redactData(outcome.data);
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
       step.tokens = outcome.usage
         ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
@@ -1980,9 +1995,9 @@ async function runStep(
       }
       if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
-      step.result = outcome.result;
-      step.conclusion = outcome.conclusion;
-      if (outcome.data !== undefined) step.data = outcome.data;
+      step.result = redactText(outcome.result);
+      step.conclusion = redactText(outcome.conclusion);
+      if (outcome.data !== undefined) step.data = redactData(outcome.data);
       // A consult's spend belongs to the step that asked.
       const consultCost = consultTools.drainCost();
       const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push);
