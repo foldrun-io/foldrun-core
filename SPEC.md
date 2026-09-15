@@ -618,8 +618,8 @@ Rules:
 
 - A `?` after the number marks the step **optional**: if it fails, the flow continues without its result (`2? [[enricher]] — nice-to-have enrichment`).
 - **Routing** — `case:` steps in one group are exclusive branches: the FIRST
-  whose text appears in the previous results runs, the rest are routed past,
-  and an `else:` step runs only when no case matched:
+  whose marker leads a line of the previous group's result runs, the rest are
+  routed past, and an `else:` step runs only when no case matched:
 
   ```markdown
   1. [[classifier]] — reply with exactly one word, BUG or QUESTION
@@ -633,9 +633,14 @@ Rules:
 
   `when:` is the non-exclusive sibling — every matching `when:` step runs —
   which is why routing is its own vocabulary instead of a mode on `when:`.
-  A `when:` or `case:` marker must **begin a line** of a previous result,
-  with markdown decoration in front of it allowed and a longer word starting
-  the same way not a match. For `case:` it matters more, because routing is
+  A `when:` or `case:` marker must **begin a line** of the **previous
+  group's** result — the nearest earlier group that produced one; a group
+  routed past entirely is looked through — with markdown decoration in
+  front of it allowed and a longer word starting the same way not a match.
+  Only the previous result is read, not every earlier group joined: the
+  prompt gets the whole history, a gate gets the latest verdict, so a
+  classifier's BUG two groups back cannot reopen a branch the debugger
+  has since answered. For `case:` it matters more, because routing is
   exclusive: a label picked out of a sentence sends the flow down the wrong
   branch and skips the right one. It is not a search of the whole text: an agent writing "there
   are no BLOCKED items" would open a `when: BLOCKED` gate, and saying a

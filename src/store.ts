@@ -1012,11 +1012,14 @@ export interface FlowStep {
   effort?: string;
   /** Pause for a human before running this step. */
   approve?: boolean;
-  /** Run only if the previous results contain this text (case-insensitive).
-   *  Independent: every matching `when:` step in a group runs. */
+  /** Run only if the previous group's result has a line beginning with
+   *  this marker (case-insensitive). The previous group is the nearest
+   *  earlier one that produced a result. Independent: every matching
+   *  `when:` step in a group runs. */
   when?: string;
   /** Exclusive routing: of a group's `case:` steps, only the FIRST whose
-   *  text appears in the previous results runs; the rest are routed past. */
+   *  marker leads a line of the previous group's result runs; the rest are
+   *  routed past. */
   case?: string;
   /** The route of last resort: runs only when none of its group's `case:`
    *  steps matched. */

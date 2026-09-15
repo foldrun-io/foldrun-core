@@ -290,3 +290,55 @@ test("when: stays independent — two markers in one group both run", () =>
       assert.equal(run.steps.filter((s) => s.status === "completed").length, 3, "both whens ran");
     },
   ));
+
+// Routing reads the PREVIOUS group's result, as documented — not every
+// earlier group joined. The prompt gets all of them (a group-3 reporter
+// should see what group 1 measured), but a gate that read the whole
+// history let a verdict two groups back open a branch a later group had
+// already overruled.
+test("case: and when: read the previous group's result, not every earlier group", () =>
+  withStubbedRun(
+    {
+      classifier: "BUG: looks like the parser",
+      debugger: "QUESTION: is it actually reproducible?",
+      fixer: "fixing",
+      asker: "asking",
+      auditor: "audited",
+    },
+    [
+      step("classifier", 1),
+      step("debugger", 2),
+      step("fixer", 3, { case: "BUG" }),
+      step("asker", 3, { case: "QUESTION" }),
+      step("auditor", 3, { when: "BUG" }),
+    ],
+    (run) => {
+      assert.equal(run.status, "completed");
+      const by = (name: string) => run.steps.find((s) => s.agent === name)!;
+      assert.equal(by("asker").status, "completed", "the previous group said QUESTION");
+      assert.equal(by("fixer").status, "skipped", "group 1's BUG is history, not the previous result");
+      assert.match(by("fixer").skipReason ?? "", /not matched/);
+      assert.equal(by("auditor").status, "skipped");
+      assert.match(by("auditor").skipReason ?? "", /condition not met/);
+    },
+  ));
+
+test("a group that was routed past entirely is looked through — the previous RESULT is what counts", () =>
+  withStubbedRun(
+    {
+      classifier: "BUG: the parser",
+      writer: "prose",
+      fixer: "fixed",
+    },
+    [
+      step("classifier", 1),
+      // Group 2 has one branch and it is not taken: the group produces nothing.
+      step("writer", 2, { case: "QUESTION" }),
+      step("fixer", 3, { case: "BUG" }),
+    ],
+    (run) => {
+      const by = (name: string) => run.steps.find((s) => s.agent === name)!;
+      assert.equal(by("writer").status, "skipped");
+      assert.equal(by("fixer").status, "completed", "the nearest group that produced a result is the classifier");
+    },
+  ));

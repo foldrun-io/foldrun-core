@@ -2675,6 +2675,17 @@ function driveRunInner(
       // is assembled) keeps the newest: when the total is over it, the
       // oldest groups are dropped whole before anything is cut mid-text.
       const contextBefore = (gi: number) => joinEarlierGroups(groupResults, gi);
+      // What `when:` and `case:` read: the PREVIOUS group's result alone —
+      // the nearest earlier group that produced one, so a routed-past group
+      // between is looked through rather than read as silence. The prompt
+      // gets every earlier group joined (contextBefore); routing must not,
+      // because a verdict two groups back would still open a gate a later
+      // group had overruled: a classifier's BUG line matched a `case: BUG`
+      // three groups on, after the debugger had already answered it.
+      const routingBefore = (gi: number): string | null => {
+        for (let i = gi - 1; i >= 0; i--) if (groupResults[i]) return groupResults[i];
+        return null;
+      };
       // The data half of the same handoff: what the nearest earlier group
       // returned through `output: json`. Rebuilt from the record rather than
       // kept only in memory, so a resumed run hands step 3 the value step 1
@@ -2913,21 +2924,24 @@ function driveRunInner(
         }
 
         const ctx = context;
+        // The previous group's result — see routingBefore.
+        const routing = routingBefore(gi);
 
-        // `when:` — skip a step whose condition isn't met by prior results.
+        // `when:` — skip a step whose condition isn't met by the previous
+        // group's result.
         for (const step of freshGroup) {
           if (step.status !== "pending" || !step.when) continue;
           // A marker at the start of a line, not a word anywhere in the
           // prose — see markerPresent. "There are no BLOCKED items" must
           // not open a gate keyed on BLOCKED.
-          const met = markerPresent(ctx, step.when);
+          const met = markerPresent(routing, step.when);
           if (!met) {
             step.status = "skipped";
             step.skipReason = `condition not met: when "${step.when}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: `skipped — no previous result has a line beginning "${step.when}" (when: reads a marker at the start of a line, not a word in a sentence)`,
+              text: `skipped — the previous group's result has no line beginning "${step.when}" (when: reads a marker at the start of a line of the previous result, not a word in a sentence)`,
             });
           }
         }
@@ -2948,14 +2962,14 @@ function driveRunInner(
         if (caseSteps.length || freshGroup.some((s) => s.status === "pending" && s.else)) {
           let matchedCase: StepRecord | null = null;
           for (const step of caseSteps) {
-            if (!matchedCase && markerPresent(ctx, step.case!)) {
+            if (!matchedCase && markerPresent(routing, step.case!)) {
               matchedCase = step;
               continue;
             }
             step.status = "skipped";
             step.skipReason = matchedCase
               ? `routed past — "${matchedCase.case}" matched first`
-              : `case not matched: no previous result has a line beginning "${step.case}"`;
+              : `case not matched: the previous group's result has no line beginning "${step.case}"`;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
