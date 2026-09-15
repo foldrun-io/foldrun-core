@@ -186,6 +186,17 @@ export function registerPlatform(hooks: Partial<PlatformHooks>): void {
   });
 }
 
+/**
+ * Does a platform own the queue? True once something registered its own
+ * enqueueFlowRun — whatever process asks. An eval used to decide this from
+ * FOLDRUN_ROLE === "web", so on a worker it started the run in-process and
+ * walked around the queue the platform was counting on (the account cap,
+ * the lanes, the per-pod lease). The seam is the fact; the role is a guess.
+ */
+export function platformQueues(): boolean {
+  return platform.enqueueFlowRun !== local.enqueueFlowRun;
+}
+
 /** Back to the local defaults — for tests that register and must not leak. */
 export function resetPlatform(): void {
   Object.assign(platform, local, { isolation: {} });

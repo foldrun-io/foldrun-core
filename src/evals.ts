@@ -48,7 +48,7 @@ import {
   type Effort,
 } from "./store.ts";
 import { startFlowRun, loadFlow } from "./runner.ts";
-import { platform } from "./platform.ts";
+import { platform, platformQueues } from "./platform.ts";
 import type { FlowStep } from "./store.ts";
 
 export type Assertion =
@@ -395,16 +395,20 @@ export interface EvalResult {
   error?: string;
 }
 
-/** Wait for a run to finish, with a ceiling so a hung agent can't hang an eval. */
 /**
  * A web replica never drives a run: it has no route to the cluster API and
  * no right to create a pod, by design — so an eval started there (a push,
  * the Run button) queues its run for the worker like any other. From 29 Aug
  * every eval on the split platform died at "pod create failed: connection
  * refused" for exactly this reason. A single process — the CLI, a laptop,
- * FOLDRUN_ROLE unset — still drives it right here, as it always did.
+ * no platform registered — still drives it right here, as it always did.
+ *
+ * The test is whether a platform owns the queue, not which role this
+ * process was started as: on a worker the role read "worker", the eval
+ * started its run in-process, and the run never passed through the
+ * account cap or the lanes the platform enforces on every other run.
  */
-const runsViaQueue = () => process.env.FOLDRUN_ROLE === "web";
+const runsViaQueue = () => platformQueues();
 
 async function beginEvalRun(
   tenant: string,
