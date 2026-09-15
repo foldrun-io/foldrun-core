@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { runInContainer } from "./container.ts";
+import { hostSafeEnv } from "./host-env.ts";
 
 // A script's only clock is the `timeout:` its own tool.md declares. There
 // was a two-minute default and a ten-minute cap here; both were the
@@ -138,7 +139,7 @@ function containerInterpreter(abs: string): string {
   return byExt[path.extname(abs).toLowerCase()] ?? abs;
 }
 
-function runScript(
+export function runScript(
   cwd: string,
   spec: ScriptSpec,
   values: Record<string, string>,
@@ -239,9 +240,14 @@ function runScript(
       return;
     }
 
+    // Not process.env: on a platform that is every tenant's root key and
+    // the datastore credentials. The child starts from the allowlisted
+    // base and gets what the agent declared, by name — see host-env.ts.
+    // In a run container `env` already carries the container's whole
+    // environment, which is the boundary, so nothing is lost there.
     const child = spawn(cmd, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: { ...hostSafeEnv(), ...env },
       timeout: timeoutFor(spec),
     });
     let out = "";

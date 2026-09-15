@@ -457,9 +457,9 @@ try {
 
   // API and script tools, rebuilt in here from their specs. Secrets were
   // substituted into API headers before the input crossed the boundary, so
-  // buildApiTools gets an already-resolved environment. (verify: needs no
-  // separate env either — the container's own environment already carries
-  // the declared secrets, which is why executeStep gets verifyEnv: {}.)
+  // buildApiTools gets an already-resolved environment. verify: gets the
+  // container's own environment, whole: it is the boundary, assembled on
+  // the host from an allowlist, and the declared secrets are in it.
   const api = buildApiTools("", input.apis, undefined, { env, missing: [] });
   const script = buildScriptTools(
     agentDir,
@@ -507,7 +507,7 @@ try {
     budgetNote: input.budgetNote,
     price: input.price,
     verify: input.verify,
-    verifyEnv: {},
+    verifyEnv: env,
     output: input.output,
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.

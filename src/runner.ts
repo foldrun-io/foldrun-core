@@ -11,6 +11,7 @@ import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { hostSafeEnv } from "./host-env.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
@@ -1904,7 +1905,7 @@ async function runStep(
       const stepSecrets = held.env;
       const consultTools = buildConsultTools(
         consults,
-        { ...process.env, ...stepSecrets, ...providerEnv },
+        { ...hostSafeEnv(), ...stepSecrets, ...providerEnv },
         (type, text) => push(type, text),
       );
       // @file secrets become 0600 paths here (host run), cleaned up in the
@@ -1931,8 +1932,11 @@ async function runStep(
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model
-        // only ever sees the variable names, not the values.
-        env: { ...process.env, ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...modelEnv },
+        // only ever sees the variable names, not the values. The base is
+        // the allowlisted host environment, not process.env: the SDK's
+        // Bash tool runs with this, and on a platform process.env holds
+        // every tenant's root key and the datastore credentials.
+        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
           budgetNote: stepBudgetNote,

@@ -16,6 +16,7 @@ import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
+import { hostSafeEnv } from "./host-env.ts";
 
 export interface ExecOutcome {
   status: "completed" | "failed";
@@ -541,9 +542,13 @@ function runVerify(
   return new Promise((resolve) => {
     // No clock of the platform's: a verify like `npm run build` takes what
     // it takes, and the step's own `timeout:` is the bound if the flow set one.
+    // The allowlisted host base plus what the caller passed: the step's
+    // secrets and identifiers on the in-process path (runner.ts), the
+    // container's own environment on the isolated one (run-container.ts).
+    // Never process.env whole — see host-env.ts.
     const child = spawn("bash", ["-lc", command], {
       cwd: agentDir,
-      env: { ...process.env, ...env },
+      env: { ...hostSafeEnv(), ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
     // An `output: json` step's data arrives on stdin, so a check can be
