@@ -304,7 +304,10 @@ export async function executeStep(
       }
     }, STOP_POLL_MS));
   }
-  for (const t of timers) t.unref?.();
+  // The clocks stay referenced on purpose: a step hanging in a tool call may
+  // be the only thing keeping the loop alive, and an unreferenced timer
+  // would let the process exit around it instead of ending it. They are all
+  // cleared when the step ends, so nothing outlives the step.
 
   // The hard cap. Spend is counted as each assistant turn arrives — its
   // usage is in the message — so the step can stop at the ceiling rather
