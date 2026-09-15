@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   webhookToken,
   rotateWebhook,
@@ -81,4 +82,32 @@ test("logging against a workspace that does not exist is a no-op, not a crash", 
     recordDelivery("acme", "nope", { t: new Date().toISOString(), flow: "x", outcome: "error" });
     assert.deepEqual(readDeliveries("acme", "nope"), []);
   });
+});
+
+// The install key used to be "foldrun-dev-install" until the vault happened
+// to create `.secret-key` — so every hook token on a fresh install was
+// computable from the source, and then changed the first time a secret was
+// stored. Now the same material the vault seals with is created on first
+// ask, and a token minted before any secret exists is the token after.
+test("hook tokens derive from real key material, made eagerly, and survive the first secret", async () => {
+  const { setSecret } = await import("../src/secrets.ts");
+  const { installKey } = await import("../src/webhook.ts");
+  const prevKey = process.env.FOLDRUN_SECRET_KEY;
+  delete process.env.FOLDRUN_SECRET_KEY;
+  try {
+    withWorkspace(() => {
+      const root = process.env.FOLDRUN_DATA!;
+      assert.ok(!fs.existsSync(path.join(root, ".secret-key")), "fresh install: no key yet");
+      const before = webhookToken("acme", "desk", "publish");
+      assert.ok(fs.existsSync(path.join(root, ".secret-key")), "asking for a token creates the key");
+      assert.notEqual(installKey(), "foldrun-dev-install");
+      const dev = crypto.createHmac("sha256", "foldrun-dev-install").update("acme/desk/publish").digest("hex").slice(0, 32);
+      assert.notEqual(before, dev, "the token is not the one anyone with the source can compute");
+      setSecret("acme", "DEMO", "value-0123456789", "desk");
+      assert.equal(webhookToken("acme", "desk", "publish"), before, "storing a secret does not move the token");
+    });
+  } finally {
+    if (prevKey === undefined) delete process.env.FOLDRUN_SECRET_KEY;
+    else process.env.FOLDRUN_SECRET_KEY = prevKey;
+  }
 });

@@ -4,22 +4,23 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { dataRoot } from "./paths.ts";
 import { workspaceDir } from "./store.ts";
+import { installKeyMaterial } from "./secrets.ts";
 import crypto from "node:crypto";
 
-const keyFile = () => path.join(dataRoot(), ".secret-key");
-
 /**
- * The install's secret key. Every derived token — flow hooks, git secrets —
- * hangs off this one value, so rotating it invalidates all of them together.
+ * The install's secret key. Every derived token — flow hooks, git secrets,
+ * approval links — hangs off this one value, so rotating it invalidates all
+ * of them together.
+ *
+ * The same material the vault encrypts with, created on first use. This used
+ * to fall back to the constant "foldrun-dev-install" until the vault lazily
+ * wrote `.secret-key`, which meant two things nobody wanted: every hook and
+ * approval token on a fresh install was computable from the source, and all
+ * of them silently changed the first time a secret was stored.
  */
 export function installKey(): string {
-  if (process.env.FOLDRUN_SECRET_KEY) return process.env.FOLDRUN_SECRET_KEY;
-  if (fs.existsSync(keyFile())) return fs.readFileSync(keyFile(), "utf8");
-  // secrets.ts creates this on first use; fall back to a fixed dev value so
-  // hook URLs stay stable before any secret has been set.
-  return "foldrun-dev-install";
+  return installKeyMaterial();
 }
 
 // Per-hook rotation without storing tokens: what is stored is a generation

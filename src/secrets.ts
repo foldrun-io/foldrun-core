@@ -47,14 +47,29 @@ const keyFile = () => path.join(dataRoot(), ".secret-key");
 /** Which store a secret came from. */
 export type SecretScope = "account" | "workspace";
 
-function masterKey(): Buffer {
+/**
+ * The install's root secret, as text: FOLDRUN_SECRET_KEY when set, else the
+ * contents of `.secret-key` under the data root — created here, the first
+ * time anything asks, so there is never a moment when a derived token has
+ * nothing real to hang off. The vault, hook tokens, approval links and git
+ * push secrets all derive from this one value; rotating it invalidates every
+ * one of them together. Exported for webhook.ts, which used to fall back to
+ * a fixed dev string until the vault happened to create this file — so hook
+ * URLs were computable by anyone who read the source, and then changed the
+ * first time a secret was stored.
+ */
+export function installKeyMaterial(): string {
   const fromEnv = process.env.FOLDRUN_SECRET_KEY;
-  if (fromEnv) return crypto.createHash("sha256").update(fromEnv).digest();
+  if (fromEnv) return fromEnv;
   fs.mkdirSync(dataRoot(), { recursive: true });
   if (!fs.existsSync(keyFile())) {
     fs.writeFileSync(keyFile(), crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
   }
-  return crypto.createHash("sha256").update(fs.readFileSync(keyFile(), "utf8")).digest();
+  return fs.readFileSync(keyFile(), "utf8");
+}
+
+function masterKey(): Buffer {
+  return crypto.createHash("sha256").update(installKeyMaterial()).digest();
 }
 
 // `workspace` undefined means the account store.
