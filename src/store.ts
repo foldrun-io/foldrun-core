@@ -1980,7 +1980,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         agents: listAgents(tenant, name).length,
         flows: listFlows(tenant, name).length,
         deployedAt: fs.statSync(pDir).mtime.toISOString(),
-        runCount: fs.existsSync(runsDir) ? fs.readdirSync(runsDir).length : 0,
+        runCount: fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0,
         ...(preview ? { preview } : {}),
       };
     })
@@ -2813,6 +2813,7 @@ export function deleteRun(tenant: string, workspace: string, runId: string): boo
     recursive: true,
     force: true,
   });
+  noteRunDeleted(path.dirname(file), runId);
   onRunDeleted?.(tenant, workspace, runId);
   return true;
 }
@@ -2887,6 +2888,7 @@ export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   const tmp = `${p}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(run, null, 2));
   fs.renameSync(tmp, p);
+  noteRunWritten(path.dirname(p), run, p);
 }
 
 // Every run in an account, each tagged with the workspace it belongs to —
@@ -2895,9 +2897,272 @@ export interface RunWithWorkspace extends RunRecord {
   workspace: string;
 }
 
+/**
+ * Every run in the account, newest first, off the per-workspace index.
+ *
+ * A finished run comes back as the index knows it: id, flow, status,
+ * summary, times, and each step's agent, group, status, cost, tokens,
+ * seconds, skip reason and last error — with `instruction` empty, `events`
+ * holding only that error, and `result` null. That is what every list and
+ * every rollup reads (runCost, runFailure, runDurationSecs, the usage
+ * window, the graph's stats). A run that is still live — queued, running,
+ * or parked at a gate — is read whole, because the gate's question and its
+ * events are what the approvals list shows. Anything wanting a finished
+ * run's reply or trace opens it with readRun.
+ *
+ * This used to parse every run file of every workspace on every call, and
+ * the dashboard calls it every twenty seconds per open tab.
+ */
 export function listAllRuns(tenant: string): RunWithWorkspace[] {
   return listWorkspaces(tenant)
-    .flatMap((p) => listRuns(tenant, p.name).map((r) => ({ ...r, workspace: p.name })))
+    .flatMap((p) =>
+      listRunSummaries(tenant, p.name).map((s) => {
+        const whole = LIVE_STATUSES.has(s.status) ? readRun(tenant, p.name, s.id) : null;
+        return { ...(whole ?? runFromSummary(s)), workspace: p.name };
+      }),
+    )
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+// ------------------------------------------------------------ the run index
+//
+// runs/.index.json: one row per run with what a list needs — never a reply,
+// never a trace — kept up to date by writeRun and deleteRun, and repaired
+// from the directory by any reader that finds it missing or stale. Stale is
+// decided per file: a row remembers the mtime of the record it was made
+// from, and a record whose mtime moved (another process wrote it, a copy
+// restored it) is re-read on its own. So the index is never trusted over the
+// directory, and never costs more than the files that actually changed.
+//
+// Writers of one run are one process; two processes writing different runs
+// of a workspace can each save a copy that lacks the other's newest row,
+// and the next reader mends it by mtime. No lock beyond the atomic rename.
+
+/** What a list knows about one step. */
+export interface RunSummaryStep {
+  agent: string;
+  group: number;
+  status: StepRecord["status"];
+  costUsd: number | null;
+  tokens?: { input: number; output: number } | null;
+  computeSecs?: number | null;
+  skipReason?: string;
+  /** The last error event, for a failed step — what runFailure reads. */
+  error?: string;
+  item?: string;
+  waitFor?: "event";
+  ask?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+/** What a list knows about one run. */
+export interface RunSummary {
+  id: string;
+  flow: string;
+  status: RunRecord["status"];
+  summary: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  stopRequested?: boolean;
+  test?: boolean;
+  budgetUsd?: number | null;
+  tags?: string[];
+  startedBy?: string | null;
+  parkedAt?: string | null;
+  /** A step is parked for a person — what the approvals banner counts. */
+  awaitingApproval: boolean;
+  steps: RunSummaryStep[];
+}
+
+interface RunIndexRow extends RunSummary {
+  /** mtime of the record this row was made from; a moved mtime means re-read. */
+  mtimeMs: number;
+}
+interface RunIndex {
+  v: 1;
+  runs: Record<string, RunIndexRow>;
+}
+
+const RUN_INDEX = ".index.json";
+const LIVE_STATUSES = new Set<RunRecord["status"]>(["queued", "running", "awaiting-approval"]);
+
+/** One run's row. */
+export function summarizeRun(run: RunRecord): RunSummary {
+  return {
+    id: run.id,
+    flow: run.flow,
+    status: run.status,
+    summary: run.summary ?? null,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt ?? null,
+    ...(run.stopRequested ? { stopRequested: true } : {}),
+    ...(run.test ? { test: true } : {}),
+    ...(run.budgetUsd !== undefined ? { budgetUsd: run.budgetUsd } : {}),
+    ...(run.tags?.length ? { tags: run.tags } : {}),
+    ...(run.startedBy ? { startedBy: run.startedBy } : {}),
+    ...(run.parkedAt ? { parkedAt: run.parkedAt } : {}),
+    awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
+    steps: run.steps.map((s) => {
+      const error = s.status === "failed" ? s.events.filter((e) => e.type === "error").at(-1)?.text : undefined;
+      return {
+        agent: s.agent,
+        group: s.group,
+        status: s.status,
+        costUsd: s.costUsd,
+        ...(s.tokens !== undefined ? { tokens: s.tokens } : {}),
+        ...(s.computeSecs !== undefined ? { computeSecs: s.computeSecs } : {}),
+        ...(s.skipReason ? { skipReason: s.skipReason } : {}),
+        ...(error ? { error: error.slice(0, 500) } : {}),
+        ...(s.item ? { item: s.item } : {}),
+        ...(s.waitFor ? { waitFor: s.waitFor } : {}),
+        ...(s.ask ? { ask: s.ask } : {}),
+        ...(s.startedAt ? { startedAt: s.startedAt } : {}),
+        ...(s.finishedAt ? { finishedAt: s.finishedAt } : {}),
+      };
+    }),
+  };
+}
+
+/** A RunRecord with the shape a list reads and nothing else — see listAllRuns. */
+export function runFromSummary(s: RunSummary): RunRecord {
+  const { awaitingApproval: _awaiting, ...run } = s;
+  return {
+    ...run,
+    steps: s.steps.map((st) => {
+      const { error, ...rest } = st;
+      return {
+        ...rest,
+        instruction: "",
+        optional: false,
+        events: error ? [{ t: st.finishedAt ?? s.finishedAt ?? s.startedAt, type: "error" as const, text: error }] : [],
+        result: null,
+      };
+    }),
+  };
+}
+
+const runIndexCache = new Map<string, { index: RunIndex; mtimeMs: number }>();
+
+function readRunIndex(dir: string): RunIndex | null {
+  const file = path.join(dir, RUN_INDEX);
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    runIndexCache.delete(dir);
+    return null;
+  }
+  const cached = runIndexCache.get(dir);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.index;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as RunIndex;
+    if (parsed?.v !== 1 || typeof parsed.runs !== "object" || !parsed.runs) return null;
+    runIndexCache.set(dir, { index: parsed, mtimeMs });
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeRunIndex(dir: string, index: RunIndex) {
+  const file = path.join(dir, RUN_INDEX);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(index));
+  fs.renameSync(tmp, file);
+  try {
+    runIndexCache.set(dir, { index, mtimeMs: fs.statSync(file).mtimeMs });
+  } catch {
+    runIndexCache.delete(dir);
+  }
+}
+
+const sameRow = (a: RunIndexRow | undefined, b: RunSummary) =>
+  !!a && JSON.stringify({ ...a, mtimeMs: 0 }) === JSON.stringify({ ...b, mtimeMs: 0 });
+
+/** writeRun just saved `run` at `file`: bring its row up to date. The file
+ *  is rewritten only when the row's content moved — a live step appends an
+ *  event several times a second, and the row does not change for that;
+ *  the mtime it remembers goes stale instead, and a reader re-reads that
+ *  one record, which is the cheap and correct thing. */
+function noteRunWritten(dir: string, run: RunRecord, file: string) {
+  try {
+    const index = readRunIndex(dir);
+    if (!index) return; // no index yet — the first reader builds it whole
+    const row = summarizeRun(run);
+    if (sameRow(index.runs[run.id], row)) return;
+    index.runs[run.id] = { ...row, mtimeMs: fs.statSync(file).mtimeMs };
+    writeRunIndex(dir, index);
+  } catch {
+    // the index is a cache; the record is the truth and it is already on disk
+  }
+}
+
+function noteRunDeleted(dir: string, runId: string) {
+  try {
+    const index = readRunIndex(dir);
+    if (!index || !(runId in index.runs)) return;
+    delete index.runs[runId];
+    writeRunIndex(dir, index);
+  } catch {
+    // ditto
+  }
+}
+
+/**
+ * The workspace's runs as the index knows them, newest first — the call a
+ * list makes. Reconciled against the directory on every read: rows for
+ * records that are gone are dropped, records with no row or a moved mtime
+ * are re-read, and the index is rewritten if anything changed. A missing
+ * or unreadable index is a full scan that leaves one behind.
+ */
+export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "runs");
+  if (!fs.existsSync(dir)) return [];
+  const index: RunIndex = readRunIndex(dir) ?? { v: 1, runs: {} };
+  const present = new Set<string>();
+  let changed = false;
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith(".json") || f.startsWith(".")) continue;
+    const id = f.slice(0, -".json".length);
+    present.add(id);
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(path.join(dir, f)).mtimeMs;
+    } catch {
+      continue; // pruned between the listing and the stat
+    }
+    const row = index.runs[id];
+    if (row && row.mtimeMs === mtimeMs) continue;
+    try {
+      const run = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord;
+      index.runs[id] = { ...summarizeRun(run), mtimeMs };
+      changed = true;
+    } catch {
+      // a torn or foreign file is not a run; leave whatever row it had
+    }
+  }
+  for (const id of Object.keys(index.runs)) {
+    if (present.has(id)) continue;
+    delete index.runs[id];
+    changed = true;
+  }
+  if (changed) {
+    try {
+      writeRunIndex(dir, index);
+    } catch {
+      // a read-only or racing directory still gets its answer
+    }
+  }
+  return Object.values(index.runs)
+    .map(({ mtimeMs: _m, ...row }) => row)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/** Every workspace's runs as summaries, tagged with the workspace. */
+export function listAllRunSummaries(tenant: string): (RunSummary & { workspace: string })[] {
+  return listWorkspaces(tenant)
+    .flatMap((p) => listRunSummaries(tenant, p.name).map((s) => ({ ...s, workspace: p.name })))
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
@@ -3127,12 +3392,14 @@ export function listAgentSteps(tenant: string, workspace: string, agent: string)
   return out;
 }
 
+/** Every run of the workspace, whole, newest first. Parses every record;
+ *  a list that needs only what a list needs reads listRunSummaries. */
 export function listRuns(tenant: string, workspace: string): RunRecord[] {
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
+    .filter((f) => f.endsWith(".json") && !f.startsWith("."))
     .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
