@@ -232,3 +232,39 @@ test("append merge: host rows without a trailing newline, a rewrite, and a new f
   assert.equal(mergeAppends(b("a\nb\n"), b("a\nB\n"), b("a\nb\nc\n")), null, "a rewritten line is not an append");
   assert.equal(mergeAppends(null, b("{}\n"), b("[]\n")), null, "two new files are a conflict");
 });
+
+// A secret whose value holds a newline used to be dropped from the env
+// file without a word — docker's --env-file is one KEY=value per line —
+// and the step failed later, elsewhere, on a variable that read as unset.
+test("a secret with a line break crosses as a file, and the trace says so", async () => {
+  const { stageContainerEnv } = await import("../src/run-container.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-envfile-"));
+  try {
+    const events: string[] = [];
+    const env = stageContainerEnv(
+      {
+        PLAIN_TOKEN: "abc123",
+        PEM_KEY: "@file -----BEGIN KEY-----\nabc\n-----END KEY-----\n",
+        MULTI_LINE: "line one\nline two",
+        CRLF_VALUE: "first\r\nsecond",
+      },
+      root,
+      "agents/worker",
+      (type, text) => events.push(`${type}: ${text}`),
+    );
+    assert.equal(env.PLAIN_TOKEN, "abc123", "a plain value goes through the env file");
+    assert.equal(env.PEM_KEY, "/workspace/agents/worker/.secret-files/pem_key");
+    assert.equal(env.MULTI_LINE, "/workspace/agents/worker/.secret-files/multi_line", "not dropped: a path the step can read");
+    assert.equal(env.CRLF_VALUE, "/workspace/agents/worker/.secret-files/crlf_value");
+    assert.equal(fs.readFileSync(path.join(root, "agents/worker/.secret-files/multi_line"), "utf8"), "line one\nline two");
+    for (const v of Object.values(env)) assert.ok(!/[\r\n]/.test(v), "nothing with a line break reaches the env file");
+    assert.deepEqual(
+      events.filter((e) => /line break/.test(e)).map((e) => e.replace(/ holds .*/, "")),
+      ["info: MULTI_LINE", "info: CRLF_VALUE"],
+      "each secret that could not cross as a variable is named on the trace",
+    );
+    assert.ok(events.every((e) => !e.includes("line one")), "the value itself never appears in an event");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

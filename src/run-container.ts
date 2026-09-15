@@ -776,6 +776,50 @@ export interface WriteDivert {
   note: (rel: string, summary: string) => void;
 }
 
+/**
+ * What crosses into the container as its environment, and how.
+ *
+ * A docker --env-file is one `KEY=value` per line and cannot carry a
+ * newline. @file secrets are multi-line by nature (a PEM key, a cert), so
+ * they are staged as files NOW, into the copied-in workspace, and the env
+ * carries the container path — the one place a path is stable across the
+ * boundary. A plain secret whose value happens to hold a newline gets the
+ * same treatment, and the trace says so: it used to be dropped from the
+ * env file without a word, and the step failed later, elsewhere, on a
+ * variable that read as unset. Everything else goes through the env file.
+ */
+export function stageContainerEnv(
+  env: Record<string, string>,
+  wsIn: string,
+  agentRel: string,
+  emit: (type: "info" | "error", text: string) => void,
+): Record<string, string> {
+  const containerEnv: Record<string, string> = {};
+  const stage = (k: string, content: string) => {
+    const rel = path.join(agentRel, ".secret-files", k.toLowerCase());
+    const abs = path.join(wsIn, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(abs, content, { mode: 0o600 });
+    return `/workspace/${rel.replaceAll("\\", "/")}`;
+  };
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v !== "string") continue;
+    if (isFileValue(v)) {
+      containerEnv[k] = stage(k, fileContent(v));
+    } else if (/[\r\n]/.test(v)) {
+      containerEnv[k] = stage(k, v);
+      emit(
+        "info",
+        `${k} holds a line break and cannot cross as an environment variable — ` +
+          `passed as a file instead; $${k} is its path in the sandbox`,
+      );
+    } else {
+      containerEnv[k] = v;
+    }
+  }
+  return containerEnv;
+}
+
 /** The limits a size class reserves. Large is the install's configured
  *  limits unchanged, so existing installs bill and behave identically;
  *  small defaults to a quarter-ish slice and is env-tunable. */
@@ -875,26 +919,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(jobIn);
     fs.writeFileSync(path.join(jobIn, "input.json"), JSON.stringify(args.input, null, 2));
 
-    // @file secrets are multi-line (a PEM key, a cert), and a docker
-    // --env-file cannot carry a newline. So they are staged as files *now*,
-    // into the copied-in workspace, and the env carries the container path —
-    // the one place a path is stable across the boundary. Everything else
-    // goes through the env file. (Without this the key silently vanished:
-    // the old filter dropped any value with a newline, and ssh got an empty
-    // -i path.)
-    const containerEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(args.env)) {
-      if (typeof v !== "string") continue;
-      if (isFileValue(v)) {
-        const rel = path.join(args.input.agentRel, ".secret-files", k.toLowerCase());
-        const abs = path.join(wsIn, rel);
-        fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
-        fs.writeFileSync(abs, fileContent(v), { mode: 0o600 });
-        containerEnv[k] = `/workspace/${rel.replaceAll("\\", "/")}`;
-      } else if (!v.includes("\n")) {
-        containerEnv[k] = v;
-      }
-    }
+    const containerEnv = stageContainerEnv(args.env, wsIn, args.input.agentRel, args.emit);
 
     const envFile = path.join(staging, "env");
     fs.writeFileSync(

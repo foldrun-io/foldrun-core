@@ -10,8 +10,10 @@
 // at a desk. So the decision lives in core and the routes only say who made
 // it.
 
-import { readRun, writeRun, readFlow, mayApprove, type RunRecord } from "./store.ts";
+import crypto from "node:crypto";
+import { readRun, writeRun, readFlow, mayApprove, type FlowInfo, type RunRecord } from "./store.ts";
 import { platform } from "./platform.ts";
+import { approveToken, installKey } from "./webhook.ts";
 
 export interface ApprovalDecision {
   decision: "approve" | "reject";
@@ -34,6 +36,167 @@ export interface ApprovalDecision {
    * person kicked off and then waved through is a gate that never happened.
    */
   actor?: { email?: string | null; role?: string | null } | null;
+  /**
+   * The emailed link's token, when a link is deciding. Read here rather
+   * than trusted from the route, because what a link may decide is policy:
+   * the step it was minted for, before it expires, once, and never a gate
+   * whose flow names its approvers unless the link was minted for one of
+   * them. See readApproveLink.
+   */
+  link?: string;
+}
+
+// ----------------------------------------------------------------- links
+
+/** How long an emailed link decides for when the flow does not say. */
+export const APPROVE_LINK_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** What a link may decide: one step, until a moment, as somebody or as
+ *  nobody. A `run` link is the older kind — bound to the run alone, and
+ *  kept working, once, for runs that were already waiting when this
+ *  changed. */
+export type ApproveLink =
+  | { kind: "step"; step: number; expiresAt: string; approver: string | null }
+  | { kind: "run" };
+
+/** The link's lifetime: the flow's `approve_within:` when it has one —
+ *  after that the gate has expired on its own — else a week. */
+export function approveLinkTtlMs(flow: Pick<FlowInfo, "approveWithin"> | null | undefined): number {
+  return flow?.approveWithin ? flow.approveWithin * 1000 : APPROVE_LINK_DEFAULT_TTL_MS;
+}
+
+const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64url");
+const unb64 = (s: string) => Buffer.from(s, "base64url").toString("utf8");
+
+function signLink(tenant: string, workspace: string, runId: string, step: number, expires: number, approver: string): string {
+  return crypto
+    .createHmac("sha256", installKey())
+    .update(`approve-link:${tenant}/${workspace}/${runId}/${step}/${expires}/${approver}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/**
+ * The token an emailed link carries. Bound to one step of one run and to
+ * a moment, and — when the notification went to a named approver — to
+ * that person, so the link decides as them. A link that was only bound
+ * to the run approved every later gate of that run for as long as it ran,
+ * and a forwarded one let anyone past `approvers:`.
+ *
+ * `step.expires.approver.signature`; the signature covers all of it plus
+ * the run's identity, under the install key, so rotating the key kills
+ * every link at once, the way it kills every hook.
+ */
+export function approveLinkToken(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  link: { step: number; expiresAt: number; approver?: string | null },
+): string {
+  const approver = (link.approver ?? "").trim().toLowerCase();
+  const expires = Math.floor(link.expiresAt);
+  return `${link.step}.${expires}.${approver ? b64(approver) : "-"}.${signLink(tenant, workspace, runId, link.step, expires, approver)}`;
+}
+
+/** The path an emailed link opens — absolute when the caller prefixes the
+ *  install's public origin. `decision=reject` pre-selects; a GET never
+ *  decides. */
+export function approveLinkPath(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  link: { step: number; expiresAt: number; approver?: string | null },
+): string {
+  return `/api/approve/${tenant}/${workspace}/${runId}?token=${approveLinkToken(tenant, workspace, runId, link)}`;
+}
+
+const same = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/**
+ * What a presented token is, or why it is nothing. 401 for a token that
+ * was never minted for this run, 410 for one that was and has expired —
+ * the second deserves a sentence, because the person holding it did
+ * nothing wrong.
+ */
+export function readApproveLink(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  presented: string,
+  now = Date.now(),
+): { link: ApproveLink } | { error: string; status: 401 | 410 } {
+  const invalid = { error: "invalid token", status: 401 as const };
+  if (!presented) return invalid;
+  const parts = presented.split(".");
+  if (parts.length === 4) {
+    const [stepText, expText, approverText, sig] = parts;
+    if (!/^\d+$/.test(stepText) || !/^\d+$/.test(expText)) return invalid;
+    let approver = "";
+    try {
+      approver = approverText === "-" ? "" : unb64(approverText);
+    } catch {
+      return invalid;
+    }
+    const step = Number(stepText);
+    const expires = Number(expText);
+    if (!same(sig, signLink(tenant, workspace, runId, step, expires, approver))) return invalid;
+    if (now >= expires) return { error: "this link has expired — open the run in the dashboard to decide it", status: 410 };
+    return { link: { kind: "step", step, expiresAt: new Date(expires).toISOString(), approver: approver || null } };
+  }
+  if (same(presented, approveToken(tenant, workspace, runId))) return { link: { kind: "run" } };
+  return invalid;
+}
+
+/** A used link is written on the run as a digest, never the token. */
+const linkDigest = (token: string) => crypto.createHash("sha256").update(token).digest("hex").slice(0, 24);
+
+/** The record's field for used links. Not in RunRecord's declared shape —
+ *  store.ts owns that — but a record is JSON and carries it. */
+type RunWithLinks = RunRecord & { approvalLinksUsed?: string[] };
+
+/**
+ * Everything a link has to pass before it decides anything, answered the
+ * same way for the page that shows the gate and the POST that decides it.
+ * Returns which waiting steps the link may decide and who it decides as.
+ */
+export function checkApproveLink(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  presented: string,
+  now = Date.now(),
+): { ok: true; link: ApproveLink; steps: number[]; approver: string | null } | { ok: false; status: number; message: string } {
+  const read = readApproveLink(tenant, workspace, run.id, presented, now);
+  if ("error" in read) return { ok: false, status: read.status, message: read.error };
+  const { link } = read;
+  if ((run as RunWithLinks).approvalLinksUsed?.includes(linkDigest(presented))) {
+    return { ok: false, status: 409, message: "this link was already used — a link decides once" };
+  }
+  // The older, run-bound link: kept for runs already waiting, but not for
+  // longer than a new link would have been.
+  if (link.kind === "run") {
+    const since = Date.parse(run.parkedAt ?? run.startedAt);
+    if (Number.isFinite(since) && now - since > APPROVE_LINK_DEFAULT_TTL_MS) {
+      return { ok: false, status: 410, message: "this link has expired — open the run in the dashboard to decide it" };
+    }
+  }
+  const waiting = run.steps
+    .map((s, i) => ({ s, i }))
+    .filter(({ s, i }) => s.status === "awaiting-approval" && s.waitFor !== "event" && (link.kind === "run" || i === link.step))
+    .map(({ i }) => i);
+  const approver = link.kind === "step" ? link.approver : null;
+  // A flow that names its approvers is asking for a person; a link is a
+  // possession. Only a link minted for one of the named approvers carries
+  // enough of an identity to be checked against the list.
+  const flow = readFlow(tenant, workspace, run.flow);
+  if (flow?.approvers?.length && !approver) {
+    return {
+      ok: false,
+      status: 403,
+      message: `this flow names who may approve it (${flow.approvers.join(", ")}), and an emailed link carries no identity — sign in to the dashboard to decide it`,
+    };
+  }
+  return { ok: true, link, steps: waiting, approver };
 }
 
 /** An error the HTTP layer can map straight to a status — see errorResponse. */
@@ -62,11 +225,20 @@ export async function decideApproval(
 ): Promise<{ run: RunRecord; steps: number[] }> {
   const run = readRun(tenant, workspace, runId);
   if (!run) throw new ApprovalError("run not found", 404);
+
+  // A link decides what it was minted for, as whom it was minted for.
+  let allowed: number[] | null = null;
+  if (d.link !== undefined) {
+    const check = checkApproveLink(tenant, workspace, run, d.link);
+    if (!check.ok) throw new ApprovalError(check.message, check.status);
+    allowed = check.steps;
+    d = { ...d, actor: check.approver ? { email: check.approver, role: null } : null };
+  }
   assertMayDecide(tenant, workspace, run, d);
 
   const waiting = run.steps
     .map((s, i) => ({ s, i }))
-    .filter(({ s, i }) => s.status === "awaiting-approval" && (d.step === undefined || d.step === i));
+    .filter(({ s, i }) => s.status === "awaiting-approval" && (d.step === undefined || d.step === i) && (allowed === null || allowed.includes(i)));
   if (waiting.length === 0) throw new ApprovalError("nothing is awaiting approval", 409);
 
   const note = typeof d.note === "string" ? d.note.trim() : "";
@@ -99,6 +271,13 @@ export async function decideApproval(
   // record would hand a later gate in the same run a deadline that has
   // already passed.
   if (run.steps.every((s) => s.status !== "awaiting-approval")) run.approveBy = null;
+  // A link decides once. Written as a digest on the record, so a step that
+  // parks again — a loop, a rerun from the gate — is not decided by the
+  // same forwarded mail.
+  if (d.link !== undefined) {
+    const used = (run as RunWithLinks).approvalLinksUsed ?? [];
+    (run as RunWithLinks).approvalLinksUsed = [...used, linkDigest(d.link)].slice(-50);
+  }
   writeRun(tenant, workspace, run);
 
   // A parked run has no process polling for this decision — the worker
