@@ -261,7 +261,7 @@ export function snapshotDivertedDirs(wsRoot: string): Map<string, Buffer> {
     if (!fs.existsSync(root)) continue;
     for (const entry of fs.readdirSync(root, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile()) continue;
-      const abs = path.join(entry.parentPath ?? entry.path, entry.name);
+      const abs = path.join(entry.parentPath, entry.name);
       snap.set(path.relative(wsRoot, abs).replaceAll("\\", "/"), fs.readFileSync(abs));
     }
   }
