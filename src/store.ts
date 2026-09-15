@@ -3049,6 +3049,10 @@ export interface RunSummaryStep {
   item?: string;
   waitFor?: "event";
   ask?: string;
+  /** The step's instruction, kept for a parked step so the approvals banner can show the question without the record. */
+  instruction?: string;
+  /** When a parked step last spoke — the moment the banner sorts by. */
+  waitingSince?: string;
   startedAt?: string;
   finishedAt?: string;
 }
@@ -3114,6 +3118,7 @@ export function summarizeRun(run: RunRecord): RunSummary {
         ...(s.item ? { item: s.item } : {}),
         ...(s.waitFor ? { waitFor: s.waitFor } : {}),
         ...(s.ask ? { ask: s.ask } : {}),
+        ...(s.status === "awaiting-approval" ? { instruction: s.instruction, waitingSince: s.events.at(-1)?.t ?? run.startedAt } : {}),
         ...(s.startedAt ? { startedAt: s.startedAt } : {}),
         ...(s.finishedAt ? { finishedAt: s.finishedAt } : {}),
       };
