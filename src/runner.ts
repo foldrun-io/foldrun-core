@@ -2775,12 +2775,25 @@ function driveRunInner(
         // this is what keeps the *next* group from starting.
         const stopCheck = readRun(tenant, workspace, run.id);
         if (stopCheck?.stopRequested) {
+          let skipped = 0;
           for (const s of run.steps) {
             if (s.status === "pending" || s.status === "running") {
               s.status = "skipped";
               s.skipReason = "run stopped";
+              skipped += 1;
             }
           }
+          // Say so on the trail. stopRun wrote "run stopped" onto the
+          // record's first step, but the save() below writes this process's
+          // copy of the record over it, so the only witness was the
+          // stopRequested flag — and a run that "failed" with no error line
+          // anywhere took a code read to explain (rank-desk, 2026-09-13).
+          const witness = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
+          witness?.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `run stopped by a person between groups — ${skipped} remaining step${skipped === 1 ? "" : "s"} skipped`,
+          });
           run.status = "failed";
           run.stopRequested = true;
           save();
@@ -3271,16 +3284,25 @@ function driveRunInner(
       for (const s of run.steps) if (s.status === "pending") s.status = "skipped";
     } catch (err) {
       run.status = "failed";
+      const text = err instanceof Error ? err.message : String(err);
+      let told = false;
       run.steps.forEach((s) => {
         if (s.status === "running") {
           s.status = "failed";
-          s.events.push({
-            t: new Date().toISOString(),
-            type: "error",
-            text: err instanceof Error ? err.message : String(err),
-          });
+          s.events.push({ t: new Date().toISOString(), type: "error", text });
+          told = true;
         }
       });
+      // Thrown between groups, with nothing running: the error still has to
+      // land on some step's trail, or the run reads as failed for no reason.
+      if (!told) {
+        const witness = run.steps.findLast((s) => s.status !== "pending") ?? run.steps[0];
+        witness?.events.push({
+          t: new Date().toISOString(),
+          type: "error",
+          text: `run failed between steps: ${text}`,
+        });
+      }
     } finally {
       if (!parked) {
         run.finishedAt = new Date().toISOString();
