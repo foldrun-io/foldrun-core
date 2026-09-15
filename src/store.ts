@@ -1890,7 +1890,7 @@ export function updateFlowStep(
   const block = blocks[index];
   const managed = new Set(Object.keys(options));
   const kept = block.lines.slice(1).filter((line) => {
-    const key = line.match(OPTION_RE)?.[1];
+    const key = line.match(OPTION_RE)?.[2];
     return !(key && managed.has(key));
   });
   const added: string[] = [];
