@@ -1256,7 +1256,8 @@ async function runStep(
   // the credential in its answer rather than in a tool event. Same scrub,
   // same place. The JSON value goes through its text form: a secret inside
   // a nested field is still a secret, and the key name survives either way.
-  const redactText = (text: string | null) => (text === null ? null : redact(text));
+  const redactText = <T extends string | null | undefined>(text: T): T =>
+    (typeof text === "string" ? redact(text) : text) as T;
   const redactData = (value: unknown): unknown => {
     if (value === undefined || redactions.length === 0) return value;
     try {

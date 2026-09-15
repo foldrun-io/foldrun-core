@@ -20,6 +20,10 @@ export interface FlowWarning {
   line?: number;
   message: string;
   detail: string;
+  /** "error" for a value the parser could not read — `timeout: abc` — which
+   *  `foldrun check` must fail on rather than note. Absent means advisory,
+   *  which every structural warning in this file is. */
+  level?: "error" | "warn";
 }
 
 // Anaphora: phrases that only mean something if earlier output exists.
@@ -166,6 +170,22 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
 
   flow.steps.forEach((step, i) => {
     const inFirstGroup = step.group === firstGroup;
+
+    // A value the parser refused. Not advisory: the run would go ahead on
+    // a number the author never wrote — `timeout: 15m` ran as one second
+    // for as long as this was a coercion — so the check fails instead.
+    for (const problem of step.problems ?? []) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        level: "error",
+        message: problem,
+        detail:
+          "The option is written but its value cannot be read, and a run would not do what the " +
+          "line says. Durations are seconds or 90s / 30m / 4h / 3d; counts are whole numbers " +
+          "within the key's cap (retry and loop at most 5, max at most 20).",
+      });
+    }
 
     // The first group starts with context = null. An instruction that points
     // at earlier output therefore points at nothing.

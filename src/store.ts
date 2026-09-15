@@ -1081,6 +1081,12 @@ export interface FlowStep {
   /** 1-indexed line in the flow file. Diagnostics without a line make you
    *  search; every real linter emits file:line. */
   line?: number;
+  /** What is wrong with an option's VALUE, in the author's words — `timeout:
+   *  abc`, `retry: 9`, `each: columns`. The parser keeps the step (a run
+   *  still has a shape) and the lint reports each of these as an error, so
+   *  `foldrun check` fails on a value that would otherwise be read as
+   *  something the author never wrote: `timeout: 15m` used to be one second. */
+  problems?: string[];
 }
 
 export interface FlowInfo {
@@ -1308,11 +1314,38 @@ const STEP_OPTION_KEYS = new Set([
 /** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
  *  days: a wait is a pause in a flow, not a second scheduler. */
 export function parseWait(value: string): number | undefined {
+  const secs = parseDuration(value);
+  return secs === undefined ? undefined : Math.min(secs, 30 * 86400);
+}
+
+/** The one duration grammar every key shares — `wait:`, `timeout:`, the
+ *  flow's `throttle:`/`debounce:`/`sla:` — as whole seconds, at least 1.
+ *  Undefined for anything that is not one: the caller says what the key
+ *  was, because "not a duration" is only useful with the line it names. */
+export function parseDuration(value: string): number | undefined {
   const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*([smhd]?)$/i);
   if (!m) return undefined;
   const mult = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase() as "" | "s" | "m" | "h" | "d"];
   const secs = Math.round(Number(m[1]) * mult);
-  return secs > 0 ? Math.min(secs, 30 * 86400) : undefined;
+  return secs > 0 ? secs : undefined;
+}
+
+/** `timeout:` — the same units `wait:` takes, and no ceiling: the platform
+ *  sets no clock of its own, so the author's number stands as written.
+ *  `timeout: 15m` was `Math.max(1, Number("15m") || 0)` — one second — and
+ *  every step wearing it was cut off before its first tool call returned. */
+export function parseTimeout(value: string): number | undefined {
+  return parseDuration(value);
+}
+
+/** A whole number within [min, max], or undefined — for the counted
+ *  options (`retry:`, `loop:`, `max:`, `parallel:`). "abc" and "2.5" and "9"
+ *  on a key capped at 5 are all refused rather than silently rounded,
+ *  clamped, or read as zero. */
+function parseCount(value: string, min: number, max: number): number | undefined {
+  if (!/^\d+$/.test(value.trim())) return undefined;
+  const n = Number(value.trim());
+  return n >= min && n <= max ? n : undefined;
 }
 
 /** An ISO 8601 instant (YAML may already have parsed it into a Date), or
@@ -1438,17 +1471,37 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       const step = steps[steps.length - 1];
       const [, key, rawValue] = opt;
       const value = unquote(rawValue);
+      // A value the key cannot read is recorded, never guessed at. Every
+      // one of these used to be coerced — Number("abc") || 0, clamped —
+      // and the run went ahead with a number the author never wrote.
+      const problem = (text: string) => (step.problems ??= []).push(`${key}: ${value} — ${text}`);
       if (key === "approve") step.approve = value !== "false";
       else if (key === "when") step.when = value;
       else if (key === "case") step.case = value;
       else if (key === "else") step.else = value !== "false";
-      else if (key === "retry") step.retry = Math.min(5, Math.max(0, Number(value) || 0));
-      else if (key === "timeout") step.timeout = Math.max(1, Number(value) || 0);
+      else if (key === "retry") {
+        const n = parseCount(value, 0, 5);
+        if (n === undefined) problem("a whole number of extra attempts, at most 5");
+        // Over the cap still runs, capped: the check fails, the run does not.
+        step.retry = n ?? Math.min(5, Math.max(0, Math.floor(Number(value)) || 0));
+      }
+      else if (key === "timeout") {
+        const secs = parseTimeout(value);
+        if (secs === undefined) problem("not a duration; write seconds (900) or 15m, 4h, 3d");
+        else step.timeout = secs;
+      }
       else if (key === "verify") step.verify = value;
-      else if (key === "output") step.output = /^json$/i.test(value) ? "json" : undefined;
+      else if (key === "output") {
+        if (/^json$/i.test(value)) step.output = "json";
+        else problem("the only shape is json");
+      }
       else if (key === "model") step.model = value;
       else if (key === "effort") step.effort = value;
-      else if (key === "loop") step.loop = Math.min(5, Math.max(1, Number(value) || 0)) || undefined;
+      else if (key === "loop") {
+        const n = parseCount(value, 1, 5);
+        if (n === undefined) problem("a whole number of extra cycles, 1 to 5");
+        step.loop = n ?? (Math.min(5, Math.max(1, Math.floor(Number(value)) || 0)) || undefined);
+      }
       else if (key === "until") step.until = value;
       else if (key === "each") {
         if (value === "lines") step.each = "lines";
@@ -1457,19 +1510,28 @@ export function parseFlow(file: string, raw: string): FlowInfo {
           step.each = "rows";
           // "rows of ../../storage/leads.csv" — the path is the part after "of".
           step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
+          if (!step.eachPath) problem("rows needs a file: each: rows of ../../storage/leads.csv");
         }
+        else problem("lines, items, or rows of <path>");
       }
       else if (key === "on-fail" || key === "onfail") step.onFail = refNames(value)[0] ?? undefined;
       else if (key === "wait") {
         if (/^event$/i.test(value)) step.waitFor = "event";
-        else step.waitSecs = parseWait(value);
+        else {
+          step.waitSecs = parseWait(value);
+          if (step.waitSecs === undefined) problem("event, or a duration: 90s, 30m, 4h, 3d");
+        }
       }
       else if (key === "ask") { step.ask = value; }
       else if (key === "preview") {
         step.preview = value.split(",").map((p) => p.trim().replace(/^(\.\.\/\.\.\/)?storage\//, "")).filter(Boolean);
       }
       else if (key === "delegate") step.delegate = refNames(value).slice(0, 5);
-      else if (key === "max") step.max = Math.min(20, Math.max(1, Number(value) || 0)) || undefined;
+      else if (key === "max") {
+        const n = parseCount(value, 1, 20);
+        if (n === undefined) problem("a whole number of items, 1 to 20");
+        step.max = n ?? (Math.min(20, Math.max(1, Math.floor(Number(value)) || 0)) || undefined);
+      }
     }
   }
   steps.sort((a, b) => a.group - b.group);
