@@ -761,6 +761,11 @@ export interface RunInContainerArgs {
   /** A test run: where state/ and storage/ changes go instead of the
    *  workspace, and who to tell about each. See test-mode.ts. */
   divert?: WriteDivert;
+  /** The run is a test run. An isolated executor labels the sandbox so the
+   *  cluster can cut its network down to the egress proxy: a script tool
+   *  calls the network directly, not through the proxy where the test-mode
+   *  policy lives, so without this a test run's script could still send. */
+  test?: boolean;
 }
 
 /** What a test run does with a write it must not apply. */

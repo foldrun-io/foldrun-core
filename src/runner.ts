@@ -1755,6 +1755,7 @@ async function runStep(
         size,
         // A test run's state/ and storage/ changes come out under the run.
         divert: testRun && runId ? divertFor(runId) : undefined,
+        test: testRun,
         // Resume: a sandbox a previous driver left running, recorded on the
         // step. Consumed once — a fresh attempt after this one (a retry, a
         // fallback) starts its own sandbox.
