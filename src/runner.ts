@@ -1228,6 +1228,10 @@ async function runStep(
   /** The run is a test run — see test-mode.ts. Read off the run record by
    *  the caller, never from anything the sandbox could have written. */
   testRun = false,
+  /** Has a person asked for the run to stop? Read on a clock by the
+   *  in-process model loop, so a stop lands mid-step and not at the next
+   *  group. The isolated path needs none: stopRun destroys the sandbox. */
+  stopRequested?: () => boolean,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1939,10 +1943,11 @@ async function runStep(
         env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
-          budgetNote: stepBudgetNote,
+        budgetNote: stepBudgetNote,
         price: tokenPrice,
         verify: step.verify,
         output: step.output,
+        stopRequested,
         // What the scripts saw, the verify sees: a flow can then check that
         // the proof a step left names THIS run, not one that came before —
         // copy-back never propagates a deletion, so a marker from an earlier
@@ -3156,6 +3161,12 @@ function driveRunInner(
                   ceiling.ceilingUsd,
                   ceiling.note,
                   run.test === true,
+                  // save() merges a stop written by another process into
+                  // this record; the model loop polls this on a clock.
+                  () => {
+                    save();
+                    return run.stopRequested === true;
+                  },
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.

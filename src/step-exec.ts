@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import type { McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
 import { spawn } from "node:child_process";
@@ -78,11 +78,28 @@ export interface ExecOptions {
    *  container): the SDK's bash sandbox is then redundant and would block
    *  declared network use. Default (undefined/true) keeps it on. */
   sandboxBash?: boolean;
+  /** Has a person asked for the run to stop? Polled every couple of
+   *  seconds while the model loop runs; true interrupts it. The in-process
+   *  runner answers from the run record (stopRun writes there from another
+   *  process); a container has a sandbox that is destroyed instead. */
+  stopRequested?: () => boolean;
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
 
+/** How often the stop flag is read while a step runs. */
+export const STOP_POLL_MS = 2000;
+/** After an interrupt is asked for, how long the model loop gets to wind
+ *  down on its own before the query is aborted outright. */
+export const INTERRUPT_GRACE_MS = 10_000;
+
+/** The model loop, as executeStep needs it — the SDK's `query`, or a test's
+ *  stand-in. Only the shape the loop reads. */
+export type QueryLike = AsyncIterable<unknown> & { interrupt(): Promise<unknown> };
+export type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => QueryLike;
+
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
 export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect };
+
 
 /** Conservative per-token rates for a model nothing else can price — an
  *  unknown id on a gateway with no catalogue. Opus-class, so a ceiling
@@ -172,7 +189,12 @@ export function stepCeilingFor(
   return { ceilingUsd: left, note: `budget: on the ${agent} agent` };
 }
 
-export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
+export async function executeStep(
+  opts: ExecOptions,
+  /** The model loop. Injected so the clock and the stop can be tested
+   *  without a model; production passes nothing and gets the SDK. */
+  runQuery: QueryFn = query as unknown as QueryFn,
+): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
   let status: "running" | "completed" | "failed" = "running";
   let costUsd: number | null = null;
@@ -182,10 +204,16 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
   fs.mkdirSync(path.join(agentDir, "memory"), { recursive: true });
 
-  const q = query({
+  // The one handle that can end the loop from outside: the timeout and a
+  // stop both ask the query to interrupt, and abort it outright if it has
+  // not wound down within the grace period.
+  const abort = new AbortController();
+
+  const q = runQuery({
     prompt: opts.prompt,
     options: {
       cwd: agentDir,
+      abortController: abort,
       model: opts.model,
       // Omitted, not passed as undefined-with-a-default: an unset effort
       // should mean "whatever this model does normally", which is not a
@@ -245,7 +273,31 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
     },
   });
 
-  const deadline = opts.timeoutSec ? Date.now() + opts.timeoutSec * 1000 : null;
+  // Why the loop was ended from outside, if it was. The deadline used to be
+  // checked only when a message arrived, so a step waiting on one long tool
+  // call — a crawl, a build — sailed past its timeout: with no message there
+  // was nothing to check it against. The backstop timer fires regardless,
+  // and a stop is read on a clock rather than between groups.
+  let ended: "timeout" | "stopped" | null = null;
+  const timers: NodeJS.Timeout[] = [];
+  const endWith = (why: "timeout" | "stopped") => {
+    if (ended) return;
+    ended = why;
+    void q.interrupt().catch(() => {});
+    timers.push(setTimeout(() => abort.abort(), INTERRUPT_GRACE_MS));
+  };
+  if (opts.timeoutSec) timers.push(setTimeout(() => endWith("timeout"), opts.timeoutSec * 1000));
+  if (opts.stopRequested) {
+    timers.push(setInterval(() => {
+      try {
+        if (opts.stopRequested!()) endWith("stopped");
+      } catch {
+        // an unreadable record is not a stop
+      }
+    }, STOP_POLL_MS));
+  }
+  for (const t of timers) t.unref?.();
+
   // The hard cap. Spend is counted as each assistant turn arrives — its
   // usage is in the message — so the step can stop at the ceiling rather
   // than learn afterwards that it crossed it. Cache traffic is counted as
@@ -258,12 +310,9 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
   // its call and the trace can say how long each tool ran.
   const openCalls = new Map<string, { name: string; at: number }>();
 
-  for await (const message of q) {
-    if (deadline && Date.now() > deadline) {
-      emit("error", `step exceeded its ${opts.timeoutSec}s timeout`);
-      status = "failed";
-      break;
-    }
+  try {
+  for await (const message of q as AsyncIterable<SDKMessage>) {
+    if (ended) break;
     if (message.type === "assistant") {
       const u = (message.message as unknown as { usage?: Record<string, number | undefined> }).usage;
       if (ceiling && u) {
@@ -317,6 +366,19 @@ export async function executeStep(opts: ExecOptions): Promise<ExecOutcome> {
         };
       }
     }
+  }
+  } catch (err) {
+    // An abort we asked for is not an error of the step's; anything else is.
+    if (!ended) throw err;
+  } finally {
+    for (const t of timers) clearTimeout(t);
+  }
+  if (ended === "timeout") {
+    emit("error", `timed out after ${opts.timeoutSec}s (timeout: in the flow file) — the step was stopped with the files it wrote so far kept`);
+    status = "failed";
+  } else if (ended === "stopped") {
+    emit("error", "stopped by a person mid-step");
+    status = "failed";
   }
   // The SDK ends a healthy run with a `result` message. A stream that just
   // stops — subprocess OOM-killed, crashed, or torn down — used to fall
