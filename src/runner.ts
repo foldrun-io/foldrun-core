@@ -58,6 +58,8 @@ import {
   type McpSpec,
   type RunRecord,
   type StepRecord,
+  type StepAttempt,
+  sumAttempts,
   STORAGE_DIR,
   adoptLegacyVersionKey,
   listAgents,
@@ -1204,6 +1206,49 @@ function repriced(
     push("info", `cost repriced from the gateway's catalogue: $${known.toFixed(6)} (sdk said $${sdkCost.toFixed(6)})`);
   }
   return known;
+}
+
+/**
+ * Write one attempt onto the step's history and re-total the step.
+ *
+ * runStep reports the attempt it just ran — its cost, tokens and sandbox
+ * seconds — by assigning the step's fields. Those become this attempt's row;
+ * the step's fields then become the sum of every row, which is what the
+ * run's spend, the flow's budget: and the platform's bill read. A retried
+ * step used to carry only its last attempt's cost, so a `retry: 2` step
+ * could spend three shares while reporting one.
+ */
+export function recordAttempt(
+  step: StepRecord,
+  n: number,
+  status: "completed" | "failed",
+  startedAt: string,
+  eventsBefore: number,
+  /** The attempt re-attached to a sandbox a previous driver left: same
+   *  attempt, so its row is replaced rather than repeated. */
+  reattach = false,
+) {
+  const tries = step.tries ?? [];
+  const lastError = step.events
+    .slice(eventsBefore)
+    .filter((e) => e.type === "error")
+    .at(-1)?.text;
+  const row: StepAttempt = {
+    n,
+    status,
+    costUsd: step.costUsd,
+    tokens: step.tokens ?? null,
+    computeSecs: step.computeSecs ?? null,
+    startedAt,
+    finishedAt: step.finishedAt ?? new Date().toISOString(),
+    ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
+  };
+  const kept = reattach && tries.at(-1)?.n === n ? tries.slice(0, -1) : tries;
+  step.tries = [...kept, row];
+  const totals = sumAttempts(step.tries);
+  step.costUsd = totals.costUsd;
+  step.tokens = totals.tokens;
+  step.computeSecs = totals.computeSecs;
 }
 
 async function runStep(
@@ -2866,6 +2911,7 @@ function driveRunInner(
             result: null,
             costUsd: null,
             attempts: 0,
+            tries: undefined,
           }));
           run.steps.splice(at + 1, 0, ...instances);
           ordered = orderedGroups();
@@ -3110,32 +3156,25 @@ function driveRunInner(
         // twenty steps over — the shares sum to what was left. Between
         // groups the check above still refuses to start the next one.
         const launching = freshGroup.filter((s) => s.status === "pending");
-        const flowShareUsd = stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length);
         // An agent's own `budget:` — the most it may spend in one run — is
         // read at launch, so a cap raised mid-run applies to the next step.
         const agentBudgets = new Map(listAgents(tenant, workspace).map((a) => [a.name, a.budget]));
+        // The ceiling for one attempt of one step, read NOW: what is left of
+        // the run's budget shared across the group, or the agent's own cap
+        // less what its steps have cost. Computed before every attempt, not
+        // once before the loop — a retry's share is what is left after the
+        // failed attempt spent, and the step's own figure already carries
+        // that spend (it is the sum of its tries).
+        const ceilingFor = (step: StepRecord) =>
+          stepCeilingFor(
+            stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length),
+            agentBudgets.get(step.agent),
+            run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
+            step.agent,
+          );
         await Promise.all(
           launching
             .map(async (step) => {
-              const ceiling = stepCeilingFor(
-                flowShareUsd,
-                agentBudgets.get(step.agent),
-                run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
-                step.agent,
-              );
-              // Nothing left is a refusal, not "no ceiling": a zero passed
-              // down would read as unset, and the one step that must not
-              // run would run with no cap at all.
-              if (ceiling.ceilingUsd === 0) {
-                step.status = "failed";
-                step.events.push({
-                  t: new Date().toISOString(),
-                  type: "error",
-                  text: `over budget — nothing left to spend before this step (${ceiling.note}); it was not started`,
-                });
-                save();
-                return;
-              }
               const attempts = (step.retry ?? 0) + 1;
               // A step re-attaching to its sandbox is still on the attempt
               // that started it; a step re-run after a backoff picks up the
@@ -3144,6 +3183,31 @@ function driveRunInner(
                 !step.sandbox && !!step.attempts && /retrying in \d+s/.test(step.events[step.events.length - 1]?.text ?? "");
               const from = step.sandbox ? Math.max(1, step.attempts ?? 1) : interruptedInBackoff ? Math.min(attempts, step.attempts! + 1) : 1;
               for (let attempt = from; attempt <= attempts; attempt++) {
+                const ceiling = ceilingFor(step);
+                // Nothing left is a refusal, not "no ceiling": a zero passed
+                // down would read as unset, and the one step that must not
+                // run would run with no cap at all. On a retry this is what
+                // stops the second attempt spending a share the first one
+                // already spent.
+                if (ceiling.ceilingUsd === 0) {
+                  step.status = "failed";
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "error",
+                    text:
+                      attempt === from
+                        ? `over budget — nothing left to spend before this step (${ceiling.note}); it was not started`
+                        : `over budget — nothing left to spend for attempt ${attempt} (${ceiling.note}); not retried`,
+                  });
+                  save();
+                  return;
+                }
+                // Re-attaching to a sandbox is the same attempt, so its row
+                // is replaced; anything else is a new row, a loop cycle's
+                // re-run included.
+                const reattach = !!step.sandbox;
+                const attemptStartedAt = new Date().toISOString();
+                const eventsBefore = step.events.length;
                 step.attempts = attempt;
                 step.status = "running";
                 save();
@@ -3171,6 +3235,8 @@ function driveRunInner(
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
                 const outcome: string = step.status;
+                recordAttempt(step, attempt, outcome === "completed" ? "completed" : "failed", attemptStartedAt, eventsBefore, reattach);
+                save();
                 if (outcome !== "failed" || attempt === attempts) break;
                 // A stop destroys the step's sandbox, which reads here as a
                 // failed attempt — and a failed attempt used to be retried in

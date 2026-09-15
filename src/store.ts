@@ -2542,6 +2542,34 @@ export interface RunEvent {
   effect?: TestEffect;
 }
 
+/** One attempt of a step — see StepRecord.tries. */
+export interface StepAttempt {
+  /** Which attempt, 1-based: `attempts` on the step at the time. */
+  n: number;
+  status: "completed" | "failed";
+  costUsd: number | null;
+  tokens: { input: number; output: number } | null;
+  computeSecs: number | null;
+  startedAt: string;
+  finishedAt: string;
+  /** The last error event this attempt wrote, when it failed. */
+  error?: string;
+}
+
+/** The step's totals across its attempts, from the rows. Null where no
+ *  attempt reported the figure — an in-process step rents no sandbox, and
+ *  billing reads null as zero, not as "unknown, charge something". */
+export function sumAttempts(tries: StepAttempt[]): Pick<StepAttempt, "costUsd" | "tokens" | "computeSecs"> {
+  const costs = tries.map((t) => t.costUsd).filter((c): c is number => typeof c === "number");
+  const toks = tries.map((t) => t.tokens).filter((t): t is { input: number; output: number } => !!t);
+  const secs = tries.map((t) => t.computeSecs).filter((c): c is number => typeof c === "number");
+  return {
+    costUsd: costs.length ? costs.reduce((a, b) => a + b, 0) : null,
+    tokens: toks.length ? toks.reduce((a, b) => ({ input: a.input + b.input, output: a.output + b.output }), { input: 0, output: 0 }) : null,
+    computeSecs: secs.length ? secs.reduce((a, b) => a + b, 0) : null,
+  };
+}
+
 export interface StepRecord {
   agent: string;
   instruction: string;
@@ -2561,6 +2589,17 @@ export interface StepRecord {
   verify?: string;
   /** Attempts made so far, for the run trace. */
   attempts?: number;
+  /**
+   * One row per attempt, oldest first: what each cost and how it ended.
+   * `costUsd`, `tokens` and `computeSecs` on the step are the SUM of these
+   * rows — a retried step spent every attempt's money, and the run's spend,
+   * the flow's `budget:` and the platform's bill all read the step's
+   * figure, so the figure is the total. Before this the step carried only
+   * the last attempt's cost and a `retry: 2` step could spend three shares
+   * of the budget while reporting one. A loop cycle that re-runs the step
+   * appends here too, so its earlier cycles are not lost from the bill.
+   */
+  tries?: StepAttempt[];
   /** The sandbox this step is executing in, while it is: which executor,
    *  its handle (a pod name), and how many of its output lines the driver
    *  has already applied to this record. What a driver that inherits the
