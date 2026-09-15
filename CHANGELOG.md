@@ -11,6 +11,103 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [0.4.0] — 2026-09-15
+
+- The step clocks stay referenced: a hanging tool call must not let the loop exit around them ([66be8f1](https://github.com/foldrun-io/foldrun-core/commit/66be8f1))
+- A parked step's summary carries its instruction and when it last spoke ([27213c3](https://github.com/foldrun-io/foldrun-core/commit/27213c3))
+- The step editor reads the option key from the regrouped option regex ([a93ea16](https://github.com/foldrun-io/foldrun-core/commit/a93ea16))
+- schema:, parallel: and max_turns: — what a step returns, how wide it fans out, how long it may go ([8723c60](https://github.com/foldrun-io/foldrun-core/commit/8723c60))
+- A JSON Schema validator small enough to read, with no dependency ([e9447d9](https://github.com/foldrun-io/foldrun-core/commit/e9447d9))
+- A gate's notification carries one step-bound link per waiting step ([ad21a84](https://github.com/foldrun-io/foldrun-core/commit/ad21a84))
+- hostSafeEnv is a ProcessEnv, so a host that requires NODE_ENV accepts it ([d993e8e](https://github.com/foldrun-io/foldrun-core/commit/d993e8e))
+- A run index beside the records, so a list never parses every run ([85e4589](https://github.com/foldrun-io/foldrun-core/commit/85e4589))
+- Every attempt on the record; the step's cost is their sum; a retry's share is what is left ([6c0716d](https://github.com/foldrun-io/foldrun-core/commit/6c0716d))
+- An approval link decides one step, before a moment, once — and as somebody ([be7068b](https://github.com/foldrun-io/foldrun-core/commit/be7068b))
+- A secret with a line break crosses into the container as a file, out loud ([3350b5e](https://github.com/foldrun-io/foldrun-core/commit/3350b5e))
+- The in-process step ends at its timeout and on a stop, on a clock ([49b1ce2](https://github.com/foldrun-io/foldrun-core/commit/49b1ce2))
+- One allowlisted host environment for every child a step spawns in-process ([a44ee8c](https://github.com/foldrun-io/foldrun-core/commit/a44ee8c))
+- Read an option's value or refuse it; timeout: takes wait:'s units ([7983d77](https://github.com/foldrun-io/foldrun-core/commit/7983d77))
+- An eval queues its run wherever a platform owns the queue ([535dd46](https://github.com/foldrun-io/foldrun-core/commit/535dd46))
+- Hook tokens hang off the vault's key, made on first ask, never a dev constant ([429ea50](https://github.com/foldrun-io/foldrun-core/commit/429ea50))
+- Scrub the reply, the conclusion and the data the way the events already were ([cd15270](https://github.com/foldrun-io/foldrun-core/commit/cd15270))
+- csv and tsv are editable workspace files ([cbb92a0](https://github.com/foldrun-io/foldrun-core/commit/cbb92a0))
+- Tell the executor a run is a test, so the cluster can deny its pod the world ([ba7c164](https://github.com/foldrun-io/foldrun-core/commit/ba7c164))
+- Leave a trail when a run stops or fails between groups ([1b2ee30](https://github.com/foldrun-io/foldrun-core/commit/1b2ee30))
+- Tell the platform how each oauth2 refresh went ([86f439a](https://github.com/foldrun-io/foldrun-core/commit/86f439a))
+- Merge concurrent appends at write-back instead of overwriting ([f4f01f7](https://github.com/foldrun-io/foldrun-core/commit/f4f01f7))
+- The platform's tools, on every account's shelf (#14) ([961d56a](https://github.com/foldrun-io/foldrun-core/commit/961d56a))
+- build(deps-dev): bump @types/node from 22.20.1 to 26.5.0 (#4) ([4044fd3](https://github.com/foldrun-io/foldrun-core/commit/4044fd3))
+- sdk bump zod pinned (#12) ([684b59d](https://github.com/foldrun-io/foldrun-core/commit/684b59d))
+- Say what these hashes actually take (#11) ([def658f](https://github.com/foldrun-io/foldrun-core/commit/def658f))
+- Bump typescript from 5.9.3 to 7.0.2 (#3) ([5ec5986](https://github.com/foldrun-io/foldrun-core/commit/5ec5986))
+- Bump the actions group with 3 updates (#1) ([e6c1859](https://github.com/foldrun-io/foldrun-core/commit/e6c1859))
+- The README told people to use a login the CLI refuses (#10) ([e06ff4e](https://github.com/foldrun-io/foldrun-core/commit/e06ff4e))
+- Let GitHub see the licence (#8) ([8987169](https://github.com/foldrun-io/foldrun-core/commit/8987169))
+- every CodeQL finding, closed ([12fc759](https://github.com/foldrun-io/foldrun-core/commit/12fc759))
+- the record of why nothing happened, and whether a credential still works ([2c56e4d](https://github.com/foldrun-io/foldrun-core/commit/2c56e4d))
+- the four gates between a trigger and a run, and who may answer a gate ([59ccd41](https://github.com/foldrun-io/foldrun-core/commit/59ccd41))
+
+### audit
+
+- what three reviewers and a re-read found ([3840300](https://github.com/foldrun-io/foldrun-core/commit/3840300))
+
+### budget
+
+- one grammar, a period, an agent's own cap, and unset means no limit ([418462b](https://github.com/foldrun-io/foldrun-core/commit/418462b))
+
+### dependabot
+
+- weekly, grouped ([064aac3](https://github.com/foldrun-io/foldrun-core/commit/064aac3))
+
+### Dirent.parentPath only
+
+- the deprecated .path fallback fails the box's typecheck ([a2a2dda](https://github.com/foldrun-io/foldrun-core/commit/a2a2dda))
+
+### lint
+
+- an address check that cannot be made slow by a flow file ([3d54582](https://github.com/foldrun-io/foldrun-core/commit/3d54582))
+
+### platform
+
+- edition() — the one question a commercial surface asks ([9ab0e79](https://github.com/foldrun-io/foldrun-core/commit/9ab0e79))
+
+### release
+
+- only stage the lockfile when git tracks it ([6fcf3c1](https://github.com/foldrun-io/foldrun-core/commit/6fcf3c1))
+
+### Revert
+
+- the LICENSE was never the problem (#9) ([ee516f3](https://github.com/foldrun-io/foldrun-core/commit/ee516f3))
+
+### runner image
+
+- build for another platform, named for it ([6fa8a26](https://github.com/foldrun-io/foldrun-core/commit/6fa8a26))
+
+### secrets
+
+- GCM is told its tag length ([6854fba](https://github.com/foldrun-io/foldrun-core/commit/6854fba))
+
+### self-hosting
+
+- ARM has no fallback, and say so ([5bde1db](https://github.com/foldrun-io/foldrun-core/commit/5bde1db))
+- the platform, one container, one command — public ([120c970](https://github.com/foldrun-io/foldrun-core/commit/120c970))
+
+### Test mode
+
+- a run that exercises everything and changes nothing outside ([9faa9d3](https://github.com/foldrun-io/foldrun-core/commit/9faa9d3))
+
+### three silent wrongs
+
+- truncated instructions, markers matched in prose, the Test button ([8445735](https://github.com/foldrun-io/foldrun-core/commit/8445735))
+
+### trailing whitespace
+
+- trimEnd, not a regex ([3de915d](https://github.com/foldrun-io/foldrun-core/commit/3de915d))
+
+### when
+
+- and case: read the previous group's result, as documented ([bbcfb56](https://github.com/foldrun-io/foldrun-core/commit/bbcfb56))
+
 ## [0.3.0] — 2026-09-08
 
 - the in-pod budget meter priced every step at Opus rates, and cache reads as fresh input ([476688f](https://github.com/foldrun-io/foldrun-core/commit/476688f))
