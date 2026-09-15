@@ -17,6 +17,7 @@ import type { TestEffect } from "./test-mode.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 
 export interface ExecOutcome {
   status: "completed" | "failed";
@@ -74,6 +75,12 @@ export interface ExecOptions {
   /** `output: json` — the reply must carry one JSON value; extracting it is
    *  part of finishing the step, and failing to is failing the step. */
   output?: "json";
+  /** `schema:` — what that value must look like; a value that does not fit
+   *  fails the step naming the field. See json-schema.ts. */
+  schema?: Record<string, unknown> | boolean;
+  /** `max_turns:` — the most model turns before the step is stopped. The
+   *  SDK enforces it; the step reads the result's reason and says so. */
+  maxTurns?: number;
   /** false when the caller is already an isolation boundary (a run
    *  container): the SDK's bash sandbox is then redundant and would block
    *  declared network use. Default (undefined/true) keeps it on. */
@@ -220,6 +227,7 @@ export async function executeStep(
       // level we can name — it moves as models ship.
       ...(opts.effort ? { effort: opts.effort } : {}),
       systemPrompt: opts.systemPrompt,
+      ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
       // Restrict the toolset itself, not just approval: an agent that
       // declares no tools gets none, instead of seeing the full Claude
       // Code toolset and burning turns on denied calls.
@@ -351,6 +359,9 @@ export async function executeStep(
       }
     } else if (message.type === "result") {
       status = message.subtype === "success" ? "completed" : "failed";
+      if (message.subtype === "error_max_turns") {
+        emit("error", `stopped after ${opts.maxTurns ?? "its"} turns (max_turns: in the flow file) — the step did not finish`);
+      }
       costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
       if ("usage" in message && message.usage) {
         const u = message.usage as unknown as Record<string, number | undefined>;
@@ -408,6 +419,14 @@ export async function executeStep(
     if (extracted.ok) {
       data = extracted.value;
       emit("info", `output: json — ${describeJson(data)}`);
+      // The declared shape, checked here beside the extraction: a value
+      // that parses but is not what the next step was promised is the same
+      // failure as no value, and the message names the field.
+      const errors = opts.schema !== undefined && looksLikeSchema(opts.schema) ? validateSchema(data, opts.schema) : [];
+      if (errors.length) {
+        emit("error", `schema: the value does not fit — ${describeSchemaErrors(errors)}`);
+        status = "failed";
+      }
     } else {
       emit("error", `output: json — ${extracted.reason}`);
       status = "failed";

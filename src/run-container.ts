@@ -67,6 +67,9 @@ export interface ContainerStepInput {
   verify?: string;
   /** `output: json` — checked inside, where the reply is. */
   output?: "json";
+  /** `schema:` and `max_turns:`, resolved host-side — see ExecOptions. */
+  schema?: Record<string, unknown> | boolean;
+  maxTurns?: number;
   /** tools: [search] — the directories to search, as paths INSIDE the
    *  container (/workspace/…, /library/…). */
   search?: SearchRoot[];
@@ -509,6 +512,8 @@ try {
     verify: input.verify,
     verifyEnv: env,
     output: input.output,
+    schema: input.schema,
+    maxTurns: input.maxTurns,
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.
     sandboxBash: false,

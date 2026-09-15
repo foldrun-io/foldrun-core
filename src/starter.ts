@@ -355,7 +355,10 @@ Indented under a step, any of:
 | \`preview: draft/*.mdx\` | what the approval box shows — paths under \`storage/\`, globs allowed |
 | \`delegate: [[a]], [[b]]\` | hand the step to whichever fits, up to 5 |
 | \`output: json\` | the reply ends with one JSON value; the next step gets it as data, \`each: items\` fans out over it |
+| \`schema: {...}\` | with \`output: json\` — the JSON Schema the value must satisfy; inline, a YAML block under the key, or a file path |
 | \`each: items\` | run once per element of the previous step's JSON array |
+| \`parallel: 3\` | how many \`each:\` instances run at once — default all |
+| \`max_turns: 20\` | the most model turns before the step is stopped, beside \`budget:\` and \`timeout:\` |
 
 ## Writing an agent
 

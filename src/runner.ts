@@ -12,6 +12,7 @@ import {
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
@@ -60,6 +61,7 @@ import {
   type StepRecord,
   type StepAttempt,
   sumAttempts,
+  parseSchemaText,
   STORAGE_DIR,
   adoptLegacyVersionKey,
   listAgents,
@@ -130,6 +132,32 @@ export function joinEarlierGroups(groupResults: (string | null)[], gi: number, c
   if (parts.length === 0) return null;
   while (parts.length > 1 && parts.reduce((n, t) => n + t.length + 2, 0) > cap) parts.shift();
   return parts.join("\n\n");
+}
+
+/**
+ * `parallel: N` — a pool of N slots the instances of one fan-out share.
+ * Fan-out always ran every instance at once, and still does unless the
+ * step says otherwise: twenty browser steps against one site, or one
+ * vendor's rate limit, is what the cap is for. Nothing is rented while an
+ * instance waits for a slot.
+ */
+export function slotPool(size: number): { acquire: () => Promise<void>; release: () => void } {
+  let free = Math.max(1, size);
+  const waiting: (() => void)[] = [];
+  return {
+    acquire: () =>
+      new Promise<void>((resolve) => {
+        if (free > 0) {
+          free -= 1;
+          resolve();
+        } else waiting.push(resolve);
+      }),
+    release: () => {
+      const next = waiting.shift();
+      if (next) next();
+      else free += 1;
+    },
+  };
 }
 
 export interface DiscoveredSkill {
@@ -1356,8 +1384,15 @@ async function runStep(
     // the failure of a step that returned no JSON are testable at no cost.
     if (step.output === "json") {
       const extracted = extractJson(step.result);
-      if (extracted.ok) step.data = extracted.value;
-      else {
+      if (extracted.ok) {
+        step.data = extracted.value;
+        const schema = step.schema ?? (step.schemaPath ? readSchemaFile(path.resolve(agentDir, "..", ".."), step.schemaPath) : null);
+        const errors = schema && looksLikeSchema(schema) ? validateSchema(step.data, schema) : [];
+        if (errors.length) {
+          push("error", `schema: the value does not fit — ${describeSchemaErrors(errors)}`);
+          step.status = "failed";
+        }
+      } else {
         push("error", `output: json — ${extracted.reason}`);
         step.status = "failed";
       }
@@ -1563,11 +1598,18 @@ async function runStep(
     if (step.output === "json") {
       // The contract the runner parses back out — stated in the prompt so
       // the instruction and the parser agree by construction, like delegate:.
+      // The schema, when there is one, is quoted whole: the model that has
+      // to satisfy it should not have to guess it from the field names.
+      const schema = step.schema ?? (step.schemaPath ? readSchemaFile(path.resolve(agentDir, "..", ".."), step.schemaPath) : null);
       prompt +=
         `\n\n<output>\nThis step returns data. End your reply with exactly one JSON value inside a ` +
         "```json fenced block — the value the next step will compute on. Prose before it is " +
         `welcome (lead with a one-line headline); nothing may follow the block. If the instruction ` +
-        `names fields, use exactly those names.\n</output>`;
+        `names fields, use exactly those names.` +
+        (schema && looksLikeSchema(schema)
+          ? ` The value must satisfy this JSON Schema, and the step fails if it does not:\n${JSON.stringify(schema, null, 2).slice(0, 20_000)}`
+          : "") +
+        `\n</output>`;
     }
     if (step.waitFor === "event" && step.eventPayload !== undefined) {
       // Not resolved for links, like the previous step's results: it is
@@ -1633,6 +1675,16 @@ async function runStep(
     // fallback), else the platform's, and only for a step riding the
     // platform credential.
     const secondSupply = fallbackEnv ?? (Object.keys(providerEnv).length === 0 ? platformFallbackEnv() : null);
+
+    // `schema:` — inline on the step, or a file under the workspace read
+    // now, host-side, so both executors are handed the same document. A
+    // file that cannot be read is a failed step before any model runs:
+    // the contract the author wrote down cannot be checked.
+    const resolvedSchema: Record<string, unknown> | boolean | null = step.schema ?? (step.schemaPath ? readSchemaFile(workspaceRoot, step.schemaPath) : null);
+    if (step.schemaPath && resolvedSchema === null) {
+      throw new Error(`schema: ${step.schemaPath} — not a readable JSON or YAML schema under the workspace`);
+    }
+    if (step.maxTurns) push("info", `max_turns: ${step.maxTurns}`);
 
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
     if (isolatedRun()) {
@@ -1781,6 +1833,8 @@ async function runStep(
           price: tokenPrice,
           verify: step.verify,
           output: step.output,
+          schema: resolvedSchema ?? undefined,
+          maxTurns: step.maxTurns,
           translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
           // The container sees the workspace at /workspace and the library
           // at /library; the roots are named host-side and moved here.
@@ -1992,6 +2046,8 @@ async function runStep(
         price: tokenPrice,
         verify: step.verify,
         output: step.output,
+        schema: resolvedSchema ?? undefined,
+        maxTurns: step.maxTurns,
         stopRequested,
         // What the scripts saw, the verify sees: a flow can then check that
         // the proof a step left names THIS run, not one that came before —
@@ -2346,6 +2402,26 @@ function csvItems(workspaceDir: string, step: StepRecord, take: number): string[
   return data.slice(0, take).map((r) => `${header}\n${r}`);
 }
 
+/**
+ * `schema: <path>` — the file, read and parsed, or null. Agent-relative like
+ * every other path in a flow (`../../schemas/lead.json`), confined to the
+ * workspace: a schema is the author's document, never something a step
+ * can point outside.
+ */
+export function readSchemaFile(workspaceRoot: string, rel: string): Record<string, unknown> | boolean | null {
+  const root = path.resolve(workspaceRoot);
+  // Written agent-relative (`../../schemas/x.json`) or workspace-relative
+  // (`schemas/x.json`); both land on the same file.
+  const candidates = [path.resolve(root, rel.replace(/^(\.\.\/){2}/, "")), path.resolve(root, "agents", "x", rel)];
+  for (const abs of candidates) {
+    if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
+    const parsed = parseSchemaText(fs.readFileSync(abs, "utf8"));
+    return "problem" in parsed ? null : parsed.schema;
+  }
+  return null;
+}
+
 export function createFlowRun(
   tenant: string,
   workspace: string,
@@ -2392,6 +2468,10 @@ export function createFlowRun(
       preview: s.preview,
       delegate: s.delegate,
       output: s.output,
+      schema: s.schema,
+      schemaPath: s.schemaPath,
+      parallel: s.parallel,
+      maxTurns: s.maxTurns,
       attempts: 0,
       status: "pending",
       events: [],
@@ -2897,6 +2977,7 @@ function driveRunInner(
             type: "info",
             text:
               `fan-out: ${used.length} instance${used.length === 1 ? "" : "s"}` +
+              (step.parallel && step.parallel < used.length ? `, ${step.parallel} at a time (parallel:)` : "") +
               (dropped ? ` (more items existed — capped at ${cap})` : ""),
           });
           const at = run.steps.indexOf(step);
@@ -3172,9 +3253,30 @@ function driveRunInner(
             run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
             step.agent,
           );
+        // parallel: — the instances of one fan-out template share a pool.
+        // Keyed by what the instances share (agent + instruction), since
+        // the template itself is behind them in the record as "expanded".
+        const pools = new Map<string, ReturnType<typeof slotPool>>();
+        const poolFor = (step: StepRecord) => {
+          if (!step.parallel || !step.item) return null;
+          const key = `${step.agent}\u0000${step.instruction}`;
+          let pool = pools.get(key);
+          if (!pool) pools.set(key, (pool = slotPool(step.parallel)));
+          return pool;
+        };
         await Promise.all(
           launching
             .map(async (step) => {
+              const pool = poolFor(step);
+              if (pool) await pool.acquire();
+              try {
+                await launchStep(step);
+              } finally {
+                pool?.release();
+              }
+            }),
+        );
+        async function launchStep(step: StepRecord) {
               const attempts = (step.retry ?? 0) + 1;
               // A step re-attaching to its sandbox is still on the attempt
               // that started it; a step re-run after a backoff picks up the
@@ -3281,8 +3383,7 @@ function driveRunInner(
                   break;
                 }
               }
-            }),
-        );
+        }
 
         // on-fail: another agent takes the step over. Sequential and rare:
         // the rescue is a second full attempt at the step's job with the

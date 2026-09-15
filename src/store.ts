@@ -1081,6 +1081,20 @@ export interface FlowStep {
    *  cannot, and hands the value to the next group losslessly — the narrow
    *  move the grammar ADR allowed instead of variables. */
   output?: "json";
+  /** `schema:` — the JSON Schema an `output: json` value must satisfy,
+   *  written inline (one-line JSON, or a YAML block under the key) and
+   *  checked where the reply is; a value that does not fit fails the step
+   *  with the field named. */
+  schema?: Record<string, unknown> | boolean;
+  /** `schema: <path>` — the same, in a file under the workspace, read when
+   *  the step runs. */
+  schemaPath?: string;
+  /** `parallel:` — how many of an `each:` step's instances run at once.
+   *  Unset is all of them, which is what fan-out always did. */
+  parallel?: number;
+  /** `max_turns:` — the most model turns this step may take before it is
+   *  stopped, beside `budget:` (money) and `timeout:` (time). */
+  maxTurns?: number;
   /** 1-indexed line in the flow file. Diagnostics without a line make you
    *  search; every real linter emits file:line. */
   line?: number;
@@ -1302,7 +1316,7 @@ const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–
 // One quantifier after the colon; the value is trimmed by unquote(). A key
 // with nothing after it is an option with an empty value, which is what it
 // says, rather than a line that vanished.
-const OPTION_RE = /^\s+([a-z-]+):(.*)$/;
+const OPTION_RE = /^(\s+)([a-z_-]+):(.*)$/;
 
 /** The option keys a step actually has. An indented `word: rest` that is
  *  NOT one of these is a line of the instruction — "Warning: do not
@@ -1310,9 +1324,16 @@ const OPTION_RE = /^\s+([a-z-]+):(.*)$/;
  *  swallowed as an unknown option, silently, along with any typo of a real
  *  key. The consistency suite reads this list against the docs. */
 const STEP_OPTION_KEYS = new Set([
-  "approve", "ask", "case", "delegate", "each", "effort", "else", "loop", "max", "model",
-  "on-fail", "onfail", "output", "preview", "retry", "timeout", "until", "verify", "wait", "when",
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "loop", "max", "max_turns", "model",
+  "on-fail", "onfail", "output", "parallel", "preview", "retry", "schema", "timeout", "until", "verify", "wait", "when",
 ]);
+
+/** The most fan-out instances `parallel:` may run at once — the fan-out's
+ *  own hard cap, since more slots than items is no cap. */
+export const PARALLEL_CAP = 20;
+/** The most turns `max_turns:` may allow. A turn is one model reply, tool
+ *  calls included; a step that needs more than this is not one step. */
+export const MAX_TURNS_CAP = 500;
 
 /** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
  *  days: a wait is a pause in a flow, not a second scheduler. */
@@ -1434,8 +1455,38 @@ export function parseFlow(file: string, raw: string): FlowInfo {
   // pointing at the real file rather than the body.
   const offset = raw.slice(0, raw.length - content.length).split("\n").length - 1;
   let lineNo = 0;
+  // A `schema:` with nothing after the colon takes the lines indented
+  // deeper than it as a YAML block — the one place the grammar allows a
+  // shape to be written out rather than named, because a schema is a
+  // document and a one-line one is unreadable past three fields.
+  let block: { step: FlowStep; indent: number; lines: string[] } | null = null;
+  const endBlock = () => {
+    if (!block) return;
+    const { step, lines } = block;
+    block = null;
+    // Dedent by the block's own margin, not trim: the first line's indent
+    // is every line's indent, and YAML reads a mapping by its columns.
+    const margin = Math.min(...lines.filter((l) => l.trim()).map((l) => l.match(/^\s*/)![0].length));
+    const text = lines.map((l) => (l.trim() ? l.slice(margin) : "")).join("\n").trim();
+    if (!text) return void (step.problems ??= []).push("schema: — the block under it is empty");
+    const parsed = parseSchemaText(text);
+    if ("problem" in parsed) (step.problems ??= []).push(`schema: ${parsed.problem}`);
+    else step.schema = parsed.schema;
+  };
   for (const line of content.split("\n")) {
     lineNo++;
+    if (block) {
+      const indent = line.match(/^(\s*)\S/)?.[1].length;
+      if (indent === undefined) {
+        block.lines.push("");
+        continue;
+      }
+      if (indent > block.indent) {
+        block.lines.push(line.slice(block.indent + 1));
+        continue;
+      }
+      endBlock();
+    }
     const m = line.match(STEP_RE);
     if (m) {
       steps.push({
@@ -1464,7 +1515,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     // option. Unindented prose between steps is still prose and still
     // ignored, so a flow file's commentary is undisturbed.
     const opt = line.match(OPTION_RE);
-    if (steps.length && /^\s+\S/.test(line) && !(opt && STEP_OPTION_KEYS.has(opt[1]))) {
+    if (steps.length && /^\s+\S/.test(line) && !(opt && STEP_OPTION_KEYS.has(opt[2]))) {
       const step = steps[steps.length - 1];
       step.instruction = `${step.instruction} ${line.trim()}`.trim();
       continue;
@@ -1472,7 +1523,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     // Indented options belong to the step above them.
     if (opt && steps.length) {
       const step = steps[steps.length - 1];
-      const [, key, rawValue] = opt;
+      const [, indentText, key, rawValue] = opt;
       const value = unquote(rawValue);
       // A value the key cannot read is recorded, never guessed at. Every
       // one of these used to be coerced — Number("abc") || 0, clamped —
@@ -1535,8 +1586,29 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         if (n === undefined) problem("a whole number of items, 1 to 20");
         step.max = n ?? (Math.min(20, Math.max(1, Math.floor(Number(value)) || 0)) || undefined);
       }
+      else if (key === "parallel") {
+        const n = parseCount(value, 1, PARALLEL_CAP);
+        if (n === undefined) problem(`a whole number of instances to run at once, 1 to ${PARALLEL_CAP}`);
+        else step.parallel = n;
+      }
+      else if (key === "max_turns") {
+        const n = parseCount(value, 1, MAX_TURNS_CAP);
+        if (n === undefined) problem(`a whole number of turns, 1 to ${MAX_TURNS_CAP}`);
+        else step.maxTurns = n;
+      }
+      else if (key === "schema") {
+        if (!value) block = { step, indent: indentText.length, lines: [] };
+        else if (/^[{[]/.test(value)) {
+          const parsed = parseSchemaText(value);
+          if ("problem" in parsed) problem(parsed.problem);
+          else step.schema = parsed.schema;
+        }
+        else if (!/\s/.test(value) && (/\.(json|ya?ml)$/i.test(value) || value.includes("/"))) step.schemaPath = value;
+        else problem("a JSON object, a path under the workspace (schemas/lead.json), or a YAML block on the lines below");
+      }
     }
   }
+  endBlock();
   steps.sort((a, b) => a.group - b.group);
   return {
     name: data.name ?? file.replace(/\.md$/, ""),
@@ -1581,6 +1653,23 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     approveWithin: durationOf(data.approve_within),
     steps,
   };
+}
+
+/** A schema written out: JSON, or YAML (parsed as frontmatter is, by the
+ *  same engine). The result must be an object — a schema is a document,
+ *  and `schema: 3` or `schema: [a, b]` describes nothing. */
+export function parseSchemaText(text: string): { schema: Record<string, unknown> | boolean } | { problem: string } {
+  let value: unknown;
+  try {
+    value = /^\s*[{[]/.test(text) ? JSON.parse(text) : matter(`---\n${text}\n---\n`).data;
+  } catch (err) {
+    return { problem: `cannot read the schema — ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` };
+  }
+  if (typeof value === "boolean") return { schema: value };
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length === 0) {
+    return { problem: "a schema is a JSON object (type, properties, required, …)" };
+  }
+  return { schema: value as Record<string, unknown> };
 }
 
 function idempotencyName(raw: string): string | null {
@@ -2632,6 +2721,10 @@ export interface StepRecord {
   max?: number;
   /** Carried from the flow — see FlowStep. */
   output?: "json";
+  schema?: Record<string, unknown> | boolean;
+  schemaPath?: string;
+  parallel?: number;
+  maxTurns?: number;
   /** The parsed JSON an `output: json` step returned. Kept beside the prose
    *  result rather than instead of it: the reply is still what a person
    *  reads on the run page, and the data is what the next step computes on. */

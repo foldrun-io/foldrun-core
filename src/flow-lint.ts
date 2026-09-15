@@ -233,6 +233,24 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       }
     }
 
+    // Two options that read another option to mean anything.
+    if (step.parallel && !step.each) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        message: `"${step.subflow ?? step.agent}" has parallel: but no each:`,
+        detail: "parallel: caps how many instances of a fan-out run at once. Without each: there is one instance, and the line does nothing.",
+      });
+    }
+    if ((step.schema !== undefined || step.schemaPath) && step.output !== "json") {
+      warnings.push({
+        step: i,
+        line: step.line,
+        message: `"${step.subflow ?? step.agent}" has schema: but no output: json`,
+        detail: "schema: describes the JSON value an output: json step returns. Without output: json nothing is parsed, so nothing is checked. Add `output: json`.",
+      });
+    }
+
     // A step's OTHER agent references — the ones no parser validates,
     // because they are options rather than the step's target. Both fail
     // silently and at the worst possible moment: a misspelled `delegate:`
