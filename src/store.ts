@@ -1926,7 +1926,10 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
 
 // Editable paths: project.md, .md files under agents/ or flows/, and an
 // agent's own scripts (text source files it runs with bash).
-const SCRIPT_EXT = /\.(py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml|env|md)$/i;
+// csv/tsv: a desk's registers and ledgers (who was emailed, what was
+// posted) are tables, and refusing them meant a register could be neither
+// seeded nor read through the door — only rewritten by a run (2026-09-15).
+const SCRIPT_EXT = /\.(py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml|env|md|[ct]sv)$/i;
 
 /**
  * May this path be edited — and therefore, must it be listed?
