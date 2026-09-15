@@ -52,6 +52,10 @@ export interface PlatformHooks {
      *  webhook and a chained flow leave it unset, which is what makes
      *  "nobody approves their own run" a rule the record can enforce. */
     startedBy?: string | null,
+    /** `test: true` marks the run a test run (see test-mode.ts). Unset
+     *  lets the platform decide — a preview workspace's runs are tests
+     *  unless the flow says `live: true`. */
+    opts?: { test?: boolean },
   ): Promise<RunRecord>;
   /** A parked run was approved and has no driver; line it up. Default: nothing —
    *  locally the starter that parked it is still polling the record. */
@@ -142,10 +146,10 @@ export interface PlatformHooks {
 
 const local: PlatformHooks = {
   edition: () => "self-hosted",
-  async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = [], startedBy = null) {
+  async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = [], startedBy = null, opts = {}) {
     // Imported here, not at the top: runner.ts imports this file.
     const { startFlowRun } = await import("./runner.ts");
-    return startFlowRun(tenant, workspace, steps, flowName, modelOverride ?? null, tags, null, startedBy);
+    return startFlowRun(tenant, workspace, steps, flowName, modelOverride ?? null, tags, null, startedBy, opts);
   },
   async enqueueResume() {},
   admitTrigger: async () => ({ admit: true }),

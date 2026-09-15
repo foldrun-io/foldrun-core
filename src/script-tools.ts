@@ -55,6 +55,14 @@ export interface ScriptSpec {
    *  default, `materialised`, is a program that reads values from its
    *  environment and needs them real — a browser seeding cookies. */
   secrets?: "proxied" | "materialised";
+  /** `outward: true` — this program makes something happen outside (sends,
+   *  posts, orders). On a test run a step that grants it is handed no real
+   *  secret at all, whatever their names. */
+  outward?: boolean;
+  /** `test_mode: allow` — a reader that happens to use a send-capable
+   *  secret's name (a GBP reader on a GBP token): on a test run the step
+   *  still gets the real values. An `outward` tool in the same step wins. */
+  testMode?: "allow";
 }
 
 export function parseScripts(raw: unknown): ScriptSpec[] {
@@ -82,6 +90,8 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
       secrets: e.secrets === "proxied" ? "proxied" : undefined,
+      outward: e.outward === true ? true : undefined,
+      testMode: e.test_mode === "allow" ? "allow" : undefined,
       timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
     });
   }

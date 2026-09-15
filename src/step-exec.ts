@@ -13,6 +13,7 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort } from "./store.ts";
+import type { TestEffect } from "./test-mode.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 
@@ -80,7 +81,7 @@ export interface ExecOptions {
 }
 
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
-export type EventExtra = { call?: string; ms?: number; err?: boolean };
+export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect };
 
 /** Conservative per-token rates for a model nothing else can price — an
  *  unknown id on a gateway with no catalogue. Opus-class, so a ceiling

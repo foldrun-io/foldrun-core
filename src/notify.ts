@@ -380,6 +380,11 @@ export async function sendRunNotification(
   // on 2026-09-06 the reader's inbox rule had sent the lot to the bin, the
   // real reports with them. Failures and gates still send: a person asked.
   if (run.status === "completed" && isQuietFlow(run.flow)) return false;
+  // A test run sent nothing outward and this must not be the exception: it
+  // reports only a failure, which is the one thing the person testing it
+  // needs told about without watching. Its gate mail would ask a real
+  // decision about a pretend send.
+  if (run.test && run.status !== "failed") return false;
 
   const failed = run.steps.filter((s) => s.status === "failed").map((s) => s.agent);
   const waitingSteps = run.steps.filter((s) => s.status === "awaiting-approval");

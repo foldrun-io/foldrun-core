@@ -14,6 +14,7 @@ import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } fro
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
+import { TEST_WRITES_DIR, restoreDivertedDirs, snapshotDivertedDirs, testHeadline, testModeEnv, withholdSecrets } from "./test-mode.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
  *  one the platform registered (a pod)? */
@@ -1223,6 +1224,9 @@ async function runStep(
   stepBudgetUsd: number | null = null,
   /** Which line set that ceiling, for the error that names it. */
   stepBudgetNote?: string,
+  /** The run is a test run — see test-mode.ts. Read off the run record by
+   *  the caller, never from anything the sandbox could have written. */
+  testRun = false,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1470,6 +1474,13 @@ async function runStep(
     // The confinement boundary: agents in a workspace are one team, but the
     // workspace is where isolation is enforced.
     const workspaceRoot = path.resolve(agentDir, "..", "..");
+    // Where a test run's state/ and storage/ writes go, and the line each
+    // one leaves: under the run, beside its archived outputs.
+    const divertFor = (id: string) => ({
+      to: path.join(workspaceRoot, "runs", id, TEST_WRITES_DIR),
+      note: (rel: string, summary: string) =>
+        push("info", `test: ${summary}`, { effect: { kind: "diverted" as const, path: rel, summary } }),
+    });
 
     let prompt = step.instruction
       ? resolveDocLinks(step.instruction, workspaceRoot)
@@ -1597,7 +1608,7 @@ async function runStep(
           }
         }
       }
-      const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant });
+      const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant, test: testRun });
       // Which secrets must still be real inside the sandbox: a script tool
       // reads them from its environment, and unless it says `secrets:
       // proxied` it needs the value, not the name. bash is a script by
@@ -1620,15 +1631,36 @@ async function runStep(
       }
       // Sandbox env for the declared secrets: the value, or its own name as
       // a placeholder that the proxy fills on the way out.
-      const sandboxSecrets: Record<string, string> = materialise
-        ? liveSecrets
-        : Object.fromEntries(declared.map((name) => [name, `\${${name}}`]));
+      const placeholders = Object.fromEntries(declared.map((name) => [name, `\${${name}}`]));
+      let sandboxSecrets: Record<string, string> = materialise ? liveSecrets : placeholders;
+      // A test run hands the sandbox no send-capable value. The env var is
+      // still there, reading TEST_MODE_WITHHELD, so a script that never
+      // checked FOLDRUN_TEST_MODE fails at the provider's door with an auth
+      // error — and sends nothing. The script tools say whether the step
+      // has a declared sender (everything withheld) or a declared reader
+      // (nothing withheld); see test-mode.ts for the order.
+      if (testRun && materialise) {
+        const held = withholdSecrets(liveSecrets, {
+          outward: scriptSpecs.some((sc) => sc.outward),
+          allow: scriptSpecs.some((sc) => sc.testMode === "allow"),
+        });
+        sandboxSecrets = held.env;
+        for (const name of held.withheld) {
+          push("info", `test: ${name} withheld from the sandbox — TEST_MODE_WITHHELD`, { effect: { kind: "withheld", summary: `${name} withheld from the sandbox` } });
+        }
+      }
+      // On a test run the http tools always go through the proxy as
+      // placeholders, even when a script made the step materialise: the
+      // proxy is where the outward-write policy lives, and a header
+      // carrying TEST_MODE_WITHHELD would only fail where it should have
+      // been sunk or refused.
+      const apiValues = testRun && lease ? placeholders : sandboxSecrets;
       const substitutedApis = apiSpecs.map((api) => ({
         ...api,
         headers: Object.fromEntries(
           Object.entries(api.headers).map(([k, v]) => [
             k,
-            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => sandboxSecrets[name] ?? whole),
+            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => apiValues[name] ?? whole),
           ]),
         ),
       }));
@@ -1713,6 +1745,7 @@ async function runStep(
             FOLDRUN_RUN_ID: runId,
             FOLDRUN_AGENT: step.agent,
             FOLDRUN_WORKSPACE: path.basename(workspaceRoot),
+            ...(testRun ? testModeEnv() : {}),
             ...sandboxSecrets,
           }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
@@ -1720,6 +1753,8 @@ async function runStep(
         // Stamps the sandbox, so stopping this run can destroy it.
         runId,
         size,
+        // A test run's state/ and storage/ changes come out under the run.
+        divert: testRun && runId ? divertFor(runId) : undefined,
         // Resume: a sandbox a previous driver left running, recorded on the
         // step. Consumed once — a fresh attempt after this one (a retry, a
         // fallback) starts its own sandbox.
@@ -1788,10 +1823,15 @@ async function runStep(
         outcome = withEarlierTiming(outcome, first);
       }
       if (lease) {
-        for (const line of await lease.drainLog()) push("info", line);
+        for (const line of await lease.drainLog()) {
+          if (typeof line === "string") push("info", line);
+          else push("info", line.text, { effect: line.effect });
+        }
         await lease.release();
       }
-      publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      // Nothing a test run left in storage/public/ reached storage/, so
+      // there is nothing to publish — and a share link is an outward act.
+      if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
       step.result = outcome.result;
       step.conclusion = outcome.conclusion;
@@ -1832,14 +1872,27 @@ async function runStep(
       })();
       step.reserved = { cpus: Number(lim.cpus) || 2, memGiB: gib };
     } else {
+      // Same withholding as the sandbox path — the in-process step is what
+      // `foldrun run --test` drives on a laptop, where there is no proxy
+      // and this is the only guard there is.
+      const held = testRun
+        ? withholdSecrets(liveSecrets, {
+            outward: scriptSpecs.some((sc) => sc.outward),
+            allow: scriptSpecs.some((sc) => sc.testMode === "allow"),
+          })
+        : { env: liveSecrets, withheld: [] as string[] };
+      for (const name of held.withheld) {
+        push("info", `test: ${name} withheld from scripts — TEST_MODE_WITHHELD`, { effect: { kind: "withheld", summary: `${name} withheld from scripts` } });
+      }
+      const stepSecrets = held.env;
       const consultTools = buildConsultTools(
         consults,
-        { ...process.env, ...liveSecrets, ...providerEnv },
+        { ...process.env, ...stepSecrets, ...providerEnv },
         (type, text) => push(type, text),
       );
       // @file secrets become 0600 paths here (host run), cleaned up in the
       // finally — once, however many attempts follow.
-      const mat = materializeFileSecrets(agentDir, liveSecrets);
+      const mat = materializeFileSecrets(agentDir, stepSecrets);
       fileDir = mat.dir;
       const attemptInProcess = (modelEnv: Record<string, string | undefined>) => executeStep({
         agentDir,
@@ -1862,7 +1915,7 @@ async function runStep(
         },
         // Declared secrets reach the agent's scripts as env vars; the model
         // only ever sees the variable names, not the values.
-        env: { ...process.env, ...clockEnv, ...mat.env, ...modelEnv },
+        env: { ...process.env, ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...modelEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
           budgetNote: stepBudgetNote,
@@ -1878,20 +1931,31 @@ async function runStep(
           ...(runId ? { FOLDRUN_RUN_ID: runId } : {}),
           FOLDRUN_AGENT: step.agent,
           FOLDRUN_WORKSPACE: path.basename(path.resolve(agentDir, "..", "..")),
-          ...liveSecrets,
+          ...(testRun ? testModeEnv() : {}),
+          ...stepSecrets,
         },
         emit: pushWatching,
       });
       // With a translator the step's endpoint is the translator: started
       // here, pointed at by the SDK's env, closed when the attempt ends.
+      // A test run brackets each attempt with a snapshot of state/ and
+      // storage/: the step writes them for real, because there is no
+      // sandbox to write instead, and afterwards what changed is moved
+      // under the run and the originals come back.
       const attemptThrough = async (modelEnv: Record<string, string | undefined>, spec: TranslatorSpec | null) => {
-        if (!spec) return attemptInProcess(modelEnv);
-        const t = await startTranslator(spec);
+        const before = testRun ? snapshotDivertedDirs(workspaceRoot) : null;
+        const t = spec ? await startTranslator(spec) : null;
         try {
-          return await attemptInProcess({ ...modelEnv, ...t.env });
+          return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
         } finally {
-          for (const line of t.drainLog()) push("info", line.startsWith("translator") ? line : `translator: ${line}`);
-          await t.close();
+          if (t) {
+            for (const line of t.drainLog()) push("info", line.startsWith("translator") ? line : `translator: ${line}`);
+            await t.close();
+          }
+          if (before && runId) {
+            const d = divertFor(runId);
+            restoreDivertedDirs(workspaceRoot, before, d.to, d.note);
+          }
         }
       };
       let outcome = await attemptThrough(providerEnv, translator);
@@ -1913,7 +1977,7 @@ async function runStep(
         );
         outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
-      publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
       step.status = outcome.status;
       step.result = outcome.result;
       step.conclusion = outcome.conclusion;
@@ -2219,6 +2283,7 @@ export function createFlowRun(
   status: "queued" | "running",
   tags: string[] = [],
   startedBy: string | null = null,
+  opts: { test?: boolean } = {},
 ): RunRecord {
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -2226,6 +2291,7 @@ export function createFlowRun(
     tags,
     status,
     ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
+    ...(opts.test ? { test: true } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -2292,8 +2358,9 @@ export function startFlowRun(
   tags: string[] = [],
   effortOverride?: string | null,
   startedBy: string | null = null,
+  opts: { test?: boolean } = {},
 ): RunRecord {
-  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags, startedBy);
+  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags, startedBy, opts);
   void driveRun(tenant, workspace, run, modelOverride, tags, { effortOverride });
   return run;
 }
@@ -3053,6 +3120,7 @@ function driveRunInner(
                   ctxData,
                   ceiling.ceilingUsd,
                   ceiling.note,
+                  run.test === true,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -3154,7 +3222,7 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData);
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true);
           // runStep mutates rescue.status; widen past TS's "running" narrowing.
           const rescueOutcome: string = rescue.status;
           if (rescueOutcome === "completed") {
@@ -3312,6 +3380,9 @@ function driveRunInner(
         // learn, and the runs list and the notification stop having to say
         // only "completed".
         run.summary = runSummary(run);
+        // A test run's headline says so wherever the headline goes — the
+        // runs list, the history tool, a later run's recall.
+        if (run.test && run.summary) run.summary = testHeadline(run.summary);
         // Archive before the next run resets outputs/ — a failed run's
         // artifacts are usually the most interesting ones, so this runs on
         // failure too.

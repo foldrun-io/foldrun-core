@@ -80,6 +80,10 @@ export interface EvalInfo {
    *  `manual`: only when a person presses Run or the CLI asks — for a flow
    *  eval that costs a whole run and touches real systems every time. */
   trigger: "deploy" | "manual";
+  /** An eval's runs are test runs — nothing outward, state untouched —
+   *  unless the file says `live: true`. A flow eval that must really send
+   *  to prove itself opts in; nothing opts in by accident. */
+  live: boolean;
   cases: EvalCase[];
 }
 
@@ -187,6 +191,7 @@ export function parseEval(file: string, raw: string): EvalInfo {
     model: resolveModel(data.model ?? "fast"),
     effort: resolveEffort(data.effort ?? "low"),
     trigger: data.trigger === "manual" ? "manual" : "deploy",
+    live: data.live === true,
     cases,
   };
 }
@@ -408,8 +413,9 @@ async function beginEvalRun(
   flowName: string,
   model?: string | null,
   effort?: string | null,
+  test = true,
 ) {
-  if (!runsViaQueue()) return startFlowRun(tenant, workspace, steps, flowName, model, [], effort);
+  if (!runsViaQueue()) return startFlowRun(tenant, workspace, steps, flowName, model, [], effort, null, { test });
   // The job carries a model override but no effort one, and driveRun cannot
   // re-read a flow called `eval:<name>`. Put the flow's defaults onto the
   // steps that have none — which is what nearest-wins resolves to anyway.
@@ -418,7 +424,7 @@ async function beginEvalRun(
     ...(s.model || !model ? {} : { model }),
     ...(s.effort || !effort ? {} : { effort }),
   }));
-  return platform.enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, []);
+  return platform.enqueueFlowRun(tenant, workspace, withDefaults, flowName, model ?? null, [], null, { test });
 }
 
 // Waits for as long as the run runs. There was a cap here (5 minutes, then
@@ -559,7 +565,9 @@ export async function runEval(
             ? { ...s, instruction: `${s.instruction}\n\n<run_task>\n${testCase.task}\n</run_task>` }
             : s,
         );
-        run = await beginEvalRun(tenant, workspace, steps, `eval:${info.name}`, flow.model, flow.effort);
+        // Test unless the eval OR the flow says live: an eval that runs a
+        // flow written `live: true` was written by someone who knew.
+        run = await beginEvalRun(tenant, workspace, steps, `eval:${info.name}`, flow.model, flow.effort, !(info.live || flow.live));
       } else {
         if (!target) throw new Error("this eval names neither an agent nor a flow");
         run = await beginEvalRun(
@@ -567,6 +575,9 @@ export async function runEval(
           workspace,
           [{ agent: target, instruction: testCase.task, group: 1, optional: false }],
           `eval:${info.name}`,
+          undefined,
+          undefined,
+          !info.live,
         );
       }
       runId = run.id;

@@ -25,6 +25,7 @@ import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import { platform } from "./platform.ts";
+import type { TestEffect } from "./test-mode.ts";
 import matter from "gray-matter";
 
 /**
@@ -1191,6 +1192,11 @@ export interface FlowInfo {
    *  Null: it waits indefinitely, which stays the default. */
   approveWithin: number | null;
 
+  /** `live: true` — this flow's runs are real even where the platform would
+   *  default them to test: in a preview workspace, and as an eval's subject.
+   *  Only ever an opt-out of the safe default, never the other way round. */
+  live: boolean;
+
   steps: FlowStep[];
 }
 
@@ -1476,6 +1482,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     model: data.model ?? null,
     effort: data.effort ?? null,
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
+    live: data.live === true,
     priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
     budget: runBudget(data.budget),
     budgetProblem: budgetProblem(data.budget, ["run"]),
@@ -2460,6 +2467,11 @@ export interface RunEvent {
   call?: string;
   ms?: number;
   err?: boolean;
+  /** Set on a test run's event that reports what the platform did instead
+   *  of the real thing — a refused send, a redirected email, a diverted
+   *  state write, a withheld secret. The run page lists these; the text is
+   *  still the trace's line. See test-mode.ts. */
+  effect?: TestEffect;
 }
 
 export interface StepRecord {
@@ -2656,6 +2668,13 @@ export interface RunRecord {
    *  the flow's `approve_within:`. A gate nobody answers by then is rejected
    *  and the run fails, rather than holding a concurrency slot forever. */
   approveBy?: string | null;
+  /** A test run: every step runs for real, against the real files and the
+   *  real read APIs, but nothing outward happens — sends are refused or
+   *  sunk at the egress proxy, send-capable secrets never enter the
+   *  sandbox, and state/ and storage/ writes land under this run's own
+   *  directory. On the record, not in an env var, so a script cannot turn
+   *  it off; carried onto every rerun of this run. See test-mode.ts. */
+  test?: boolean;
   steps: StepRecord[];
 }
 

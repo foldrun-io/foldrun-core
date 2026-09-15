@@ -76,9 +76,11 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
         continue;
       }
       try {
+        // A test run's chain stays a test: the flow after it reads a result
+        // nothing real produced, and must not act on it for real either.
         const run = await platform.enqueueFlowRun(tenant, workspace, withTask(flow.steps, "previous_run", body), flow.name, flow.model, [
           `after:${finished.flow}`,
-        ]);
+        ], null, finished.test ? { test: true } : {});
         started.push(run.id);
         console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
       } catch (err) {

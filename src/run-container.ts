@@ -25,6 +25,7 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec, type Effort } from "./store.ts";
+import { divertedSummary, isDivertedPath } from "./test-mode.ts";
 import type { EventExtra } from "./step-exec.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
@@ -254,6 +255,7 @@ export function applyContainerChanges(
   containerWs: string,
   baseline?: string | Record<string, string>,
   note?: (message: string) => void,
+  divert?: WriteDivert,
 ): string[] {
   const applied: string[] = [];
   const walk = (dir: string) => {
@@ -313,6 +315,18 @@ export function applyContainerChanges(
           );
           continue;
         }
+      }
+      // A test run's state/ and storage/ writes land under the run, not on
+      // the workspace: the step ran against the real files and its output
+      // is kept where a person can read it, but the next real run starts
+      // from state a test never touched. Decided after the merge so the
+      // diverted copy is what WOULD have been written, conflicts included.
+      if (divert && isDivertedPath(rel)) {
+        const aside = path.join(divert.to, rel);
+        fs.mkdirSync(path.dirname(aside), { recursive: true });
+        fs.writeFileSync(aside, next);
+        divert.note(rel.replaceAll("\\", "/"), divertedSummary(rel.replaceAll("\\", "/"), hostNow, next));
+        continue;
       }
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, next);
@@ -744,6 +758,17 @@ export interface RunInContainerArgs {
    *  (consumed 0), and before each output line it applies. The runner
    *  records these on the step, so the next driver knows where to attach. */
   checkpoint?: (ref: string, consumed: number) => void;
+  /** A test run: where state/ and storage/ changes go instead of the
+   *  workspace, and who to tell about each. See test-mode.ts. */
+  divert?: WriteDivert;
+}
+
+/** What a test run does with a write it must not apply. */
+export interface WriteDivert {
+  /** The directory the diverted files are written under, by their
+   *  workspace-relative path: runs/<id>/test-writes/. */
+  to: string;
+  note: (rel: string, summary: string) => void;
 }
 
 /** The limits a size class reserves. Large is the install's configured
@@ -982,7 +1007,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(wsOut);
     const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
     if (back.status === 0) {
-      applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m));
+      applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m), args.divert);
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }

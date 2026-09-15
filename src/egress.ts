@@ -36,6 +36,7 @@
 // here in core, because it is what the runner image runs.
 
 import { trimSlashes } from "./paths.ts";
+import type { TestEffect } from "./test-mode.ts";
 
 /** `${NAME}` — the shape a secret reference takes everywhere in foldrun. */
 export const PLACEHOLDER = /\$\{([A-Z][A-Z0-9_]*)\}/g;
@@ -103,11 +104,15 @@ export interface EgressLease {
    *  lease URL first), so a store that is not this process's memory has
    *  to be told when the grant is complete. Call before every attempt. */
   commit(): Promise<void>;
-  /** One line per request, for the run trace. Drained by the runner. */
-  drainLog(): Promise<string[]>;
+  /** One line per request, for the run trace. Drained by the runner. A
+   *  line may carry a test-mode effect beside its text — what the proxy
+   *  refused or redirected on a test lease — for the run page to list. */
+  drainLog(): Promise<EgressLogLine[]>;
   /** The step is over: the lease is void and its values are dropped. */
   release(): Promise<void>;
 }
+
+export type EgressLogLine = string | { text: string; effect: TestEffect };
 
 /**
  * The seam the platform fills. `null` from `lease` (or no `egress` at all)
@@ -115,7 +120,11 @@ export interface EgressLease {
  * as it always did.
  */
 export interface EgressHooks {
-  lease(args: { tenant: string; runId: string; grant: EgressGrant }): Promise<EgressLease | null>;
+  /** `test` — the run is a test run: the proxy applies the outward-write
+   *  policy in test-mode.ts to every request on this lease. Carried on the
+   *  lease, not the request, because the pod is the party not trusted to
+   *  say so. */
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean }): Promise<EgressLease | null>;
 }
 
 /** Strip a header set of the proxy's own and hop-by-hop headers. */
