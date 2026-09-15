@@ -39,10 +39,13 @@ export function hostEnvAllowed(name: string): boolean {
  * process.env, reduced to the allowlist. A fresh object every call, so a
  * caller that layers secrets on top never writes into the host's own env.
  */
-export function hostSafeEnv(from: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function hostSafeEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(from)) {
     if (typeof v === "string" && hostEnvAllowed(k)) out[k] = v;
   }
-  return out;
+  // Typed as ProcessEnv, not a string map: a host whose type augmentation
+  // makes a key required (Next declares NODE_ENV so) refuses a plain map at
+  // every spawn. The value is the same either way.
+  return out as NodeJS.ProcessEnv;
 }
