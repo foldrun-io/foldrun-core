@@ -72,6 +72,34 @@ dropped further down.
   ];
 }
 
+/**
+ * What an account folder ignores, at its own root.
+ *
+ * The workspace scaffold has always shipped one of these; an account folder is
+ * the thing that gets committed now, and the key that decrypts its secrets
+ * lives at ITS root — `<account>/.foldrun/` — so the guard has to be here too
+ * or the first `git add .` commits the vault key.
+ */
+export function accountGitignore(): StarterFile {
+  return {
+    path: ".gitignore",
+    content: `# The key that decrypts every secret in this account, plus the local run
+# store. Never commit these.
+.foldrun/
+
+# Written by runs, not by you.
+workspaces/*/runs/
+workspaces/*/outputs/
+state/
+storage/
+
+.env
+.env.local
+.DS_Store
+`,
+  };
+}
+
 export function starterFiles(workspace: string): StarterFile[] {
   return [
     {

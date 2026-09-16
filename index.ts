@@ -10,6 +10,7 @@
 // database, previews, share links, tenancy — lives in its own private package
 // and plugs in through platform.ts. Nothing here imports it.
 
+export * from "./src/layout.ts";
 export * from "./src/paths.ts";
 export * from "./src/store.ts";
 export * from "./src/starter.ts";
@@ -40,5 +41,6 @@ export * from "./src/notify.ts";
 export * from "./src/webhook.ts";
 export * from "./src/approvals.ts";
 export * from "./src/deploy.ts";
+export * from "./src/account.ts";
 export * from "./src/tar.ts";
 export * from "./src/git.ts";

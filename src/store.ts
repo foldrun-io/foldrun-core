@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
-import { dataRoot, singleWorkspace } from "./paths.ts";
+import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
 import type { TestEffect } from "./test-mode.ts";
 import matter from "gray-matter";
@@ -184,13 +184,14 @@ export function workspaceDir(tenant: string, workspace: string) {
  * The account root — where `library/`, account secrets and the account-wide
  * AGENTS.md live.
  *
- * On a laptop there is no account, so it is the workspace's parent: `my-desk/`
- * sits beside `library/` and an `AGENTS.md` covering everything there. Same
- * rule libraryDir uses, so the two never disagree about where "up" is.
+ * On a laptop it is wherever `singleAccountRoot` says: the workspace's parent
+ * for a flat `my-desk/`, and the account root two levels up for a workspace
+ * inside `my-account/workspaces/`. Same rule libraryDir uses, so the two never
+ * disagree about where "up" is.
  */
 export function accountDir(tenant: string) {
   const single = singleWorkspace();
-  if (single) return path.resolve(single, "..");
+  if (single) return singleAccountRoot()!;
   assertSafeName(tenant, "tenant");
   return path.join(dataRoot(), tenant);
 }

@@ -14,7 +14,7 @@
 import { platform } from "./platform.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { dataRoot, singleWorkspace } from "./paths.ts";
+import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
 import matter from "gray-matter";
 import { KINDS } from "./kinds.ts";
 import { recordRevision, registerTreeReader } from "./history.ts";
@@ -44,7 +44,9 @@ export function libraryDir(tenant: string, kind?: LibraryKind) {
   // library is still possible on a laptop without inventing a home directory.
   const single = singleWorkspace();
   if (single) {
-    const base = path.join(path.resolve(single), "..", "library");
+    // The account scope, which is the workspace's parent only when the
+    // workspace is a flat one — see singleAccountRoot.
+    const base = path.join(singleAccountRoot()!, "library");
     return kind ? path.join(base, kind) : base;
   }
   assertSafeName(tenant, "tenant");

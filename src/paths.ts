@@ -22,6 +22,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { accountRootFor } from "./layout.ts";
 
 /**
  * The nearest enclosing project root, found by walking up from `from` looking
@@ -76,6 +77,27 @@ export function dataRoot(): string {
  */
 export function singleWorkspace(): string | null {
   return process.env.FOLDRUN_WORKSPACE ?? null;
+}
+
+/**
+ * The account scope in single-workspace mode: where `AGENTS.md` and
+ * `library/` live for the workspace this process is pinned to. Null in the
+ * multi-tenant layout, where the account is a tenant directory under the data
+ * root and nothing has to be inferred.
+ *
+ * It used to be, everywhere, `path.resolve(single, "..")`. That is right for a
+ * flat workspace and wrong for one inside an account folder, where the parent
+ * is `workspaces/` — a directory with no AGENTS.md and no library in it. Every
+ * `skills:`, `tools:` and `scripts:` that named something shared then resolved
+ * against an empty directory and came back missing. `accountRootFor` knows the
+ * difference; `FOLDRUN_ACCOUNT` overrides both, for an embedder that has
+ * already decided.
+ */
+export function singleAccountRoot(): string | null {
+  const single = singleWorkspace();
+  if (!single) return null;
+  if (process.env.FOLDRUN_ACCOUNT) return path.resolve(process.env.FOLDRUN_ACCOUNT);
+  return accountRootFor(path.resolve(single));
 }
 
 // ------------------------------------------------------- linear trimming
