@@ -1008,6 +1008,11 @@ export function parseApis(raw: unknown): ApiSpec[] {
 export interface FlowStep {
   agent: string;
   instruction: string;
+  /** The instruction was written over more than one line and the parser
+   *  joined them. It runs, but `foldrun check` says so: a wrapped
+   *  instruction is one editor keystroke away from being a paragraph of
+   *  prose the parser has to guess about. */
+  wrapped?: boolean;
   group: number; // steps sharing a group number run in parallel
   optional: boolean; // "2?" — failure doesn't fail the flow
   /** Set when the step targets another flow (`[[flow:name]]`) instead of an agent. */
@@ -1337,6 +1342,12 @@ const STEP_OPTION_KEYS = new Set([
   "on-fail", "onfail", "output", "parallel", "preview", "retry", "schema", "timeout", "until", "verify", "wait", "when",
 ]);
 
+/** A line that opens a markdown block rather than continuing a sentence:
+ *  a heading, a bullet, a numbered item, a quote, a rule, or a paragraph
+ *  that opens in bold. Tested against the line already trimmed, so it says
+ *  "this is a document" whatever margin the list gave it. */
+const MARKDOWN_BLOCK_RE = /^(?:#{1,6}\s|[-*+]\s|>\s|\d+[.)]\s|\*\*|__|---|\|)/;
+
 /** The most fan-out instances `parallel:` may run at once — the fan-out's
  *  own hard cap, since more slots than items is no cap. */
 export const PARALLEL_CAP = 20;
@@ -1469,6 +1480,9 @@ export function parseFlow(file: string, raw: string): FlowInfo {
   // shape to be written out rather than named, because a schema is a
   // document and a one-line one is unreadable past three fields.
   let block: { step: FlowStep; indent: number; lines: string[] } | null = null;
+  // The step still accepting wrapped instruction lines, or null once
+  // anything has closed it. See the continuation rule below.
+  let open: FlowStep | null = null;
   const endBlock = () => {
     if (!block) return;
     const { step, lines } = block;
@@ -1509,26 +1523,42 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         instruction: m[5].trim(),
         line: lineNo + offset,
       });
+      open = steps[steps.length - 1];
       continue;
     }
-    // An indented line that is not an option continues the instruction.
+    // An indented line that is not an option continues the instruction —
+    // but only while the step is still open.
     //
-    // Without this it was silently DROPPED. An instruction wrapped over
-    // three lines kept the first and discarded the rest, the run went
-    // green, and the agent worked from an instruction its author had not
-    // written — the worst failure this parser can have, because nothing
-    // anywhere reports it. Twenty-five live instructions across eight desks
-    // were being cut this way.
+    // Both directions of this have been wrong in production. Dropping the
+    // continuation silently cut twenty-five live instructions off mid
+    // sentence. Taking every indented line instead read the *wrapped lines
+    // of a bullet list* three paragraphs below the last step as orders: the
+    // gbp-desk publisher was told to "publish Tuesday's five every way step
+    // 3 could fail was also a way Thursday's five silently never went out".
     //
-    // Indentation is what makes it a continuation, exactly as it is for an
-    // option. Unindented prose between steps is still prose and still
-    // ignored, so a flow file's commentary is undisturbed.
+    // So a step's instruction ends where the step ends. A continuation is
+    // an indented line that follows the step line, or a previous
+    // continuation, with nothing in between — no blank line, no unindented
+    // line, no option, no schema block. Once any of those closes the step
+    // the instruction is finished, and prose below the last step is prose.
+    //
+    // Indented markdown never continues an instruction either. A heading, a
+    // bullet, a quote, a numbered item or a paragraph opening in bold is a
+    // document, not a sentence somebody wrapped, and the indentation is a
+    // list's own margin.
     const opt = line.match(OPTION_RE);
-    if (steps.length && /^\s+\S/.test(line) && !(opt && STEP_OPTION_KEYS.has(opt[2]))) {
-      const step = steps[steps.length - 1];
-      step.instruction = `${step.instruction} ${line.trim()}`.trim();
-      continue;
+    const isOption = !!opt && STEP_OPTION_KEYS.has(opt[2]);
+    if (open && /^\s+\S/.test(line) && !isOption) {
+      if (MARKDOWN_BLOCK_RE.test(line.trim())) {
+        open = null;
+      } else {
+        open.instruction = `${open.instruction} ${line.trim()}`.trim();
+        open.wrapped = true;
+        continue;
+      }
     }
+    // Anything that is not a continuation closes the step to further ones.
+    open = null;
     // Indented options belong to the step above them.
     if (opt && steps.length) {
       const step = steps[steps.length - 1];

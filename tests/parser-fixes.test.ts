@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseFlow, markerPresent } from "../src/store.ts";
+import { lintFlow } from "../src/flow-lint.ts";
 
 // ------------------------------------------- wrapped instructions
 
@@ -42,9 +43,69 @@ test("unindented prose between steps is still prose", () => {
   assert.deepEqual(f.steps.map((s) => s.instruction), ["do it", "then this"]);
 });
 
-test("a blank line inside a step's block does not become part of the instruction", () => {
+test("a blank line ends the instruction — what follows is not orders", () => {
+  // It used to keep reading after the blank line, which is how prose below
+  // the last step became part of that step's instruction.
   const [step] = flow("1. [[a]] — do it\n\n   and also this\n").steps;
-  assert.equal(step.instruction, "do it and also this");
+  assert.equal(step.instruction, "do it");
+  assert.equal(step.wrapped, undefined);
+});
+
+test("the gbp-desk shape: prose and bullets after the last step stay out", () => {
+  // Live evidence. flows/posts.md in gbp-desk had its publisher told to
+  // "publish Tuesday's five every way step 3 could fail was also a way
+  // Thursday's five silently never went out" — the WRAPPED LINES of a
+  // bullet three paragraphs down, whose own "- " line was ignored.
+  const f = flow(
+    "3! [[post-publisher]] — publish Tuesday's five\n" +
+      "   preview: post-plan.csv\n" +
+      "   verify: matches: lpsid=\n" +
+      "\n" +
+      "**One planning session, two publications — but not one run.** The expensive,\n" +
+      "thoughtful part is choosing ten topics.\n" +
+      "\n" +
+      "- *A failed Tuesday ate Thursday.* A step that fails skips the one after it, so\n" +
+      "  every way step 3 could fail was also a way Thursday's five silently never\n" +
+      "  went out. On 2026-09-08 that happened for nothing.\n",
+  );
+  assert.equal(f.steps.length, 1);
+  assert.equal(f.steps[0].instruction, "publish Tuesday's five");
+  assert.equal(f.steps[0].approve, true);
+  assert.equal(f.steps[0].verify, "matches: lpsid=");
+});
+
+test("an instruction followed straight by indented options keeps just itself", () => {
+  const [step] = flow("1. [[a]] — do the thing\n   model: max\n   retry: 2\n").steps;
+  assert.equal(step.instruction, "do the thing");
+  assert.equal(step.wrapped, undefined);
+  assert.equal(step.model, "max");
+  assert.equal(step.retry, 2);
+});
+
+test("an indented heading under a step is a document, not a continuation", () => {
+  const [step] = flow("1. [[a]] — do it\n   ## Notes\n   more words\n").steps;
+  assert.equal(step.instruction, "do it");
+});
+
+test("an indented bold paragraph under a step is not a continuation", () => {
+  const [step] = flow("1. [[a]] — do it\n   **Why it left.** It used to be step 4.\n").steps;
+  assert.equal(step.instruction, "do it");
+});
+
+test("a genuinely wrapped instruction is marked wrapped, so check can say so", () => {
+  const [step] = flow("1. [[a]] — do it\n   and then do the other thing\n").steps;
+  assert.equal(step.instruction, "do it and then do the other thing");
+  assert.equal(step.wrapped, true);
+});
+
+test("check warns about a wrapped instruction and names the agent", () => {
+  const f = flow("1. [[writer]] — write it\n   and keep going here\n");
+  const w = lintFlow(f).filter((x) => /more than one line/.test(x.message));
+  assert.equal(w.length, 1);
+  assert.match(w[0].message, /writer/);
+  assert.notEqual(w[0].level, "error");
+  const quiet = lintFlow(flow("1. [[writer]] — write it\n   model: max\n"));
+  assert.equal(quiet.filter((x) => /more than one line/.test(x.message)).length, 0);
 });
 
 // ------------------------------------------------- when: markers

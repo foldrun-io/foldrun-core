@@ -203,6 +203,24 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       });
     }
 
+    // An instruction written over more than one line. It is read in full
+    // now, but the parser had to decide where it stopped, and the line
+    // below a wrapped instruction is one edit away from being prose. Said
+    // out loud so an author who meant to wrap can see it, and one who did
+    // not can see what got joined on.
+    if (step.wrapped) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        message: `"${step.subflow ?? step.agent}" has an instruction spread over more than one line`,
+        detail:
+          "A step's instruction ends where the step ends: the indented lines directly under it " +
+          "are joined on, and the first blank line, option, heading, bullet or unindented line " +
+          "finishes it. Put the whole instruction on the step's own line — one line, however " +
+          "long — so what the agent is told does not depend on where the paragraph below begins.",
+      });
+    }
+
     // The first group starts with context = null. An instruction that points
     // at earlier output therefore points at nothing.
     if (inFirstGroup && step.instruction && REFERS_BACK.test(step.instruction)) {
