@@ -31,7 +31,9 @@ import {
   type DeployFile,
   notifyWorkspaceChanged,
 } from "./store.ts";
+import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
+import { timezoneProblem } from "./clock.ts";
 import { repoDir } from "./gitrepo.ts";
 
 /** Directories a deploy never reads out of a source tree. */
@@ -209,6 +211,21 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
   for (const f of files) {
     const m = f.path.match(/^agents\/([^/]+)\/agent\.md$/);
     if (m) agents.add(m[1]);
+  }
+
+  // `timezone:` is read at four levels and a value nothing can parse falls
+  // silently through to the level above — so it is refused where it was
+  // written, not discovered as a date that is a day out.
+  for (const f of files) {
+    if (!/^(AGENTS\.md|agents\/[^/]+\/agent\.md)$/.test(f.path)) continue;
+    let front: Record<string, unknown> = {};
+    try {
+      front = matter(f.content).data as Record<string, unknown>;
+    } catch {
+      continue; // unparseable frontmatter is its own report
+    }
+    const problem = timezoneProblem(front.timezone);
+    if (problem) at(f.path, problem);
   }
   if (agents.size === 0) {
     at("agents/", "no agents — a workspace needs at least one agents/<name>/agent.md");

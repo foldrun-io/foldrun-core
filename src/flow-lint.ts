@@ -12,6 +12,7 @@
 // blocked — flows still run, warnings are advisory.
 
 import type { FlowInfo, FlowStep } from "./store.ts";
+import { timezoneProblem } from "./clock.ts";
 
 export interface FlowWarning {
   /** Index into flow.steps, or null for a whole-flow warning. */
@@ -85,6 +86,21 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       detail:
         "Nothing here waits for a person, so the list has no effect. Mark the step that needs " +
         "a second pair of eyes with `!` (or `approve: true`), or drop the approvers: line.",
+    });
+  }
+  // A zone nobody can read is two faults at once: the cron fires at the
+  // wrong hour, and every step's calendar quietly falls through to the level
+  // above. Both are invisible in a green run, so `foldrun check` refuses it.
+  const zoneProblem = timezoneProblem(flow.timezone);
+  if (zoneProblem) {
+    warnings.push({
+      step: null,
+      level: "error",
+      message: zoneProblem,
+      detail:
+        "This is the zone the schedule fires in AND the calendar every step in this flow works " +
+        "to. Unreadable, the schedule falls back to UTC and each step inherits the workspace's " +
+        "zone instead of this one.",
     });
   }
   // A deadline on a gate that does not exist reads as a safety net and is not

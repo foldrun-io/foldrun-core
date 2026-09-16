@@ -43,6 +43,7 @@ export function readFrontmatter(file: string): Record<string, unknown> {
 import { ownToolNames, legacyUseNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
+import { timezoneProblem } from "./clock.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
@@ -799,6 +800,11 @@ export interface AgentInfo {
   budget: number | null;
   /** What is wrong with the `budget:` line, or null. */
   budgetProblem: string | null;
+  /** `timezone:` — the calendar this agent works to, nearest-wins over its
+   *  flow's, its workspace's and the account's. Null inherits. */
+  timezone: string | null;
+  /** What is wrong with the `timezone:` line, or null. */
+  timezoneProblem: string | null;
 }
 
 // Recognised HTTP verbs a tool may declare. Deliberately NOT named
@@ -1302,6 +1308,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
         budget: runBudget(data.budget),
         budgetProblem: budgetProblem(data.budget, ["run"]),
+        timezone: typeof data.timezone === "string" ? data.timezone : null,
+        timezoneProblem: timezoneProblem(data.timezone),
       };
     });
 }
