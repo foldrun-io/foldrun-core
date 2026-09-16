@@ -202,6 +202,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "schedule", insert: "schedule: \"0 6 * * MON\"" },
     { label: "timezone", insert: "timezone: Australia/Sydney" },
     { label: "language", insert: "language: en-AU" },
+    { label: "region", insert: "region: au", hint: "currency, units, calendar, weekend and text direction follow" },
     { label: "model", insert: "model: fast", hint: "every step, unless the step says" },
     { label: "effort", insert: "effort: high", hint: "every step, unless the step says" },
   ],
