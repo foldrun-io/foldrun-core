@@ -42,6 +42,23 @@ const NOT_SOURCE_FILE = new Set([".DS_Store", "secrets.json"]);
 
 const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
 
+/**
+ * Is this path, relative to a workspace root, one `readTree` would carry?
+ *
+ * The same question the walk above asks, asked of a path that is not on this
+ * machine — what the platform lists for a workspace, so `foldrun status` and
+ * `foldrun pull` compare like with like. Without it the comparison counted
+ * every run artefact and bookkeeping file the platform keeps as a local
+ * deletion, and every status was a wall of red.
+ */
+export function isSourcePath(rel: string): boolean {
+  const norm = rel.replaceAll("\\", "/");
+  const parts = norm.split("/");
+  if (parts.some((p) => NOT_SOURCE.has(p))) return false;
+  if (NOT_SOURCE_FILE.has(parts[parts.length - 1])) return false;
+  return norm === "AGENTS.md" || norm === "project.md" || IN_WORKSPACE_DIR.test(norm);
+}
+
 export interface DeployIssue {
   where: string;
   message: string;

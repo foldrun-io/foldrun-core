@@ -70,7 +70,13 @@ export function readLibraryTree(accountRoot: string): LibraryFile[] {
   const out: LibraryFile[] = [];
   for (const kind of LIBRARY_KINDS) {
     const dir = path.join(accountRoot, "library", kind);
-    for (const f of walkFiles(dir)) out.push({ kind, path: f.path, content: f.content });
+    for (const f of walkFiles(dir)) {
+      // `.gitkeep` and friends keep an empty library directory in git and are
+      // not library entries: the write endpoint refuses a path with no known
+      // extension, so shipping one would fail the deploy over a placeholder.
+      if (f.path.split("/").some((seg) => seg.startsWith("."))) continue;
+      out.push({ kind, path: f.path, content: f.content });
+    }
   }
   return out;
 }
