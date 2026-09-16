@@ -94,6 +94,11 @@ export interface EgressGrant {
    *  API_KEY are two credentials, and one's refusal must not paint the
    *  other red. Absent for a secret whose origin the runner did not know. */
   healthKeys?: Record<string, string>;
+  /** The step's own timezone, from the clock cascade. The proxy is the only
+   *  party that sees an upstream response's headers, so it is the party
+   *  that has to put a rate-limit reset into words — and a reset time is
+   *  only useful in the calendar the step works to. See refusal.ts. */
+  timezone?: string;
 }
 
 export interface EgressLease {

@@ -31,6 +31,7 @@ import crypto from "node:crypto";
 import { PROTECTED_PARAMS } from "./providers.ts";
 import { viaEgress } from "./egress.ts";
 import { trimSlashes } from "./paths.ts";
+import { captureRefusalHeaders, isRefusalStatus, refusalLine } from "./refusal.ts";
 
 // ------------------------------------------------------------------ shapes
 
@@ -60,6 +61,10 @@ export interface TranslatorSpec {
    *  upstream request goes through it, and `upstreamKey` is a placeholder
    *  the proxy fills. */
   egress?: string;
+  /** The step's own zone, from the clock cascade — what a reset time in a
+   *  refusal is told in. UTC when nothing said otherwise. */
+  timezone?: string;
+
 }
 
 export interface RunningTranslator {
@@ -913,6 +918,20 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
         const text = await upstream.text();
         const message = upstreamMessage(text, upstream.status);
         log.push(`POST ${label} → ${upstream.status} (${Date.now() - started}ms): ${message.slice(0, 160)}`);
+        // The refusal in words, from the headers the response already
+        // carried. Only on a refusal, and only the allow-listed headers:
+        // a 400 about a malformed body is the work's problem, not the
+        // supply's, and explaining it as one would mislead.
+        if (isRefusalStatus(upstream.status)) {
+          log.push(
+            refusalLine({
+              status: upstream.status,
+              headers: captureRefusalHeaders(upstream.headers),
+              timezone: spec.timezone,
+              provider: label,
+            }),
+          );
+        }
         // The status crosses unchanged, so a 401 or 429 from the provider
         // reads as one to the SDK — and to the fallback decision upstream.
         return send(upstream.status, errorBody(upstream.status, message));

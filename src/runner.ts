@@ -14,6 +14,7 @@ import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } fro
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
+import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
 import { TEST_WRITES_DIR, restoreDivertedDirs, snapshotDivertedDirs, testHeadline, testModeEnv, withholdSecrets } from "./test-mode.ts";
@@ -82,6 +83,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { resolveSearch } from "./providers.ts";
 import { trimChars } from "./paths.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
@@ -1061,6 +1063,26 @@ function agentContext(
   const disabled: string[] = [];
   const unknownTools: string[] = [];
   const shadowed: string[] = [];
+  // `web_search:` and `web_fetch:` name who answers. Unset means ours — the
+  // account's own engine, and our own fetch, both inside the run's sandbox
+  // and both on the run record. A provider name swaps the tool the runtime
+  // grants for the SDK's server-side one, which the run's endpoint executes:
+  // point the run at z.ai and z.ai's index answers the same tool Anthropic
+  // would have. The name the model sees is unchanged either way, so a prompt
+  // written against `web_search` survives the switch.
+  const searchChoice = resolveSearch((front as Record<string, unknown>).web_search);
+  const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch);
+  const providerWebTools: Record<string, string> = {};
+  for (const [key, choice, builtin] of [
+    ["web_search", searchChoice, "WebSearch"],
+    ["web_fetch", fetchChoice, "WebFetch"],
+  ] as const) {
+    if (choice.error) {
+      providerWarnings.push(choice.error);
+    } else if (choice.provider) {
+      providerWebTools[key] = builtin;
+    }
+  }
   let wantSearch = false;
   let wantHistory = false;
   let wantDesks = false;
@@ -1077,7 +1099,12 @@ function agentContext(
     // but a tool hidden by one is worth saying out loud rather than silently
     // ignoring. A `[[link]]` skips the built-ins entirely: the brackets mean
     // "my file", which is how a tool named `search` is granted at all.
-    if (ref.linked) {
+    if (providerWebTools[toolName] && !ref.linked) {
+      // A provider answers this one. The SDK's server-side tool goes in place
+      // of ours; `[[web_search]]` still reaches our file, because the
+      // brackets mean "my file" everywhere else and should here too.
+      allowed.push(providerWebTools[toolName]);
+    } else if (ref.linked) {
       // Granted above through ownToolNames, or reported missing there.
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
@@ -1192,8 +1219,11 @@ function agentContext(
     providerSecrets,
     providerWarnings,
     fallbackEnv,
-    translator,
-    fallbackTranslator,
+    // Stamped with the step's own zone: when one of these refuses, the
+    // reset time it reports is told in the calendar the step works to,
+    // not in the pod's UTC.
+    translator: translator && { ...translator, timezone },
+    fallbackTranslator: fallbackTranslator && { ...fallbackTranslator, timezone },
     apiWarnings,
     secretScopes,
     missingTools,
@@ -1689,8 +1719,15 @@ async function runStep(
     // watched on both paths, because a refusal reads the same from a pod
     // and from this process.
     let lastRefusal = "";
+    // And WHY it refused, in words, when anything on the way saw the
+    // headers that say so: the translator here, the egress proxy over
+    // there. Kept apart from `lastRefusal` — that one decides whether to
+    // fall back, this one is what a person reads afterwards.
+    let refusalWhy = "";
     const pushWatching: typeof push = (type, text, extra) => {
       if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
+      const why = refusalFromLine(text);
+      if (why) refusalWhy = why;
       push(type, text, extra);
     };
     // The second supply: the block's own fallback when it declared one (a
@@ -1698,6 +1735,28 @@ async function runStep(
     // fallback), else the platform's, and only for a step riding the
     // platform credential.
     const secondSupply = fallbackEnv ?? (Object.keys(providerEnv).length === 0 ? platformFallbackEnv() : null);
+    // Where this step stands on a second supply, for the refusal sentence.
+    // It starts as the truth before anything has run and becomes
+    // "exhausted" the moment the fallback has had its turn — the owner is
+    // about to remove the OpenRouter fallback, so "none" becomes the normal
+    // reading and has to look like a decision on the page.
+    let supplyState: SupplyState = secondSupply ? "trying" : "none";
+    // The line a person reads when this step ends failed: the reason, if
+    // anything on the way learned one, else the status put into words, and
+    // in every case where the step could go next. Pushed last so it is the
+    // last error event — which is what runFailure, the desks' headlines and
+    // `foldrun report` read.
+    const sayWhy = (status: StepRecord["status"]) => {
+      if (status !== "failed" || !lastRefusal) return;
+      const said = Number(lastRefusal.match(/API Error: (\d{3})/)?.[1] ?? NaN);
+      const why =
+        refusalWhy ||
+        explainRefusal({
+          status: Number.isFinite(said) && isRefusalStatus(said) ? said : 402,
+          timezone: clock.timezone,
+        });
+      push("error", `${why}${supplyNote(supplyState)}`);
+    };
 
     // `schema:` — inline on the step, or a file under the workspace read
     // now, host-side, so both executors are handed the same document. A
@@ -1731,7 +1790,7 @@ async function runStep(
       // before anything is copied in. Null where no proxy is configured
       // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
       // everything below materialises exactly as it always did.
-      const grant: EgressGrant = { secrets: {} };
+      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone };
       for (const api of apiSpecs) {
         const host = hostOf(api.base);
         if (!host) continue;
@@ -1960,6 +2019,7 @@ async function runStep(
           ),
         };
         await lease?.commit();
+        supplyState = "exhausted";
         outcome = await runIsolated(fallbackArgs);
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
@@ -1968,14 +2028,18 @@ async function runStep(
       }
       if (lease) {
         for (const line of await lease.drainLog()) {
-          if (typeof line === "string") push("info", line);
-          else push("info", line.text, { effect: line.effect });
+          // pushWatching, not push: a line the proxy wrote may carry the
+          // refusal mark, and that sentence is the whole reason the proxy
+          // reads response headers at all.
+          if (typeof line === "string") pushWatching("info", line);
+          else pushWatching("info", line.text, { effect: line.effect });
         }
         await lease.release();
       }
       // Nothing a test run left in storage/public/ reached storage/, so
       // there is nothing to publish — and a share link is an outward act.
       if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      sayWhy(outcome.status);
       step.status = outcome.status;
       step.result = redactText(outcome.result);
       step.conclusion = redactText(outcome.conclusion);
@@ -2099,7 +2163,7 @@ async function runStep(
           return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
         } finally {
           if (t) {
-            for (const line of t.drainLog()) push("info", line.startsWith("translator") ? line : `translator: ${line}`);
+            for (const line of t.drainLog()) pushWatching("info", line.startsWith("translator") ? line : `translator: ${line}`);
             await t.close();
           }
           if (before && runId) {
@@ -2125,9 +2189,11 @@ async function runStep(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
+        supplyState = "exhausted";
         outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
       if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      sayWhy(outcome.status);
       step.status = outcome.status;
       step.result = redactText(outcome.result);
       step.conclusion = redactText(outcome.conclusion);
