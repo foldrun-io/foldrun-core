@@ -139,7 +139,37 @@ export const SEARCH_APIS: readonly SearchApi[] = [
   { name: "firecrawl", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/search",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "FIRECRAWL_API_KEY",
     index: "Firecrawl's — open-source core, self-hostable" },
+  { name: "perplexity", title: "Perplexity Search", host: "api.perplexity.ai", endpoint: "https://api.perplexity.ai/search",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "PERPLEXITY_API_KEY",
+    index: "Perplexity's own crawl — the Search API returns results, not an answer" },
+  { name: "linkup", title: "Linkup", host: "api.linkup.so", endpoint: "https://api.linkup.so/v1/search",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "LINKUP_API_KEY",
+    index: "Linkup's — agent-shaped, each result with its content" },
+  // ---- the SERP scrapers: Google's own results page, read for you. Not
+  // an index of their own, and not Google partners — there is no such
+  // programme. The one kind to use when the question is about Google
+  // itself: where a page ranks, what the SERP shows.
+  { name: "serper", title: "Serper", host: "google.serper.dev", endpoint: "https://google.serper.dev/search",
+    method: "POST", auth: { header: "X-API-KEY" }, secret: "SERPER_API_KEY",
+    index: "Google's results page, scraped — ~$1 / 1,000; fast, developers' favourite" },
+  { name: "serpapi", title: "SerpApi", host: "serpapi.com", endpoint: "https://serpapi.com/search",
+    method: "GET", auth: { header: "", prefix: "" }, secret: "SERPAPI_API_KEY",
+    index: "Google's results page, scraped — the dearest, 80+ engines",
+    note: "The key travels as the api_key query parameter; the egress proxy fills the URL as it fills a header." },
+  { name: "dataforseo", title: "DataForSEO", host: "api.dataforseo.com", endpoint: "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
+    method: "POST", auth: { header: "Authorization", prefix: "Basic " }, secret: "DATAFORSEO_AUTH_BASIC",
+    secretFormat: "base64 of `login:password` — DataForSEO authenticates with HTTP basic auth, and the proxy fills one placeholder verbatim: `printf 'LOGIN:PASSWORD' | base64`",
+    index: "Google's results page, scraped — $0.60 / 1,000 standard queue; what rank-desk uses" },
 ];
+
+/** Names people will try that cannot work, and why — said at `check`
+ *  rather than discovered at 3am. */
+export const REFUSED_WEB: Record<string, string> = {
+  bing: "Microsoft retired the Bing Search API on 11 Aug 2025. What remains is Grounding with Bing Search, usable only inside an Azure AI agent — not a search a tool can call. Bing's index still answers through ChatGPT (web_search: openai).",
+  azure: "the Bing Search API is retired; Grounding with Bing Search runs only inside Azure AI agents. See bing.",
+  google: "Google does not sell its index. The Custom Search JSON API is closed to new customers and retires 1 Jan 2027; Grounding with Google Search runs only inside Gemini. For Google's results page, use a SERP scraper: serper, serpapi or dataforseo.",
+  apify: "Apify is an actor marketplace, not a search, fetch or browser endpoint. Reach a specific actor as an http tool file, the way blog-desk's apify-fallback does.",
+};
 
 /** Fetch APIs the runtime calls itself: a URL in, the page out, with the
  *  customer's own key. Same seam as the search APIs — `web_fetch: jina` —
@@ -177,6 +207,46 @@ export const FETCH_APIS: readonly FetchApi[] = [
     secretFormat: "base64 of `<api key>:` — Zyte authenticates with HTTP basic auth, and the proxy fills a placeholder verbatim, so the vault holds the encoded form: `printf 'KEY:' | base64`",
     tier: "unblocker", batch: 1, what: "the page rendered in a real browser behind Zyte's proxy pool — for the sites that refuse everything else; pay per successful request" },
 ];
+
+/** Remote browsers: a CDP endpoint our web_browse connects to instead of
+ *  the account's pod — the same tool, the same modes and actions, rendered
+ *  on the vendor's machines. `web_browse: browserbase`. The one capability
+ *  where the key cannot ride the egress proxy: CDP is a websocket, so the
+ *  wrapper holds the real value the way it already holds a cookie secret,
+ *  and creates the session itself where the vendor wants one. */
+export interface BrowserApi {
+  name: string;
+  aliases?: string[];
+  title: string;
+  /** How a session is reached: a REST call that returns the endpoint, or a
+   *  websocket URL the key goes straight into. */
+  how: "session" | "direct";
+  host: string;
+  secret: string;
+  secretFormat?: string;
+  what: string;
+  note?: string;
+}
+
+export const BROWSER_APIS: readonly BrowserApi[] = [
+  { name: "browserbase", title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
+    what: "hosted Chromium with stealth; POST /v1/sessions (X-BB-API-Key) returns connectUrl" },
+  { name: "steel", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
+    what: "hosted Chromium, open-source core; POST /v1/sessions (steel-api-key), then wss://connect.steel.dev?apiKey&sessionId" },
+  { name: "hyperbrowser", title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
+    what: "hosted Chromium with built-in unblocking; a session returns its wsEndpoint" },
+  { name: "browserless", title: "Browserless", how: "direct", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
+    what: "hosted Chrome; wss://production-sfo.browserless.io?token=… (other regions by name)",
+    note: "SSPL-licensed: the free path is out for a paid service; the cloud is a plain vendor." },
+  { name: "brightdata", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
+    secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
+    what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
+];
+
+export function findBrowserApi(name: string): BrowserApi | undefined {
+  const key = name.trim().toLowerCase();
+  return BROWSER_APIS.find((a) => a.name === key || a.aliases?.includes(key));
+}
 
 export function findFetchApi(name: string): FetchApi | undefined {
   const key = name.trim().toLowerCase();
@@ -341,8 +411,8 @@ function readChoice(raw: unknown, field: string): { name: string; secret?: strin
   return { error: `${field}: takes a name, or a block with name: and key:, or nothing at all for the runtime's own.` };
 }
 
-export function resolveSearch(name: unknown, kind: "search" | "fetch" = "search"): SearchChoice {
-  const field = kind === "fetch" ? "web_fetch" : "web_search";
+export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse" = "search"): SearchChoice {
+  const field = kind === "fetch" ? "web_fetch" : kind === "browse" ? "web_browse" : "web_search";
   if (name === undefined || name === null || name === "" || name === "ours") {
     return { provider: null };
   }
@@ -350,6 +420,14 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" = "search"
   if ("error" in read) return { provider: null, error: read.error };
   const key = read.name.trim().toLowerCase();
 
+  if (key in REFUSED_WEB) return { provider: null, error: `${field}: ${key} — ${REFUSED_WEB[key]}` };
+  if (kind === "browse") {
+    const b = findBrowserApi(key);
+    if (!b) {
+      return { provider: null, error: `web_browse: ${key} — no remote browser by that name. The ones this tool can connect to: ${BROWSER_APIS.map((a) => a.name).join(", ")}. Unset means the account's own browser.` };
+    }
+    return { provider: b.name, shape: "direct", index: b.what, secret: read.secret ?? b.secret, secretOptional: false, host: b.host };
+  }
   const api = kind === "fetch" ? findFetchApi(key) : findSearchApi(key);
   if (api) {
     return {

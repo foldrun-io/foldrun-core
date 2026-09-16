@@ -150,3 +150,46 @@ test("Zyte's secret says what the vault must hold", () => {
   assert.match(findFetchApi("zyte")!.secretFormat!, /base64/);
   assert.equal(findFetchApi("zyte")!.secret, "ZYTE_API_KEY_BASIC");
 });
+
+// ---- the whole list: SERP scrapers, refused names, remote browsers ------
+import { BROWSER_APIS, REFUSED_WEB } from "../src/providers.ts";
+
+test("the SERP scrapers are search APIs like the rest, with the key where each vendor wants it", () => {
+  for (const name of ["serper", "serpapi", "dataforseo", "perplexity", "linkup"]) {
+    const got = resolveSearch(name);
+    assert.equal(got.shape, "direct", name);
+    assert.ok(got.secret && got.host, name);
+  }
+  assert.equal(resolveSearch("dataforseo").secret, "DATAFORSEO_AUTH_BASIC", "basic auth: the vault holds the encoded pair");
+  assert.equal(resolveSearch("serpapi").secret, "SERPAPI_API_KEY");
+});
+
+test("names that cannot work are refused with the reason, for every kind", () => {
+  for (const [name, why] of Object.entries(REFUSED_WEB)) {
+    for (const kind of ["search", "fetch", "browse"] as const) {
+      const got = resolveSearch(name, kind);
+      assert.equal(got.provider, null, `${kind}: ${name}`);
+      assert.ok(got.error!.includes(why.slice(0, 40)), `${kind}: ${name} says why`);
+    }
+  }
+  assert.match(resolveSearch("bing").error!, /11 Aug 2025/);
+  assert.match(resolveSearch("google").error!, /serper, serpapi or dataforseo/);
+});
+
+test("a remote browser resolves for web_browse with its secret, and only for web_browse", () => {
+  for (const b of BROWSER_APIS) {
+    const got = resolveSearch(b.name, "browse");
+    assert.equal(got.shape, "direct", b.name);
+    assert.equal(got.secret, b.secret, b.name);
+    assert.equal(got.host, b.host, b.name);
+    assert.equal(got.secretOptional, false, `${b.name}: a browser key is never optional`);
+  }
+  assert.equal(resolveSearch("bright-data", "browse").provider, "brightdata", "the hyphenated spelling");
+  assert.match(resolveSearch("browserbase", "search").error!, /no provider or search API/);
+  assert.match(resolveSearch("exa", "browse").error!, /no remote browser by that name/);
+});
+
+test("the long form works for a browser too, and a literal key is still refused", () => {
+  assert.equal(resolveSearch({ name: "browserbase", key: "${BB}" }, "browse").secret, "BB");
+  assert.match(resolveSearch({ name: "browserbase", key: "bb_live_x" }, "browse").error!, /not the key itself/);
+});

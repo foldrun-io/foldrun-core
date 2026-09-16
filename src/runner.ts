@@ -827,6 +827,9 @@ function agentContext(
   // must hold, the env the tool reads, and the egress grant for the host.
   const searchChoice = resolveSearch((front as Record<string, unknown>).web_search, "search");
   const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch, "fetch");
+  // A remote browser's key is materialised, not proxied: CDP is a websocket
+  // and the wrapper opens the session itself, the way it seeds a cookie.
+  const browseChoice = resolveSearch((front as Record<string, unknown>).web_browse, "browse");
   // A direct search API is paid for with the customer's own key, stored
   // under a fixed vault name (EXA_API_KEY, BRAVE_SEARCH_API_KEY, …). Naming
   // the API in frontmatter is declaring that secret — nobody should have to
@@ -834,7 +837,7 @@ function agentContext(
   // nothing and say so only at the provider.
   const declared: string[] = [
     ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
-    ...[searchChoice, fetchChoice].flatMap((c) => {
+    ...[searchChoice, fetchChoice, browseChoice].flatMap((c) => {
       if (c.shape !== "direct" || !c.secret) return [];
       // Jina's reader answers without a key. Declaring an absent optional
       // key would fail the step for a credential it never needed.
@@ -1019,6 +1022,11 @@ function agentContext(
     ...(fetchChoice.shape === "direct" && fetchChoice.provider
       ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
       : {}),
+    // A remote browser: the wrapper connects over CDP to this vendor with
+    // the named key, and the platform leaves the account's pod alone.
+    ...(browseChoice.shape === "direct" && browseChoice.provider
+      ? { FOLDRUN_BROWSER_VENDOR: browseChoice.provider, FOLDRUN_BROWSER_SECRET: browseChoice.secret ?? "" }
+      : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.
@@ -1098,6 +1106,7 @@ function agentContext(
   // would have. The name the model sees is unchanged either way, so a prompt
   // written against `web_search` survives the switch.
   const providerWebTools: Record<string, string> = {};
+  if (browseChoice.error) providerWarnings.push(browseChoice.error);
   for (const [key, choice, builtin] of [
     ["web_search", searchChoice, "WebSearch"],
     ["web_fetch", fetchChoice, "WebFetch"],
