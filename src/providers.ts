@@ -58,21 +58,54 @@ export interface ProviderPreset {
   note?: string;
   /** A tool loop was driven through this endpoint from this runtime. */
   verified?: boolean;
+  /** Whether the endpoint runs a server-side web search, and in whose shape.
+   *  Absent means it does not — `web_search: <that name>` is then an error a
+   *  person should see from `check`, not an empty result at 3am. */
+  search?: SearchShape;
 }
+
+/** Whether this endpoint will execute a server-side web search, and in whose
+ *  shape. Separate from `format` on purpose: speaking a wire is not the same
+ *  as running a tool on it. DeepSeek's endpoint is Anthropic-shaped and still
+ *  has no search at all, which is exactly the mistake this field exists to
+ *  stop `check` from letting through.
+ *
+ *   "anthropic"  executes the `web_search_20250305` server tool as Anthropic
+ *                defines it, so the runtime grants it and the endpoint answers
+ *   "plugin"     has its own switch rather than a tool (OpenRouter's web
+ *                plugin / `:online`), fulfilled natively where the underlying
+ *                model supports it and by Exa everywhere else
+ *   "openai"     the Responses-shaped `web_search` tool
+ *   "builtin_fn" Moonshot's `$web_search`, a Chat-Completions builtin_function
+ *                the client has to echo back — billed per successful call
+ *   undefined    no server-side search. Ours is the only way to the web. */
+export type SearchShape = "anthropic" | "plugin" | "openai" | "builtin_fn";
+
+/** Whose index answers, for the ones that will answer at all. Checked against
+ *  each vendor's own documentation on 2026-09-16. Worth stating out loud
+ *  because it is the whole reason to prefer a provider's search over ours:
+ *  you are buying an index we cannot crawl, not a faster endpoint. */
+export const SEARCH_INDEX: Record<string, string> = {
+  anthropic: "Brave",
+  zai: "Zhipu's own (China-weighted)",
+  openrouter: "native where the model supports it, Exa otherwise",
+  openai: "Bing, plus OpenAI's own OAI-SearchBot crawl",
+  kimi: "Moonshot's own (China-weighted)",
+};
 
 export const PROVIDERS: readonly ProviderPreset[] = [
   // ------------------------------------------------ Anthropic-shaped, direct
   { name: "anthropic", title: "Anthropic", format: "anthropic", baseUrl: "https://api.anthropic.com", auth: "x-api-key", verified: true,
-    note: "Models newer than Opus 4.6 reject top_k with a 400; the runtime never sends it unless a params: block does." },
+    note: "Models newer than Opus 4.6 reject top_k with a 400; the runtime never sends it unless a params: block does." , search: "anthropic" },
   { name: "openrouter", title: "OpenRouter", format: "anthropic", baseUrl: "https://openrouter.ai/api", auth: "bearer", verified: true,
-    note: "Hundreds of models behind one key. Its own docs disagree on how well non-Anthropic models hold a tool loop on this endpoint — probe the model you mean to use." },
+    note: "Hundreds of models behind one key. Its own docs disagree on how well non-Anthropic models hold a tool loop on this endpoint — probe the model you mean to use." , search: "plugin" },
   { name: "deepseek", title: "DeepSeek", format: "anthropic", baseUrl: "https://api.deepseek.com/anthropic", auth: "x-api-key",
     note: "Ignores top_k, cache_control and thinking budgets; Claude model names are remapped to DeepSeek's." },
   { name: "kimi", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer",
-    note: "Own model ids only. Known bug (2026-09): K3 reuses one tool_use id across separate calls, which breaks a tool loop." },
+    note: "Own model ids only. Known bug (2026-09): K3 reuses one tool_use id across separate calls, which breaks a tool loop." , search: "builtin_fn" },
   { name: "moonshot", title: "Moonshot Kimi", format: "anthropic", baseUrl: "https://api.moonshot.ai/anthropic", auth: "bearer",
-    note: "Same endpoint as kimi." },
-  { name: "zai", title: "z.ai (GLM)", format: "anthropic", baseUrl: "https://api.z.ai/api/anthropic", auth: "bearer" },
+    note: "Same endpoint as kimi." , search: "builtin_fn" },
+  { name: "zai", title: "z.ai (GLM)", format: "anthropic", baseUrl: "https://api.z.ai/api/anthropic", auth: "bearer" , search: "anthropic" },
   { name: "minimax", title: "MiniMax", format: "anthropic", baseUrl: "https://api.minimax.io/anthropic", auth: "bearer" },
   { name: "qwen", title: "Alibaba Qwen (Model Studio)", format: "anthropic", auth: "x-api-key",
     note: "base_url depends on the plan: pay-as-you-go https://<workspace>.<region>.maas.aliyuncs.com/apps/anthropic; Coding Plan https://coding-intl.dashscope.aliyuncs.com/apps/anthropic. Own model ids (qwen3.7-max …), no remap; no reasoning_effort, use thinking." },
@@ -96,7 +129,7 @@ export const PROVIDERS: readonly ProviderPreset[] = [
   // ------------------------------------------- Chat-Completions, translated
   { name: "openai", title: "OpenAI", format: "openai", baseUrl: "https://api.openai.com/v1", auth: "bearer", verified: true,
     maxTokensParam: "max_completion_tokens", reasoningEffort: true,
-    note: "Reached over Chat Completions, which OpenAI keeps supporting; the Responses API is not spoken here, so a reasoning model's reasoning does not carry across tool calls." },
+    note: "Reached over Chat Completions, which OpenAI keeps supporting; the Responses API is not spoken here, so a reasoning model's reasoning does not carry across tool calls." , search: "openai" },
   { name: "gemini", title: "Google Gemini", format: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", auth: "bearer",
     note: "Google's OpenAI-compatible route. Unknown parameters are ignored silently; reasoning cannot be switched off on the newest models." },
   { name: "xai", title: "xAI Grok", format: "openai", baseUrl: "https://api.x.ai/v1", auth: "bearer",
@@ -144,4 +177,48 @@ export function providerPreset(name: unknown): ProviderPreset | null {
  *  so before a run fails with a 404 from the wrong path. */
 export function looksOpenAiShaped(baseUrl: string): boolean {
   return /\/v1\/?$|\/chat\/completions|api\.openai\.com|\/openai\b/i.test(baseUrl);
+}
+
+
+/** What `web_search: <name>` in an agent's frontmatter resolves to.
+ *
+ *  Unset means ours: the account's own search engine, free, on the run
+ *  record. Naming a provider buys that provider's index instead — which is
+ *  the only reason to do it, and the reason the failure modes below are
+ *  errors rather than a quiet fallback. A desk that silently searched
+ *  nothing for a month is worse than one that refused to deploy.
+ */
+export interface SearchChoice {
+  /** null when ours answers. */
+  provider: string | null;
+  shape?: SearchShape;
+  /** Whose index answers, for the run trace and the help page. */
+  index?: string;
+  /** Set when the name cannot work; `check` prints it and refuses. */
+  error?: string;
+}
+
+export function resolveSearch(name: unknown): SearchChoice {
+  if (name === undefined || name === null || name === "" || name === "ours") {
+    return { provider: null };
+  }
+  if (typeof name !== "string") {
+    return { provider: null, error: "web_search: takes a provider name, or nothing at all for the account's own search engine." };
+  }
+  const key = name.trim().toLowerCase();
+  const preset = PROVIDERS.find((p) => p.name === key);
+  if (!preset) {
+    const near = PROVIDERS.filter((p) => p.search).map((p) => p.name).join(", ");
+    return { provider: null, error: `web_search: ${key} — no provider by that name. The ones that can search: ${near}.` };
+  }
+  if (!preset.search) {
+    return {
+      provider: null,
+      error:
+        `web_search: ${key} — ${preset.title} has no server-side search. ` +
+        `Its endpoint is ${preset.format}-shaped, but speaking a wire is not the same as running a tool on it. ` +
+        `Leave web_search: unset to use the account's own search engine.`,
+    };
+  }
+  return { provider: key, shape: preset.search, index: SEARCH_INDEX[key] };
 }

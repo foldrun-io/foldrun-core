@@ -15,9 +15,14 @@ import { refList, refNames, type Ref } from "./refs.ts";
 /** Groups: one word an author can hold in their head, expanded to SDK names. */
 export const TOOL_MAP: Record<string, string[]> = {
   // `web` includes Anthropic's server-side WebSearch, the one built-in tool
-  // that runs off the box and bills per call. `fetch` is the local half only:
-  // an agent that searches through the account's own `websearch` tool and
-  // reads pages with WebFetch never leaves the box for anything but tokens.
+  // that runs off the box and bills per call; `fetch` is the local half only.
+  // Neither is the normal way to reach the web here. The three tools an
+  // author writes are one lowercase family — `web_search` finds URLs,
+  // `web_fetch` reads one, `web_browse` drives one — all served from the
+  // gallery, all on the run record, all working whichever model is driving.
+  // None of them is aliased here on purpose: a name in TOOL_MAP shadows a
+  // real tool of the same name (see runner.ts), so aliasing `web_fetch` would
+  // silently replace our tool with the SDK's and change what an agent gets.
   web: ["WebSearch", "WebFetch"],
   fetch: ["WebFetch"],
   // `read` is deliberately separate from `files`: an agent that may inspect a

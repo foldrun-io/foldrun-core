@@ -78,6 +78,15 @@ export interface LibraryEntry {
   /** For skills: true when the folder bundles scripts/. */
   hasScripts?: boolean;
   /**
+   * Every file this entry is made of, relative to the kind's directory,
+   * `path` included. One entry stays one tool — the shelf must not grow a
+   * second row called browser — but a caller copying the library needs the
+   * code beside the manifest, and the listing is the only place that knows
+   * what is in the folder. Absent for a single-file entry, where `path` is
+   * already the whole of it.
+   */
+  files?: string[];
+  /**
    * For tools: how this one connects — http, script or mcp. Surfaced so a
    * list of tools reads as one vocabulary with three transports, rather
    * than a page of names whose differences are invisible until you open
@@ -87,6 +96,25 @@ export interface LibraryEntry {
   transport?: "http" | "script" | "mcp";
   runs?: string;
   updatedAt: string;
+}
+
+/** Every file inside a folder entry, as paths relative to the kind's
+ *  directory. Depth-first so a nested `scripts/` comes with it. */
+function folderFiles(dir: string, prefix: string): string[] {
+  const out: string[] = [];
+  const walk = (at: string, rel: string) => {
+    for (const e of fs.readdirSync(at, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const here = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(at, e.name), here);
+      else out.push(`${prefix}/${here}`);
+    }
+  };
+  try {
+    walk(dir, "");
+  } catch {
+    return [`${prefix}/tool.md`];
+  }
+  return out;
 }
 
 export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
@@ -115,6 +143,7 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
         out.push({
           ...describe(manifest, entry.name),
           path: `${entry.name}/tool.md`,
+          files: folderFiles(full, entry.name),
           ...toolShape(manifest, entry.name),
           updatedAt: fs.statSync(manifest).mtime.toISOString(),
         });
@@ -140,6 +169,7 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
           ...describe(skillMd, entry),
           path: `${entry}/SKILL.md`,
           hasScripts: fs.existsSync(path.join(full, "scripts")),
+          files: folderFiles(full, entry),
           updatedAt: fs.statSync(skillMd).mtime.toISOString(),
         });
       } else if (entry.endsWith(".md")) {

@@ -71,7 +71,7 @@ const TOOL_GROUPS: Completion[] = [
   { label: "read", hint: "Read, Glob, Grep — may look, never write" },
   { label: "files", hint: "Read, Write, Edit, Glob, Grep" },
   { label: "web", hint: "WebSearch (Anthropic's servers, billed per search), WebFetch" },
-  { label: "fetch", hint: "WebFetch only — local; pair with the websearch tool" },
+  { label: "fetch", hint: "WebFetch only — the SDK's; prefer the web_fetch tool" },
   { label: "bash", hint: "Bash — arbitrary commands" },
 ];
 
