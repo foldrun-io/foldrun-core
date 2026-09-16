@@ -408,6 +408,7 @@ apis: [{ name: crm }]       # an HTTP API, as a tool
 mcpServers: {}              # an MCP server, as a tool
 agents: [writer]            # colleagues this one may consult
 secrets: [CRM_TOKEN]        # from the vault — never written in these files
+timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
 provider: {}                # BYOK: your own model credential
 permissionMode: plan        # plan first, act once approved
 runtime:                    # only if scripts need packages
@@ -419,6 +420,10 @@ You research a topic and report what you found...
 
 Only \`name\` and the prose are required. Every other field widens or narrows
 what the agent can reach, and the default is narrow.
+
+\`timezone:\` is nearest-wins all the way down: the agent's own, else its
+flow's, else the workspace's AGENTS.md, else the account's, else UTC. It sets
+\`TZ\` and the date the agent is told, so a Sydney desk stamps the Sydney date.
 
 \`runtime:\` installs pip/npm packages in the sandbox each agent runs in. Pin
 versions the normal way (\`pandas>=2\`, \`lodash@^4\`). Python and Node are
