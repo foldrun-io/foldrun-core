@@ -45,6 +45,7 @@ import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
+import { languageProblem } from "./language.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
@@ -806,6 +807,7 @@ export interface AgentInfo {
   timezone: string | null;
   /** What is wrong with the `timezone:` line, or null. */
   timezoneProblem: string | null;
+  languageProblem: string | null;
   /** web_search:/web_fetch:/web_browse: values that cannot work. The run says
    *  so in its trail and carries on; check and deploy say so first. */
   webProblems: string[];
@@ -1319,6 +1321,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         budgetProblem: budgetProblem(data.budget, ["run"]),
         timezone: typeof data.timezone === "string" ? data.timezone : null,
         timezoneProblem: timezoneProblem(data.timezone),
+        languageProblem: languageProblem(data.language),
         webProblems: webProblems(data),
       };
     });
