@@ -36,6 +36,7 @@ import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
 import { languageProblem } from "./language.ts";
+import { localeProblems } from "./locale.ts";
 import { repoDir } from "./gitrepo.ts";
 
 /** Directories a deploy never reads out of a source tree. */
@@ -232,6 +233,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     for (const w of webProblems(front)) at(f.path, w);
     const lang = languageProblem(front.language);
     if (lang) at(f.path, lang);
+    for (const w of localeProblems(front)) at(f.path, w);
   }
   if (agents.size === 0) {
     at("agents/", "no agents — a workspace needs at least one agents/<name>/agent.md");

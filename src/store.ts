@@ -46,6 +46,7 @@ import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
 import { languageProblem } from "./language.ts";
+import { localeProblems } from "./locale.ts";
 import {
   readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
 } from "./okf.ts";
@@ -808,6 +809,8 @@ export interface AgentInfo {
   /** What is wrong with the `timezone:` line, or null. */
   timezoneProblem: string | null;
   languageProblem: string | null;
+  /** region:/currency:/units:/calendar: values that cannot be read. */
+  localeProblems: string[];
   /** web_search:/web_fetch:/web_browse: values that cannot work. The run says
    *  so in its trail and carries on; check and deploy say so first. */
   webProblems: string[];
@@ -1322,6 +1325,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         timezone: typeof data.timezone === "string" ? data.timezone : null,
         timezoneProblem: timezoneProblem(data.timezone),
         languageProblem: languageProblem(data.language),
+        localeProblems: localeProblems(data),
         webProblems: webProblems(data),
       };
     });

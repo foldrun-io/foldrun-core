@@ -85,6 +85,7 @@ import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { resolveSearch } from "./providers.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
+import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
@@ -361,6 +362,28 @@ export function agentLanguage(agentDir: string, tenant: string, agentFront: Reco
 }
 
 /**
+ * The country this step works for, on the same road as the language, then
+ * FOLDRUN_REGION, then whatever the language tag carried (`en-AU` says AU).
+ * Everything a country changes — currency, units, calendar, weekend, text
+ * direction — is derived from it in locale.ts; the three overrides
+ * (`currency:`, `calendar:`, `units:`) are read at the nearest level that
+ * wrote them.
+ */
+export function agentRegion(agentDir: string, tenant: string, agentFront: Record<string, unknown>, languageTag: string): RegionChoice {
+  return resolveRegion([
+    { level: "agent", value: agentFront.region },
+    { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.region },
+    { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.region },
+  ], languageTag);
+}
+
+export function agentLocaleOverrides(agentDir: string, tenant: string, agentFront: Record<string, unknown>): { currency?: unknown; calendar?: unknown; units?: unknown } {
+  const levels = [agentFront, readAgentsMd(workspaceRootOf(agentDir))?.data ?? {}, readAgentsMd(accountDir(tenant))?.data ?? {}];
+  const pick = (k: string) => levels.map((l) => l[k]).find((v) => v !== undefined && v !== null && v !== "");
+  return { currency: pick("currency"), calendar: pick("calendar"), units: pick("units") };
+}
+
+/**
  * The prose from AGENTS.md, outermost first.
  *
  * This was written by every scaffold, shown in the dashboard, described in the
@@ -565,12 +588,22 @@ function agentContext(
   // its sentence goes in here, the env the tools read is set below, and the
   // step prints any level that wrote something unreadable.
   const language = agentLanguage(agentDir, tenant, front);
+  const region = agentRegion(agentDir, tenant, front, language.language);
+  // The clock is resolved further down for the env; the locale needs its
+  // zone now so "today" in a Jalali or Hijri calendar is today where the
+  // step works, not in UTC.
+  const localeZone = agentClock(agentDir, tenant, front, flowTimezone).timezone;
+  const locale: LocaleFacts = deriveLocale(language.language, region.region, agentLocaleOverrides(agentDir, tenant, front), localeZone);
   // Said only when someone set it: an agent that never mentions a language
-  // reads exactly the prompt it always did.
-  if (language.from !== "default" && language.from !== "env") {
+  // or a region reads exactly the prompt it always did.
+  const languageSet = language.from !== "default" && language.from !== "env";
+  const regionSet = region.from !== "none" && region.from !== "env" && region.from !== "language";
+  if (languageSet || regionSet) {
     parts.push(
-      `# Language\n\nWrite in ${languageName(language.language)} (\`${language.language}\`, set at the ${language.from} level) ` +
-        `unless the step you are given says otherwise. Your tools already know: a search asks in it, the browser reports it, a fetch requests it.`,
+      `# Locale\n\n${localeProse(locale, languageName(language.language), regionName(region.region))} ` +
+        `Write in ${languageName(language.language)} unless the step you are given says otherwise; ` +
+        `use these currency, units and calendar conventions in anything you produce. ` +
+        `Your tools already know: a search asks in it and for this country, the browser reports it, a fetch requests it.`,
     );
   }
   parts.push(
@@ -1036,6 +1069,14 @@ function agentContext(
     // The language the agent works in — what the search asks in, the locale
     // the browser reports, the Accept-Language a fetch sends. Not a secret.
     FOLDRUN_LANGUAGE: language.language,
+    // The country and what follows from it — web_search's gl, a script's
+    // currency. Unset where nobody said, so nothing is invented.
+    ...(region.region ? { FOLDRUN_REGION: region.region } : {}),
+    ...(locale.currency ? { FOLDRUN_CURRENCY: locale.currency } : {}),
+    FOLDRUN_UNITS: locale.units,
+    FOLDRUN_CALENDAR: locale.calendar,
+    ...(locale.dateLocal ? { FOLDRUN_DATE_LOCAL: locale.dateLocal } : {}),
+    FOLDRUN_RTL: locale.direction === "rtl" ? "1" : "0",
     // TZ is the form the sandbox's shell and Node both read; for a fixed
     // offset that is not the same string Intl was given (see clock.ts).
     TZ: clock.tz,
@@ -1287,6 +1328,7 @@ function agentContext(
     providerSecrets,
     providerWarnings,
     fallbackEnv,
+    region,
     // Who answers web_search and web_fetch, resolved once up top. The step
     // needs them again to grant a direct API's key to its host.
     searchChoice,
@@ -1535,7 +1577,7 @@ async function runStep(
       unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
-      searchChoice, fetchChoice, language,
+      searchChoice, fetchChoice, language, region,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
@@ -1573,6 +1615,7 @@ async function runStep(
     for (const w of providerWarnings) push("error", w);
     // A level that wrote a language nobody can read was skipped, not obeyed.
     for (const l of language.lines) push("info", l);
+    for (const l of region.lines) push("info", l);
     for (const w of apiWarnings) push("error", `openapi: ${w}`);
     if (formatWarning) push("error", formatWarning);
     if (legacyUse.length) push("error", legacyUseError(legacyUse));
