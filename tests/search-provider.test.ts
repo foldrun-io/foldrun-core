@@ -193,3 +193,16 @@ test("the long form works for a browser too, and a literal key is still refused"
   assert.equal(resolveSearch({ name: "browserbase", key: "${BB}" }, "browse").secret, "BB");
   assert.match(resolveSearch({ name: "browserbase", key: "a-literal-value" }, "browse").error!, /not the key itself/);
 });
+
+// ---- the three gates share one rule --------------------------------------
+import { webProblems } from "../src/providers.ts";
+
+test("webProblems names every web key that cannot work, and nothing else", () => {
+  assert.deepEqual(webProblems({}), []);
+  assert.deepEqual(webProblems({ web_search: "exa", web_fetch: "jina", web_browse: "steel" }), []);
+  const bad = webProblems({ web_search: "deepseek", web_fetch: "brave", web_browse: "exa" });
+  assert.equal(bad.length, 3);
+  assert.match(bad[0], /web_search: deepseek — DeepSeek has no server-side search/);
+  assert.match(bad[1], /web_fetch: brave — Brave Search searches but has no fetch here/);
+  assert.match(bad[2], /web_browse: exa — no remote browser by that name/);
+});

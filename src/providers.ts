@@ -474,3 +474,17 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
   }
   return { provider: key, shape: preset.search, index: SEARCH_INDEX[key] };
 }
+
+/** Every web_search: / web_fetch: / web_browse: value in a frontmatter that
+ *  cannot work, each as the sentence resolveSearch gives. Computed once in
+ *  core so `check`, the deploy gate and the run all refuse the same thing
+ *  in the same words — the timezone rule's shape. Empty when all three are
+ *  unset or answerable. */
+export function webProblems(front: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [key, kind] of [["web_search", "search"], ["web_fetch", "fetch"], ["web_browse", "browse"]] as const) {
+    const choice = resolveSearch(front[key], kind);
+    if (choice.error) out.push(choice.error);
+  }
+  return out;
+}

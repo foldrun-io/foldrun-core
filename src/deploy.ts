@@ -34,6 +34,7 @@ import {
 import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
+import { webProblems } from "./providers.ts";
 import { repoDir } from "./gitrepo.ts";
 
 /** Directories a deploy never reads out of a source tree. */
@@ -226,6 +227,8 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     }
     const problem = timezoneProblem(front.timezone);
     if (problem) at(f.path, problem);
+    // The same refusal check gives: a web key that cannot work never ships.
+    for (const w of webProblems(front)) at(f.path, w);
   }
   if (agents.size === 0) {
     at("agents/", "no agents — a workspace needs at least one agents/<name>/agent.md");
