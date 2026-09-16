@@ -102,7 +102,7 @@ test("the long form names the API and the customer's own vault entry", () => {
 });
 
 test("a key written into the file is refused, and the refusal says where it goes", () => {
-  const got = resolveSearch({ name: "exa", key: "sk-live-abc123" });
+  const got = resolveSearch({ name: "exa", key: "the-key-itself-not-a-reference" });
   assert.equal(got.provider, null);
   assert.match(got.error!, /not the key itself/);
   assert.match(got.error!, /foldrun secrets set/);
@@ -191,5 +191,5 @@ test("a remote browser resolves for web_browse with its secret, and only for web
 
 test("the long form works for a browser too, and a literal key is still refused", () => {
   assert.equal(resolveSearch({ name: "browserbase", key: "${BB}" }, "browse").secret, "BB");
-  assert.match(resolveSearch({ name: "browserbase", key: "bb_live_x" }, "browse").error!, /not the key itself/);
+  assert.match(resolveSearch({ name: "browserbase", key: "a-literal-value" }, "browse").error!, /not the key itself/);
 });
