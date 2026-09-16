@@ -83,6 +83,9 @@ import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { trimChars } from "./paths.ts";
+import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
+
+export { localDate } from "./clock.ts";
 
 // An MCP tool definition becomes an SDK server config. ${SECRET} placeholders
 // in env and headers resolve server-side, so a credential reaches the server
@@ -311,31 +314,33 @@ function workspaceFrontmatter(agentDir: string, tenant: string): Record<string, 
 }
 
 /**
- * The calendar an agent works to. `timezone:` in AGENTS.md, nearest-wins like
- * every other key there; a flow's cron already means its own timezone, this
- * makes "today" mean it too. Unset is UTC — what the pods run — which for a
- * Sydney desk made an article dated today "one day in the future" until 10am.
- * An unknown name falls back to UTC rather than failing every step.
+ * The calendar a set of frontmatter asks for, with no cascade around it —
+ * one merged record in, one zone out. The full cascade lives in
+ * `agentClock` below and in clock.ts; this is what the account-level parts
+ * of the platform (a wallet's month, a budget window) call.
  */
 export function resolveTimezone(front: Record<string, unknown>): string {
-  const tz = typeof front.timezone === "string" ? front.timezone.trim() : "";
-  const chosen = tz || process.env.FOLDRUN_TIMEZONE?.trim() || "UTC";
-  try {
-    new Intl.DateTimeFormat("en-CA", { timeZone: chosen });
-    return chosen;
-  } catch {
-    return "UTC";
-  }
+  return resolveClock([{ level: "workspace", value: front.timezone }]).timezone;
 }
 
-/** YYYY-MM-DD in a timezone — the date the workspace believes it is. */
-export function localDate(timeZone: string, now = new Date()): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(now);
+/**
+ * The clock this step works to: agent, then flow, then workspace, then
+ * account, then FOLDRUN_TIMEZONE, then UTC. Nearest wins, and a value that
+ * is not a zone falls through to the next level with a line to say so —
+ * see clock.ts for why this exists at all.
+ */
+export function agentClock(
+  agentDir: string,
+  tenant: string,
+  agentFront: Record<string, unknown>,
+  flowTimezone?: string | null,
+): ClockChoice {
+  return resolveClock([
+    { level: "agent", value: agentFront.timezone },
+    { level: "flow", value: flowTimezone },
+    { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.timezone },
+    { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.timezone },
+  ]);
 }
 
 /**
@@ -522,6 +527,9 @@ function agentContext(
   tags: string[] = [],
   /** Who is running, so scripts can stamp what they write with its provenance. */
   identity: { runId?: string; agent?: string } = {},
+  /** The flow's own `timezone:`, when this step belongs to one. Between the
+   *  agent's frontmatter and the workspace's AGENTS.md in the cascade. */
+  flowTimezone?: string | null,
 ) {
   // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
   // workspace a secret should resolve against is two levels up.
@@ -967,12 +975,16 @@ function agentContext(
     runtimeError = runtime.error;
   }
 
-  // What day it is, in the workspace's own timezone. Not a secret, so it
-  // travels beside secretEnv rather than inside it — a value in there is
-  // redacted from every log line that quotes it.
-  const timezone = resolveTimezone(workspaceFrontmatter(agentDir, tenant));
+  // What day it is, in the calendar this step works to — the agent's own
+  // `timezone:`, else its flow's, else the workspace's, else the account's.
+  // Not a secret, so it travels beside secretEnv rather than inside it — a
+  // value in there is redacted from every log line that quotes it.
+  const clock = agentClock(agentDir, tenant, front, flowTimezone);
+  const timezone = clock.timezone;
   const clockEnv = {
-    TZ: timezone,
+    // TZ is the form the sandbox's shell and Node both read; for a fixed
+    // offset that is not the same string Intl was given (see clock.ts).
+    TZ: clock.tz,
     FOLDRUN_DATE: localDate(timezone),
     // Where the account's own search engine answers, when the install runs
     // one — the `websearch` library tool reads it. Not a secret; rides with
@@ -1142,6 +1154,9 @@ function agentContext(
   return {
     front,
     clockEnv,
+    /** The zone, where it came from, and anything unreadable on the way —
+     *  reported by the step, not here, so it lands in the run's trace. */
+    clock,
     systemPrompt: parts.join("\n\n"),
     allowed: finalAllowed,
     disabled,
@@ -1305,6 +1320,9 @@ async function runStep(
    *  in-process model loop, so a stop lands mid-step and not at the next
    *  group. The isolated path needs none: stopRun destroys the sandbox. */
   stopRequested?: () => boolean,
+  /** The flow's `timezone:`, for the clock cascade. Undefined for a step
+   *  run outside any flow, which still gets agent → workspace → account. */
+  flowTimezone?: string | null,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -1409,14 +1427,14 @@ async function runStep(
     // step: the generic HTTP tool still works without the typed ones.
     for (const w of await prefetchOpenApi(tenant, openApiSources(agentDir, tenant))) push("error", `openapi: ${w}`);
     const {
-      front, clockEnv, systemPrompt, allowed, disabled, apiTools, scriptTools,
+      front, clockEnv, clock, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
-    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent });
+    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
     // A retry that moved the step up a class (an evicted or OOM-killed
     // attempt) wins over the agent's own `size:` for the attempts after.
     const size = step.sizeUp ?? agentSize;
@@ -1442,6 +1460,11 @@ async function runStep(
       // Longest first, so a value containing another is replaced whole.
       .sort((a, b) => b[0].length - a[0].length);
 
+    // One line for the clock: which zone this step works to, and which level
+    // set it. "Why is this dated yesterday" should be answerable from the run.
+    push("info", `clock: ${clock.timezone} (${clock.source}) — today is ${clockEnv.FOLDRUN_DATE}`);
+    // And one more only when something written could not be read as a zone.
+    for (const problem of clock.problems) push("error", problem);
     if (providerLabel) push("info", `provider: ${providerLabel}`);
     for (const w of providerWarnings) push("error", w);
     for (const w of apiWarnings) push("error", `openapi: ${w}`);
@@ -2627,6 +2650,18 @@ function driveRunInner(
   opts: { parkOnApproval?: boolean; effortOverride?: string | null },
 ): Promise<void> {
   const effortOverride = opts.effortOverride ?? null;
+  // The flow's own calendar. Read from the flow file rather than passed in,
+  // so every door into a run — the queue, an eval, the CLI, a rerun, a
+  // reconcile that picks an abandoned run back up — gets the same clock
+  // without each caller having to remember it. A run that belongs to no
+  // flow (an ad-hoc agent run) finds nothing here and cascades from the
+  // agent to the workspace, which is what it should do.
+  let flowTimezone: string | null = null;
+  try {
+    flowTimezone = readFlow(tenant, workspace, run.flow)?.timezone ?? null;
+  } catch {
+    // an unreadable flow file is reported where it is parsed for real
+  }
   const pDir = workspaceDir(tenant, workspace);
   const runRoot = pDir;
   /**
@@ -3333,6 +3368,7 @@ function driveRunInner(
                     save();
                     return run.stopRequested === true;
                   },
+                  flowTimezone,
                 );
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -3435,7 +3471,7 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true);
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, undefined, flowTimezone);
           // runStep mutates rescue.status; widen past TS's "running" narrowing.
           const rescueOutcome: string = rescue.status;
           if (rescueOutcome === "completed") {
