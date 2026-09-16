@@ -822,7 +822,26 @@ function agentContext(
   //
   // Declared-and-absent is still an error; referenced-and-absent is the API
   // tool's own missingSecrets, reported where the tool is described.
-  const declared: string[] = Array.isArray(front.secrets) ? front.secrets.map(String) : [];
+  // `web_search:` and `web_fetch:` name who answers; resolved here, early,
+  // because three later things hang off the answer — the secret the step
+  // must hold, the env the tool reads, and the egress grant for the host.
+  const searchChoice = resolveSearch((front as Record<string, unknown>).web_search, "search");
+  const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch, "fetch");
+  // A direct search API is paid for with the customer's own key, stored
+  // under a fixed vault name (EXA_API_KEY, BRAVE_SEARCH_API_KEY, …). Naming
+  // the API in frontmatter is declaring that secret — nobody should have to
+  // write it twice, and a run that forgot the second line would search
+  // nothing and say so only at the provider.
+  const declared: string[] = [
+    ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
+    ...[searchChoice, fetchChoice].flatMap((c) => {
+      if (c.shape !== "direct" || !c.secret) return [];
+      // Jina's reader answers without a key. Declaring an absent optional
+      // key would fail the step for a credential it never needed.
+      if (c.secretOptional && !getSecret(tenant, c.secret, workspace)) return [];
+      return [c.secret];
+    }),
+  ];
   const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
   const {
     env: secretEnv,
@@ -992,6 +1011,14 @@ function agentContext(
     // one — the `websearch` library tool reads it. Not a secret; rides with
     // the clock so it reaches scripts, the sandbox and verify alike.
     ...(process.env.FOLDRUN_SEARCH_URL ? { FOLDRUN_SEARCH_URL: process.env.FOLDRUN_SEARCH_URL } : {}),
+    // Whose index our web_search asks when the agent named a search API.
+    // Unset means the account's own engine. The name, never the key.
+    ...(searchChoice.shape === "direct" && searchChoice.provider
+      ? { FOLDRUN_WEB_SEARCH_VIA: searchChoice.provider, FOLDRUN_WEB_SEARCH_SECRET: searchChoice.secret ?? "" }
+      : {}),
+    ...(fetchChoice.shape === "direct" && fetchChoice.provider
+      ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
+      : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.
@@ -1070,8 +1097,6 @@ function agentContext(
   // point the run at z.ai and z.ai's index answers the same tool Anthropic
   // would have. The name the model sees is unchanged either way, so a prompt
   // written against `web_search` survives the switch.
-  const searchChoice = resolveSearch((front as Record<string, unknown>).web_search);
-  const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch);
   const providerWebTools: Record<string, string> = {};
   for (const [key, choice, builtin] of [
     ["web_search", searchChoice, "WebSearch"],
@@ -1079,7 +1104,11 @@ function agentContext(
   ] as const) {
     if (choice.error) {
       providerWarnings.push(choice.error);
-    } else if (choice.provider) {
+    } else if (choice.provider && choice.shape !== "direct") {
+      // A provider's server-side tool replaces ours. A direct search API
+      // does not: our tool stays, and reads FOLDRUN_WEB_SEARCH_VIA to know
+      // whose index to ask — through the egress proxy, with the customer's
+      // own key, on the run record.
       providerWebTools[key] = builtin;
     }
   }
@@ -1219,6 +1248,10 @@ function agentContext(
     providerSecrets,
     providerWarnings,
     fallbackEnv,
+    // Who answers web_search and web_fetch, resolved once up top. The step
+    // needs them again to grant a direct API's key to its host.
+    searchChoice,
+    fetchChoice,
     // Stamped with the step's own zone: when one of these refuses, the
     // reset time it reports is told in the calendar the step works to,
     // not in the pod's UTC.
@@ -1462,6 +1495,7 @@ async function runStep(
       unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
+      searchChoice, fetchChoice,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
@@ -1791,6 +1825,14 @@ async function runStep(
       // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
       // everything below materialises exactly as it always did.
       const grant: EgressGrant = { secrets: {}, timezone: clock.timezone };
+      // A direct search API's key: granted to that API's host and no other,
+      // exactly as an http tool's key is granted to its base URL's host. The
+      // script sends the placeholder; the worker fills it on the way out.
+      for (const choice of [searchChoice, fetchChoice]) {
+        if (choice.shape === "direct" && choice.secret && choice.host && choice.secret in liveSecrets) {
+          addGrant(grant, choice.secret, liveSecrets[choice.secret], choice.host);
+        }
+      }
       for (const api of apiSpecs) {
         const host = hostOf(api.base);
         if (!host) continue;

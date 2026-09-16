@@ -79,7 +79,114 @@ export interface ProviderPreset {
  *   "builtin_fn" Moonshot's `$web_search`, a Chat-Completions builtin_function
  *                the client has to echo back — billed per successful call
  *   undefined    no server-side search. Ours is the only way to the web. */
-export type SearchShape = "anthropic" | "plugin" | "openai" | "builtin_fn";
+export type SearchShape = "anthropic" | "plugin" | "openai" | "builtin_fn" | "direct";
+
+/** A search API the runtime calls itself, with the customer's own key.
+ *
+ *  These are not model providers — none of them serves a model — so they
+ *  live apart from PROVIDERS. `web_search:` accepts either kind of name, and
+ *  the difference decides where the search runs: a provider's server-side
+ *  tool runs on the provider's machines and is off the run record, while a
+ *  direct API is called from the run's own sandbox through the egress proxy
+ *  — the key never enters the pod, the call is on the record with its
+ *  arguments, and it works whichever model is driving. Same switch, better
+ *  audit trail. Shapes were read from each vendor's own API reference on
+ *  2026-09-16; the wrapper in the gallery's web_search tool carries the
+ *  matching request and response mapping. */
+export interface SearchApi {
+  name: string;
+  aliases?: string[];
+  title: string;
+  /** The one host the key may be sent to — the egress grant is for this. */
+  host: string;
+  endpoint: string;
+  method: "GET" | "POST";
+  /** The header the key travels in, and any prefix on the value. */
+  auth: { header: string; prefix?: string };
+  /** The vault name a customer stores their key under. */
+  secret: string;
+  index: string;
+  note?: string;
+  /** The API answers without a key (at a lower rate). The runner declares
+   *  the secret only when the vault has it, so a missing key is not an
+   *  error the way a declared-and-absent secret is. */
+  secretOptional?: boolean;
+  /** What the value in the vault must be, when it is not the bare key. */
+  secretFormat?: string;
+}
+
+export const SEARCH_APIS: readonly SearchApi[] = [
+  { name: "brave", title: "Brave Search", host: "api.search.brave.com", endpoint: "https://api.search.brave.com/res/v1/web/search",
+    method: "GET", auth: { header: "X-Subscription-Token" }, secret: "BRAVE_SEARCH_API_KEY",
+    index: "Brave's own — ~40B pages, ~100M refreshed a day; the index Claude searches" },
+  { name: "exa", title: "Exa", host: "api.exa.ai", endpoint: "https://api.exa.ai/search",
+    method: "POST", auth: { header: "x-api-key" }, secret: "EXA_API_KEY",
+    index: "Exa's own semantic index — by meaning, not keywords" },
+  { name: "tavily", title: "Tavily", host: "api.tavily.com", endpoint: "https://api.tavily.com/search",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "TAVILY_API_KEY",
+    index: "Tavily's own crawler plus bought-in feeds" },
+  { name: "parallel", title: "Parallel", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/search",
+    method: "POST", auth: { header: "x-api-key" }, secret: "PARALLEL_API_KEY",
+    index: "Parallel's own closed index",
+    note: "Wants an objective beside the queries; the wrapper writes one from the query." },
+  { name: "you", aliases: ["youcom", "you.com"], title: "You.com", host: "ydc-index.io", endpoint: "https://ydc-index.io/v1/search",
+    method: "POST", auth: { header: "X-API-Key" }, secret: "YOU_API_KEY",
+    index: "You.com's own index and cache (self-reported)" },
+  { name: "jina", title: "Jina Search", host: "s.jina.ai", endpoint: "https://s.jina.ai/",
+    method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "JINA_API_KEY",
+    index: "Jina's — top results, each with its page content already read",
+    note: "s.jina.ai refuses without a key (checked live 2026-09-16); r.jina.ai, the reader, does not." },
+  { name: "firecrawl", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/search",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "FIRECRAWL_API_KEY",
+    index: "Firecrawl's — open-source core, self-hostable" },
+];
+
+/** Fetch APIs the runtime calls itself: a URL in, the page out, with the
+ *  customer's own key. Same seam as the search APIs — `web_fetch: jina` —
+ *  and the same trade: our own fetch is free and on the record; these are
+ *  for the failure modes ours cannot cover, chiefly a page that refuses a
+ *  plain request. Three tiers, priced accordingly: a reader (Jina,
+ *  Firecrawl) turns a page into clean markdown; a search vendor's extract
+ *  (Exa, Tavily, Parallel) reads many at once; an unblocker (Zyte) renders
+ *  behind the anti-bot walls a reader cannot pass. */
+export interface FetchApi extends Omit<SearchApi, "index"> {
+  tier: "reader" | "extract" | "unblocker";
+  /** How many URLs one call may carry. 1 means one call per page. */
+  batch: number;
+  what: string;
+}
+
+export const FETCH_APIS: readonly FetchApi[] = [
+  { name: "jina", title: "Jina Reader", host: "r.jina.ai", endpoint: "https://r.jina.ai/",
+    method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "JINA_API_KEY", secretOptional: true,
+    tier: "reader", batch: 1, what: "clean markdown, text or html; works without a key at 20 requests a minute (checked live 2026-09-16)" },
+  { name: "firecrawl", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/scrape",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "FIRECRAWL_API_KEY",
+    tier: "reader", batch: 1, what: "main-content markdown or html, boilerplate stripped; one URL per call" },
+  { name: "exa", title: "Exa Contents", host: "api.exa.ai", endpoint: "https://api.exa.ai/contents",
+    method: "POST", auth: { header: "x-api-key" }, secret: "EXA_API_KEY",
+    tier: "extract", batch: 100, what: "text for up to 100 URLs in one call; served from Exa's own cache unless told to fetch fresh" },
+  { name: "tavily", title: "Tavily Extract", host: "api.tavily.com", endpoint: "https://api.tavily.com/extract",
+    method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "TAVILY_API_KEY",
+    tier: "extract", batch: 20, what: "markdown or text for up to 20 URLs in one call, failures listed beside successes" },
+  { name: "parallel", title: "Parallel Extract", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/extract",
+    method: "POST", auth: { header: "x-api-key" }, secret: "PARALLEL_API_KEY",
+    tier: "extract", batch: 20, what: "full-page markdown for several URLs at once; handles JavaScript pages and PDFs" },
+  { name: "zyte", title: "Zyte API", host: "api.zyte.com", endpoint: "https://api.zyte.com/v1/extract",
+    method: "POST", auth: { header: "Authorization", prefix: "Basic " }, secret: "ZYTE_API_KEY_BASIC",
+    secretFormat: "base64 of `<api key>:` — Zyte authenticates with HTTP basic auth, and the proxy fills a placeholder verbatim, so the vault holds the encoded form: `printf 'KEY:' | base64`",
+    tier: "unblocker", batch: 1, what: "the page rendered in a real browser behind Zyte's proxy pool — for the sites that refuse everything else; pay per successful request" },
+];
+
+export function findFetchApi(name: string): FetchApi | undefined {
+  const key = name.trim().toLowerCase();
+  return FETCH_APIS.find((a) => a.name === key || a.aliases?.includes(key));
+}
+
+export function findSearchApi(name: string): SearchApi | undefined {
+  const key = name.trim().toLowerCase();
+  return SEARCH_APIS.find((a) => a.name === key || a.aliases?.includes(key));
+}
 
 /** Whose index answers, for the ones that will answer at all. Checked against
  *  each vendor's own documentation on 2026-09-16. Worth stating out loud
@@ -194,22 +301,89 @@ export interface SearchChoice {
   shape?: SearchShape;
   /** Whose index answers, for the run trace and the help page. */
   index?: string;
+  /** For a direct API: the vault name of the customer's key, and the one
+   *  host the egress proxy may fill it in for. */
+  secret?: string;
+  secretOptional?: boolean;
+  host?: string;
   /** Set when the name cannot work; `check` prints it and refuses. */
   error?: string;
 }
 
-export function resolveSearch(name: unknown): SearchChoice {
+/** `web_search: exa`, or the long form with the customer's own vault name:
+ *
+ *    web_search:
+ *      name: exa
+ *      key: ${MY_EXA_KEY}
+ *
+ *  The same two spellings `provider:` takes. `key` is a reference, never a
+ *  value — a credential written into a markdown file is refused here, the
+ *  way it is refused everywhere else in foldrun. */
+function readChoice(raw: unknown, field: string): { name: string; secret?: string } | { error: string } {
+  if (typeof raw === "string") return { name: raw };
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>;
+    if (typeof o.name !== "string" || !o.name.trim()) {
+      return { error: `${field}: the long form needs \`name:\` — the API or provider to ask.` };
+    }
+    if (o.key === undefined) return { name: o.name };
+    if (typeof o.key !== "string") return { error: `${field}.key must be a \${NAME} reference to a secret in the vault.` };
+    const m = /^\$\{([A-Z][A-Z0-9_]*)\}$/.exec(o.key.trim());
+    if (!m) {
+      return {
+        error:
+          `${field}.key must be a \${NAME} reference to a secret in the vault, not the key itself — ` +
+          `store it with \`foldrun secrets set NAME\` and write \`key: \${NAME}\`.`,
+      };
+    }
+    return { name: o.name, secret: m[1] };
+  }
+  return { error: `${field}: takes a name, or a block with name: and key:, or nothing at all for the runtime's own.` };
+}
+
+export function resolveSearch(name: unknown, kind: "search" | "fetch" = "search"): SearchChoice {
+  const field = kind === "fetch" ? "web_fetch" : "web_search";
   if (name === undefined || name === null || name === "" || name === "ours") {
     return { provider: null };
   }
-  if (typeof name !== "string") {
-    return { provider: null, error: "web_search: takes a provider name, or nothing at all for the account's own search engine." };
+  const read = readChoice(name, field);
+  if ("error" in read) return { provider: null, error: read.error };
+  const key = read.name.trim().toLowerCase();
+
+  const api = kind === "fetch" ? findFetchApi(key) : findSearchApi(key);
+  if (api) {
+    return {
+      provider: api.name,
+      shape: "direct",
+      index: "index" in api ? (api as SearchApi).index : (api as FetchApi).what,
+      secret: read.secret ?? api.secret,
+      // A custom vault name is a deliberate choice; it is never optional.
+      secretOptional: read.secret ? false : Boolean(api.secretOptional),
+      host: api.host,
+    };
   }
-  const key = name.trim().toLowerCase();
+  if (kind === "fetch") {
+    const other = findSearchApi(key);
+    if (other) {
+      return { provider: null, error: `web_fetch: ${key} — ${other.title} searches but has no fetch here. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.` };
+    }
+    if (key === "anthropic") return { provider: "anthropic", shape: "anthropic", index: "Anthropic's web_fetch — a small model's reading of the page, on Anthropic's servers" };
+    const preset = PROVIDERS.find((p) => p.name === key);
+    return {
+      provider: null,
+      error: preset
+        ? `web_fetch: ${key} — ${preset.title} has no fetch a tool can call. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`
+        : `web_fetch: ${key} — no fetch API or provider by that name. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`,
+    };
+  }
+  if (read.secret) {
+    return { provider: null, error: `${field}.key: only a direct API takes your own key here. ${key} is a model provider — its key lives in the provider: block.` };
+  }
   const preset = PROVIDERS.find((p) => p.name === key);
   if (!preset) {
-    const near = PROVIDERS.filter((p) => p.search).map((p) => p.name).join(", ");
-    return { provider: null, error: `web_search: ${key} — no provider by that name. The ones that can search: ${near}.` };
+    const providers = PROVIDERS.filter((p) => p.search).map((p) => p.name).join(", ");
+    const apis = SEARCH_APIS.map((a) => a.name).join(", ");
+    return { provider: null, error: `${field}: ${key} — no provider or search API by that name. Providers that search: ${providers}. Search APIs, with your own key: ${apis}.` };
   }
   if (!preset.search) {
     return {

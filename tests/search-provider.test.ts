@@ -39,7 +39,7 @@ test("an Anthropic-shaped endpoint with no search is refused, not quietly allowe
 
 test("a typo names the providers that would have worked", () => {
   const got = resolveSearch("anthropc");
-  assert.match(got.error!, /no provider by that name/);
+  assert.match(got.error!, /no provider or search API by that name/);
   assert.match(got.error!, /anthropic/);
 });
 
@@ -48,5 +48,105 @@ test("case and padding do not decide whether a desk can search", () => {
 });
 
 test("a non-string is an error rather than a silent fallback", () => {
-  assert.match(resolveSearch(true)!.error!, /provider name/);
+  assert.match(resolveSearch(true)!.error!, /takes a name/);
+});
+
+// ---- direct search APIs: the customer's own key, our tool, on the record --
+import { SEARCH_APIS, findSearchApi } from "../src/providers.ts";
+
+test("a search API resolves to the direct shape with its secret and its one host", () => {
+  for (const api of SEARCH_APIS) {
+    const got = resolveSearch(api.name);
+    assert.equal(got.shape, "direct", api.name);
+    assert.equal(got.provider, api.name);
+    assert.equal(got.secret, api.secret, "the vault name the runner will declare");
+    assert.equal(got.host, api.host, "the one host the egress grant is for");
+    assert.equal(got.error, undefined);
+  }
+});
+
+test("every search API names a host that is the host of its endpoint", () => {
+  // The grant is by host; an endpoint on a different host would be a key
+  // the proxy never fills, failing at the provider as "missing credential".
+  for (const api of SEARCH_APIS) {
+    assert.equal(new URL(api.endpoint).host, api.host, api.name);
+  }
+});
+
+test("you.com answers to its spellings", () => {
+  for (const spelling of ["you", "youcom", "you.com", "You.com"]) {
+    assert.equal(findSearchApi(spelling)?.name, "you", spelling);
+    assert.equal(resolveSearch(spelling).provider, "you", spelling);
+  }
+});
+
+
+test("a provider keeps its own shape even though it also appears in the API error list", () => {
+  assert.equal(resolveSearch("anthropic").shape, "anthropic");
+  assert.equal(resolveSearch("anthropic").secret, undefined, "no vault key — the provider's own tool answers");
+});
+
+test("an unknown name lists both the providers and the APIs", () => {
+  const got = resolveSearch("exxa");
+  assert.match(got.error!, /Providers that search: .*anthropic/);
+  assert.match(got.error!, /Search APIs, with your own key: .*exa/);
+});
+
+// ---- the long form: bring your own vault name --------------------------
+test("the long form names the API and the customer's own vault entry", () => {
+  const got = resolveSearch({ name: "exa", key: "${MY_EXA_KEY}" });
+  assert.equal(got.provider, "exa");
+  assert.equal(got.shape, "direct");
+  assert.equal(got.secret, "MY_EXA_KEY", "the runner declares this name, not the default");
+  assert.equal(got.secretOptional, false, "a chosen name is never optional");
+});
+
+test("a key written into the file is refused, and the refusal says where it goes", () => {
+  const got = resolveSearch({ name: "exa", key: "sk-live-abc123" });
+  assert.equal(got.provider, null);
+  assert.match(got.error!, /not the key itself/);
+  assert.match(got.error!, /foldrun secrets set/);
+});
+
+test("the long form without a name is an error, not a silent default", () => {
+  assert.match(resolveSearch({ key: "${X}" }).error!, /needs `name:`/);
+});
+
+test("a model provider does not take a key here — that is the provider: block's job", () => {
+  assert.match(resolveSearch({ name: "anthropic", key: "${K}" }).error!, /provider: block/);
+});
+
+// ---- fetch APIs ---------------------------------------------------------
+import { FETCH_APIS, findFetchApi } from "../src/providers.ts";
+
+test("every fetch API resolves for web_fetch with its secret and host", () => {
+  for (const api of FETCH_APIS) {
+    const got = resolveSearch(api.name, "fetch");
+    assert.equal(got.shape, "direct", api.name);
+    assert.equal(got.secret, api.secret, api.name);
+    assert.equal(got.host, api.host, api.name);
+    assert.equal(new URL(api.endpoint).host, api.host, `${api.name}: the grant host must be the endpoint's host`);
+  }
+});
+
+test("Jina's reader is the one whose key is optional; its search is not", () => {
+  assert.equal(resolveSearch("jina", "fetch").secretOptional, true);
+  assert.equal(resolveSearch("jina", "search").secretOptional, false);
+});
+
+test("a search-only API named for web_fetch is refused and told what can fetch", () => {
+  const got = resolveSearch("brave", "fetch");
+  assert.equal(got.provider, null);
+  assert.match(got.error!, /searches but has no fetch here/);
+  assert.match(got.error!, /jina/);
+});
+
+test("web_fetch: anthropic stays the one provider swap, and openai is refused honestly", () => {
+  assert.equal(resolveSearch("anthropic", "fetch").shape, "anthropic");
+  assert.match(resolveSearch("openai", "fetch").error!, /no fetch a tool can call/);
+});
+
+test("Zyte's secret says what the vault must hold", () => {
+  assert.match(findFetchApi("zyte")!.secretFormat!, /base64/);
+  assert.equal(findFetchApi("zyte")!.secret, "ZYTE_API_KEY_BASIC");
 });
