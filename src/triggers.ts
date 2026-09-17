@@ -14,7 +14,7 @@
 
 import crypto from "node:crypto";
 import { platform } from "./platform.ts";
-import { listFlows, readRun, type FlowInfo, type FlowStep, type RunRecord } from "./store.ts";
+import { listFlows, readRun, runVerdict, type FlowInfo, type FlowStep, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 
 /** The last step's result — the same reading runner.ts makes, kept local so
@@ -36,6 +36,13 @@ export function withTask(steps: FlowStep[], tag: string, body: string): FlowStep
 
 // ------------------------------------------------------------ trigger: flow
 
+/** Which `on:` a settled run answers to: failed, blocked (completed, but
+ *  its work refused itself), or completed. */
+export function endingOf(run: RunRecord): "completed" | "failed" | "blocked" {
+  if (run.status === "failed") return "failed";
+  return runVerdict(run) === "BLOCKED" ? "blocked" : "completed";
+}
+
 /** The flows a finished run should start, by this workspace's own files. */
 export function chainedFlows(tenant: string, workspace: string, finished: RunRecord): FlowInfo[] {
   if (finished.status !== "completed" && finished.status !== "failed") return [];
@@ -48,7 +55,7 @@ export function chainedFlows(tenant: string, workspace: string, finished: RunRec
       // A flow chained on itself is a loop with no bound — refused here and
       // by foldrun check, never started.
       f.name !== finished.flow &&
-      (f.on === "any" || f.on === finished.status),
+      (f.on === "any" || f.on === endingOf(finished)),
   );
 }
 
@@ -66,6 +73,7 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
   const result = (runResult(finished) ?? "").slice(0, 20_000);
   const body =
     `run: ${finished.id}\nflow: ${finished.flow}\nstatus: ${finished.status}\n` +
+    (runVerdict(finished) ? `verdict: ${runVerdict(finished)}\n` : "") +
     (finished.summary ? `summary: ${finished.summary}\n` : "") +
     (result ? `\n${result}` : "");
   for (const flow of flows) {

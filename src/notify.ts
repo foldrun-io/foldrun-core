@@ -10,7 +10,7 @@
 //
 //   notify:
 //     url: ${SLACK_WEBHOOK_URL}       # a secret name, or a literal URL
-//     events: [failed, awaiting-approval, completed]
+//     events: [failed, awaiting-approval, completed, blocked]
 //
 // Or, for people who live in an inbox rather than a channel:
 //
@@ -33,7 +33,7 @@
 
 import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
-import { accountDir, workspaceDir, runCost, readFlow, type RunRecord } from "./store.ts";
+import { accountDir, workspaceDir, runCost, readFlow, runVerdict, type RunRecord } from "./store.ts";
 import { getSecret } from "./secrets.ts";
 import { publicUrl } from "./webhook.ts";
 import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
@@ -403,7 +403,17 @@ export async function sendRunNotification(
   run: RunRecord,
 ): Promise<boolean> {
   const config = notifyConfig(tenant, workspace);
-  if (!config || !config.events.includes(run.status)) return false;
+  if (!config) return false;
+  // A completed run whose work refused itself — the verdict is BLOCKED — is
+  // its own event, `blocked`. It follows `failed` the way the plain alerts
+  // do: whoever hears about failures hears about it, because "nothing was
+  // published" is the news a person needs whether a step crashed or an
+  // agent stopped itself. Naming `blocked` turns it on alone; a list
+  // without either stays silent.
+  const blocked = run.status === "completed" && runVerdict(run) === "BLOCKED";
+  if (blocked) {
+    if (!config.events.includes("blocked") && !config.events.includes("failed")) return false;
+  } else if (!config.events.includes(run.status)) return false;
   // A test is not news. An eval case or an adhoc single-agent run is started
   // by a person who is watching it, and a desk that emails "completed" for
   // every one of them buries the weekly verdict under two hundred of these —
@@ -423,8 +433,9 @@ export async function sendRunNotification(
   // says what the run is waiting for, so nobody hunts for a button that
   // the outside world is meant to press.
   const onEvent = waitingSteps.length > 0 && waitingSteps.every((s) => s.waitFor === "event");
-  const headline =
-    run.status === "completed"
+  const headline = blocked
+    ? `⛔ ${run.flow} blocked`
+    : run.status === "completed"
       ? `✓ ${run.flow} completed`
       : run.status === "failed"
         ? `✗ ${run.flow} failed${failed.length ? ` at ${failed.join(", ")}` : ""}`
@@ -462,6 +473,7 @@ export async function sendRunNotification(
     runId: run.id,
     flow: run.flow,
     status: run.status,
+    verdict: runVerdict(run),
     summary,
     costUsd: runCost(run),
     startedAt: run.startedAt,

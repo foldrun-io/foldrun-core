@@ -191,3 +191,42 @@ test("a run notification is the account's mail first; the platform's is the fall
       if (hadFrom === undefined) delete process.env.FOLDRUN_EMAIL_FROM; else process.env.FOLDRUN_EMAIL_FROM = hadFrom;
     }
   }));
+
+test("a completed run whose verdict is BLOCKED is sent as blocked — to whoever hears failures, not to completed-only", () =>
+  withWorkspace(null, async () => {
+    const bodies: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        bodies.push(body);
+        res.writeHead(200).end("ok");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    const events = (list: string) =>
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/hook\n  events: [${list}]\n---\n`);
+    const blocked = { ...run("completed"), summary: "BLOCKED — applied 78 links, not the 7 approved; nothing pushed", verdict: "BLOCKED" as const };
+    const good = { ...run("completed"), summary: "GOOD — 6 links", verdict: "GOOD" as const };
+    try {
+      events("failed");
+      assert.equal(await sendRunNotification("acme", "desk", blocked), true, "failed hears blocked");
+      assert.equal(await sendRunNotification("acme", "desk", good), false, "failed does not hear good");
+      const payload = JSON.parse(bodies[0]);
+      assert.equal(payload.verdict, "BLOCKED");
+      assert.equal(payload.status, "completed");
+      assert.match(payload.text, /⛔ publish blocked — BLOCKED/);
+
+      events("completed");
+      assert.equal(await sendRunNotification("acme", "desk", blocked), false, "completed-only does not hear blocked");
+      assert.equal(await sendRunNotification("acme", "desk", good), true);
+
+      events("blocked");
+      assert.equal(await sendRunNotification("acme", "desk", blocked), true, "blocked alone hears it");
+      assert.equal(await sendRunNotification("acme", "desk", run("failed")), false);
+    } finally {
+      server.close();
+    }
+  }));

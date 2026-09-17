@@ -1162,7 +1162,10 @@ export interface FlowInfo {
    *  with `on:` saying which endings count. The finished run's summary and
    *  result become this run's task. */
   after: string | null;
-  on: "completed" | "failed" | "any";
+  /** `blocked` is a completed run whose verdict is BLOCKED — the work
+   *  refused itself. `completed` no longer includes those: a follow-up to a
+   *  publish that did not happen should not run as if it had. */
+  on: "completed" | "failed" | "blocked" | "any";
   /** `trigger: once` — an ISO 8601 instant; fires the first tick at or after
    *  it, once, then never again. */
   at: string | null;
@@ -1677,7 +1680,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     // `after: [[flow:publish]]` — a link or a bare name, read the same way
     // as every other file-naming field (refs.ts).
     after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,
-    on: data.on === "failed" || data.on === "any" ? data.on : "completed",
+    on: data.on === "failed" || data.on === "blocked" || data.on === "any" ? data.on : "completed",
     at: parseInstant(data.at),
     url: typeof data.url === "string" ? data.url.trim() : null,
     every: typeof data.every === "string" || typeof data.every === "number" ? (parseWait(String(data.every)) ?? null) : null,
@@ -2902,6 +2905,20 @@ export interface RunRecord {
    * simply gets its first line — which is still better than a status.
    */
   summary?: string | null;
+  /**
+   * What the run's work concluded, when its summary leads with one of the
+   * four verdict words every desk ends on: GOOD, BAD, QUIET, BLOCKED.
+   *
+   * `status` says whether the machine ran — a step crashed, a budget ran
+   * out. The verdict says what the agents found when it did. They are
+   * different facts: a publisher that checks, sees the wrong change in
+   * front of it and refuses to push has run perfectly, and its run is
+   * `completed`. Until this field, that run was a green tick beside a line
+   * reading BLOCKED (run-mu4sdg8z-1otr, 2026-09-17) — the one outcome a
+   * person most needed to see, drawn as success. Null: the summary does
+   * not lead with a verdict, and the run reads exactly as it always did.
+   */
+  verdict?: Verdict | null;
   /** The flow's per-run `budget:` at the time this run started, so the cap
    *  a run was held to is on its record rather than read from a file that
    *  may since have changed. Null: none. */
@@ -3432,6 +3449,28 @@ export function runFailure(run: RunRecord): { agent: string; reason: string } | 
  * runFailure, which puts the reason for a failure on the list for the same
  * reason — the sentence was in the record all along.
  */
+export const VERDICTS = ["GOOD", "BAD", "QUIET", "BLOCKED"] as const;
+export type Verdict = (typeof VERDICTS)[number];
+
+/**
+ * The verdict a headline leads with, or null. Leading, whole-word and
+ * upper-case only — "GOOD — 6 links applied", "**BLOCKED**: nothing
+ * pushed", "BAD: 3 pages dropped". A summary that merely contains the word
+ * ("no BLOCKED items") has no verdict, for the reason markerPresent gives.
+ */
+export function verdictOf(summary: string | null | undefined): Verdict | null {
+  if (!summary) return null;
+  const line = summary.replace(/^[\s#>*_`\-]+/, "");
+  const m = /^(GOOD|BAD|QUIET|BLOCKED)(?![A-Za-z0-9_])/.exec(line);
+  return m ? (m[1] as Verdict) : null;
+}
+
+/** A run's verdict: recorded when it finished, else read from its summary,
+ *  so runs from before the field existed show one too. */
+export function runVerdict(run: Pick<RunRecord, "verdict" | "summary">): Verdict | null {
+  return run.verdict !== undefined ? run.verdict : verdictOf(run.summary);
+}
+
 export function runSummary(run: RunRecord): string | null {
   for (let i = run.steps.length - 1; i >= 0; i--) {
     const line = stepHeadline(run.steps[i]);

@@ -56,6 +56,7 @@ import {
   readRun,
   writeRun,
   runSummary,
+  verdictOf,
   type FlowStep,
   type McpSpec,
   type RunRecord,
@@ -3822,6 +3823,9 @@ function driveRunInner(
         // learn, and the runs list and the notification stop having to say
         // only "completed".
         run.summary = runSummary(run);
+        // Read before a test run's prefix goes on the summary, which would
+        // otherwise hide the word it leads with.
+        run.verdict = verdictOf(run.summary);
         // A test run's headline says so wherever the headline goes — the
         // runs list, the history tool, a later run's recall.
         if (run.test && run.summary) run.summary = testHeadline(run.summary);
