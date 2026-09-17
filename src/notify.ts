@@ -40,19 +40,23 @@ import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
 
 /**
- * The platform's own mail: an invite, a low balance.
+ * The platform's own mail: an invite, a password reset, a low balance.
  *
- * These are from foldrun, about the platform, to the account's owner — so
- * they go through the platform's Resend key and sender (FOLDRUN_RESEND_API_KEY,
- * FOLDRUN_EMAIL_FROM), never through anything the customer configured.
- *
- * Without a platform key — the CLI on a laptop, a test — the account's own
- * key and EMAIL_FROM are the fallback.
+ * An account that configured its own mail — RESEND_API_KEY and EMAIL_FROM
+ * on the account — gets ALL of its mail from that sender, these included:
+ * a business that sends from its own domain does not want a second, foreign
+ * address turning up in its people's inboxes (2026-09-17, an owner found
+ * foldrun.io mail beside their own and asked for none of it). Only an
+ * account with no sender of its own falls to the platform's key and sender
+ * (FOLDRUN_RESEND_API_KEY, FOLDRUN_EMAIL_FROM), so invites still work
+ * before anyone has set mail up.
  */
 export function platformMail(tenant: string): { key: string; from: string } | null {
+  const own = accountMail(tenant);
+  if (own && getSecret(tenant, "EMAIL_FROM")?.value?.trim()) return own;
   const key = process.env.FOLDRUN_RESEND_API_KEY;
   if (key) return { key, from: process.env.FOLDRUN_EMAIL_FROM || "foldrun <hello@foldrun.io>" };
-  return accountMail(tenant);
+  return own;
 }
 
 /** The account's own Resend key and sender, or null when it has none. */

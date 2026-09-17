@@ -180,11 +180,15 @@ test("a run notification is the account's mail first; the platform's is the fall
       process.env.FOLDRUN_EMAIL_FROM = "foldrun <hello@foldrun.io>";
       // No account key: the platform's connection carries the notification.
       assert.deepEqual(notifyMail("acme"), { key: "re_platform", from: "foldrun <hello@foldrun.io>" });
-      // The account chose its own: that wins for notifications, and the
-      // platform's mail (an invite, a low balance) still goes as the platform.
+      // The account chose its own: that wins for notifications.
       setSecret("acme", "RESEND_API_KEY", "re_theirs");
       setSecret("acme", "EMAIL_FROM", "Owner Inspections <marketing@ownerinspections.com.au>");
       assert.deepEqual(notifyMail("acme"), { key: "re_theirs", from: "Owner Inspections <marketing@ownerinspections.com.au>" });
+      // An account with its own sender gets ALL its mail from it — invites,
+      // resets and low-balance too. No foldrun.io beside its own domain.
+      assert.deepEqual(platformMail("acme"), { key: "re_theirs", from: "Owner Inspections <marketing@ownerinspections.com.au>" });
+      // A key with no sender of its own is not a choice of sender: platform mail stays the platform's.
+      setSecret("acme", "EMAIL_FROM", "");
       assert.deepEqual(platformMail("acme"), { key: "re_platform", from: "foldrun <hello@foldrun.io>" });
     } finally {
       if (hadKey === undefined) delete process.env.FOLDRUN_RESEND_API_KEY; else process.env.FOLDRUN_RESEND_API_KEY = hadKey;
