@@ -177,7 +177,7 @@ export const REFUSED_WEB: Record<string, string> = {
  *  for the failure modes ours cannot cover, chiefly a page that refuses a
  *  plain request. Three tiers, priced accordingly: a reader (Jina,
  *  Firecrawl) turns a page into clean markdown; a search vendor's extract
- *  (Exa, Tavily, Parallel) reads many at once; an unblocker (Zyte) renders
+ *  (Exa, Tavily, Parallel) reads many at once; an unblocker (Zyte, ScrapingBee) renders
  *  behind the anti-bot walls a reader cannot pass. */
 export interface FetchApi extends Omit<SearchApi, "index"> {
   tier: "reader" | "extract" | "unblocker";
@@ -195,7 +195,7 @@ export const FETCH_APIS: readonly FetchApi[] = [
     tier: "reader", batch: 1, what: "main-content markdown or html, boilerplate stripped; one URL per call" },
   { name: "exa", title: "Exa Contents", host: "api.exa.ai", endpoint: "https://api.exa.ai/contents",
     method: "POST", auth: { header: "x-api-key" }, secret: "EXA_API_KEY",
-    tier: "extract", batch: 100, what: "text for up to 100 URLs in one call; served from Exa's own cache unless told to fetch fresh" },
+    tier: "extract", batch: 100, what: "text for up to 100 URLs in one call; always fetched fresh (maxAgeHours: 0), not Exa's cache" },
   { name: "tavily", title: "Tavily Extract", host: "api.tavily.com", endpoint: "https://api.tavily.com/extract",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "TAVILY_API_KEY",
     tier: "extract", batch: 20, what: "markdown or text for up to 20 URLs in one call, failures listed beside successes" },
@@ -206,6 +206,9 @@ export const FETCH_APIS: readonly FetchApi[] = [
     method: "POST", auth: { header: "Authorization", prefix: "Basic " }, secret: "ZYTE_API_KEY_BASIC",
     secretFormat: "base64 of `<api key>:` — Zyte authenticates with HTTP basic auth, and the proxy fills a placeholder verbatim, so the vault holds the encoded form: `printf 'KEY:' | base64`",
     tier: "unblocker", batch: 1, what: "the page rendered in a real browser behind Zyte's proxy pool — for the sites that refuse everything else; pay per successful request" },
+  { name: "scrapingbee", aliases: ["scraping-bee", "scraping_bee"], title: "ScrapingBee", host: "app.scrapingbee.com", endpoint: "https://app.scrapingbee.com/api/v1/",
+    method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "SCRAPINGBEE_API_KEY",
+    tier: "unblocker", batch: 1, what: "the page rendered in a real browser (render_js) behind ScrapingBee's proxy pool; credits per call, more for JavaScript" },
 ];
 
 /** Remote browsers: a CDP endpoint our web_browse connects to instead of
@@ -241,6 +244,8 @@ export const BROWSER_APIS: readonly BrowserApi[] = [
   { name: "brightdata", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
     secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
     what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
+  { name: "zenrows", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
+    what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
 
 export function findBrowserApi(name: string): BrowserApi | undefined {
