@@ -338,7 +338,7 @@ export async function sendTestNotification(
     };
   }
   const sent = new Date().toISOString();
-  const headline = "\u2713 foldrun test notification";
+  const headline = "\u2713 test notification";
   const detail = `Sent from ${workspace} at ${sent}. If you are reading this, failures and approval gates will reach you here too.`;
 
   if (config.email) {
