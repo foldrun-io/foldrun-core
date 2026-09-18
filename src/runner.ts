@@ -84,7 +84,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { resolveSearch } from "./providers.ts";
+import { readBrowseSettings, resolveSearch } from "./providers.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
@@ -890,7 +890,19 @@ function agentContext(
   const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch, "fetch");
   // A remote browser's key is materialised, not proxied: CDP is a websocket
   // and the wrapper opens the session itself, the way it seeds a cookie.
-  const browseChoice = resolveSearch((front as Record<string, unknown>).web_browse, "browse");
+  // `web_browse:` carries two things in one key: how the browser presents
+  // itself (engine, user agent, device, locale, timezone) and, optionally,
+  // which remote vendor renders the page. Settings are read off first so the
+  // vendor resolver sees only the vendor part, and a block of settings alone
+  // means the account's own browser with those defaults. Nearest wins: the
+  // agent's block, else the workspace's, else the account's — the shape
+  // `provider:` already uses.
+  const browseFront =
+    (front as Record<string, unknown>).web_browse ?? workspaceFrontmatter(agentDir, tenant).web_browse;
+  const browseRead = readBrowseSettings(browseFront);
+  const browseSettings = browseRead.settings;
+  const browseChoice = resolveSearch(browseRead.rest, "browse");
+  if (browseRead.error) browseChoice.error = browseChoice.error ?? browseRead.error;
   // A direct search API is paid for with the customer's own key, stored
   // under a fixed vault name (EXA_API_KEY, BRAVE_SEARCH_API_KEY, …). Naming
   // the API in frontmatter is declaring that secret — nobody should have to
@@ -1099,6 +1111,15 @@ function agentContext(
     ...(browseChoice.shape === "direct" && browseChoice.provider
       ? { FOLDRUN_BROWSER_VENDOR: browseChoice.provider, FOLDRUN_BROWSER_SECRET: browseChoice.secret ?? "" }
       : {}),
+    // The `web_browse:` block, as defaults the tool reads when the call did
+    // not say otherwise. Env rather than arguments because the tool is a
+    // script the model calls: a default nobody typed should not have to be
+    // typed by the model either.
+    ...(browseSettings.engine ? { FOLDRUN_BROWSER_ENGINE: browseSettings.engine } : {}),
+    ...(browseSettings.user_agent ? { FOLDRUN_BROWSER_USER_AGENT: browseSettings.user_agent } : {}),
+    ...(browseSettings.device ? { FOLDRUN_BROWSER_DEVICE: browseSettings.device } : {}),
+    ...(browseSettings.locale ? { FOLDRUN_BROWSER_LOCALE: browseSettings.locale } : {}),
+    ...(browseSettings.timezone ? { FOLDRUN_BROWSER_TIMEZONE: browseSettings.timezone } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

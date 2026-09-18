@@ -394,6 +394,68 @@ export interface SearchChoice {
  *  The same two spellings `provider:` takes. `key` is a reference, never a
  *  value — a credential written into a markdown file is refused here, the
  *  way it is refused everywhere else in foldrun. */
+/**
+ * `web_browse:` settings — how the browser presents itself, not what one call
+ * does.
+ *
+ *    web_browse:
+ *      engine: firefox
+ *      user_agent: "Mozilla/5.0 …"
+ *
+ * The engine and the user agent belong in the file, not in every call. They
+ * travel together: a Cloudflare clearance cookie is bound to the user agent
+ * that earned it, so a skill repeating the UA in each call is one edit away
+ * from a session that silently stops working (Medium, 2026-09-17).
+ *
+ * `via:` (or `name:`) names a remote browser vendor, which is what this key
+ * meant when it only took a string; that spelling still works. Anything a
+ * single call decides — mode, actions, wait_for, block — stays in the call.
+ */
+export interface BrowseSettings {
+  engine?: "chromium" | "firefox" | "webkit";
+  user_agent?: string;
+  device?: string;
+  locale?: string;
+  timezone?: string;
+}
+
+const BROWSE_ENGINES = ["chromium", "firefox", "webkit"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone"] as const;
+
+/** The settings in a `web_browse:` block, and the vendor part with them
+ *  removed — so one key carries both without either learning about the
+ *  other. A string, or a block with no settings, gives no settings at all. */
+export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; rest: unknown; error?: string } {
+  // An empty leftover is nothing at all. Returned as `{}` it reads to the
+  // vendor resolver as "the long form, with no name", which is a second
+  // error about a key the person never wrote.
+  const left = (o: Record<string, unknown>) => (Object.keys(o).length ? o : undefined);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { settings: {}, rest: raw };
+  const o = raw as Record<string, unknown>;
+  const settings: BrowseSettings = {};
+  const rest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (!(BROWSE_SETTING_KEYS as readonly string[]).includes(k)) {
+      rest[k] = v;
+      continue;
+    }
+    if (v === undefined || v === null || v === "") continue;
+    if (typeof v !== "string") {
+      return { settings, rest: left(rest), error: `web_browse.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
+    }
+    if (k === "engine" && !(BROWSE_ENGINES as readonly string[]).includes(v)) {
+      return { settings, rest: left(rest), error: `web_browse.engine: ${v} — the engines are ${BROWSE_ENGINES.join(", ")}.` };
+    }
+    (settings as Record<string, string>)[k] = v;
+  }
+  // `via:` is the readable name for what used to be the whole value.
+  if (typeof rest.via === "string" && rest.name === undefined) {
+    rest.name = rest.via;
+    delete rest.via;
+  }
+  return { settings, rest: Object.keys(rest).length ? rest : undefined };
+}
+
 function readChoice(raw: unknown, field: string): { name: string; secret?: string } | { error: string } {
   if (typeof raw === "string") return { name: raw };
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -488,7 +550,16 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
 export function webProblems(front: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const [key, kind] of [["web_search", "search"], ["web_fetch", "fetch"], ["web_browse", "browse"]] as const) {
-    const choice = resolveSearch(front[key], kind);
+    let value = front[key];
+    if (kind === "browse") {
+      const read = readBrowseSettings(value);
+      if (read.error) {
+        out.push(read.error);
+        continue;
+      }
+      value = read.rest;
+    }
+    const choice = resolveSearch(value, kind);
     if (choice.error) out.push(choice.error);
   }
   return out;
