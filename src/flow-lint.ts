@@ -38,6 +38,11 @@ const REFERS_BACK =
  *  checks too. */
 export interface KnownNames {
   agents: string[];
+  /** Agents that hold a tool declaring `outward: true` — one that sends,
+   *  posts, buys or publishes. The caller resolves the grants; this file only
+   *  needs the answer. Absent means the caller did not look, and the outward
+   *  rule is skipped rather than guessed at. */
+  outwardAgents?: string[];
 }
 
 /** One @, something either side, a dot in the domain, no whitespace. Written
@@ -246,6 +251,25 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
           "The approval box shows the previous step's reply and any storage/ file it names. " +
           "Declare what to show — `preview: draft/*.mdx, draft/images/*.webp` — so the approver " +
           "always sees the document, not a pointer, even when the agent forgets to name it.",
+      });
+    }
+
+    // A step that can act on the outside world, with nothing to say whether
+    // it did. The two answers are a check the runtime can fail on, or a
+    // person; either is fine, neither is not. This is the one lint here that
+    // is an error: every other structural warning costs a reread, and this
+    // one costs a send nobody can take back.
+    if (known?.outwardAgents?.includes(step.agent ?? "") && !step.verify && !step.approve && !step.ask) {
+      warnings.push({
+        step: step.group,
+        line: step.line,
+        level: "error",
+        message: `[[${step.agent}]] can act outside this workspace and this step has no verify: and no gate`,
+        detail:
+          "A step that sends, posts, buys or publishes needs one of two things: a `verify:` the " +
+          "runtime can fail the step on — a receipt file, a ledger row, the reply's own verdict " +
+          "line — or a person, with `!` or `ask:`. Without either, a step that sent nothing and a " +
+          "step that sent everything end the same way: reported as done.",
       });
     }
 

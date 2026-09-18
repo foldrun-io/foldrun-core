@@ -551,10 +551,15 @@ export interface McpSpec {
   headers: Record<string, string>;
 }
 
+/** `outward: true` in a tool's frontmatter: this one sends, posts, buys,
+ *  publishes or uploads. It changes nothing at run time — `check` uses it to
+ *  insist the step that grants it has a verify or a gate. */
+export type OutwardMark = { outward?: boolean };
+
 export type ToolDef =
-  | { kind: "http"; name: string; spec: ApiSpec }
-  | { kind: "script"; name: string; spec: Record<string, unknown> }
-  | { kind: "mcp"; name: string; spec: McpSpec };
+  | ({ kind: "http"; name: string; spec: ApiSpec } & OutwardMark)
+  | ({ kind: "script"; name: string; spec: Record<string, unknown> } & OutwardMark)
+  | ({ kind: "mcp"; name: string; spec: McpSpec } & OutwardMark);
 
 /**
  * The program inside a single-file script tool: the first fenced block whose
@@ -588,6 +593,16 @@ export function fencedCodeBlock(
     }
   }
   return null;
+}
+
+/**
+ * `outward: true` — this tool changes something that is not ours: it sends,
+ * posts, buys, publishes, uploads. The runtime does not treat it differently;
+ * `check` does, because the step that uses one is the step where a silent
+ * failure costs something that cannot be taken back. See `lintFlow`.
+ */
+export function toolIsOutward(data: Record<string, unknown>): boolean {
+  return data.outward === true;
 }
 
 export function parseToolDef(data: Record<string, unknown>, fallbackName: string, body?: string): ToolDef | null {
@@ -684,7 +699,10 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
         d.run = `${scope}/tools/${folder}/${d.run.replace(/^\.\//, "")}`;
       }
       const def = parseToolDef(d, fallbackName, content);
-      if (def) out[def.name] = def;
+      // `outward: true` rides on the definition so a caller that resolved the
+      // grants — `check` — can ask which agents can act outside the workspace
+      // without reading every tool file a second time.
+      if (def) out[def.name] = toolIsOutward(d) ? { ...def, outward: true } : def;
       else broken.push(`${fallbackName}: no base, run, command or fenced code block — nothing to call`);
     } catch (err) {
       // A malformed definition must not fail every run in the workspace. But
