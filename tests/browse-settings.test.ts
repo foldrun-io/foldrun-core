@@ -40,3 +40,14 @@ test("check still reports a vendor that cannot work, block or not", () => {
   assert.match(webProblems({ web_browse: { via: "nosuchvendor" } })[0], /no remote browser by that name/);
   assert.deepEqual(webProblems({ web_browse: { engine: "firefox" } }), [], "a good block is not a problem");
 });
+
+test("cookies are named in the file, never written into it", () => {
+  const good = readBrowseSettings({ cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" });
+  assert.deepEqual(good.settings, { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" });
+  assert.equal(good.error, undefined);
+  // The mistake this refuses: the header line pasted where the name goes.
+  const bad = readBrowseSettings({ cookies: "sid=1:abc; uid=123" });
+  assert.match(bad.error!, /must be the NAME of a vault secret/);
+  assert.match(bad.error!, /foldrun secrets set NAME/);
+  assert.deepEqual(webProblems({ web_browse: { cookies: "sid=1:abc" } }), [bad.error]);
+});

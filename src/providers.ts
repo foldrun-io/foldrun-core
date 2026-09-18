@@ -417,10 +417,17 @@ export interface BrowseSettings {
   device?: string;
   locale?: string;
   timezone?: string;
+  /** The NAME of a vault secret holding this site's sign-in cookies, never
+   *  the cookies themselves. It sits here beside `user_agent` because the two
+   *  are one thing: a Cloudflare clearance cookie is bound to the user agent
+   *  that earned it, and a file that carries one without the other is a
+   *  session waiting to stop working. */
+  cookies?: string;
+  cookie_domain?: string;
 }
 
 const BROWSE_ENGINES = ["chromium", "firefox", "webkit"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain"] as const;
 
 /** The settings in a `web_browse:` block, and the vendor part with them
  *  removed — so one key carries both without either learning about the
@@ -445,6 +452,18 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     }
     if (k === "engine" && !(BROWSE_ENGINES as readonly string[]).includes(v)) {
       return { settings, rest: left(rest), error: `web_browse.engine: ${v} — the engines are ${BROWSE_ENGINES.join(", ")}.` };
+    }
+    // A vault name, not a cookie. Someone will eventually paste the header
+    // line straight into the file; it is refused here, where the mistake is
+    // still private, rather than committed and read by everyone with the repo.
+    if (k === "cookies" && !/^[A-Z][A-Z0-9_]*$/.test(v)) {
+      return {
+        settings,
+        rest: left(rest),
+        error:
+          `web_browse.cookies must be the NAME of a vault secret (CAPITALS), not the cookies themselves — ` +
+          `store them with \`foldrun secrets set NAME\` and write \`cookies: NAME\`.`,
+      };
     }
     (settings as Record<string, string>)[k] = v;
   }

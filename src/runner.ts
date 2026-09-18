@@ -1120,6 +1120,8 @@ function agentContext(
     ...(browseSettings.device ? { FOLDRUN_BROWSER_DEVICE: browseSettings.device } : {}),
     ...(browseSettings.locale ? { FOLDRUN_BROWSER_LOCALE: browseSettings.locale } : {}),
     ...(browseSettings.timezone ? { FOLDRUN_BROWSER_TIMEZONE: browseSettings.timezone } : {}),
+    ...(browseSettings.cookies ? { FOLDRUN_BROWSER_COOKIES: browseSettings.cookies } : {}),
+    ...(browseSettings.cookie_domain ? { FOLDRUN_BROWSER_COOKIE_DOMAIN: browseSettings.cookie_domain } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.
