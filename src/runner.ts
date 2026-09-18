@@ -2537,6 +2537,46 @@ export function backoffMs(attempt: number, text = "", random: () => number = Mat
   return Math.round(base * (0.5 + random() * 0.5));
 }
 
+/**
+ * The platform's model credential, read at the moment a step needs it.
+ *
+ * It used to come only from this process's environment, which meant the
+ * worker held whatever token it was started with. Refreshing an OAuth token
+ * REVOKES the old one, so a refresh without a restart left every run
+ * answering 401 — on 2026-09-18 that took every desk down for two hours, and
+ * nothing said so until a person read a failed run. The refresher's own
+ * comment had named the fix years of incidents earlier: stop shipping the
+ * token as an env var.
+ *
+ * So: when `FOLDRUN_MODEL_KEY_FILE` names a file (the Kubernetes secret,
+ * mounted rather than injected), it is read fresh every time. The kubelet
+ * updates a mounted secret in place within about a minute of it changing, so
+ * a refreshed token reaches the next step on its own, with no restart, no
+ * timing window, and nothing to skip while work is in flight.
+ *
+ * A missing or empty file falls back to the environment, which is what a
+ * local install, the CLI and every compose setup use.
+ */
+export function platformModelCredential(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const file = env.FOLDRUN_MODEL_KEY_FILE;
+  if (file) {
+    try {
+      const value = fs.readFileSync(file, "utf8").trim();
+      if (value) return value;
+    } catch {
+      // Unreadable is not the same as absent: say so once, then fall back,
+      // because a running platform that cannot read its credential file is a
+      // thing an operator needs to know about before the next step fails.
+      if (!credentialFileWarned) {
+        credentialFileWarned = true;
+        console.warn(`[model] FOLDRUN_MODEL_KEY_FILE=${file} could not be read; falling back to the environment`);
+      }
+    }
+  }
+  return env.CLAUDE_CODE_OAUTH_TOKEN || undefined;
+}
+let credentialFileWarned = false;
+
 function platformModelEnv(): Record<string, string | undefined> {
   const {
     ANTHROPIC_API_KEY,
@@ -2556,7 +2596,9 @@ function platformModelEnv(): Record<string, string | undefined> {
     ANTHROPIC_API_KEY,
     ANTHROPIC_AUTH_TOKEN,
     ANTHROPIC_BASE_URL,
-    CLAUDE_CODE_OAUTH_TOKEN,
+    // The file wins when there is one: it is the live secret, and this
+    // process's copy is whatever it was handed at boot.
+    CLAUDE_CODE_OAUTH_TOKEN: platformModelCredential() ?? CLAUDE_CODE_OAUTH_TOKEN,
     ANTHROPIC_DEFAULT_HAIKU_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL,
     ANTHROPIC_DEFAULT_OPUS_MODEL,
