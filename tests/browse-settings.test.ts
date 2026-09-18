@@ -51,3 +51,12 @@ test("cookies are named in the file, never written into it", () => {
   assert.match(bad.error!, /foldrun secrets set NAME/);
   assert.deepEqual(webProblems({ web_browse: { cookies: "sid=1:abc" } }), [bad.error]);
 });
+
+test("a cookie default must name the site it belongs to", () => {
+  // Without a domain the cookies would ride on whatever host a call opened,
+  // which is an agent handing one site another site's session.
+  const loose = readBrowseSettings({ cookies: "MEDIUM_COOKIES" });
+  assert.match(loose.error!, /needs web_browse\.cookie_domain beside it/);
+  assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES" } }), [loose.error]);
+  assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" } }), []);
+});

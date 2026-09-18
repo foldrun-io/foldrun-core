@@ -467,6 +467,19 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     }
     (settings as Record<string, string>)[k] = v;
   }
+  // A cookie default without a domain would ride on whatever host the call
+  // opens, which is one agent handing a site someone else's session. The
+  // domain is what keeps a file-level cookie to the site it belongs to.
+  if (settings.cookies && !settings.cookie_domain) {
+    return {
+      settings,
+      rest: left(rest),
+      error:
+        `web_browse.cookies needs web_browse.cookie_domain beside it — a cookie default with no domain ` +
+        `would be sent to whatever site the call opens. Write \`cookie_domain: .example.com\`.`,
+    };
+  }
+
   // `via:` is the readable name for what used to be the whole value.
   if (typeof rest.via === "string" && rest.name === undefined) {
     rest.name = rest.via;
