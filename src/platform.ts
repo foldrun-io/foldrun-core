@@ -142,6 +142,14 @@ export interface PlatformHooks {
    * nothing to say, which is a laptop.
    */
   noteOAuthRefresh(ctx: { tenant: string; workspace?: string }, name: string, error: string | null): Promise<string | undefined>;
+  /**
+   * fetch() for a URL a tenant chose — a webhook, an OAuth token endpoint,
+   * a provider base URL, an OpenAPI source. On a platform these run on the
+   * worker or web tier, which can reach what a sandbox cannot, so the
+   * platform refuses private and cluster addresses. Default: plain fetch,
+   * which is a laptop calling its own LAN on purpose.
+   */
+  fetchUntrusted(url: string, init?: RequestInit): Promise<Response>;
 }
 
 const local: PlatformHooks = {
@@ -165,6 +173,7 @@ const local: PlatformHooks = {
   sandboxResumable: () => false,
   galleryDir: () => null,
   noteOAuthRefresh: async () => undefined,
+  fetchUntrusted: (url, init) => fetch(url, init),
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles

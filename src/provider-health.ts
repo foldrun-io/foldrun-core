@@ -24,6 +24,7 @@ import matter from "gray-matter";
 import { getSecret } from "./secrets.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
 import { accountDir, workspaceDir, listWorkspaces, listAgents, parseProvider, type ProviderSpec } from "./store.ts";
+import { platform } from "./platform.ts";
 
 export type HealthVerdict = "ok" | "credential" | "not-found" | "busy" | "unreachable" | "provider-error";
 
@@ -137,7 +138,7 @@ export async function checkProvider(
   for (const [k, v] of Object.entries(spec.headers ?? {})) headers[k.toLowerCase()] = resolve(tenant, workspace, v);
 
   try {
-    const res = await fetch(url, {
+    const res = await platform.fetchUntrusted(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),

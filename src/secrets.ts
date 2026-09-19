@@ -487,7 +487,7 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<string>
       client_secret: config.client_secret,
       ...(config.extra ?? {}),
     });
-    const res = await fetch(config.token_url, {
+    const res = await platform.fetchUntrusted(config.token_url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
@@ -638,7 +638,7 @@ async function exchangeServiceAccount(config: ServiceAccountConfig, cacheKey: st
     const signature = base64url(signer.sign(config.private_key));
     const jwt = `${header}.${claim}.${signature}`;
 
-    const res = await fetch(config.token_url, {
+    const res = await platform.fetchUntrusted(config.token_url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
