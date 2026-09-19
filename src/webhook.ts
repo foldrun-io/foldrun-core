@@ -143,7 +143,16 @@ export interface HookDelivery {
   runId?: string;
   bytes?: number;
   detail?: string;
+  /** A run of refusals, collapsed: how many, and when the first came.
+   *  `t` is the latest. Absent means one. */
+  count?: number;
+  first?: string;
 }
+
+/** What anyone can produce without the token or the signing secret. A run
+ *  of these collapses into one line, so a stranger's flood costs the log a
+ *  single entry and can never push an owner's real deliveries out of it. */
+const UNAUTHENTICATED: HookDelivery["outcome"][] = ["invalid-token", "invalid-signature"];
 
 function deliveriesFile(tenant: string, workspace: string) {
   return path.join(workspaceDir(tenant, workspace), "hook-deliveries.jsonl");
@@ -154,6 +163,7 @@ const KEEP_DELIVERIES = 500;
 export function recordDelivery(tenant: string, workspace: string, delivery: HookDelivery) {
   const file = deliveriesFile(tenant, workspace);
   if (!fs.existsSync(path.dirname(file))) return; // no workspace, nothing to log against
+  if (UNAUTHENTICATED.includes(delivery.outcome) && collapseInto(file, delivery)) return;
   fs.appendFileSync(file, JSON.stringify(delivery) + "\n");
   // Bounded: compact to the newest KEEP when it doubles. Amortised cheap,
   // and a log that grows forever is a disk-full incident with a delay.
@@ -167,6 +177,37 @@ export function recordDelivery(tenant: string, workspace: string, delivery: Hook
   } catch {
     // compaction is best-effort; the append already landed
   }
+}
+
+/** Fold a refusal into the log's last line when that line is a refusal
+ *  too. The flow name is not part of the match: it comes from the URL, so
+ *  a flood that varies it would otherwise never collapse. True when folded. */
+function collapseInto(file: string, delivery: HookDelivery): boolean {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+  const end = text.trimEnd();
+  const cut = end.lastIndexOf("\n") + 1;
+  let last: HookDelivery;
+  try {
+    last = JSON.parse(end.slice(cut)) as HookDelivery;
+  } catch {
+    return false;
+  }
+  if (!UNAUTHENTICATED.includes(last.outcome)) return false;
+  const merged: HookDelivery = {
+    ...delivery,
+    count: (last.count ?? 1) + 1,
+    first: last.first ?? last.t,
+    ...(last.detail === "more than one flow name" || last.flow !== delivery.flow ? { detail: "more than one flow name" } : {}),
+  };
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, end.slice(0, cut) + JSON.stringify(merged) + "\n");
+  fs.renameSync(tmp, file);
+  return true;
 }
 
 export function readDeliveries(tenant: string, workspace: string, limit = 20): HookDelivery[] {
