@@ -24,6 +24,7 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { dataRoot } from "./paths.ts";
 import type { ApiSpec } from "./store.ts";
+import { platform } from "./platform.ts";
 
 export interface OperationParam {
   name: string;
@@ -328,7 +329,7 @@ export async function prefetchOpenApi(tenant: string, sources: string[]): Promis
     const cached = readCache(tenant, source);
     if (cached && Date.now() - Date.parse(cached.fetchedAt) < CACHE_TTL_MS) continue;
     try {
-      const res = await fetch(source, {
+      const res = await platform.fetchUntrusted(source, {
         signal: AbortSignal.timeout(10_000),
         headers: { accept: "application/json, application/yaml, text/yaml, */*" },
       });

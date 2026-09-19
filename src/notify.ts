@@ -38,6 +38,7 @@ import { getSecret } from "./secrets.ts";
 import { publicUrl } from "./webhook.ts";
 import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
+import { platform } from "./platform.ts";
 
 /**
  * The platform's own mail: an invite, a password reset, a low balance.
@@ -297,7 +298,7 @@ export async function sendPlainNotification(
     });
     if (!url || url.includes("${")) return false;
     const payload = JSON.stringify(body);
-    const res = await fetch(url, {
+    const res = await platform.fetchUntrusted(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
       body: payload,
@@ -382,7 +383,7 @@ export async function sendTestNotification(
   }
   try {
     const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
-    const res = await fetch(url, {
+    const res = await platform.fetchUntrusted(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
       body: payload,
@@ -540,7 +541,7 @@ export async function sendRunNotification(
       return false;
     }
     const payload = JSON.stringify(body);
-    const res = await fetch(url, {
+    const res = await platform.fetchUntrusted(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
       body: payload,
