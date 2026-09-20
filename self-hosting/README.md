@@ -62,9 +62,11 @@ Every version is a [release](https://github.com/foldrun-io/foldrun-infra/release
 listing what changed, and the same build that runs foldrun's own box is what
 is published — there is no separate "community" image.
 
-Unset `FOLDRUN_RUNNER_IMAGE` and the platform builds its own runner on
+Set `FOLDRUN_RUNNER_IMAGE=` empty and the platform builds its own runner on
 first use instead. That is what a change to the runner's Dockerfile needs,
-and it costs about five minutes and 600 MB of browser downloads.
+and it costs about five minutes and 600 MB of browser downloads. Empty, not
+removed: the line left out of your `.env` falls back to the published image,
+which is the sensible default for everyone who is not changing the runner.
 
 ## Postgres and Redis
 
