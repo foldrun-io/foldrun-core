@@ -14,6 +14,16 @@ import {
   applyContainerChanges,
   hashTree,
   parseDriverLine,
+<<<<<<< Updated upstream
+||||||| Stash base
+  runnerImageRef,
+  runnerImageTag,
+=======
+  RUNTIME_CACHE,
+  runnerImageRef,
+  runnerImageTag,
+  runtimeCacheMount,
+>>>>>>> Stashed changes
 } from "../src/run-container.ts";
 
 test("what the spec says agents own comes back; what they must not touch does not", () => {
@@ -267,4 +277,86 @@ test("a secret with a line break crosses as a file, and the trace says so", asyn
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---------- runtimeCacheMount: the container tier's cache is a Docker NAMED
+// volume, never a host path. The bug this replaces was a `-v <hostpath>:...`
+// under FOLDRUN_DATA, which the host daemon on the far end of the socket could
+// not resolve ("mounts denied"). Save/restore the two env vars it reads.
+function withCacheEnv<T>(
+  vars: { cache?: string; data?: string },
+  body: () => T,
+): T {
+  const prev = {
+    cache: process.env.FOLDRUN_RUNTIME_CACHE,
+    data: process.env.FOLDRUN_DATA,
+  };
+  const set = (k: "FOLDRUN_RUNTIME_CACHE" | "FOLDRUN_DATA", v: string | undefined) => {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  };
+  set("FOLDRUN_RUNTIME_CACHE", vars.cache);
+  set("FOLDRUN_DATA", vars.data);
+  try {
+    return body();
+  } finally {
+    set("FOLDRUN_RUNTIME_CACHE", prev.cache);
+    set("FOLDRUN_DATA", prev.data);
+  }
+}
+
+test("runtimeCacheMount: off, and unsafe or empty tenants, all yield no mount", () => {
+  withCacheEnv({ cache: "off" }, () => {
+    assert.equal(runtimeCacheMount("acct-1"), null, "FOLDRUN_RUNTIME_CACHE=off disables the cache");
+  });
+  withCacheEnv({ cache: undefined }, () => {
+    assert.equal(runtimeCacheMount(undefined), null, "no tenant, no mount");
+    assert.equal(runtimeCacheMount(""), null, "empty tenant, no mount");
+    assert.equal(runtimeCacheMount("../evil"), null, "path traversal is refused");
+    assert.equal(runtimeCacheMount("."), null, "a lone dot is refused");
+    assert.equal(runtimeCacheMount(".."), null, "a lone dot-dot is refused");
+    assert.equal(runtimeCacheMount("a/b"), null, "a slash is not a single segment");
+  });
+});
+
+test("runtimeCacheMount: a real tenant mounts a volume NAME, never a host path under FOLDRUN_DATA", () => {
+  // This is the regression guard for the mounts-denied bug: the source must be
+  // a daemon-resolvable volume name, not a filesystem path the daemon can't see.
+  withCacheEnv({ cache: undefined, data: "/data" }, () => {
+    const m = runtimeCacheMount("acct-123");
+    assert.ok(m, "a safe tenant produces a mount");
+    assert.ok(!path.isAbsolute(m!.source), "the source is not an absolute path");
+    assert.ok(!m!.source.includes("/"), "the source is a volume name, not a path");
+    assert.ok(
+      !m!.source.startsWith(process.env.FOLDRUN_DATA!),
+      "the source is not under FOLDRUN_DATA — the exact shape that failed with 'mounts denied'",
+    );
+    assert.ok(!m!.source.includes(".runtimes-sandbox"), "the old host-dir path is gone");
+  });
+});
+
+test("runtimeCacheMount: target is RUNTIME_CACHE, and distinct tenants get distinct volumes", () => {
+  withCacheEnv({ cache: undefined }, () => {
+    const a = runtimeCacheMount("acct-a");
+    const b = runtimeCacheMount("acct-b");
+    assert.equal(a!.target, RUNTIME_CACHE, "mounted where prepareRuntime looks");
+    assert.equal(b!.target, RUNTIME_CACHE);
+    assert.notEqual(a!.source, b!.source, "one volume per tenant — no shared, executable cache");
+  });
+});
+
+test("runtimeCacheMount: the volume name satisfies Docker's charset rule", () => {
+  // Docker's own rule (docker/docker names.go): [a-zA-Z0-9][a-zA-Z0-9_.-]*
+  const DOCKER_VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+  withCacheEnv({ cache: undefined }, () => {
+    for (const tenant of ["acct-123", "ABC123", "a_b-c", "acct.1", "0account", "x"]) {
+      const m = runtimeCacheMount(tenant);
+      assert.ok(m, `${tenant} is a safe segment and should mount`);
+      assert.match(
+        m!.source,
+        DOCKER_VOLUME_NAME,
+        `volume name ${m!.source} must be a legal Docker volume name`,
+      );
+    }
+  });
 });
