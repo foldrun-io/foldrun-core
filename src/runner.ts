@@ -2132,8 +2132,26 @@ async function runStep(
       // attempt holds its own sandbox, so the meter owes the sum.
       const firstArgs = isolatedArgs(platformModelEnv());
       await lease?.commit();
+      let credentialUsed = platformModelCredential();
       let outcome = await runIsolated(firstArgs);
       step.sandbox = null; // whatever happens next starts its own
+      // A 401 from a token that rotated mid-step is not a broken key: the
+      // replacement is already on its way to the mounted file. Wait for it
+      // once, then fall into the same retry the busy case uses.
+      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+        push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
+        const rotated = await awaitRotatedCredential(credentialUsed);
+        if (rotated) {
+          push("info", "the credential rotated under this step; retrying on the new one");
+          credentialUsed = rotated;
+          lastRefusal = "";
+          const previous = outcome.timing;
+          await lease?.commit();
+          outcome = withEarlierTiming(await runIsolated(isolatedArgs(platformModelEnv())), previous);
+        } else {
+          push("info", "the credential did not change — this is the key itself, not a rotation");
+        }
+      }
       for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
@@ -2325,7 +2343,22 @@ async function runStep(
           }
         }
       };
+      let credentialUsed = platformModelCredential();
       let outcome = await attemptThrough(providerEnv, translator);
+      // Same rule as the isolated path: a credential that rotated under the
+      // step is waited out and retried before anything else is considered.
+      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+        push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
+        const rotated = await awaitRotatedCredential(credentialUsed);
+        if (rotated) {
+          push("info", "the credential rotated under this step; retrying on the new one");
+          credentialUsed = rotated;
+          lastRefusal = "";
+          outcome = await attemptThrough(providerEnv, translator);
+        } else {
+          push("info", "the credential did not change — this is the key itself, not a rotation");
+        }
+      }
       // Same rule as the isolated path: a busy provider is waited out on
       // the supply it refused from, before any fallback is considered.
       for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
@@ -2471,6 +2504,59 @@ function platformFallbackEnv(): Record<string, string> | null {
     if (id) out[`ANTHROPIC_DEFAULT_${tier}_MODEL`] = id;
   }
   return out;
+}
+
+/**
+ * A 401 the token refresh caused, rather than a key that is simply wrong.
+ *
+ * The refresher on the box turns the long-lived grant into an 8h access
+ * token every four hours, and Anthropic revokes the old one the instant the
+ * new one is minted. The platform reads the credential per step from the
+ * mounted file, which fixed the boot-time copy — but not this: a step
+ * already talking to the API when the rotation lands gets a hard 401
+ * mid-turn, and the replacement does not appear in the mounted file until
+ * the kubelet syncs it, about a minute later.
+ *
+ * That window is narrow and it is not rare. Every 401 on this account in
+ * three weeks of runs fell inside it: 02:07:22 and 02:07:24 against a 02:07
+ * refresh, 22:08:12, 22:08:17, 22:08:30 and 22:09:03 against 22:08. The
+ * desks that lost a run nightly were simply the ones scheduled on the hour
+ * the refresher shares.
+ *
+ * So: on a 401, wait for the file to hold a DIFFERENT credential, then let
+ * the caller retry with it. A token that never changes inside the window is
+ * a key that is actually invalid — no waiting fixes that, and the caller
+ * falls through to the second supply exactly as before. Moving the timer
+ * cannot fix this; a run that takes forty minutes spans any minute chosen.
+ */
+const CREDENTIAL_ROTATION_WAIT_MS = 90_000;
+const CREDENTIAL_POLL_MS = 2_000;
+
+function isAuthRefusal(text: string): boolean {
+  return /API Error: 401|access token has (been revoked|expired)/i.test(text);
+}
+
+/**
+ * Wait, briefly, for the mounted credential to become one we have not
+ * already been refused on. Returns the new value, or null when the window
+ * passes without a change — which is the answer that means "this key is
+ * wrong", not "this key is stale".
+ */
+export async function awaitRotatedCredential(
+  before: string | undefined,
+  now: () => number = Date.now,
+  read: () => string | undefined = () => platformModelCredential(),
+  waitMs = CREDENTIAL_ROTATION_WAIT_MS,
+  pollMs = CREDENTIAL_POLL_MS,
+): Promise<string | null> {
+  if (!before) return null;
+  const until = now() + waitMs;
+  for (;;) {
+    const current = read();
+    if (current && current !== before) return current;
+    if (now() >= until) return null;
+    await sleep(pollMs);
+  }
 }
 
 /** A model-call failure the fallback can answer: the primary refusing over
