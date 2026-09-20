@@ -26,10 +26,25 @@ test("settings and a vendor travel in the same block; via: is name:", () => {
 });
 
 test("an engine that does not exist is refused by name, not silently ignored", () => {
-  const read = readBrowseSettings({ engine: "safari" });
-  assert.match(read.error!, /web_browse\.engine: safari/);
-  assert.match(read.error!, /chromium, firefox, webkit/);
-  assert.deepEqual(webProblems({ web_browse: { engine: "safari" } }), [read.error]);
+  const read = readBrowseSettings({ engine: "opera" });
+  assert.match(read.error!, /web_browse\.engine: opera/);
+  assert.match(read.error!, /chrome, firefox, safari/, "named the way the room talks, not by engine");
+  assert.deepEqual(webProblems({ web_browse: { engine: "opera" } }), [read.error]);
+});
+
+// A file should read the way people speak: chrome and safari, not chromium
+// and webkit. Underneath they are still the engines Playwright knows, and the
+// old spellings keep working so nothing written before this breaks.
+test("chrome and safari are what a person writes; the engine is what runs", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome" }).settings.engine, "chromium");
+  assert.equal(readBrowseSettings({ engine: "safari" }).settings.engine, "webkit");
+  assert.equal(readBrowseSettings({ engine: "firefox" }).settings.engine, "firefox");
+});
+
+test("the engine names still work, so no agent written before this breaks", () => {
+  assert.equal(readBrowseSettings({ engine: "chromium" }).settings.engine, "chromium");
+  assert.equal(readBrowseSettings({ engine: "webkit" }).settings.engine, "webkit");
+  assert.equal(readBrowseSettings({ engine: "Chrome" }).settings.engine, "chromium", "case is not a trap");
 });
 
 test("a setting that is not text is refused", () => {

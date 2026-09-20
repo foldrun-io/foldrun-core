@@ -434,7 +434,20 @@ export interface BrowseSettings {
   storage_origin?: string;
 }
 
-const BROWSE_ENGINES = ["chromium", "firefox", "webkit"] as const;
+// What a person writes, and what Playwright calls it. "chromium" and "webkit"
+// are engine names; "chrome" and "safari" are what everyone else calls those
+// browsers, and a file should read the way the room talks. Both spellings are
+// accepted forever: agents written before this keep working, and the engine
+// names remain the truth underneath (chrome here is the open-source Chromium
+// build, not the branded Chrome; safari is WebKit, Safari's engine).
+const BROWSE_ENGINE_ALIASES: Record<string, "chromium" | "firefox" | "webkit"> = {
+  chrome: "chromium",
+  chromium: "chromium",
+  firefox: "firefox",
+  safari: "webkit",
+  webkit: "webkit",
+};
+const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
 const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin"] as const;
 
 /** The settings in a `web_browse:` block, and the vendor part with them
@@ -458,8 +471,13 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     if (typeof v !== "string") {
       return { settings, rest: left(rest), error: `web_browse.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
     }
-    if (k === "engine" && !(BROWSE_ENGINES as readonly string[]).includes(v)) {
-      return { settings, rest: left(rest), error: `web_browse.engine: ${v} — the engines are ${BROWSE_ENGINES.join(", ")}.` };
+    if (k === "engine") {
+      const canonical = BROWSE_ENGINE_ALIASES[v.toLowerCase()];
+      if (!canonical) {
+        return { settings, rest: left(rest), error: `web_browse.engine: ${v} — the browsers are ${BROWSE_ENGINES.join(", ")}.` };
+      }
+      settings.engine = canonical;
+      continue;
     }
     // A vault name, not a cookie. Someone will eventually paste the header
     // line straight into the file; it is refused here, where the mistake is
