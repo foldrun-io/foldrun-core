@@ -424,10 +424,18 @@ export interface BrowseSettings {
    *  session waiting to stop working. */
   cookies?: string;
   cookie_domain?: string;
+  /** The NAME of a vault secret holding this site's signed-in Web Storage and
+   *  IndexedDB, as JSON: `{ localStorage, sessionStorage, indexedDB }`. The
+   *  sibling of `cookies:` for the sites that keep their login in storage
+   *  rather than a cookie — Firebase writes a record to IndexedDB, MSAL can
+   *  keep tokens in sessionStorage, and a cookie jar alone opens those pages
+   *  signed out. Seeded before the page's own scripts run, never read back. */
+  storage?: string;
+  storage_origin?: string;
 }
 
 const BROWSE_ENGINES = ["chromium", "firefox", "webkit"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin"] as const;
 
 /** The settings in a `web_browse:` block, and the vendor part with them
  *  removed — so one key carries both without either learning about the
@@ -456,6 +464,26 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     // A vault name, not a cookie. Someone will eventually paste the header
     // line straight into the file; it is refused here, where the mistake is
     // still private, rather than committed and read by everyone with the repo.
+    if (k === "storage" && !/^[A-Z][A-Z0-9_]*$/.test(v)) {
+      return {
+        settings,
+        rest: left(rest),
+        error:
+          `web_browse.storage must be the NAME of a vault secret (CAPITALS), not the storage itself — ` +
+          `store the JSON with \`foldrun secrets set NAME\` and write \`storage: NAME\`.`,
+      };
+    }
+    // An origin, not a cookie domain: Web Storage and IndexedDB are walled off
+    // per origin, scheme and host together, so `.example.com` cannot be seeded.
+    if (k === "storage_origin" && !/^https?:\/\/[^/\s]+$/.test(v)) {
+      return {
+        settings,
+        rest: left(rest),
+        error:
+          `web_browse.storage_origin must be an origin, scheme and host with no path — ` +
+          `write \`storage_origin: https://www.example.com\`, not \`.example.com\`.`,
+      };
+    }
     if (k === "cookies" && !/^[A-Z][A-Z0-9_]*$/.test(v)) {
       return {
         settings,
@@ -477,6 +505,19 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       error:
         `web_browse.cookies needs web_browse.cookie_domain beside it — a cookie default with no domain ` +
         `would be sent to whatever site the call opens. Write \`cookie_domain: .example.com\`.`,
+    };
+  }
+
+  // Storage is per origin, and seeding it into the wrong one would hand a
+  // site another site's signed-in state — the same mistake `cookie_domain`
+  // exists to prevent, one storage area over.
+  if (settings.storage && !settings.storage_origin) {
+    return {
+      settings,
+      rest: left(rest),
+      error:
+        `web_browse.storage needs web_browse.storage_origin beside it — Web Storage and IndexedDB are ` +
+        `walled off per origin, so the tool has to be told which one. Write \`storage_origin: https://www.example.com\`.`,
     };
   }
 

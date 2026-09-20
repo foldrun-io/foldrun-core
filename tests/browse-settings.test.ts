@@ -60,3 +60,33 @@ test("a cookie default must name the site it belongs to", () => {
   assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES" } }), [loose.error]);
   assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" } }), []);
 });
+
+// Storage is the sibling of cookies, for the sites whose login is not a
+// cookie: Firebase writes its record to IndexedDB, MSAL can keep tokens in
+// sessionStorage, and a cookie jar alone opens those pages signed out.
+test("storage names a secret and carries the origin it belongs to", () => {
+  const read = readBrowseSettings({
+    storage: "INDIEHACKERS_STORAGE",
+    storage_origin: "https://www.indiehackers.com",
+  });
+  assert.deepEqual(read.settings, {
+    storage: "INDIEHACKERS_STORAGE",
+    storage_origin: "https://www.indiehackers.com",
+  });
+  assert.equal(read.error, undefined);
+});
+
+test("the storage itself pasted into the file is refused, like cookies", () => {
+  const read = readBrowseSettings({ storage: '{"localStorage":{"token":"x"}}', storage_origin: "https://x.com" });
+  assert.match(read.error!, /must be the NAME of a vault secret/);
+});
+
+test("storage without an origin is refused: storage is walled off per origin", () => {
+  const read = readBrowseSettings({ storage: "APP_STORAGE" });
+  assert.match(read.error!, /needs web_browse\.storage_origin beside it/);
+});
+
+test("a cookie domain is not an origin", () => {
+  const read = readBrowseSettings({ storage: "APP_STORAGE", storage_origin: ".example.com" });
+  assert.match(read.error!, /must be an origin, scheme and host/);
+});
