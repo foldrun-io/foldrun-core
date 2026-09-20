@@ -629,11 +629,25 @@ export function runnerImageTag(): string {
  * (tonistiigi/binfmt); the publisher does that itself, every time, because
  * the registration does not survive a reboot.
  */
-export function ensureRunnerImage(opts: { platform?: string } = {}): { tag: string; log: string[] } {
+/**
+ * Which image a step runs in: an explicit FOLDRUN_RUNNER_IMAGE when one is
+ * set, otherwise the content-hash tag core builds itself. `explicit` is what
+ * ensureRunnerImage checks to skip the build — an empty string is *not* an
+ * image name (it is `docker build -t ""` → "repository name must have at
+ * least one component"), so it falls through to the content-hash tag exactly
+ * as an unset value does. Pure, so the resolution is testable without docker.
+ */
+export function runnerImageRef(opts: { platform?: string } = {}): { tag: string; explicit: boolean } {
+  const set = process.env.FOLDRUN_RUNNER_IMAGE;
+  if (set) return { tag: set, explicit: true };
   const arch = opts.platform ? `-${opts.platform.split("/").pop()}` : "";
-  const tag = process.env.FOLDRUN_RUNNER_IMAGE ?? runnerImageTag() + arch;
+  return { tag: runnerImageTag() + arch, explicit: false };
+}
+
+export function ensureRunnerImage(opts: { platform?: string } = {}): { tag: string; log: string[] } {
+  const { tag, explicit } = runnerImageRef(opts);
   const log: string[] = [];
-  if (process.env.FOLDRUN_RUNNER_IMAGE) return { tag, log };
+  if (explicit) return { tag, log };
 
   const have = spawnSync(cli(), ["image", "inspect", tag], { stdio: "ignore" });
   if (have.status === 0) return { tag, log };
