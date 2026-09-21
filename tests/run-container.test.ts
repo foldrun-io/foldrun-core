@@ -14,16 +14,8 @@ import {
   applyContainerChanges,
   hashTree,
   parseDriverLine,
-<<<<<<< Updated upstream
-||||||| Stash base
-  runnerImageRef,
-  runnerImageTag,
-=======
   RUNTIME_CACHE,
-  runnerImageRef,
-  runnerImageTag,
   runtimeCacheMount,
->>>>>>> Stashed changes
 } from "../src/run-container.ts";
 
 test("what the spec says agents own comes back; what they must not touch does not", () => {
