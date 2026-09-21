@@ -193,5 +193,11 @@ export function addGrant(grant: EgressGrant, name: string, value: string, host: 
   const existing = grant.secrets[name];
   if (existing) {
     if (!existing.hosts.includes(h)) existing.hosts.push(h);
+    // A name granted again with a different value is a rotation: the
+    // runner re-grants the model key after awaitRotatedCredential, on the
+    // same grant object the lease holds by reference. Keeping the first
+    // value here meant the "retry on the new one" sent the revoked token —
+    // every 4-hourly refresh on 2026-09-18..22 failed the step it landed on.
+    existing.value = value;
   } else grant.secrets[name] = { value, hosts: [h] };
 }

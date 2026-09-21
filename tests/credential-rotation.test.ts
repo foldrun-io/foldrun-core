@@ -17,6 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { awaitRotatedCredential, isTransientOverload } from "../src/runner.ts";
+import { proxyModelEnv, type EgressGrant } from "../src/egress.ts";
 
 /** A clock that runs as fast as the test asks it to, so a 90s window costs
  *  nothing. The poll still awaits a real timer; only the deadline is faked. */
@@ -64,4 +65,17 @@ test("a subscription's weekly limit is a refusal for the second supply, never a 
   // Not transient: the window is a week, and waiting thirty seconds three
   // times would only burn three sandboxes.
   assert.equal(isTransientOverload(msg), false);
+});
+
+test("re-granting the model key after a rotation replaces the value the proxy fills", () => {
+  // The lease holds the grant by reference and commit() re-seals whatever
+  // is in it. Before this, the retry after awaitRotatedCredential re-granted
+  // the new token under the same name and the old, revoked one stayed —
+  // so the proxy sent the revoked token and the retry 401'd as well.
+  const grant: EgressGrant = { secrets: {}, timezone: "UTC" };
+  const env = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-old" };
+  proxyModelEnv(env, "http://lease", grant);
+  proxyModelEnv({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-new" }, "http://lease", grant);
+  assert.equal(grant.secrets.FOLDRUN_MODEL_KEY.value, "sk-ant-oat01-new");
+  assert.deepEqual(grant.secrets.FOLDRUN_MODEL_KEY.hosts, ["api.anthropic.com"]);
 });
