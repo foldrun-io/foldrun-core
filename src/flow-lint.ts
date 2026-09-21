@@ -61,10 +61,15 @@ function looksLikeAddress(a: string): boolean {
  *  a shell — see `checkVerify` in step-exec.ts, which owns this list. */
 const VERIFY_ASSERTION = /^(contains|not-contains|matches|file|judge):\s/;
 
-/** Shell punctuation and the commands these flows actually reach for. A
- *  `verify:` holding any of them is a command, however wordy it reads. */
+/** What a shell command has that a sentence does not: an operator that only
+ *  means something to a shell, a path or bracket at the very start, or one
+ *  of the commands these flows actually reach for. Deliberately NOT any
+ *  punctuation a sentence might carry — the first version disqualified on
+ *  `;`, `,`, `'` and `"`, so "the reply opens with GOOD; a GOOD reply names
+ *  the SHA" read as shell and a guaranteed exit 127 sat in fix-desk unseen
+ *  by the very lint written to catch it. */
 const LOOKS_LIKE_SHELL =
-  /[|&;<>$`"'(){}[\]*?]|^[.~/]|\b(test|grep|egrep|find|head|tail|cat|ls|node|npm|npx|bash|sh|zsh|python3?|jq|awk|sed|curl|git|make|exit)\b/;
+  /&&|\|\||\s\|\s|\$\(|\$\{|`|\s[<>]\s|\d?>[>&]?\s|^\[|^[.~/]|^\s*\b(test|grep|egrep|find|head|tail|cat|ls|node|npm|npx|bash|sh|zsh|python3?|jq|awk|sed|curl|git|make|exit|n=|[A-Za-z_]+=)/;
 
 /** A `verify:` that is a claim in English rather than a command. Conservative
  *  on purpose, the same bargain as REFERS_BACK: it must have no assertion

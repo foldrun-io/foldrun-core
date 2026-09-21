@@ -52,6 +52,20 @@ test("the same sentence behind judge: is fine, and so is every other dialect", (
   }
 });
 
+test("a sentence with punctuation is still a sentence", () => {
+  // The detector once treated `;`, `,`, `'` and `"` as proof of a shell
+  // command, so this exact verify — live in fix-desk — passed the lint and
+  // failed every run with exit 127. Punctuation is not an operator.
+  for (const v of [
+    "the reply opens with GOOD, QUIET or BLOCKED; a GOOD reply names the commit SHA and carries the marker that starts group 5, on its own line",
+    "the reply doesn't say BLOCKED and names the file it wrote",
+    'the reply quotes the crawl id (the one it posted) and says "written"',
+  ]) {
+    const w = lint(`1. [[auditor]] — audit\n   verify: ${v}\n`);
+    assert.ok(w.some((x) => x.message.includes("reads as a sentence")), `${v} → ${w.map((x) => x.message).join(" | ")}`);
+  }
+});
+
 test("a real shell command is left alone, however wordy", () => {
   for (const v of [
     'test -n "$(find ../../storage/js-capture.md -mmin -180 -size +0c)"',
@@ -60,6 +74,8 @@ test("a real shell command is left alone, however wordy", () => {
     "npm run build",
     "n=$(grep -oE 'NEXT CURSOR:[0-9]+' a.md); test -n \"$n\"",
     "head -1 ../../storage/digest.md | grep -qE '^(GOOD|BAD)'",
+    '[ -n "$(find ../../storage -name x)" ]',
+    "count=$(grep -c . a.list); test \"$count\" = 10",
   ]) {
     const m = messages(`1. [[auditor]] — audit\n   verify: ${v}\n`);
     assert.ok(!m.some((x) => x.includes("reads as a sentence")), `${v} → ${m.join(" | ")}`);
