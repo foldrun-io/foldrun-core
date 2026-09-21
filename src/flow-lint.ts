@@ -57,6 +57,32 @@ function looksLikeAddress(a: string): boolean {
   return dot > 0 && dot < domain.length - 1;
 }
 
+/** The assertion words a `verify:` may open with. Anything else is handed to
+ *  a shell — see `checkVerify` in step-exec.ts, which owns this list. */
+const VERIFY_ASSERTION = /^(contains|not-contains|matches|file|judge):\s/;
+
+/** What a shell command has that a sentence does not: an operator that only
+ *  means something to a shell, a path or bracket at the very start, or one
+ *  of the commands these flows actually reach for. Deliberately NOT any
+ *  punctuation a sentence might carry — the first version disqualified on
+ *  `;`, `,`, `'` and `"`, so "the reply opens with GOOD; a GOOD reply names
+ *  the SHA" read as shell and a guaranteed exit 127 sat in fix-desk unseen
+ *  by the very lint written to catch it. */
+const LOOKS_LIKE_SHELL =
+  /&&|\|\||\s\|\s|\$\(|\$\{|`|\s[<>]\s|\d?>[>&]?\s|^\[|^[.~/]|^\s*\b(test|grep|egrep|find|head|tail|cat|ls|node|npm|npx|bash|sh|zsh|python3?|jq|awk|sed|curl|git|make|exit|n=|[A-Za-z_]+=)/;
+
+/** A `verify:` that is a claim in English rather than a command. Conservative
+ *  on purpose, the same bargain as REFERS_BACK: it must have no assertion
+ *  prefix, nothing shell-shaped anywhere in it, and enough words to be a
+ *  sentence — so a bare `./check.sh` or a one-word command is left alone and
+ *  the warning only fires where the author plainly wrote prose. */
+function looksLikeProse(verify: string): boolean {
+  const v = verify.trim();
+  if (!v || VERIFY_ASSERTION.test(v)) return false;
+  if (LOOKS_LIKE_SHELL.test(v)) return false;
+  return v.split(/\s+/).length >= 4;
+}
+
 export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   const warnings: FlowWarning[] = [];
   const agentNames = known ? new Set(known.agents) : null;
@@ -306,6 +332,46 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         line: step.line,
         message: `"${step.subflow ?? step.agent}" has schema: but no output: json`,
         detail: "schema: describes the JSON value an output: json step returns. Without output: json nothing is parsed, so nothing is checked. Add `output: json`.",
+      });
+    }
+
+    // The step's own agent. `delegate:` and `on-fail:` are checked below and
+    // the step's target was not, which is the reference that stops the run
+    // rather than degrading it: the runner reaches the step, finds nothing to
+    // run and fails it with `agent "<name>" not found in workspace`. A
+    // scheduled flow does that at 3am, three times, before anyone looks.
+    if (agentNames && step.agent && !step.subflow && !agentNames.has(step.agent)) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        level: "error",
+        message: `[[${step.agent}]] is not an agent in this workspace`,
+        detail:
+          "This step has nothing to run. Every run of this flow fails here. Check the spelling " +
+          "against `agents/<name>/agent.md` — the name is the folder's, not the file's heading — " +
+          "or add the agent.",
+      });
+    }
+
+    // A `verify:` written as a sentence. Two dialects share the key: a line
+    // beginning `contains:`, `not-contains:`, `matches:`, `file:` or
+    // `judge:` is an assertion, and ANYTHING else is handed to a shell. So
+    // `verify: the reply names the clone it made` runs a program called
+    // `the`, exits 127, and fails a step that did its job perfectly — every
+    // run, with an error about bash that says nothing about the flow. The
+    // fix is one word: the same sentence behind `judge:` is graded by a
+    // model, which is what the author meant.
+    if (step.verify && looksLikeProse(step.verify)) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        level: "error",
+        message: `verify: reads as a sentence, so it will be run as a shell command`,
+        detail:
+          `\`${step.verify.slice(0, 60)}${step.verify.length > 60 ? "…" : ""}\` has no assertion ` +
+          "prefix, so the runtime executes it: the first word becomes the program and the step " +
+          "fails with `command not found`. Put `judge: ` in front to have a model grade the " +
+          "claim, or write it as a shell command that exits 0 when the claim holds.",
       });
     }
 

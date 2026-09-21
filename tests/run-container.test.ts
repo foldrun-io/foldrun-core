@@ -15,8 +15,22 @@ import {
   hashTree,
   parseDriverLine,
   RUNTIME_CACHE,
+  runnerImageRef,
+  runnerImageTag,
   runtimeCacheMount,
 } from "../src/run-container.ts";
+
+function withRunnerImage<T>(value: string | undefined, body: () => T): T {
+  const prev = process.env.FOLDRUN_RUNNER_IMAGE;
+  if (value === undefined) delete process.env.FOLDRUN_RUNNER_IMAGE;
+  else process.env.FOLDRUN_RUNNER_IMAGE = value;
+  try {
+    return body();
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_RUNNER_IMAGE;
+    else process.env.FOLDRUN_RUNNER_IMAGE = prev;
+  }
+}
 
 test("what the spec says agents own comes back; what they must not touch does not", () => {
   assert.ok(allowedBack("agents/writer/outputs/report.md"));
@@ -233,6 +247,37 @@ test("append merge: host rows without a trailing newline, a rewrite, and a new f
   assert.equal(mergeAppends(b("a\n"), b("a\nx"), b("a\ny\n"))!.toString(), "a\nx\ny\n");
   assert.equal(mergeAppends(b("a\nb\n"), b("a\nB\n"), b("a\nb\nc\n")), null, "a rewritten line is not an append");
   assert.equal(mergeAppends(null, b("{}\n"), b("[]\n")), null, "two new files are a conflict");
+});
+
+// FOLDRUN_RUNNER_IMAGE names an image to run as-is; anything falsy means
+// "build the content-hash image core produces itself". An empty string used
+// to survive `??` into the build path as `docker build -t ""`, which docker
+// rejects ("repository name must have at least one component"), so every step
+// failed with the var set empty — exactly what a compose `${VAR:-…}` yields
+// when someone tries to clear it. runnerImageRef resolves this without docker.
+test("an empty or unset FOLDRUN_RUNNER_IMAGE builds the content-hash tag; a real value is used as-is", () => {
+  const content = withRunnerImage(undefined, () => runnerImageTag());
+  assert.notEqual(content, "");
+
+  const empty = withRunnerImage("", () => runnerImageRef());
+  assert.notEqual(empty.tag, "", "an empty value must not become an empty docker tag");
+  assert.equal(empty.tag, content);
+  assert.equal(empty.explicit, false);
+
+  const unset = withRunnerImage(undefined, () => runnerImageRef());
+  assert.equal(unset.tag, content);
+  assert.equal(unset.explicit, false);
+
+  const set = withRunnerImage("ghcr.io/foldrun-io/runner:v9", () => runnerImageRef());
+  assert.equal(set.tag, "ghcr.io/foldrun-io/runner:v9");
+  assert.equal(set.explicit, true);
+
+  // The arch suffix is core's own naming for a cross-built image and rides
+  // only the content-hash tag — an explicit image name is taken verbatim.
+  const built = withRunnerImage("", () => runnerImageRef({ platform: "linux/arm64" }));
+  assert.equal(built.tag, `${content}-arm64`);
+  const explicit = withRunnerImage("me/runner:x", () => runnerImageRef({ platform: "linux/arm64" }));
+  assert.equal(explicit.tag, "me/runner:x");
 });
 
 // A secret whose value holds a newline used to be dropped from the env

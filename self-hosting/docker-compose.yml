@@ -50,10 +50,13 @@ services:
       FOLDRUN_RUN_ISOLATION: container
       # The image every step runs in: node, python, git, and Chromium,
       # Firefox and WebKit for the browser tool. Published, so the first
-      # run does not spend five minutes and 600MB building it. Unset it and
-      # the platform builds its own copy on first use, which is what a
-      # change to the runner's Dockerfile needs.
-      FOLDRUN_RUNNER_IMAGE: ${FOLDRUN_RUNNER_IMAGE:-ghcr.io/foldrun-io/runner:latest}
+      # run does not spend five minutes and 600MB building it. Set it empty
+      # (FOLDRUN_RUNNER_IMAGE= in your .env) and the platform builds its own
+      # copy on first use, which is what a change to the runner's Dockerfile
+      # needs. The `-` below, not `:-`, is deliberate: `:-` would substitute
+      # the published tag for an empty value too, leaving no way to ask for
+      # a build.
+      FOLDRUN_RUNNER_IMAGE: ${FOLDRUN_RUNNER_IMAGE-ghcr.io/foldrun-io/runner:latest}
       # The key every derived credential hangs off (sessions, hooks, git,
       # vault). Generate once: openssl rand -hex 32. Losing it logs everyone
       # out and voids every hook URL; leaking it is game over — treat it like
@@ -66,8 +69,10 @@ services:
       FOLDRUN_BILLING: ${FOLDRUN_BILLING:-}
       FOLDRUN_CONCURRENCY: ${FOLDRUN_CONCURRENCY:-2}
       # Where a step reaches the egress proxy. Empty disables it and every
-      # step materialises its secrets into its container as before.
-      FOLDRUN_EGRESS_URL: ${FOLDRUN_EGRESS_URL:-http://host.docker.internal:8090}
+      # step materialises its secrets into its container as before. The `-`,
+      # not `:-`, is what lets an empty value through to mean "disabled"
+      # rather than falling back to the default address.
+      FOLDRUN_EGRESS_URL: ${FOLDRUN_EGRESS_URL-http://host.docker.internal:8090}
       FOLDRUN_EGRESS_PORT: "8090"
       # The platform's model credential — "models included". Runs without
       # their own provider: block borrow exactly this (and nothing else
