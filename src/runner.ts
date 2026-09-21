@@ -2569,7 +2569,19 @@ function isProviderRefusal(text: string): boolean {
   // fallback it could only time out on again. A refusal the fallback can
   // answer is about the ACCOUNT; anything about the work or the sandbox is
   // not, however similar the vocabulary.
-  return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded/i.test(text);
+  // A subscription's own ceiling is the same kind of refusal, worded
+  // differently: Claude Code on a Max plan answers "You've hit your weekly
+  // limit · resets 5am" with no status code and none of the money words.
+  // On 2026-09-21 every opus-tier step on the account failed on exactly that
+  // sentence while sonnet steps beside them ran fine — the plan has a
+  // separate weekly cap for Opus — and nothing here recognised it, so a
+  // second supply could not have answered even if one had been configured.
+  // It is not transient (isTransientOverload is right to ignore it: the
+  // window is a week), it is the account's supply being exhausted, which is
+  // precisely what the fallback provider is for.
+  return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded|(weekly|daily|monthly|usage) limit|rate.?limit(ed)?\b.*resets?\b|limit\b.*\bresets?\b/i.test(
+    text,
+  );
 }
 
 /** How many times a busy provider is given another moment, and the longest

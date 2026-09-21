@@ -16,7 +16,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { awaitRotatedCredential } from "../src/runner.ts";
+import { awaitRotatedCredential, isTransientOverload } from "../src/runner.ts";
 
 /** A clock that runs as fast as the test asks it to, so a 90s window costs
  *  nothing. The poll still awaits a real timer; only the deadline is faked. */
@@ -54,4 +54,14 @@ test("with no credential to compare against there is nothing to wait for", async
   // got is about its own key and must fail immediately, not stall 90s.
   const got = await awaitRotatedCredential(undefined, fakeClock().now, () => "anything", 90_000, 1);
   assert.equal(got, null);
+});
+
+test("a subscription's weekly limit is a refusal for the second supply, never a retry", () => {
+  // Claude Code on a Max plan says this with no status code and none of the
+  // money words. Every opus-tier step on the account failed on it on
+  // 2026-09-21 while sonnet steps ran, and nothing recognised it.
+  const msg = "Claude Code returned an error result: You've hit your weekly limit · resets 5am (Australia/Sydney)";
+  // Not transient: the window is a week, and waiting thirty seconds three
+  // times would only burn three sandboxes.
+  assert.equal(isTransientOverload(msg), false);
 });
