@@ -578,8 +578,12 @@ RUN apt-get update \\
 # to a fixed path the agent user can read (the default cache would be
 # root's HOME). The browsers' own sandboxes are disabled at launch time — in
 # this platform the container/gVisor IS the sandbox, and the two fight.
+# Pinned exactly, not @1: web_browse's numbered elements use ariaSnapshot's
+# "ai" mode (1.59+), and the per-account browser pod runs this same image, so
+# a floating version would move both under a working tool on any rebuild.
+# Raise it on purpose, with the gallery tests and one real call.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
-RUN npm install -g playwright@1 >/dev/null \\
+RUN npm install -g playwright@1.63.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && chmod -R a+rX /opt/browser
 WORKDIR /opt/runner
