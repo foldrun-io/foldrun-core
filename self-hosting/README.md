@@ -87,3 +87,27 @@ Runs in flight are handed back to the queue and re-attached by the worker
 that comes up, so an upgrade does not cost a run. Read the
 [release notes](https://github.com/foldrun-io/foldrun-infra/releases) for
 the version you are moving to.
+
+## The runtime cache
+
+Each account's built venvs and npm prefixes are cached between steps in a
+per-account Docker **named volume**, `foldrun-rt-<account>`, so a pandas-using
+agent installs pandas once rather than every step. Losing the cache costs time,
+never data — the next step rebuilds what it needs — so it is safe to delete.
+
+The cache is a run-container concern, not a filesystem directory, so there is no
+`rm -rf` to do (and there never was an automated cleanup — the old on-disk cache
+just accumulated too). To reclaim space, remove the cache volumes; they are
+labelled so you can find exactly them and nothing else:
+
+```bash
+# list the runtime-cache volumes and their sizes
+docker volume ls --filter label=foldrun.io/kind=runtime-cache
+
+# remove them all (the next run rebuilds what it needs) — Docker refuses any
+# volume a running step still has mounted, so this is safe during quiet periods
+docker volume ls -q --filter label=foldrun.io/kind=runtime-cache | xargs -r docker volume rm
+
+# or one account's cache only
+docker volume rm foldrun-rt-<account>
+```

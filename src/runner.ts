@@ -2045,7 +2045,7 @@ async function runStep(
         libraryRoot: libraryDir(tenant),
         galleryRoot: platform.galleryDir() ?? undefined,
         // Keys this step's dependency cache. Per-account by design — see
-        // run-container.ts#runtimeCacheDir for why it is not shared.
+        // run-container.ts#runtimeCacheMount for why it is not shared.
         tenant,
         input: {
           agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),

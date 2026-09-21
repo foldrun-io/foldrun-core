@@ -29,7 +29,6 @@ import { divertedSummary, isDivertedPath } from "./test-mode.ts";
 import type { EventExtra } from "./step-exec.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
-import { dataRoot } from "./paths.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
@@ -354,26 +353,46 @@ export function applyContainerChanges(
  */
 export const RUNTIME_CACHE = "/home/agent/.foldrun/runner/.runtimes";
 
+/** Docker's own volume-name charset: a leading alphanumeric, then
+ *  alphanumerics plus `_ . -`. The mount source is handed straight to the
+ *  daemon, so it is validated against this rather than assumed. */
+const DOCKER_VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+
 /**
- * The per-tenant directory backing that mount, or null when there is none.
+ * The per-tenant runtime cache mount — a Docker NAMED volume and the fixed
+ * path it mounts at — or null when there is none.
  *
- * Per-tenant, not shared. A shared cache would store one copy of pandas
- * instead of one per account, but it would also be mutable state that one
- * tenant's step writes and another tenant's step then *executes* — a poisoned
- * venv arriving as a trusted local file, which is precisely the path gVisor,
- * the capability drop and the egress policy all exist to close. Disk is the
- * cheaper thing to spend. If the duplication ever stops being cheap, the fix
- * is a read-only mount filled by a trusted builder, not a writable shared one.
+ * A named volume, not a host path. The run's `docker create` is issued to the
+ * host daemon over the mounted socket, and that daemon cannot resolve a path
+ * under the platform's own FOLDRUN_DATA — which under compose is itself a named
+ * volume, or a directory Docker Desktop has not shared — so `-v <hostpath>:…`
+ * failed with "mounts denied". A named volume is resolved by the daemon, needs
+ * no host sharing, and on first use is seeded from the image's mount point,
+ * which the runner image creates owned by the agent user (the DOCKERFILE below,
+ * `${RUNTIME_CACHE}`) — so the fresh cache is writable without a host-side chown.
  *
- * Deliberately NOT under `<tenant>/.runtimes`, which is the *host* cache: the
- * venvs there carry host absolute paths and would be unusable inside a runner.
- * Two roots, so a hit is always a real hit.
+ * Per-tenant, not shared. A shared cache would store one copy of pandas instead
+ * of one per account, but it would also be mutable state that one tenant's step
+ * writes and another tenant's step then *executes* — a poisoned venv arriving
+ * as a trusted local file, which is precisely the path gVisor, the capability
+ * drop and the egress policy all exist to close. Disk is the cheaper thing to
+ * spend. One volume per tenant keeps that boundary; each carries a
+ * `foldrun.io/tenant` label so it can be found and pruned (self-hosting/README.md).
+ *
+ * The venvs inside carry the runner's own absolute paths, distinct from the
+ * host's `<tenant>/.runtimes` cache — two roots, so a hit is always a real hit.
  */
-export function runtimeCacheDir(tenant: string | undefined): string | null {
+export function runtimeCacheMount(
+  tenant: string | undefined,
+): { source: string; target: string } | null {
   if (process.env.FOLDRUN_RUNTIME_CACHE === "off") return null;
   const safe = tenant ? safeTenantSegment(tenant) : null;
   if (!safe) return null;
-  return path.join(dataRoot(), safe, ".runtimes-sandbox");
+  const source = `foldrun-rt-${safe}`;
+  // safeTenantSegment already yields Docker's charset and `foldrun-rt-` is a
+  // safe leading token — but the source is what the daemon binds, so prove it.
+  if (!DOCKER_VOLUME_NAME.test(source)) return null;
+  return { source, target: RUNTIME_CACHE };
 }
 
 // ---------- the runner image ----------
@@ -974,14 +993,26 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     // host itself stays reachable, which is the one door this needs.
     flags.push("--add-host", "host.docker.internal:host-gateway");
 
-    // The dependency cache: this tenant's built venvs and npm prefixes,
-    // mounted where prepareRuntime already looks. Created host-side rather
-    // than left to the daemon so it belongs to the platform user; the
-    // entrypoint hands the mount point itself to the agent user.
-    const cacheDir = runtimeCacheDir(args.tenant);
-    if (cacheDir) {
-      fs.mkdirSync(cacheDir, { recursive: true });
-      flags.push("-v", `${cacheDir}:${RUNTIME_CACHE}`);
+    // The dependency cache: this tenant's built venvs and npm prefixes, in a
+    // per-tenant Docker named volume mounted where prepareRuntime already looks.
+    // Not a host path — the daemon on the far end of the socket cannot resolve
+    // the platform's FOLDRUN_DATA (runtimeCacheMount explains).
+    const cacheMount = runtimeCacheMount(args.tenant);
+    if (cacheMount) {
+      // Create the volume WITH labels first: `docker create -v` auto-creates it
+      // but cannot label it, and an unlabelled volume is unfindable and
+      // unprunable later. Idempotent — a no-op when it already exists. The
+      // segment is the one runtimeCacheMount already validated, so the
+      // assertions below cannot fire when cacheMount is non-null.
+      const seg = safeTenantSegment(args.tenant!)!;
+      const vol = spawnSync(cli(), [
+        "volume", "create",
+        "--label", "foldrun.io/kind=runtime-cache",
+        "--label", `foldrun.io/tenant=${seg}`,
+        cacheMount.source,
+      ], { encoding: "utf8" });
+      if (vol.status !== 0) throw new Error(`docker volume create failed:\n${vol.stderr}`);
+      flags.push("-v", `${cacheMount.source}:${cacheMount.target}`);
     }
 
     // The rent clock starts here: staging the workspace is host work, but
