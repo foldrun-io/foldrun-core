@@ -432,6 +432,12 @@ export interface BrowseSettings {
    *  signed out. Seeded before the page's own scripts run, never read back. */
   storage?: string;
   storage_origin?: string;
+  /** Named bundles of the same settings plus the per-call ones that travel
+   *  with an identity — proxy, headers, geolocation, permissions,
+   *  color_scheme, block — chosen on a call as `identity=<name>`. "As an
+   *  Australian phone" is six settings; a name says it once. Each value is a
+   *  map of text (or JSON for headers), validated here the way the block is. */
+  identities?: Record<string, Record<string, string>>;
 }
 
 // What a person writes, and what Playwright calls it. "chromium" and "webkit"
@@ -448,7 +454,43 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chromium" | "firefox" | "webkit"> =
   webkit: "webkit",
 };
 const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities"] as const;
+// What one identity may carry: the block's own settings, and the call
+// arguments that describe who the browser is rather than what one call does.
+const IDENTITY_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "proxy", "headers", "geolocation", "permissions", "color_scheme", "block"] as const;
+const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/** One named identity, checked the way the block is: text values, an
+ *  engine that exists, secrets by NAME, a cookie with its domain. */
+function readIdentity(name: string, raw: unknown): { identity?: Record<string, string>; error?: string } {
+  const where = `web_browse.identities.${name}`;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) return { error: `web_browse.identities: "${name}" is not a plain name (letters, digits, dot, dash, underscore).` };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${where} must be a block of settings, like { device: "Pixel 7", locale: en-AU }.` };
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(IDENTITY_KEYS as readonly string[]).includes(k)) return { error: `${where}.${k} is not an identity setting — they are ${IDENTITY_KEYS.join(", ")}.` };
+    if (v === undefined || v === null || v === "") continue;
+    if (k === "headers") {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return { error: `${where}.headers must be a map of header to value.` };
+      out.headers = JSON.stringify(v);
+      continue;
+    }
+    if (typeof v !== "string") return { error: `${where}.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
+    if (k === "engine") {
+      const canonical = BROWSE_ENGINE_ALIASES[v.toLowerCase()];
+      if (!canonical) return { error: `${where}.engine: ${v} — the browsers are ${BROWSE_ENGINES.join(", ")}.` };
+      out.engine = canonical;
+      continue;
+    }
+    if ((k === "cookies" || k === "storage" || k === "proxy") && !SECRET_NAME.test(v)) {
+      return { error: `${where}.${k} must be the NAME of a vault secret (CAPITALS), never the value — store it with \`foldrun secrets set NAME\`.` };
+    }
+    out[k] = v;
+  }
+  if (out.cookies && !out.cookie_domain) return { error: `${where}.cookies needs cookie_domain beside it — write \`cookie_domain: .example.com\`.` };
+  if (out.storage && !out.storage_origin) return { error: `${where}.storage needs storage_origin beside it — write \`storage_origin: https://www.example.com\`.` };
+  return { identity: out };
+}
 
 /** The settings in a `web_browse:` block, and the vendor part with them
  *  removed — so one key carries both without either learning about the
@@ -468,6 +510,19 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       continue;
     }
     if (v === undefined || v === null || v === "") continue;
+    if (k === "identities") {
+      if (!v || typeof v !== "object" || Array.isArray(v)) {
+        return { settings, rest: left(rest), error: "web_browse.identities must be a map of name to settings, like { au-mobile: { device: \"Pixel 7\", locale: en-AU } }." };
+      }
+      const identities: Record<string, Record<string, string>> = {};
+      for (const [name, block] of Object.entries(v as Record<string, unknown>)) {
+        const read = readIdentity(name, block);
+        if (read.error) return { settings, rest: left(rest), error: read.error };
+        identities[name] = read.identity!;
+      }
+      if (Object.keys(identities).length) settings.identities = identities;
+      continue;
+    }
     if (typeof v !== "string") {
       return { settings, rest: left(rest), error: `web_browse.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
     }

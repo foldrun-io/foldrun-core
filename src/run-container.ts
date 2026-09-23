@@ -582,8 +582,10 @@ RUN apt-get update \\
 # "ai" mode (1.59+), and the per-account browser pod runs this same image, so
 # a floating version would move both under a working tool on any rebuild.
 # Raise it on purpose, with the gallery tests and one real call.
+# axe-core beside it is web_browse's mode=a11y: one file the tool injects
+# into the page; without it the mode falls back to its own shorter checks.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
-RUN npm install -g playwright@1.63.0 >/dev/null \\
+RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && chmod -R a+rX /opt/browser
 WORKDIR /opt/runner

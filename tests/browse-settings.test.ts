@@ -105,3 +105,28 @@ test("a cookie domain is not an origin", () => {
   const read = readBrowseSettings({ storage: "APP_STORAGE", storage_origin: ".example.com" });
   assert.match(read.error!, /must be an origin, scheme and host/);
 });
+
+test("identities: one name for a bundle of settings, checked the way the block is", () => {
+  const good = readBrowseSettings({
+    identities: {
+      "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chrome", headers: { "x-tenant": "acme" } },
+      "au-desktop": { locale: "en-AU" },
+    },
+  });
+  assert.equal(good.error, undefined);
+  assert.deepEqual(good.settings.identities, {
+    "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chromium", headers: "{\"x-tenant\":\"acme\"}" },
+    "au-desktop": { locale: "en-AU" },
+  });
+  assert.equal(good.rest, undefined, "identities are settings, not a vendor");
+  assert.deepEqual(webProblems({ web_browse: { identities: { au: { locale: "en-AU" } } } }), []);
+
+  // The same refusals as the block, named for the identity.
+  assert.match(readBrowseSettings({ identities: { au: { engine: "opera" } } }).error!, /web_browse\.identities\.au\.engine: opera/);
+  assert.match(readBrowseSettings({ identities: { au: { proxy: "http://u:p@host" } } }).error!, /identities\.au\.proxy must be the NAME of a vault secret/);
+  assert.match(readBrowseSettings({ identities: { au: { cookies: "MEDIUM_COOKIES" } } }).error!, /cookies needs cookie_domain beside it/);
+  assert.match(readBrowseSettings({ identities: { au: { mode: "text" } } }).error!, /identities\.au\.mode is not an identity setting/, "what one call does stays in the call");
+  assert.match(readBrowseSettings({ identities: { au: "Pixel 7" } }).error!, /identities\.au must be a block of settings/);
+  assert.match(readBrowseSettings({ identities: ["au"] }).error!, /identities must be a map of name to settings/);
+  assert.match(readBrowseSettings({ identities: { "no spaces": {} } }).error!, /is not a plain name/);
+});

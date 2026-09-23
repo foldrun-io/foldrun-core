@@ -1124,6 +1124,8 @@ function agentContext(
     ...(browseSettings.cookie_domain ? { FOLDRUN_BROWSER_COOKIE_DOMAIN: browseSettings.cookie_domain } : {}),
     ...(browseSettings.storage ? { FOLDRUN_BROWSER_STORAGE: browseSettings.storage } : {}),
     ...(browseSettings.storage_origin ? { FOLDRUN_BROWSER_STORAGE_ORIGIN: browseSettings.storage_origin } : {}),
+    // The named identities, as one JSON map the tool picks from by name.
+    ...(browseSettings.identities ? { FOLDRUN_BROWSER_IDENTITIES: JSON.stringify(browseSettings.identities) } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.
