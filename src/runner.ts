@@ -2146,8 +2146,13 @@ async function runStep(
           credentialUsed = rotated;
           lastRefusal = "";
           const previous = outcome.timing;
+          // Build first: isolatedArgs is what re-grants the model key, and
+          // commit() is what publishes the grant to Redis, where the proxy
+          // reads it. Committing first sent the revoked token again — every
+          // rotation retry on 2026-09-22/23 401'd this way.
+          const retry = isolatedArgs(platformModelEnv());
           await lease?.commit();
-          outcome = withEarlierTiming(await runIsolated(isolatedArgs(platformModelEnv())), previous);
+          outcome = withEarlierTiming(await runIsolated(retry), previous);
         } else {
           push("info", "the credential did not change — this is the key itself, not a rotation");
         }
