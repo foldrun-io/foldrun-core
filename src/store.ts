@@ -2212,6 +2212,10 @@ const ACCOUNT_SEALED: Record<string, string> = {
 export function accountFileSealed(rel: string): string | null {
   const norm = rel.replaceAll("\\", "/");
   if (Object.hasOwn(ACCOUNT_SEALED, norm)) return ACCOUNT_SEALED[norm];
+  // What a move into the database leaves behind: billing.json.imported-<date>
+  // and the like, kept for a rollback — the same contents, so the same seal.
+  const moved = /^(.+\.json)\.imported-[\d-]+$/.exec(norm);
+  if (moved && Object.hasOwn(ACCOUNT_SEALED, moved[1])) return ACCOUNT_SEALED[moved[1]];
   if (/^(billed|once|topups|workspaces\/[^/]+\/runs)\//.test(norm)) {
     return "generated bookkeeping, not an authored file.";
   }
@@ -2227,7 +2231,7 @@ export function accountFileSealed(rel: string): string | null {
  *  honesty's clothes. `accountFileSealed` still refuses these if a path is
  *  constructed directly — the listing hides them, the reader guards them. */
 const ACCOUNT_BOOKKEEPING =
-  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
+  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
 
 /**
  * The account directory as it actually is on disk.

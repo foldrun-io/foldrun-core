@@ -14,15 +14,15 @@ test("private account files are sealed and left out of the listing", () => {
   const dir = accountDir("sealtest");
   fs.mkdirSync(path.join(dir, "once"), { recursive: true });
   fs.mkdirSync(path.join(dir, "library", "skills"), { recursive: true });
-  for (const f of ["secrets.json", "oauth-clients.json", "ledger.jsonl", "billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "AGENTS.md", "library/skills/x.md"]) {
+  for (const f of ["secrets.json", "oauth-clients.json", "ledger.jsonl", "billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "billing.json.imported-2026-09-24", "AGENTS.md", "library/skills/x.md"]) {
     fs.writeFileSync(path.join(dir, f), "{}");
   }
-  for (const f of ["secrets.json", "oauth-clients.json", "ledger.jsonl", "billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "topups/x", "billed/run-1"]) {
+  for (const f of ["secrets.json", "oauth-clients.json", "ledger.jsonl", "billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "topups/x", "billed/run-1", "billing.json.imported-2026-09-24", "oauth-connections.json.imported-2026-09-24"]) {
     assert.ok(accountFileSealed(f), `${f} must be sealed`);
   }
   for (const f of ["AGENTS.md", "library/skills/x.md"]) assert.equal(accountFileSealed(f), null, `${f} is authored`);
   const listed = listAccountFiles("sealtest");
-  for (const f of ["billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "secrets.json"]) {
+  for (const f of ["billing.json", "oauth-connections.json", "secret-health.json", "once/abc", "secrets.json", "billing.json.imported-2026-09-24"]) {
     assert.ok(!listed.includes(f), `${f} must not be listed`);
   }
   assert.ok(listed.includes("AGENTS.md"));
