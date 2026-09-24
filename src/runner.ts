@@ -1396,13 +1396,13 @@ function agentContext(
  * Never fails a step: a link is bookkeeping, and a run that did its work must
  * not be marked failed because a URL could not be minted.
  */
-function publishPublicDir(
+async function publishPublicDir(
   tenant: string,
   workspace: string,
   push: (type: "info" | "error", text: string) => void,
-) {
+): Promise<void> {
   try {
-    const { added } = platform.syncPublicShares(tenant, workspace);
+    const { added } = await platform.syncPublicShares(tenant, workspace);
     if (added.length) push("info", `shared: ${added.join(", ")}`);
   } catch (err) {
     push("error", `shares: ${err instanceof Error ? err.message : String(err)}`);
@@ -2216,7 +2216,7 @@ async function runStep(
       }
       // Nothing a test run left in storage/public/ reached storage/, so
       // there is nothing to publish — and a share link is an outward act.
-      if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      if (!testRun) await publishPublicDir(tenant, path.basename(workspaceRoot), push);
       sayWhy(outcome.status);
       step.status = outcome.status;
       step.result = redactText(outcome.result);
@@ -2385,7 +2385,7 @@ async function runStep(
         supplyState = "exhausted";
         outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
-      if (!testRun) publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      if (!testRun) await publishPublicDir(tenant, path.basename(workspaceRoot), push);
       sayWhy(outcome.status);
       step.status = outcome.status;
       step.result = redactText(outcome.result);

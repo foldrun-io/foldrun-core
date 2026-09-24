@@ -108,7 +108,7 @@ export interface PlatformHooks {
   /** Destroy whatever sandboxes a stopped run still has. Default: nothing to destroy. */
   killRunSandboxes(runId: string): void;
   /** Publish storage/public/ as share links after a run. Default: no links. */
-  syncPublicShares(tenant: string, workspace: string): { added: string[] };
+  syncPublicShares(tenant: string, workspace: string): Promise<{ added: string[] }>;
   /** The workspace a preview was branched from, for inherited secrets. Default: none. */
   previewSourceOf(tenant: string, workspace: string): string | null;
   /** This account's own data key, or null to use the install key. */
@@ -165,7 +165,7 @@ const local: PlatformHooks = {
   runSpend: (run) => run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
   isolation: {},
   killRunSandboxes() {},
-  syncPublicShares: () => ({ added: [] }),
+  syncPublicShares: async () => ({ added: [] }),
   previewSourceOf: () => null,
   tenantKey: () => null,
   egress: { lease: async () => null },
