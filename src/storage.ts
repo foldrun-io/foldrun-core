@@ -42,9 +42,9 @@
 //   FOLDRUN_S3_ENDPOINT         https://<account>.r2.cloudflarestorage.com
 //   FOLDRUN_S3_BUCKET           bucket name
 //   FOLDRUN_S3_REGION           default auto (R2's region)
-//   FOLDRUN_S3_ACCESS_KEY_ID
-//   FOLDRUN_S3_SECRET_ACCESS_KEY
-//   FOLDRUN_S3_PATH_STYLE       default true — R2 speaks path style
+//   FOLDRUN_S3_ACCESS_KEY_ID    static keys (R2); leave both unset under an
+//   FOLDRUN_S3_SECRET_ACCESS_KEY  AWS role — the pod's credentials are used
+//   FOLDRUN_S3_PATH_STYLE       default true — R2 speaks path style; false on S3
 //   FOLDRUN_STORAGE_MAX_MB        per object, default 512
 //   FOLDRUN_STORAGE_QUOTA_MB      per workspace, default 5120
 
@@ -280,9 +280,33 @@ interface S3Config {
   endpoint: string;
   bucket: string;
   region: string;
+  /** Static keys (R2, or a self-host with an IAM user). Absent: the pod's
+   *  role, read from the container credential endpoint — see credentials(). */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  pathStyle: boolean;
+}
+
+/** What signs a request: a key pair, and a session token when the pair is
+ *  temporary (a role's). The token rides in every signed request. */
+interface Credentials {
   accessKeyId: string;
   secretAccessKey: string;
-  pathStyle: boolean;
+  sessionToken?: string;
+}
+
+/** `https://s3.ap-southeast-2.amazonaws.com` → `ap-southeast-2`. Null for
+ *  anything else (R2, MinIO), whose region is whatever the env says. */
+export function regionOfEndpoint(endpoint: string): string | null {
+  const m = /^s3[.-]([a-z]{2}-[a-z]+-\d)\.amazonaws\.com$/.exec(new URL(endpoint).host);
+  return m ? m[1] : null;
+}
+
+/** True when this process runs under an AWS role handed out through the
+ *  container credential endpoint — EKS Pod Identity, ECS, or an IRSA-style
+ *  shim. The endpoint is the pod's, and the token file is mounted beside it. */
+function containerCredentialsAvailable(): boolean {
+  return Boolean(process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
 }
 
 export function s3Config(): S3Config | null {
@@ -290,16 +314,63 @@ export function s3Config(): S3Config | null {
   const bucket = process.env.FOLDRUN_S3_BUCKET;
   const accessKeyId = process.env.FOLDRUN_S3_ACCESS_KEY_ID;
   const secretAccessKey = process.env.FOLDRUN_S3_SECRET_ACCESS_KEY;
-  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) return null;
+  if (!endpoint || !bucket) return null;
+  const staticKeys = Boolean(accessKeyId && secretAccessKey);
+  // No key and no role is a half-set environment: fall back to fs rather
+  // than fail at the first upload (driverFor says why).
+  if (!staticKeys && !containerCredentialsAvailable()) return null;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     bucket,
-    // R2 has one region and calls it `auto`. AWS callers set their own.
-    region: process.env.FOLDRUN_S3_REGION ?? "auto",
-    accessKeyId,
-    secretAccessKey,
+    // R2 has one region and calls it `auto`. An AWS endpoint names its own;
+    // anything else says so in the env.
+    region: process.env.FOLDRUN_S3_REGION ?? regionOfEndpoint(endpoint) ?? "auto",
+    ...(staticKeys ? { accessKeyId, secretAccessKey } : {}),
     pathStyle: process.env.FOLDRUN_S3_PATH_STYLE !== "false",
   };
+}
+
+// ---------- credentials ----------
+//
+// Static keys are used as given. Without them, the process is running under
+// an AWS role: EKS Pod Identity (and ECS) publish the role's credentials on a
+// link-local HTTP endpoint named by AWS_CONTAINER_CREDENTIALS_FULL_URI, with
+// a bearer token read from AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE. They are
+// temporary — the reply says when — so they are cached and fetched again a
+// few minutes before they run out. This is the SDK's default chain, written
+// small: foldrun signs by hand and does not carry the SDK for this.
+
+let cached: (Credentials & { expiresAt: number }) | null = null;
+const REFRESH_EARLY_MS = 5 * 60_000;
+
+async function credentials(cfg: S3Config): Promise<Credentials> {
+  if (cfg.accessKeyId && cfg.secretAccessKey) return { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey };
+  if (cached && Date.now() < cached.expiresAt - REFRESH_EARLY_MS) return cached;
+  const full = process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+  const relative = process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI;
+  const url = full ?? (relative ? `http://169.254.170.2${relative}` : null);
+  if (!url) throw new Error("s3: no static key and no container credential endpoint");
+  const headers: Record<string, string> = {};
+  const tokenFile = process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
+  const token = tokenFile ? fs.readFileSync(tokenFile, "utf8").trim() : process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN;
+  if (token) headers.authorization = token;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) });
+  if (!res.ok) throw new Error(`s3: the container credential endpoint answered ${res.status}`);
+  const body = (await res.json()) as { AccessKeyId?: string; SecretAccessKey?: string; Token?: string; Expiration?: string };
+  if (!body.AccessKeyId || !body.SecretAccessKey) throw new Error("s3: the container credential endpoint returned no key");
+  cached = {
+    accessKeyId: body.AccessKeyId,
+    secretAccessKey: body.SecretAccessKey,
+    ...(body.Token ? { sessionToken: body.Token } : {}),
+    // No expiry in the reply: treat it as good for an hour, then ask again.
+    expiresAt: body.Expiration ? Date.parse(body.Expiration) : Date.now() + 60 * 60_000,
+  };
+  return cached;
+}
+
+/** For tests: forget cached role credentials. */
+export function forgetS3Credentials(): void {
+  cached = null;
 }
 
 // Narrower than crypto.BinaryLike on purpose. BinaryLike also covers views
@@ -326,8 +397,8 @@ function stamps(now: Date) {
   return { amzDate, dateStamp: amzDate.slice(0, 8) };
 }
 
-function signingKey(cfg: S3Config, dateStamp: string) {
-  const kDate = hmac(`AWS4${cfg.secretAccessKey}`, dateStamp);
+function signingKey(cfg: S3Config, creds: Credentials, dateStamp: string) {
+  const kDate = hmac(`AWS4${creds.secretAccessKey}`, dateStamp);
   const kRegion = hmac(kDate, cfg.region);
   const kService = hmac(kRegion, "s3");
   return hmac(kService, "aws4_request");
@@ -356,6 +427,7 @@ function target(cfg: S3Config, key: string) {
  */
 function presign(
   cfg: S3Config,
+  creds: Credentials,
   method: "GET" | "PUT",
   key: string,
   ttlSec: number,
@@ -369,10 +441,13 @@ function presign(
   const query: Record<string, string> = {
     ...extraQuery,
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-    "X-Amz-Credential": `${cfg.accessKeyId}/${scope}`,
+    "X-Amz-Credential": `${creds.accessKeyId}/${scope}`,
     "X-Amz-Date": amzDate,
     "X-Amz-Expires": String(ttlSec),
     "X-Amz-SignedHeaders": "host",
+    // A role's credentials are only valid with their token, and the token
+    // is part of what is signed.
+    ...(creds.sessionToken ? { "X-Amz-Security-Token": creds.sessionToken } : {}),
   };
   const canonicalQuery = Object.keys(query)
     .sort()
@@ -395,7 +470,7 @@ function presign(
     sha256(canonicalRequest),
   ].join("\n");
 
-  const signature = hmac(signingKey(cfg, dateStamp), stringToSign).toString("hex");
+  const signature = hmac(signingKey(cfg, creds, dateStamp), stringToSign).toString("hex");
   return `${origin}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
 }
 
@@ -407,6 +482,7 @@ async function s3Request(
   body?: Buffer,
   mime?: string,
 ): Promise<Response> {
+  const creds = await credentials(cfg);
   const { host, origin, canonicalUri } = target(cfg, key);
   const { amzDate, dateStamp } = stamps(new Date());
   const scope = `${dateStamp}/${cfg.region}/s3/aws4_request`;
@@ -416,6 +492,7 @@ async function s3Request(
     host,
     "x-amz-content-sha256": payloadHash,
     "x-amz-date": amzDate,
+    ...(creds.sessionToken ? { "x-amz-security-token": creds.sessionToken } : {}),
     ...(mime ? { "content-type": mime } : {}),
   };
   const signed = Object.keys(headers).sort();
@@ -432,7 +509,7 @@ async function s3Request(
   ].join("\n");
 
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256(canonicalRequest)].join("\n");
-  const signature = hmac(signingKey(cfg, dateStamp), stringToSign).toString("hex");
+  const signature = hmac(signingKey(cfg, creds, dateStamp), stringToSign).toString("hex");
 
   const res = await fetch(`${origin}${canonicalUri}`, {
     method,
@@ -440,7 +517,7 @@ async function s3Request(
     headers: {
       ...headers,
       Authorization:
-        `AWS4-HMAC-SHA256 Credential=${cfg.accessKeyId}/${scope}, ` +
+        `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${scope}, ` +
         `SignedHeaders=${signedHeaders}, Signature=${signature}`,
     },
   });
@@ -472,14 +549,14 @@ function s3Driver(cfg: S3Config): Driver {
       if (!res.ok && res.status !== 404) await fail(res, "delete");
     },
     async presignGet(key, filename, mime, ttlSec = 300) {
-      return presign(cfg, "GET", key, ttlSec, {
+      return presign(cfg, await credentials(cfg), "GET", key, ttlSec, {
         // Never inline. See presign()'s note — this is the XSS boundary.
         "response-content-disposition": `attachment; filename="${filename.replace(/["\\]/g, "")}"`,
         "response-content-type": mime,
       });
     },
     async presignPut(key, _mime, ttlSec = 600) {
-      return presign(cfg, "PUT", key, ttlSec);
+      return presign(cfg, await credentials(cfg), "PUT", key, ttlSec);
     },
   };
 }

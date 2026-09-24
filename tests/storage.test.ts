@@ -360,3 +360,61 @@ test("a mirror the same size as the record is re-fetched when its bytes differ",
   // And an unchanged mirror still costs nothing.
   assert.deepEqual(await materializeFiles(TENANT, WS), []);
 });
+
+// Under an AWS role there is no static key: the driver reads the pod's
+// credentials from the container credential endpoint (EKS Pod Identity) and
+// signs with the session token. Nothing here talks to AWS — the endpoint is
+// a local server answering the way the real one does.
+test("with no static key, the S3 driver signs with the pod's role credentials, token included", async () => {
+  const http = await import("node:http");
+  const os = await import("node:os");
+  let asks = 0;
+  const server = http.createServer((req, res) => {
+    asks++;
+    if (req.headers.authorization !== "tok-123") {
+      res.writeHead(401).end();
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ AccessKeyId: "ASIAROLEKEY", SecretAccessKey: "role-secret", Token: "session-token-xyz", Expiration: new Date(Date.now() + 3600_000).toISOString() }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const tokenFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "podid-")), "token");
+  fs.writeFileSync(tokenFile, "tok-123\n");
+  const saved = Object.fromEntries(["FOLDRUN_STORAGE_DRIVER", "FOLDRUN_S3_ENDPOINT", "FOLDRUN_S3_BUCKET", "FOLDRUN_S3_ACCESS_KEY_ID", "FOLDRUN_S3_SECRET_ACCESS_KEY", "FOLDRUN_S3_PATH_STYLE", "FOLDRUN_S3_REGION", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"].map((k) => [k, process.env[k]]));
+  try {
+    delete process.env.FOLDRUN_S3_ACCESS_KEY_ID;
+    delete process.env.FOLDRUN_S3_SECRET_ACCESS_KEY;
+    delete process.env.FOLDRUN_S3_REGION;
+    process.env.FOLDRUN_STORAGE_DRIVER = "s3";
+    process.env.FOLDRUN_S3_ENDPOINT = "https://s3.ap-southeast-2.amazonaws.com";
+    process.env.FOLDRUN_S3_BUCKET = "foldrun-files-123";
+    process.env.FOLDRUN_S3_PATH_STYLE = "false";
+    const { driverFor, s3Config, regionOfEndpoint, forgetS3Credentials } = await import("../src/storage.ts");
+    forgetS3Credentials();
+    // No key and no role: a half-set environment falls back to fs.
+    delete process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
+    assert.equal(s3Config(), null);
+    assert.equal(driverFor("acme", "desk").kind, "fs");
+    // A role: the region comes off the AWS endpoint, the host is virtual-host style.
+    process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI = `http://127.0.0.1:${port}/v1/credentials`;
+    process.env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE = tokenFile;
+    assert.equal(regionOfEndpoint("https://s3.ap-southeast-2.amazonaws.com"), "ap-southeast-2");
+    assert.equal(regionOfEndpoint("https://acct.r2.cloudflarestorage.com"), null);
+    assert.equal(s3Config()?.region, "ap-southeast-2");
+    const d = driverFor("acme", "desk");
+    assert.equal(d.kind, "s3");
+    const url = new URL((await d.presignGet("k/report.html", "report.html", "text/html"))!);
+    assert.equal(url.host, "foldrun-files-123.s3.ap-southeast-2.amazonaws.com");
+    assert.equal(url.searchParams.get("X-Amz-Security-Token"), "session-token-xyz", "the token is signed in");
+    assert.ok(url.searchParams.get("X-Amz-Credential")?.startsWith("ASIAROLEKEY/"));
+    assert.match(url.searchParams.get("X-Amz-Credential")!, /\/ap-southeast-2\/s3\/aws4_request$/);
+    assert.equal(url.searchParams.get("response-content-disposition"), 'attachment; filename="report.html"');
+    await d.presignPut("k/x", "text/plain");
+    assert.equal(asks, 1, "credentials are cached until they near expiry");
+  } finally {
+    server.close();
+    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v as string);
+  }
+});
