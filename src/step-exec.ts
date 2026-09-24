@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { HookInput, McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
 import { spawn } from "node:child_process";
@@ -256,6 +256,27 @@ export async function executeStep(
       },
       env: opts.env,
       mcpServers: opts.mcpServers,
+      // canUseTool is only asked when the SDK wants permission, and it never
+      // asks for a read inside the cwd — so `Read workspace/storage/x` went
+      // to `<agentDir>/workspace/storage/x` unchecked and unrewritten. On
+      // 2026-09-24 that read a stray copy a broken write had left there,
+      // with no error. A PreToolUse hook runs on every call: expand the
+      // virtual prefix (and refuse an escape) here for every filesystem tool,
+      // and leave the rest of the decision to canUseTool.
+      hooks: {
+        PreToolUse: [{
+          hooks: [async (hookInput: HookInput) => {
+            if (hookInput.hook_event_name !== "PreToolUse" || !isFilesystemTool(hookInput.tool_name)) return {};
+            const verdict = checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot });
+            if (!verdict.ok) {
+              emit("error", verdict.reason!);
+              return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: verdict.reason! } };
+            }
+            if (!verdict.updatedInput) return {};
+            return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const, updatedInput: verdict.updatedInput } };
+          }],
+        }],
+      },
       canUseTool: async (toolName: string, input: Record<string, unknown>) => {
         // The toolset was already narrowed to what the agent declared, so
         // anything outside it is a denial with a reason the model can act on.
