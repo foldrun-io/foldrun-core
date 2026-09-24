@@ -119,6 +119,9 @@ const VIRTUAL = [
 
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
+/** Workspace-level directories an agent's own folder must never grow. */
+const SHARED_DIRS = new Set(["storage", "state", "workspace"]);
+
 // Only the built-in filesystem tools get path checks. foldrun's own MCP tools
 // are already confined at their own layer — script paths by resolveRunPath,
 // APIs by their declared base URL — and their arguments are not filesystem
@@ -255,6 +258,27 @@ export function checkPaths(
           `${toolName} was denied: "${raw}" is a protected platform file. Secrets reach you as ` +
           `environment variables, and the run journal is not yours to read or rewrite.`,
       };
+    }
+
+    // storage/, state/ and workspace/ belong to the workspace. The same name
+    // under an agent's own folder is always a missing prefix — `storage/x`
+    // written from agents/<name>/ — and the write used to succeed there,
+    // where no other agent looks: gbp-desk's approved replies, lawyer-desk's
+    // batch, five files in all by 2026-09-24. Refuse it with the path that
+    // was meant; the model takes the correction on its next turn.
+    if (isWrite && !virtual) {
+      const own = path.relative(real(path.resolve(roots.agentDir)), abs).split(path.sep).join("/");
+      const [top, ...rest] = own.split("/");
+      if (!own.startsWith("..") && rest.length && SHARED_DIRS.has(top)) {
+        const meant = top === "workspace" ? `workspace/${rest.join("/")}` : `workspace/${top}/${rest.join("/")}`;
+        return {
+          ok: false,
+          reason:
+            `${toolName} was denied: "${raw}" would create ${top}/ inside your own agent folder, where no ` +
+            `other agent or run looks. Did you mean ${meant}? Shared files go under workspace/ ` +
+            `(workspace/storage/, workspace/state/, workspace/memory/); your own scratch goes to outputs/.`,
+        };
+      }
     }
 
     if (isWrite && READ_ONLY_WITHIN.some((re) => re.test(within))) {

@@ -331,3 +331,26 @@ test("workspace/ resolves to the workspace root even after the SDK made it absol
   // And the library stays read-only however the prefix arrives.
   assert.equal(write(`${ROOTS.agentDir}/account/skills/x/SKILL.md`).ok, false);
 });
+
+test("a write that would grow storage/, state/ or workspace/ inside the agent's folder is refused with the path meant", () => {
+  // The SDK hands these over absolute; an agent types them bare.
+  for (const [p, meant] of [
+    [`${ROOTS.agentDir}/storage/pending-replies.json`, "workspace/storage/pending-replies.json"],
+    [`${ROOTS.agentDir}/state/ledger.md`, "workspace/state/ledger.md"],
+    [`${ROOTS.agentDir}/storage/batch/rows.md`, "workspace/storage/batch/rows.md"],
+  ] as const) {
+    const v = write(p);
+    assert.equal(v.ok, false, p);
+    assert.match(v.reason!, new RegExp(`Did you mean ${meant.replaceAll("/", "\\/")}\\?`), p);
+  }
+  // The right spellings still go through, to the workspace.
+  assert.equal(write("workspace/storage/pending-replies.json").ok, true);
+  assert.equal(write(`${WORKSPACE}/storage/pending-replies.json`).ok, true);
+  assert.equal(write(`${ROOTS.agentDir}/workspace/state/ledger.md`).ok, true, "prefix expanded, not refused");
+  // What an agent's own folder is for is untouched.
+  for (const p of ["outputs/draft.md", "memory/fact.md", "agent.md", "notes/storage-ideas.md"]) {
+    assert.equal(write(`${ROOTS.agentDir}/${p}`).ok, true, p);
+  }
+  // Reading a stray that already exists is not refused.
+  assert.equal(read(`${ROOTS.agentDir}/storage/old.json`).ok, true);
+});
