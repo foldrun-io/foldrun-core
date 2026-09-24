@@ -171,9 +171,18 @@ export function suggestPath(raw: string): string {
 
 /** Expand a virtual prefix to a real absolute path, or null if it has none. */
 export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnly: boolean } | null {
+  // The SDK resolves a relative path against the cwd BEFORE canUseTool sees
+  // it, so `workspace/storage/x.json` arrives as
+  // `<agentDir>/workspace/storage/x.json` and never matched a prefix. The
+  // write then made a literal `workspace/` folder inside the agent's own
+  // directory and reported success: gbp-desk's reply-sheet, 2026-09-24, whose
+  // approved replies never reached the poster. Read the prefix off the path
+  // relative to the agent directory as well as off the raw one.
+  const rel = path.isAbsolute(raw) ? path.relative(roots.agentDir, raw).split(path.sep).join("/") : null;
+  const candidate = rel !== null && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : raw;
   for (const v of VIRTUAL) {
-    if (raw.startsWith(v.prefix)) {
-      return { abs: path.resolve(v.root(roots), raw.slice(v.prefix.length)), readOnly: v.readOnly };
+    if (candidate.startsWith(v.prefix)) {
+      return { abs: path.resolve(v.root(roots), candidate.slice(v.prefix.length)), readOnly: v.readOnly };
     }
   }
   return null;

@@ -397,3 +397,24 @@ test("runtimeCacheMount: the volume name satisfies Docker's charset rule", () =>
     }
   });
 });
+
+test("mtimeManifest + APPLY_MTIMES_JS put back the times a copy lost", async () => {
+  const { mtimeManifest, APPLY_MTIMES_JS } = await import("../src/run-container.ts");
+  const { spawnSync } = await import("node:child_process");
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "mt-src-"));
+  fs.mkdirSync(path.join(src, "storage"));
+  fs.writeFileSync(path.join(src, "storage/pending-replies.json"), "{}");
+  const old = new Date("2026-09-13T23:42:08Z");
+  fs.utimesSync(path.join(src, "storage/pending-replies.json"), old, old);
+  const manifest = mtimeManifest(src);
+  // A copy that stamps "now", the way kubectl cp's tar -m does.
+  const dst = fs.mkdtempSync(path.join(os.tmpdir(), "mt-dst-"));
+  fs.cpSync(src, dst, { recursive: true });
+  const f = path.join(dst, "storage/pending-replies.json");
+  assert.ok(Date.now() - fs.statSync(f).mtimeMs < 60_000, "the copy looks fresh — the bug");
+  const m = path.join(os.tmpdir(), `mt-${process.pid}.json`);
+  fs.writeFileSync(m, JSON.stringify(manifest));
+  const r = spawnSync(process.execPath, ["-e", APPLY_MTIMES_JS, m, dst]);
+  assert.equal(r.status, 0, String(r.stderr));
+  assert.equal(Math.round(fs.statSync(f).mtimeMs / 1000), Math.round(old.getTime() / 1000));
+});

@@ -316,3 +316,18 @@ test("a grep pattern is a regex, not a location", () => {
   // Glob's pattern really is a path shape, so it keeps its check.
   assert.equal(checkPaths("Glob", { pattern: "/etc/*.conf" }, ROOTS).ok, false);
 });
+
+test("workspace/ resolves to the workspace root even after the SDK made it absolute", () => {
+  // The SDK hands canUseTool `<agentDir>/workspace/…`, not the `workspace/…`
+  // the agent typed. On 2026-09-24 that wrote gbp-desk's approved replies to
+  // agents/reply-sheet/workspace/storage/ and the poster never saw them.
+  for (const p of ["workspace/storage/pending-replies.json", `${ROOTS.agentDir}/workspace/storage/pending-replies.json`]) {
+    const v = write(p);
+    assert.equal(v.ok, true, p);
+    assert.equal(v.updatedInput?.file_path, `${WORKSPACE}/storage/pending-replies.json`, p);
+  }
+  // A plain path under the agent's own folder is not rewritten.
+  assert.equal(write(`${ROOTS.agentDir}/outputs/draft.md`).updatedInput, undefined);
+  // And the library stays read-only however the prefix arrives.
+  assert.equal(write(`${ROOTS.agentDir}/account/skills/x/SKILL.md`).ok, false);
+});

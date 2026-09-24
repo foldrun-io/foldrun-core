@@ -219,6 +219,33 @@ export function hashTree(dir: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Every file's mtime under `dir`, relative path to milliseconds — so a copy
+ * that cannot carry times can have them put back. `kubectl cp` unpacks with
+ * `tar -m`, which stamps every file with the moment it landed; on 2026-09-24
+ * gbp-desk's reply-sheet check ("pending-replies.json written in the last
+ * hour") passed on a file last written on 2026-09-13, and the poster sent
+ * nothing. Every freshness check in every flow was answering "yes".
+ */
+export function mtimeManifest(dir: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const abs = path.join(d, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) walk(abs);
+      else out[path.relative(dir, abs).replaceAll("\\", "/")] = fs.statSync(abs).mtimeMs;
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir);
+  return out;
+}
+
+/** The in-pod half of mtimeManifest: a node one-liner, run as root before `go`. */
+export const APPLY_MTIMES_JS =
+  `const fs=require("fs"),p=require("path");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));` +
+  `for(const [r,t] of Object.entries(m)){try{fs.utimesSync(p.join(process.argv[2],r),t/1000,t/1000)}catch{}}`;
+
 const sha = (b: Buffer) => crypto.createHash("sha256").update(b).digest("hex");
 
 /**
@@ -952,6 +979,10 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     const wsIn = path.join(staging, "workspace");
     fs.cpSync(args.workspaceRoot, wsIn, {
       recursive: true,
+      // Times too: a verify that asks "was this written in the last hour?"
+      // is asking about the step, and a copy stamped "now" answers yes for a
+      // file untouched since last week (see mtimeManifest).
+      preserveTimestamps: true,
       filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
     });
     const libIn = path.join(staging, "library");
