@@ -282,6 +282,29 @@ export function discoverSkills(agentDir: string, subdir = "skills"): DiscoveredS
  * Returns null rather than throwing on unparseable YAML: a broken shared file
  * must not take down every agent under it.
  */
+/**
+ * AGENTS.md without the block a coding tool reads.
+ *
+ * AGENTS.md is two things in a foldrun folder: the account's (or
+ * workspace's) own context, which every running agent is given, and — the
+ * convention Next.js set — the file a coding agent (Claude Code, Cursor,
+ * Codex) reads before it edits the folder. The CLI writes a short managed
+ * block for the second reader between these markers; it is about editing
+ * the files, not about doing the work, so no running agent is shown it.
+ */
+export const AGENT_RULES_START = "<!-- BEGIN:foldrun-agent-rules -->";
+export const AGENT_RULES_END = "<!-- END:foldrun-agent-rules -->";
+export function withoutAgentRules(body: string): string {
+  let out = body;
+  for (;;) {
+    const start = out.indexOf(AGENT_RULES_START);
+    if (start === -1) return out;
+    const end = out.indexOf(AGENT_RULES_END, start);
+    if (end === -1) return out;
+    out = out.slice(0, start) + out.slice(end + AGENT_RULES_END.length);
+  }
+}
+
 export function readAgentsMd(dir: string): { data: Record<string, unknown>; body: string } | null {
   // Convert a pre-rename `mdagent_version:` before parsing. One name in the
   // code, one on disk — the reader no longer knows two spellings, so a file
@@ -292,7 +315,7 @@ export function readAgentsMd(dir: string): { data: Record<string, unknown>; body
     if (!fs.existsSync(file)) continue;
     try {
       const parsed = matter(fs.readFileSync(file, "utf8"));
-      return { data: parsed.data as Record<string, unknown>, body: parsed.content.trim() };
+      return { data: parsed.data as Record<string, unknown>, body: withoutAgentRules(parsed.content).trim() };
     } catch {
       return null;
     }
