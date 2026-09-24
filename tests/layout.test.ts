@@ -147,6 +147,17 @@ test("an installation is told apart from an account folder by its key file", () 
   assert.equal(installationDataRoot(tenant), data);
 });
 
+test("the platform's own marker names an installation with no key file at all", () => {
+  // Keys live in the database and the install key in the environment, so
+  // neither file exists; .foldrun-install is what the platform writes.
+  const data = tmp();
+  const tenant = path.join(data, "acme");
+  account(tenant, ["blog"]);
+  assert.equal(installationDataRoot(tenant), null);
+  fs.writeFileSync(path.join(data, ".foldrun-install"), "");
+  assert.equal(installationDataRoot(tenant), data);
+});
+
 test("an account tree carries AGENTS.md, the library and every workspace", () => {
   const root = tmp();
   account(root, ["ads", "blog"]);

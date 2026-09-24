@@ -207,11 +207,17 @@ export function accountRootFor(workspaceDir: string): string {
  *
  * `<data>/<tenant>/workspaces/<name>` and `<my-account>/workspaces/<name>` are
  * the same shape, so the shape cannot tell them apart. What can is the
- * installation's own key file, which sits at the data root and nowhere else.
+ * installation's own marker, which sits at the data root and nowhere else:
+ * `.foldrun-install`, written by the platform at boot. `.secret-key` and
+ * `keys.json` are the older markers — kept for installs from before it, and
+ * no longer enough alone, because keys move into the database and a key held
+ * in FOLDRUN_SECRET_KEY never had a file.
  */
+export const INSTALL_MARKER = ".foldrun-install";
+
 export function installationDataRoot(accountRoot: string): string | null {
   const above = path.dirname(path.resolve(accountRoot));
-  for (const marker of [".secret-key", "keys.json"]) {
+  for (const marker of [INSTALL_MARKER, ".secret-key", "keys.json"]) {
     try {
       if (fs.statSync(path.join(above, marker)).isFile()) return above;
     } catch {
