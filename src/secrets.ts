@@ -103,19 +103,80 @@ interface StoredSecret {
 type SecretsFile = Record<string, StoredSecret>;
 
 function read(tenant: string, workspace?: string): SecretsFile {
-  const f = secretsFile(tenant, workspace);
-  if (!fs.existsSync(f)) return {};
+  return readFile(secretsFile(tenant, workspace));
+}
+
+// ------------------------------------------------------------ safe writes
+//
+// A vault file is read, changed and written back. It was written in place,
+// with no lock: two saves at once kept one; a crash mid-write left half a
+// file, which is an account that cannot authenticate anything; and the boot
+// re-wrap ran in every pod at once through ONE shared temp name, so two pods
+// could interleave into it and rename a corrupt file into place.
+//
+// Now every change goes through mutateVaultFile: an exclusive lock file
+// (O_EXCL, which NFS 4.1 and EFS honour, so it holds across pods), the read
+// and the change under it, a temp file unique to this writer, and a rename —
+// atomic on the same filesystem, so a reader sees the old file or the new
+// one, never half. A lock older than LOCK_STALE_MS is a crashed holder.
+
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 10_000;
+const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function readFile(file: string): SecretsFile {
+  if (!fs.existsSync(file)) return {};
   try {
-    return JSON.parse(fs.readFileSync(f, "utf8"));
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return {};
   }
 }
 
-function write(tenant: string, workspace: string | undefined, data: SecretsFile) {
-  const f = secretsFile(tenant, workspace);
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  fs.writeFileSync(f, JSON.stringify(data, null, 2), { mode: 0o600 });
+function lockVault(file: string): () => void {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, "wx", 0o600);
+      fs.writeSync(fd, `${process.pid}@${new Date().toISOString()}`);
+      fs.closeSync(fd);
+      return () => fs.rmSync(lock, { force: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          fs.rmSync(lock, { force: true }); // a holder that died; take it over
+          continue;
+        }
+      } catch {
+        continue; // released between the open and the stat
+      }
+      if (Date.now() > deadline) throw new Error("the vault is busy — another change is being saved; try again");
+      sleep(25);
+    }
+  }
+}
+
+/**
+ * Change one vault file safely: `change` gets what is stored now and returns
+ * the new contents, or null to leave the file untouched. Returns what is
+ * stored after.
+ */
+export function mutateVaultFile(file: string, change: (all: SecretsFile) => SecretsFile | null): SecretsFile {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const release = lockVault(file);
+  try {
+    const current = readFile(file);
+    const next = change(structuredClone(current));
+    if (next === null) return current;
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return next;
+  } finally {
+    release();
+  }
 }
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -132,13 +193,14 @@ export function setSecret(
   }
   if (value.length > 8192) throw new Error("secret too long");
   const sealed = encryptValue(tenant, value);
-  const all = read(tenant, workspace);
-  all[name] = {
-    ...sealed,
-    updatedAt: new Date().toISOString(),
-    ...(kind ? { kind } : {}),
-  };
-  write(tenant, workspace, all);
+  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+    all[name] = {
+      ...sealed,
+      updatedAt: new Date().toISOString(),
+      ...(kind ? { kind } : {}),
+    };
+    return all;
+  });
 }
 
 /**
@@ -242,9 +304,11 @@ export function getSecret(
 }
 
 export function deleteSecret(tenant: string, name: string, workspace?: string) {
-  const all = read(tenant, workspace);
-  delete all[name];
-  write(tenant, workspace, all);
+  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+    if (!(name in all)) return null;
+    delete all[name];
+    return all;
+  });
 }
 
 export interface SecretEntry {
@@ -368,48 +432,46 @@ export function rotateMasterKey(
   const unreadable: string[] = [];
 
   for (const { file } of secretFiles(tenant)) {
-    const all: SecretsFile = JSON.parse(fs.readFileSync(file, "utf8"));
-    const next: SecretsFile = {};
     let count = 0;
-
-    for (const [name, rec] of Object.entries(all)) {
-      // A record under the ACCOUNT's key is not under the install key, so
-      // rotating the install key must not touch it — re-encrypting it here
-      // with a key it was never sealed with is how a rotation would destroy a
-      // vault it was meant to protect. Rotating the install key now re-wraps
-      // the account keys instead, which is a handful of small values rather
-      // than every secret on the box.
-      if (rec.k === "tenant") {
-        next[name] = rec;
-        continue;
+    mutateVaultFile(file, (all) => {
+      const next: SecretsFile = {};
+      for (const [name, rec] of Object.entries(all)) {
+        // A record under the ACCOUNT's key is not under the install key, so
+        // rotating the install key must not touch it — re-encrypting it here
+        // with a key it was never sealed with is how a rotation would destroy a
+        // vault it was meant to protect. Rotating the install key now re-wraps
+        // the account keys instead, which is a handful of small values rather
+        // than every secret on the box.
+        if (rec.k === "tenant") {
+          next[name] = rec;
+          continue;
+        }
+        let plain: string;
+        try {
+          const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"), GCM);
+          d.setAuthTag(Buffer.from(rec.tag, "base64"));
+          plain = Buffer.concat([d.update(Buffer.from(rec.data, "base64")), d.final()]).toString("utf8");
+        } catch {
+          unreadable.push(name);
+          next[name] = rec; // untouched
+          continue;
+        }
+        const iv = crypto.randomBytes(12);
+        const c = crypto.createCipheriv("aes-256-gcm", newKey, iv, GCM);
+        const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
+        next[name] = {
+          iv: iv.toString("base64"),
+          tag: c.getAuthTag().toString("base64"),
+          data: enc.toString("base64"),
+          updatedAt: rec.updatedAt, // rotation is not an edit
+          // Kept: without it an oauth2 secret stops being refreshed after a
+          // rotation, and a file/ssh/api secret stops being materialised.
+          ...(rec.kind ? { kind: rec.kind } : {}),
+        };
+        count++;
       }
-      let plain: string;
-      try {
-        const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"), GCM);
-        d.setAuthTag(Buffer.from(rec.tag, "base64"));
-        plain = Buffer.concat([d.update(Buffer.from(rec.data, "base64")), d.final()]).toString("utf8");
-      } catch {
-        unreadable.push(name);
-        next[name] = rec; // untouched
-        continue;
-      }
-      const iv = crypto.randomBytes(12);
-      const c = crypto.createCipheriv("aes-256-gcm", newKey, iv, GCM);
-      const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
-      next[name] = {
-        iv: iv.toString("base64"),
-        tag: c.getAuthTag().toString("base64"),
-        data: enc.toString("base64"),
-        updatedAt: rec.updatedAt, // rotation is not an edit
-      };
-      count++;
-    }
-
-    // Write via a temp file in the same directory: a half-written secrets.json
-    // is an account that cannot authenticate anything.
-    const tmp = `${file}.rotating`;
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, file);
+      return next;
+    });
     rewritten.push({ file, secrets: count });
   }
 
@@ -801,33 +863,32 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
   const unreadable: string[] = [];
 
   for (const { file } of secretFiles(tenant)) {
-    const all: SecretsFile = JSON.parse(fs.readFileSync(file, "utf8"));
-    const plain = new Map<string, string>();
-    let pending = 0;
-
-    for (const [name, rec] of Object.entries(all)) {
-      if (rec.k === "tenant") continue; // already moved
-      const value = decrypt(tenant, rec);
-      if (value === null) {
-        unreadable.push(name);
-        continue;
+    // Under the vault's lock: every pod runs this at boot, and a save made
+    // between our read and our write must not be lost.
+    mutateVaultFile(file, (all) => {
+      const plain = new Map<string, string>();
+      const unreadableHere: string[] = [];
+      for (const [name, rec] of Object.entries(all)) {
+        if (rec.k === "tenant") continue; // already moved
+        const value = decrypt(tenant, rec);
+        if (value === null) {
+          unreadableHere.push(name);
+          continue;
+        }
+        plain.set(name, value);
       }
-      plain.set(name, value);
-      pending += 1;
-    }
-    // Nothing to do, or something could not be read — leave the file alone.
-    // A partial conversion is worse than none, because the half that moved is
-    // no longer openable by the key the other half still needs.
-    if (pending === 0 || unreadable.length) continue;
-
-    const next: SecretsFile = { ...all };
-    for (const [name, value] of plain) {
-      next[name] = { ...encryptValue(tenant, value), updatedAt: all[name].updatedAt, ...(all[name].kind ? { kind: all[name].kind } : {}) };
-    }
-    const tmp = `${file}.rewrap`;
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, file);
-    moved += pending;
+      unreadable.push(...unreadableHere);
+      // Nothing to do, or something in THIS file could not be read — leave it
+      // alone. A partial conversion is worse than none, because the half that
+      // moved is no longer openable by the key the other half still needs.
+      if (plain.size === 0 || unreadableHere.length) return null;
+      const next: SecretsFile = { ...all };
+      for (const [name, value] of plain) {
+        next[name] = { ...encryptValue(tenant, value), updatedAt: all[name].updatedAt, ...(all[name].kind ? { kind: all[name].kind } : {}) };
+      }
+      moved += plain.size;
+      return next;
+    });
   }
   return { moved, unreadable };
 }

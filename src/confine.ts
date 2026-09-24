@@ -65,7 +65,7 @@ const PATH_KEYS = [
 ];
 
 const DENIED_WITHIN = [
-  /(^|\/)secrets\.json$/,
+  /(^|\/)secrets\.json(\.[^/]+)?$/, // and its lock and temp files
   /(^|\/)runs(\/|$)/,
 ];
 

@@ -314,6 +314,9 @@ export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.js
 export function isPlatformPath(rel: string): boolean {
   const norm = rel.replaceAll("\\", "/");
   if (PLATFORM_FILES.includes(norm)) return true;
+  // The vault's lock and in-flight temp files (secrets.ts#mutateVaultFile)
+  // are the vault, as far as anything outside the platform is concerned.
+  if (/(^|\/)secrets\.json\./.test(norm)) return true;
   return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
 }
 
@@ -2211,6 +2214,7 @@ const ACCOUNT_SEALED: Record<string, string> = {
 
 export function accountFileSealed(rel: string): string | null {
   const norm = rel.replaceAll("\\", "/");
+  if (/(^|\/)secrets\.json\.[^/]+$/.test(norm)) return "the vault's lock or a save in flight — never served.";
   if (Object.hasOwn(ACCOUNT_SEALED, norm)) return ACCOUNT_SEALED[norm];
   // What a move into the database leaves behind: billing.json.imported-<date>
   // and the like, kept for a rollback — the same contents, so the same seal.
@@ -2231,7 +2235,7 @@ export function accountFileSealed(rel: string): string | null {
  *  honesty's clothes. `accountFileSealed` still refuses these if a path is
  *  constructed directly — the listing hides them, the reader guards them. */
 const ACCOUNT_BOOKKEEPING =
-  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
+  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json(\.[^/]+)?$/;
 
 /**
  * The account directory as it actually is on disk.
