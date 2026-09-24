@@ -114,14 +114,14 @@ test("a run of refusals accumulates, an acceptance clears it, and the last succe
     noteSecretUse("acme", k, { host: "api.resend.com", status: 401, at: at(50) });
     await flushSecretHealth();
 
-    let record = secretHealth("acme")[k];
+    let record = (await secretHealth("acme"))[k];
     assert.equal(record.refusals, 2);
     assert.equal(record.last.outcome, "refused");
     assert.equal(record.lastAccepted, worked, "the date it last worked is what dates the breakage");
 
     noteSecretUse("acme", k, { host: "api.resend.com", status: 200, at: at(1) });
     await flushSecretHealth();
-    record = secretHealth("acme")[k];
+    record = (await secretHealth("acme"))[k];
     assert.equal(record.refusals, 0);
     assert.equal(record.last.outcome, "accepted");
   }));
@@ -132,7 +132,7 @@ test("an error at the far end does not count against the key", () =>
     noteSecretUse("acme", "account:K", { host: "api.example.com", status: 401, at: at(20) });
     noteSecretUse("acme", "account:K", { host: "api.example.com", status: 500, at: at(10) });
     await flushSecretHealth();
-    assert.equal(secretHealth("acme")["account:K"].refusals, 1, "still one, not two");
+    assert.equal((await secretHealth("acme"))["account:K"].refusals, 1, "still one, not two");
   }));
 
 test("failing secrets are the ones refused last, worst first", () =>
@@ -142,7 +142,7 @@ test("failing secrets are the ones refused last, worst first", () =>
     noteSecretUse("acme", "account:BAD_ONCE", { host: "b.example.com", status: 403 });
     for (let i = 0; i < 3; i++) noteSecretUse("acme", "account:BAD_OFTEN", { host: "c.example.com", status: 401 });
     await flushSecretHealth();
-    assert.deepEqual(failingSecrets("acme").map((f) => f.name), ["account:BAD_OFTEN", "account:BAD_ONCE"]);
+    assert.deepEqual((await failingSecrets("acme")).map((f) => f.name), ["account:BAD_OFTEN", "account:BAD_ONCE"]);
   }));
 
 test("rotating or deleting a secret forgets what the old one did", () =>
@@ -150,10 +150,10 @@ test("rotating or deleting a secret forgets what the old one did", () =>
     fs.mkdirSync(path.join(process.env.FOLDRUN_DATA!, "acme"), { recursive: true });
     noteSecretUse("acme", "account:K", { host: "a.example.com", status: 401 });
     await flushSecretHealth();
-    forgetSecretHealth("acme", "account:K");
+    await forgetSecretHealth("acme", "account:K");
     // A fresh key showing its predecessor's refusals is the moment someone
     // stops trusting the indicator.
-    assert.equal(secretHealth("acme")["account:K"], undefined);
+    assert.equal((await secretHealth("acme"))["account:K"], undefined);
   }));
 
 test("the same name in two scopes is two credentials", () =>
@@ -162,13 +162,13 @@ test("the same name in two scopes is two credentials", () =>
     noteSecretUse("acme", healthKey("API_KEY", "workspace", "blog"), { host: "x.example.com", status: 401 });
     noteSecretUse("acme", healthKey("API_KEY", "account"), { host: "x.example.com", status: 200 });
     await flushSecretHealth();
-    const h = secretHealth("acme");
+    const h = (await secretHealth("acme"));
     assert.equal(h["workspace:blog:API_KEY"].last.outcome, "refused");
     assert.equal(h["account:API_KEY"].last.outcome, "accepted");
   }));
 
 test("a secret nothing has used has no health, which is a third state", () =>
-  withWorkspace(() => {
+  withWorkspace(async () => {
     fs.mkdirSync(path.join(process.env.FOLDRUN_DATA!, "acme"), { recursive: true });
-    assert.equal(secretHealth("acme").NEVER_USED, undefined);
+    assert.equal((await secretHealth("acme")).NEVER_USED, undefined);
   }));

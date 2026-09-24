@@ -55,7 +55,26 @@ export interface SecretRecord {
   lastAccepted: string | null;
 }
 
-type HealthFile = Record<string, SecretRecord>;
+export type HealthFile = Record<string, SecretRecord>;
+
+/** One use to fold into a record. */
+export interface HealthUpdate {
+  key: string;
+  use: { host: string; status: number | null; at: string };
+}
+
+/**
+ * Where health is kept. A file per account by default — what the CLI and a
+ * single-box install use. The platform plugs in Postgres
+ * (setSecretHealthStore), where each use is one atomic upsert: two pods
+ * recording at once on a shared file was last-writer-wins, and a refusal
+ * could vanish.
+ */
+export interface SecretHealthStore {
+  apply(tenant: string, updates: HealthUpdate[]): Promise<void>;
+  read(tenant: string): Promise<HealthFile>;
+  forget(tenant: string, key: string): Promise<void>;
+}
 
 const healthFile = (tenant: string) => path.join(accountDir(tenant), "secret-health.json");
 
@@ -76,27 +95,51 @@ function write(tenant: string, data: HealthFile): void {
   fs.renameSync(tmp, file);
 }
 
+const fileStore: SecretHealthStore = {
+  async apply(tenant, updates) {
+    const data = read(tenant);
+    for (const { key, use } of updates) apply(data, key, use);
+    write(tenant, data);
+  },
+  async read(tenant) {
+    return read(tenant);
+  },
+  async forget(tenant, key) {
+    const data = read(tenant);
+    if (!(key in data)) return;
+    delete data[key];
+    write(tenant, data);
+  },
+};
+
+let store: SecretHealthStore = fileStore;
+
+/** The platform's store (Postgres), or back to files with null. */
+export function setSecretHealthStore(next: SecretHealthStore | null): void {
+  store = next ?? fileStore;
+}
+
 // Writes are queued and coalesced off the caller's path. The egress proxy
 // notes a use per secret per request, before it streams the response body,
 // and a synchronous read-modify-write of a JSON file there is latency on
 // every proxied call — "never blocks" has to be true, not aspirational.
 // One writer per process; the queue drains in order.
-const pending = new Map<string, { name: string; use: { host: string; status: number | null; at?: string } }[]>();
+const pending = new Map<string, HealthUpdate[]>();
 let draining = false;
 
 function drain(): void {
   if (draining) return;
   draining = true;
-  setImmediate(() => {
+  setImmediate(async () => {
     try {
-      for (const [tenant, uses] of pending) {
+      for (const [tenant, updates] of pending) {
         pending.delete(tenant);
-        const data = read(tenant);
-        for (const { name, use } of uses) apply(data, name, use);
-        write(tenant, data);
+        try {
+          await store.apply(tenant, updates);
+        } catch {
+          // best effort, always
+        }
       }
-    } catch {
-      // best effort, always
     } finally {
       draining = false;
       if (pending.size) drain();
@@ -140,7 +183,7 @@ export function noteSecretUse(
 ): void {
   if (!key) return;
   const list = pending.get(tenant) ?? [];
-  list.push({ name: key, use: { ...use, at: use.at ?? new Date().toISOString() } });
+  list.push({ key, use: { ...use, at: use.at ?? new Date().toISOString() } });
   pending.set(tenant, list);
   drain();
 }
@@ -157,15 +200,15 @@ export function flushSecretHealth(): Promise<void> {
 /** Everything known about this account's credentials, by name. Names the
  *  vault holds but nothing has used are simply absent, which is the honest
  *  answer: unused is not the same as broken. */
-export function secretHealth(tenant: string): HealthFile {
-  return read(tenant);
+export async function secretHealth(tenant: string): Promise<HealthFile> {
+  return store.read(tenant);
 }
 
 /** The credentials worth saying something about: refused the last time they
  *  were used. Sorted worst first — most consecutive refusals, then oldest
  *  last-success, which is the order someone would work through them. */
-export function failingSecrets(tenant: string): { name: string; record: SecretRecord }[] {
-  return Object.entries(read(tenant))
+export async function failingSecrets(tenant: string): Promise<{ name: string; record: SecretRecord }[]> {
+  return Object.entries(await store.read(tenant))
     .filter(([, r]) => r.last.outcome === "refused")
     .map(([name, record]) => ({ name, record }))
     .sort((a, b) => b.record.refusals - a.record.refusals || (a.record.lastAccepted ?? "").localeCompare(b.record.lastAccepted ?? ""));
@@ -173,13 +216,15 @@ export function failingSecrets(tenant: string): { name: string; record: SecretRe
 
 /** Drop what is known about a secret — for a delete, and for a rotation,
  *  where the old key's refusals say nothing about the new one. */
-export function forgetSecretHealth(tenant: string, name: string): void {
+export async function forgetSecretHealth(tenant: string, name: string): Promise<void> {
   try {
-    const data = read(tenant);
-    if (!(name in data)) return;
-    delete data[name];
-    write(tenant, data);
+    await store.forget(tenant, name);
   } catch {
     // best effort
   }
+}
+
+/** The account's file, for the platform's one-time import into its store. */
+export function readSecretHealthFile(tenant: string): HealthFile {
+  return read(tenant);
 }
