@@ -2197,18 +2197,22 @@ function assertEditablePath(rel: string) {
  *  never be served. Listing them is honest — hiding them is what makes a file
  *  tree disagree with the filesystem it claims to show — but their contents
  *  are the vault and the money, so a reader gets the reason instead. */
-const ACCOUNT_SEALED = new Set(["secrets.json", "oauth-clients.json", "ledger.jsonl"]);
+// billing.json, oauth-connections.json and secret-health.json were listed and
+// served until 2026-09-24: any member of the account, a viewer included, could
+// open the Stripe customer id and billing email, and which connections exist.
+const ACCOUNT_SEALED: Record<string, string> = {
+  "secrets.json": "the vault — encrypted, and never served to a browser. Manage secrets in Settings.",
+  "oauth-clients.json": "OAuth client credentials — never served to a browser.",
+  "ledger.jsonl": "the billing ledger — append-only, read it through Usage and Wallet.",
+  "billing.json": "the account's billing settings — read and change them in Wallet.",
+  "oauth-connections.json": "connected apps and their health — see Settings → Connections.",
+  "secret-health.json": "secret usage bookkeeping — see Settings → Secrets.",
+};
 
 export function accountFileSealed(rel: string): string | null {
   const norm = rel.replaceAll("\\", "/");
-  if (ACCOUNT_SEALED.has(norm)) {
-    return norm === "secrets.json"
-      ? "the vault — encrypted, and never served to a browser. Manage secrets in Settings."
-      : norm === "oauth-clients.json"
-        ? "OAuth client credentials — never served to a browser."
-        : "the billing ledger — append-only, read it through Usage and Wallet.";
-  }
-  if (/^(billed|workspaces\/[^/]+\/runs)\//.test(norm)) {
+  if (Object.hasOwn(ACCOUNT_SEALED, norm)) return ACCOUNT_SEALED[norm];
+  if (/^(billed|once|topups|workspaces\/[^/]+\/runs)\//.test(norm)) {
     return "generated bookkeeping, not an authored file.";
   }
   if (/^workspaces\/[^/]+\/secrets\.json$/.test(norm)) {
@@ -2223,7 +2227,7 @@ export function accountFileSealed(rel: string): string | null {
  *  honesty's clothes. `accountFileSealed` still refuses these if a path is
  *  constructed directly — the listing hides them, the reader guards them. */
 const ACCOUNT_BOOKKEEPING =
-  /^(billed\/|ledger\.jsonl$|oauth-clients\.json$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
+  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$)|(^|\/)runs\/|(^|\/)secrets\.json$/;
 
 /**
  * The account directory as it actually is on disk.
