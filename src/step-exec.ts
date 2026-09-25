@@ -337,6 +337,14 @@ export async function executeStep(
   // that is the honest direction to be wrong in.
   const ceiling = typeof opts.budgetUsd === "number" && opts.budgetUsd > 0 ? opts.budgetUsd : null;
   let spentUsd = 0;
+  // Every turn's usage, by the model message's id. The SDK can emit one
+  // turn as several assistant messages that repeat the same usage, so a
+  // turn is counted once — and the sum is the step's cost whenever the
+  // closing `result` never arrives: a timeout or a stop ends the loop before
+  // it, and a step that made 193 model calls was recorded as $0 (lawyer-desk,
+  // 2026-09-25 09:00).
+  const turns = new Map<string, Record<string, number | undefined>>();
+  let anonymousTurns = 0;
 
   // Open tool calls, by the provider's id, so the result can be paired with
   // its call and the trace can say how long each tool ran.
@@ -346,9 +354,11 @@ export async function executeStep(
   for await (const message of q as AsyncIterable<SDKMessage>) {
     if (ended) break;
     if (message.type === "assistant") {
-      const u = (message.message as unknown as { usage?: Record<string, number | undefined> }).usage;
+      const m = message.message as unknown as { id?: string; usage?: Record<string, number | undefined> };
+      const u = m.usage;
+      if (u) turns.set(m.id ?? `turn-${anonymousTurns++}`, u);
       if (ceiling && u) {
-        spentUsd += priceTurn(u, opts.price ?? null);
+        spentUsd = [...turns.values()].reduce((sum, t) => sum + priceTurn(t, opts.price ?? null), 0);
         if (spentUsd >= ceiling) {
           emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
           status = "failed";
@@ -407,6 +417,22 @@ export async function executeStep(
     if (!ended) throw err;
   } finally {
     for (const t of timers) clearTimeout(t);
+  }
+  // No result message — a timeout, a stop, a budget stop, a stream that
+  // died — means no total from the SDK. The turns it did take were billed by
+  // the provider all the same, so the step's cost is their sum.
+  if (costUsd === null && turns.size) {
+    let input = 0;
+    let output = 0;
+    let priced = 0;
+    for (const t of turns.values()) {
+      input += (t.input_tokens ?? 0) + (t.cache_creation_input_tokens ?? 0) + (t.cache_read_input_tokens ?? 0);
+      output += t.output_tokens ?? 0;
+      priced += priceTurn(t, opts.price ?? null);
+    }
+    costUsd = priced;
+    usage ??= { inputTokens: input, outputTokens: output };
+    emit("info", `cost from ${turns.size} model turn${turns.size === 1 ? "" : "s"}: $${priced.toFixed(4)} — the step ended before the model's closing total`);
   }
   if (ended === "timeout") {
     emit("error", `timed out after ${opts.timeoutSec}s (timeout: in the flow file) — the step was stopped with the files it wrote so far kept`);

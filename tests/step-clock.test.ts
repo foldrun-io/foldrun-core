@@ -111,3 +111,37 @@ test("a step that finishes on its own is untouched by either clock", () =>
     assert.equal(out.conclusion, "done");
     assert.equal(out.costUsd, 0.001);
   }));
+
+test("a step cut off by its timeout is charged for the turns it took, each counted once", () =>
+  withAgent(async (agentDir) => {
+    const events: string[] = [];
+    // Two model turns, the first re-emitted as a second message with the
+    // same id and usage (one per content block), then a hang until timeout.
+    const query: QueryFn = ({ options }) => {
+      const ac = options.abortController as AbortController;
+      let release: (() => void) | null = null;
+      const turn1 = { id: "msg_1", usage: { input_tokens: 1000, cache_read_input_tokens: 10_000, output_tokens: 200 } };
+      const stream = (async function* () {
+        yield { type: "assistant", message: { ...turn1, content: [{ type: "text", text: "Searching." }] } };
+        yield { type: "assistant", message: { ...turn1, content: [{ type: "tool_use", id: "t1", name: "WebSearch", input: {} }] } };
+        yield { type: "assistant", message: { id: "msg_2", usage: { input_tokens: 500, output_tokens: 100 }, content: [{ type: "text", text: "Still searching." }] } };
+        await new Promise<void>((resolve) => {
+          release = resolve;
+          ac.signal.addEventListener("abort", () => resolve());
+        });
+      })();
+      return Object.assign(stream, { async interrupt() { release?.(); } });
+    };
+    const price = { input: 2e-6, output: 10e-6 };
+    const out = await executeStep(opts(agentDir, { timeoutSec: 1, price }, events), query);
+    assert.equal(out.status, "failed");
+    const expected =
+      priceTurnFor({ input_tokens: 1000, cache_read_input_tokens: 10_000, output_tokens: 200 }, price) +
+      priceTurnFor({ input_tokens: 500, output_tokens: 100 }, price);
+    assert.ok(out.costUsd !== null && Math.abs(out.costUsd - expected) < 1e-12, `charged ${out.costUsd}, expected ${expected} — turn 1 once, not twice`);
+    assert.deepEqual(out.usage, { inputTokens: 1000 + 10_000 + 500, outputTokens: 300 });
+    assert.ok(events.some((e) => /cost from 2 model turns/.test(e)), events.join("\n"));
+    assert.ok(events.some((e) => /timed out after 1s/.test(e)));
+  }));
+
+import { priceTurn as priceTurnFor } from "../src/step-exec.ts";
