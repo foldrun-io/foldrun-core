@@ -713,6 +713,7 @@ Rules:
      model: max
      effort: xhigh
   ```
+- A gate holds its whole group: on approval every step with that number starts together, so a gated step never runs *after* a sibling. `check` warns when a gate shares its number with an ungated step, and when the step numbers skip one — both are how a renumbering that missed a step shows up.
 - A step may target **another flow** instead of an agent — `1. [[flow:weekly]] — …` — which is how flows compose. The nested flow's steps run in place, keeping their own parallelism; cycles and nesting deeper than three levels are errors. Only the step's `?` and its instruction carry into the nested steps: an option written under a `[[flow:…]]` line — `when:`, `!`, `retry:`, `verify:` and the rest — is not applied, and `check` warns naming each one.
 
 ### Triggers
