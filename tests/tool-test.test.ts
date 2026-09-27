@@ -8,9 +8,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 
 import { testTool } from "../src/tool-test.ts";
 import { workspaceTools } from "../src/store.ts";
+import { setOAuth2Secret } from "../src/secrets.ts";
 
 /** A throwaway installation with one workspace, for one callback. */
 function withWorkspace(files: Record<string, string>, run: () => Promise<void>) {
@@ -214,3 +216,65 @@ test("http: without an allowlist the tester still probes any path under base", (
       },
     ),
   ));
+
+// An oauth2 secret is stored as a recipe (`@oauth2 {token_url, …}`) and a run
+// swaps it for a live access token just before the script starts. The tester
+// did not, so a tool behind Google OAuth failed its Test button with its own
+// "arrived unexchanged" guard while working in every run (gbp-desk
+// review_candidates, 2026-09-28).
+function tokenEndpoint(): Promise<{ url: string; close: () => void }> {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const ok = new URLSearchParams(body).get("refresh_token") === "good-refresh";
+      res.writeHead(ok ? 200 : 400, { "content-type": "application/json" });
+      res.end(JSON.stringify(ok ? { access_token: "live-token", expires_in: 3600 } : { error: "invalid_grant" }));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as { port: number };
+      resolve({ url: `http://127.0.0.1:${port}/token`, close: () => server.close() });
+    }),
+  );
+}
+
+const OAUTH_TOOL = `---
+transport: script
+name: who
+run: run.mjs
+secrets: [G_TOKEN]
+description: Prints what it was handed.
+---
+`;
+
+for (const [refresh, expectOk] of [["good-refresh", true], ["revoked", false]] as const) {
+  test(`script: an oauth2 secret reaches the tool as a live token (${refresh})`, async () => {
+    const endpoint = await tokenEndpoint();
+    try {
+      await withWorkspace(
+        {
+          "AGENTS.md": "---\nname: desk\n---\n",
+          "tools/who/tool.md": OAUTH_TOOL,
+          "tools/who/run.mjs": 'console.log("token=" + process.env.G_TOKEN)\n',
+        },
+        async () => {
+          setOAuth2Secret("acme", "G_TOKEN", { token_url: endpoint.url, client_id: "c", client_secret: "s", refresh_token: refresh }, "desk");
+          const result = await testTool("acme", "desk", workspaceTools("acme", "desk").who);
+          if (expectOk) {
+            assert.equal(result.ok, true, result.summary + " " + result.detail);
+            assert.match(result.detail, /token=live-token/);
+            assert.doesNotMatch(result.detail, /@oauth2/);
+          } else {
+            assert.equal(result.ok, false);
+            assert.equal(result.summary, "a secret could not be refreshed");
+            assert.match(result.detail, /G_TOKEN/);
+          }
+        },
+      );
+    } finally {
+      endpoint.close();
+    }
+  });
+}

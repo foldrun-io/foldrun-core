@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { resolveSecrets } from "./secrets.ts";
+import { resolveSecrets, materializeSecrets } from "./secrets.ts";
 import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
@@ -61,6 +61,24 @@ const clip = (s: string) =>
 const substitute = (v: string, env: Record<string, string>) =>
   v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => env[k] ?? "");
 
+/**
+ * The secrets as a run would hand them over: an oauth2 or service-account
+ * secret swapped for a live access token. Without this the tester passed the
+ * stored `@oauth2 {…}` recipe itself, so every tool behind Google OAuth failed
+ * its Test button while working in every run (gbp-desk review_candidates,
+ * 2026-09-28). A refresh that fails is the tester's answer, not a throw.
+ */
+async function liveSecrets(
+  env: Record<string, string>,
+  ctx: { tenant: string; workspace?: string },
+): Promise<{ env: Record<string, string> } | { error: string }> {
+  try {
+    return { env: await materializeSecrets(env, ctx) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Does a concrete path fit an operation's template (`/contacts/{id}`)? */
 function matchesTemplate(op: OperationSpec, concrete: string): boolean {
   const re = new RegExp(
@@ -89,7 +107,12 @@ export async function testTool(
   if (def.kind === "http") {
     const api = def.spec;
     const needed = secretsUsedByApi(api);
-    const { env, missing } = resolveSecrets(tenant, needed, workspace);
+    const { env: stored, missing } = resolveSecrets(tenant, needed, workspace);
+    const live = await liveSecrets(stored, { tenant, workspace });
+    if ("error" in live) {
+      return done({ ok: false, transport: "http", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+    }
+    const env = live.env;
 
     try {
       let rel = probePath.startsWith("/") || probePath === "" ? probePath : `/${probePath}`;
@@ -254,7 +277,12 @@ export async function testTool(
     }
 
     const names = Array.isArray(def.spec.secrets) ? def.spec.secrets.map(String) : [];
-    const { env, missing } = resolveSecrets(tenant, names, workspace);
+    const { env: stored, missing } = resolveSecrets(tenant, names, workspace);
+    const live = await liveSecrets(stored, { tenant, workspace });
+    if ("error" in live) {
+      return done({ ok: false, transport: "script", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+    }
+    const env = live.env;
     // The runtime's own choice of interpreter, not a second table beside it.
     const interpreter =
       typeof def.spec.interpreter === "string" ? def.spec.interpreter : undefined;
@@ -345,7 +373,12 @@ export async function testTool(
   const named = Object.entries(spec.env ?? {})
     .map(([, v]) => String(v).match(/^\$\{([A-Z0-9_]+)\}$/)?.[1])
     .filter((n): n is string => Boolean(n));
-  const { env, missing } = resolveSecrets(tenant, named, workspace);
+  const { env: stored, missing } = resolveSecrets(tenant, named, workspace);
+  const live = await liveSecrets(stored, { tenant, workspace });
+  if ("error" in live) {
+    return done({ ok: false, transport: "mcp", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+  }
+  const env = live.env;
   const childEnv: NodeJS.ProcessEnv = { ...hostSafeBaseEnv() };
   for (const [k, v] of Object.entries(spec.env ?? {})) childEnv[k] = substitute(String(v), env);
 
