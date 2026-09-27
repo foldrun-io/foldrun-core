@@ -483,6 +483,46 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         });
       }
     }
+
+    // A gate parks its whole group, and on approval every step in it starts
+    // together. So `5. [[editor]]` beside `5! [[publisher]]` does not mean
+    // "edit, then ask, then publish": the editor waits for the approval too,
+    // and the publisher runs alongside it, reading files the editor has not
+    // written yet. medium-desk's publisher did exactly that on 2026-09-28
+    // (run-mukdjeh8-cr66): post.json was still empty when it started.
+    const gated = (s: FlowStep) => Boolean(s.approve || s.ask || s.waitFor === "event");
+    const gates = steps.filter(gated);
+    const others = steps.filter((s) => !gated(s));
+    if (gates.length && others.length) {
+      const name = (s: FlowStep) => (s.subflow ? `flow:${s.subflow}` : s.agent);
+      warnings.push({
+        step: flow.steps.indexOf(gates[0]),
+        line: gates[0].line,
+        message: `"${name(gates[0])}" waits for a person but shares number ${group} with "${others.map(name).join('", "')}"`,
+        detail:
+          "Steps with the same number run together. The gate holds all of them until it is " +
+          "approved, then they start at once — so the gated step cannot use what the others " +
+          `produce, and the approver sees none of it. To run the gated step after them, number it ${group + 1}.`,
+      });
+    }
+  }
+
+  // A number with nothing under it is harmless to the runner, which only
+  // orders groups, but it is almost always one step numbered twice: 3, 3, 4,
+  // 5, 5!, 7 is a renumbering that missed the 5! that was meant to be 6.
+  const numbers = [...byGroup.keys()].sort((a, b) => a - b);
+  for (let i = 1; i < numbers.length; i++) {
+    if (numbers[i] - numbers[i - 1] < 2) continue;
+    const missing = numbers[i - 1] + 1 === numbers[i] - 1 ? `${numbers[i - 1] + 1}` : `${numbers[i - 1] + 1} to ${numbers[i] - 1}`;
+    const shared = [...byGroup.entries()].filter(([, s]) => s.length > 1).map(([g]) => g);
+    warnings.push({
+      step: null,
+      message: `step numbers go from ${numbers[i - 1]} to ${numbers[i]}; nothing is numbered ${missing}`,
+      detail:
+        "The same number means \"run together\", so a gap usually means a step kept an old number " +
+        "after a renumbering" +
+        (shared.length ? ` — ${shared.map((g) => `number ${g}`).join(", ")} has more than one step; check whether one of them belongs in the gap.` : "."),
+    });
   }
 
   return warnings;
