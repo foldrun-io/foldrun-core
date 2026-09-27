@@ -23,6 +23,7 @@ import { resolveSecrets } from "./secrets.ts";
 import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
+import { attachOperations, prefetchOpenApi, type OperationSpec } from "./openapi.ts";
 import { commandFor, resolveRunPath } from "./script-tools.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
 import { hostSafeEnv } from "./host-env.ts";
@@ -60,6 +61,14 @@ const clip = (s: string) =>
 const substitute = (v: string, env: Record<string, string>) =>
   v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => env[k] ?? "");
 
+/** Does a concrete path fit an operation's template (`/contacts/{id}`)? */
+function matchesTemplate(op: OperationSpec, concrete: string): boolean {
+  const re = new RegExp(
+    "^" + op.path.split(/\{[^/}]+\}/).map((part) => part.replace(/[.*+?^$()|[\]\\]/g, "\\$&")).join("[^/]+") + "$",
+  );
+  return re.test(concrete);
+}
+
 export interface ToolTestInput {
   /** http: the path to try, appended to `base:`. */
   path?: string;
@@ -83,7 +92,50 @@ export async function testTool(
     const { env, missing } = resolveSecrets(tenant, needed, workspace);
 
     try {
-      const rel = probePath.startsWith("/") || probePath === "" ? probePath : `/${probePath}`;
+      let rel = probePath.startsWith("/") || probePath === "" ? probePath : `/${probePath}`;
+      let method = api.methods.includes("GET") ? "GET" : api.methods[0];
+
+      // An `operations:` allowlist binds the tester exactly as it binds a run:
+      // the probe may only be a GET to one of the listed operations, and an
+      // allowlist that resolves nothing is a failure, as it is in a run. A
+      // tester that reached the whole API would be the one door the allowlist
+      // left open, and would report "working" for a tool a run cannot use.
+      if (api.operations?.length) {
+        const fetched = await prefetchOpenApi(tenant, api.openapi ? [api.openapi] : []);
+        const { specs, warnings } = attachOperations([api], tenant, workspaceDir(tenant, workspace));
+        const ops = specs[0].resolvedOperations ?? [];
+        if (!ops.length) {
+          return done({
+            ok: false, transport: "http", missingSecrets: missing,
+            summary: "its operations: allowlist resolved no operations, so a run gets no tools from it",
+            detail: [...fetched, ...warnings].join("\n"),
+          });
+        }
+        const listed = ops.map((o) => `${o.method} ${o.path}`).join("\n");
+        const gets = ops.filter((o) => o.method === "GET");
+        const pathOnly = rel.split("?")[0];
+        if (pathOnly === "") {
+          const plain = gets.find((o) => !o.path.includes("{"));
+          if (!plain) {
+            return done({
+              ok: false, transport: "http", missingSecrets: missing,
+              summary: gets.length
+                ? "every GET operation takes a parameter; give a path, like " + gets[0].path
+                : "the allowlist has no GET operation, and the tester only sends GET: it will not probe a write",
+              detail: `operations:\n${listed}`,
+            });
+          }
+          rel = plain.path;
+        } else if (!gets.some((o) => matchesTemplate(o, pathOnly))) {
+          return done({
+            ok: false, transport: "http", missingSecrets: missing,
+            summary: "that path is not one of the tool's GET operations",
+            detail: `path: ${pathOnly}\noperations:\n${listed}`,
+          });
+        }
+        method = "GET";
+      }
+
       const url = new URL(api.base + rel);
       // Same confinement the agent gets: a probe can't reach another host.
       if (!url.href.startsWith(api.base)) {
@@ -98,7 +150,6 @@ export async function testTool(
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(api.headers)) headers[k] = substitute(v, env);
 
-      const method = api.methods.includes("GET") ? "GET" : api.methods[0];
       const res = await fetch(url, {
         method,
         headers,
