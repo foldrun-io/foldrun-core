@@ -647,6 +647,16 @@ Rules:
   marker is absent necessarily names it. Verdicts are written as headlines,
   so the two readings agree for anything written the house way.
 
+  `when: rows of <path>` asks a file instead of the prose: the step runs only
+  if that CSV, agent-relative and inside the workspace like `each: rows of`,
+  has a data row. It is the condition for the steps after a fan-out. An
+  `each:` over an empty file skips itself and leaves no result, so a marker
+  gate on the step after it reads whatever ran before the fan-out — and on a
+  busy day that is the fan-out's own results, where no marker was ever
+  written. A missing file, a header alone, or a path outside the workspace
+  skips the step and says which. Only the whole phrase is a data condition:
+  `when: ROWS` is still a marker.
+
   An instruction may wrap over several lines. Indent the continuation, as an
   option is indented, and it is one instruction; unindented prose between
   steps stays prose.
@@ -703,7 +713,7 @@ Rules:
      model: max
      effort: xhigh
   ```
-- A step may target **another flow** instead of an agent — `1. [[flow:weekly]] — …` — which is how flows compose. The nested flow's steps run in place, keeping their own parallelism; cycles and nesting deeper than three levels are errors.
+- A step may target **another flow** instead of an agent — `1. [[flow:weekly]] — …` — which is how flows compose. The nested flow's steps run in place, keeping their own parallelism; cycles and nesting deeper than three levels are errors. Only the step's `?` and its instruction carry into the nested steps: an option written under a `[[flow:…]]` line — `when:`, `!`, `retry:`, `verify:` and the rest — is not applied, and `check` warns naming each one.
 
 ### Triggers
 
@@ -731,7 +741,7 @@ The idiom hosts and authors should follow: **link what you read, spell out what 
 
 Step options continued — failure, time, people and delegation:
 
-- `verify: <command>` — a shell command run after the step; a non-zero exit fails it. This is where a flow puts anything that must be decided by arithmetic rather than judgement: the step options are matched as text, deliberately, so a threshold or a total belongs in a command that can be tested, not in a comparison in frontmatter. The command sees what the step's scripts saw: its secrets, `FOLDRUN_RUN_ID`, `FOLDRUN_AGENT`, `FOLDRUN_DATE` and `TZ` — so a proof a step leaves on disk can be checked to name *this* run, which matters because a run's copy-back never propagates a deletion and a marker from an earlier run rides into every later sandbox. `verify:` also accepts the eval file's assertion vocabulary — `verify: contains: $34`, `not-contains: leverage`, `matches: RG-\d+`, `file: outputs/report.md`, `judge: quotes the real price` — so a flow and an eval say "the output must mention the price" in one sentence, and the commonest checks need no shell. `judge:` is a toolless fast-tier grading call on the step's own credential; the other four cost nothing.
+- `verify: <command>` — a shell command run after the step; a non-zero exit fails it. This is where a flow puts anything that must be decided by arithmetic rather than judgement: the step options are matched as text, deliberately, so a threshold or a total belongs in a command that can be tested, not in a comparison in frontmatter. The command sees what the step's scripts saw: its secrets, `FOLDRUN_RUN_ID`, `FOLDRUN_AGENT`, `FOLDRUN_DATE` and `TZ` — so a proof a step leaves on disk can be checked to name *this* run, which matters because a run's copy-back never propagates a deletion and a marker from an earlier run rides into every later sandbox. It also gets `FOLDRUN_REPLY_FILE`, a file holding the step's final turn — the text `matches:` reads — so one command can check the reply and the artefact together (`grep -q '^READY' "$FOLDRUN_REPLY_FILE" && test -s out.json`); a step has one `verify:`, and a shell that could not see the reply made an author choose. `verify:` also accepts the eval file's assertion vocabulary — `verify: contains: $34`, `not-contains: leverage`, `matches: RG-\d+`, `file: outputs/report.md`, `judge: quotes the real price` — so a flow and an eval say "the output must mention the price" in one sentence, and the commonest checks need no shell. `judge:` is a toolless fast-tier grading call on the step's own credential; the other four cost nothing.
 - `retry: <n>` — attempts after the first, clamped to 5. Consumed before `on-fail:` hands the step to another agent.
 - `timeout: 900` — abandon the step after this long: seconds, or the units `wait:` takes (`90s`, `15m`, `4h`, `3d`). A value that is not a duration (`timeout: abc`) is a check error, never a guess. **Without it, a step runs until it finishes.** The platform sets no clock of its own anywhere — not on a step, a script tool, an HTTP tool, a verify command, a consult, or a wait for a person's approval; every limit that exists is one written in a markdown file (`timeout:` on a step, on a script tool, on an HTTP tool). The run's events say which it is (`timeout: 3000s` or `no timeout`) at every step start. A step that has hit its limit is stopped with the files it wrote so far kept.
 - `approve: true` — park the step until a person releases it. `ask:` is the same gate carrying a question; a step with `ask:` does not also need `approve:`.

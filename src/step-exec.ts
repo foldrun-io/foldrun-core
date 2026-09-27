@@ -9,6 +9,7 @@
 // library and the account do not exist.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookInput, McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -582,8 +583,20 @@ export async function checkVerify(
 ): Promise<VerifyVerdict> {
   const m = verify.trim().match(VERIFY_ASSERTION);
   if (!m) {
-    const { code, out } = await runVerify(agentDir, verify, ctx.env, ctx.data);
-    return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out };
+    // The step's final turn, as a file named in FOLDRUN_REPLY_FILE — so one
+    // command can check the reply and the artefact together
+    // (`grep -q '^READY' "$FOLDRUN_REPLY_FILE" && test -s out.json`). A step
+    // has one `verify:`, and a shell check that could not see the reply
+    // made authors choose between the two.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-reply-"));
+    const replyFile = path.join(dir, "reply.md");
+    fs.writeFileSync(replyFile, ctx.conclusion ?? ctx.result ?? "");
+    try {
+      const { code, out } = await runVerify(agentDir, verify, { ...ctx.env, FOLDRUN_REPLY_FILE: replyFile }, ctx.data);
+      return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
   const [, kind, rawValue] = m;
   const value = rawValue.trim().replace(/^["']|["']$/g, "");

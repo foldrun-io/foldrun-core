@@ -12,7 +12,19 @@
 // blocked — flows still run, warnings are advisory.
 
 import type { FlowInfo, FlowStep } from "./store.ts";
+import { whenRowsPath } from "./store.ts";
 import { timezoneProblem } from "./clock.ts";
+
+/** What a `[[flow:x]]` step's options are called in a flow file, for the
+ *  ones expandSubflows does not carry into the nested steps. */
+const SUBFLOW_DROPPED: [keyof FlowStep, string][] = [
+  ["approve", "an approval (!)"], ["when", "when:"], ["case", "case:"], ["else", "else:"],
+  ["retry", "retry:"], ["timeout", "timeout:"], ["verify", "verify:"], ["model", "model:"],
+  ["effort", "effort:"], ["onFail", "on-fail:"], ["waitSecs", "wait:"], ["waitFor", "wait:"],
+  ["ask", "ask:"], ["preview", "preview:"], ["delegate", "delegate:"], ["loop", "loop:"],
+  ["until", "until:"], ["each", "each:"], ["max", "max:"], ["output", "output:"],
+  ["schema", "schema:"], ["parallel", "parallel:"], ["maxTurns", "max_turns:"],
+];
 
 export interface FlowWarning {
   /** Index into flow.steps, or null for a whole-flow warning. */
@@ -418,7 +430,8 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
     }
 
     // `when:` tests the previous results, which the first group doesn't have.
-    if (inFirstGroup && step.when) {
+    // `when: rows of` reads a file instead, which may well exist already.
+    if (inFirstGroup && step.when && whenRowsPath(step.when) === null) {
       warnings.push({
         step: i,
         line: step.line,
@@ -427,6 +440,25 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
           `Nothing has produced output yet, so "${step.when}" can never match and this step will ` +
           "always be skipped. Move it after the step whose output it depends on.",
       });
+    }
+
+    // A `[[flow:x]]` step is spliced in as the other flow's own steps, and
+    // only its `?` and its instruction survive the splice. Everything else
+    // written under it was dropped without a word — a `when:` that never
+    // gated, a `!` that never asked.
+    if (step.subflow) {
+      const dropped = SUBFLOW_DROPPED.filter(([field]) => step[field] !== undefined).map(([, name]) => name);
+      if (dropped.length) {
+        warnings.push({
+          step: i,
+          line: step.line,
+          message: `"flow:${step.subflow}" has ${dropped.join(", ")}, which a nested flow ignores`,
+          detail:
+            "A nested flow runs as its own steps, with their own options; what is written under the " +
+            "[[flow:…]] line is not applied to them. Put the option on the steps inside that flow, " +
+            "or make this an agent step.",
+        });
+      }
     }
   });
 

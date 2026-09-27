@@ -353,7 +353,7 @@ priority: normal         # high | normal | low — where its runs stand in the q
 1. [[researcher]] — Find three sources on {{topic}}.
 2. [[writer]] — Draft from what the researcher found.
    model: max
-   verify: the draft cites every source
+   verify: judge: the draft cites every source
 3?. [[editor]] — Tighten it.
 4!. [[publisher]] — Publish it.
 \`\`\`
@@ -366,11 +366,14 @@ Indented under a step, any of:
 | | |
 |---|---|
 | \`approve: true\` | stop for a human (\`!\` is shorthand for this) |
-| \`when: <condition>\` | run only if it holds |
+| \`when: <MARKER>\` | run only if a line of the previous result begins with it |
+| \`when: rows of <path>\` | run only if that CSV has a data row — for the steps after an \`each:\` |
 | \`case: <value>\` / \`else: true\` | branch on the previous step's result |
 | \`retry: 2\` | re-run on failure, up to 5 |
 | \`timeout: 900\` | seconds before the step is cut off |
-| \`verify: <claim>\` | the step fails unless this is true of its output |
+| \`verify: <shell>\` | the step fails unless the command exits 0; the reply is in \`$FOLDRUN_REPLY_FILE\` |
+| \`verify: judge: <claim>\` | a model grades the claim against the output |
+| \`verify: contains:\` / \`not-contains:\` / \`matches:\` / \`file:\` | the cheap checks, no shell |
 | \`model:\` / \`effort:\` | override the flow's default for this step |
 | \`loop: 3\` / \`until: <condition>\` | repeat until it holds, at most 5 |
 | \`each: lines\` | run once per line of the previous result |

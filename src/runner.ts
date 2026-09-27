@@ -45,6 +45,7 @@ import {
   parseFlow,
   readFlow,
   markerPresent,
+  whenRowsPath,
   parseApis,
   resolveModel,
   parseProvider,
@@ -2780,17 +2781,33 @@ function csvItems(workspaceDir: string, step: StepRecord, take: number): string[
     step.skipReason = "each: rows needs a path — `each: rows of ../../storage/x.csv`";
     return [];
   }
-  const resolved = path.resolve(workspaceDir, "agents", step.agent, raw);
-  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep)) {
-    step.skipReason = `each: rows — ${raw} is outside this workspace`;
+  const read = csvDataRows(workspaceDir, step.agent, raw);
+  if ("problem" in read) {
+    step.skipReason = `each: rows — ${read.problem}`;
     return [];
+  }
+  return read.data.slice(0, take).map((r) => `${read.header}\n${r}`);
+}
+
+/**
+ * The data rows of a CSV, path agent-relative like every path in a flow and
+ * confined to the workspace. Shared by `each: rows of`, which fans out over
+ * them, and `when: rows of`, which asks only whether there are any.
+ */
+function csvDataRows(
+  workspaceDir: string,
+  agent: string,
+  raw: string,
+): { header: string; data: string[] } | { problem: string } {
+  const resolved = path.resolve(workspaceDir, "agents", agent, raw);
+  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep)) {
+    return { problem: `${raw} is outside this workspace` };
   }
   let text: string;
   try {
     text = fs.readFileSync(resolved, "utf8");
   } catch {
-    step.skipReason = `each: rows — ${raw} does not exist (yet?)`;
-    return [];
+    return { problem: `${raw} does not exist (yet?)` };
   }
   // Minimal CSV: quoted fields with embedded commas/newlines survive.
   const rows: string[] = [];
@@ -2807,11 +2824,8 @@ function csvItems(workspaceDir: string, step: StepRecord, take: number): string[
   }
   if (row + field) rows.push(row + field);
   const [header, ...data] = rows.filter((r) => r.trim() !== "");
-  if (!header || data.length === 0) {
-    step.skipReason = `each: rows — ${raw} has no data rows`;
-    return [];
-  }
-  return data.slice(0, take).map((r) => `${header}\n${r}`);
+  if (!header || data.length === 0) return { problem: `${raw} has no data rows` };
+  return { header, data };
 }
 
 /**
@@ -3491,6 +3505,21 @@ function driveRunInner(
         // group's result.
         for (const step of freshGroup) {
           if (step.status !== "pending" || !step.when) continue;
+          // `when: rows of <csv>` asks the data, not the prose: run only if
+          // the file has a data row. It is the condition a fan-out's
+          // followers need — an `each:` over an empty file skips itself but
+          // leaves nothing for a marker to be read from, so the steps after
+          // it used to run on nothing.
+          const rowsOf = whenRowsPath(step.when);
+          if (rowsOf !== null) {
+            const read = csvDataRows(pDir, step.agent, rowsOf);
+            if ("problem" in read) {
+              step.status = "skipped";
+              step.skipReason = `condition not met: when rows — ${read.problem}`;
+              step.events.push({ t: new Date().toISOString(), type: "info", text: `skipped — ${read.problem}` });
+            }
+            continue;
+          }
           // A marker at the start of a line, not a word anywhere in the
           // prose — see markerPresent. "There are no BLOCKED items" must
           // not open a gate keyed on BLOCKED.

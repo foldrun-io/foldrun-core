@@ -1488,6 +1488,17 @@ export function unquote(raw: string): string {
  * The marker must also END at a boundary, so BLOCKED does not match
  * BLOCKEDBY.
  */
+/**
+ * The path of a `when: rows of <path>` condition, or null when the condition
+ * is a marker. `rows of` is the phrase `each:` uses for the same file, so a
+ * flow reads a CSV one way in both. The whole phrase is required: a bare
+ * `when: ROWS` stays the marker it always was.
+ */
+export function whenRowsPath(when: string): string | null {
+  const m = when.trim().match(/^rows\s+of\s+(\S.*)$/i);
+  return m ? m[1].trim() : null;
+}
+
 export function markerPresent(text: string | null | undefined, marker: string): boolean {
   const needle = marker.trim().toLowerCase();
   if (!needle || !text) return false;
