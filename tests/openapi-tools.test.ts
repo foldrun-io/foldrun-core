@@ -363,7 +363,35 @@ test("buildApiTools: an explicit operations: list withholds the generic tool", a
   assert.deepEqual(built.toolNames, ["mcp__foldrun_apis__crm_getContact"]);
   assert.doesNotMatch(built.promptLines[0], /call_crm/);
 
-  // …unless the document never resolved: then the generic tool is all there is.
-  const unresolved = buildApiTools("t", [{ ...spec, resolvedOperations: undefined }], undefined, { env: {}, missing: [] });
-  assert.deepEqual(unresolved.toolNames, ["mcp__foldrun_apis__call_crm"]);
+  // …and it fails closed: a document that never resolved leaves the API with
+  // no tools at all, not the generic one. Same when it resolved to nothing.
+  for (const resolvedOperations of [undefined, []]) {
+    const unresolved = buildApiTools("t", [{ ...spec, resolvedOperations }], undefined, { env: {}, missing: [] });
+    assert.deepEqual(unresolved.toolNames, []);
+    assert.match(unresolved.promptLines[0], /unavailable this run/);
+    assert.doesNotMatch(unresolved.promptLines[0], /call_crm/);
+  }
+
+  // Without an allowlist nothing changes: an unresolved document still means
+  // the generic tool, which is all the API ever offered.
+  const plain = buildApiTools("t", [{ ...spec, operations: undefined, resolvedOperations: undefined }], undefined, { env: {}, missing: [] });
+  assert.deepEqual(plain.toolNames, ["mcp__foldrun_apis__call_crm"]);
+});
+
+test("attachOperations says an allowlisted API fails closed when its document is missing or empty", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-openapi-"));
+  fs.mkdirSync(path.join(ws, "tools", "crm"), { recursive: true });
+  fs.writeFileSync(path.join(ws, "tools", "crm", "openapi.json"), JSON.stringify(DOC));
+  const specs = parseApis([
+    { name: "gone", base: "https://api.example.com", openapi: "tools/gone/openapi.json", operations: ["getContact"] },
+    { name: "renamed", base: "https://api.example.com", openapi: "tools/crm/openapi.json", operations: ["getContactV2"] },
+  ]);
+  const { specs: out, warnings } = attachOperations(specs, "t", ws);
+  assert.equal(out[0].resolvedOperations, undefined);
+  assert.equal(out[1].resolvedOperations, undefined);
+  assert.ok(warnings.some((w) => /^api gone: .*no such file.*fails closed/.test(w)), warnings.join("\n"));
+  assert.ok(warnings.some((w) => /^api renamed: .*"getContactV2" is not in the OpenAPI document/.test(w)), warnings.join("\n"));
+  assert.ok(warnings.some((w) => /^api renamed: .*yielded no operations.*fails closed/.test(w)), warnings.join("\n"));
+  const built = buildApiTools("t", out, undefined, { env: {}, missing: [] });
+  assert.deepEqual(built.toolNames, [], "neither API may fall back to call_<api>");
 });

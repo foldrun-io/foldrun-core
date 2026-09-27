@@ -782,7 +782,9 @@ export interface ApiSpec {
   openapi?: string;
   /** Which of the document's operations to expose — operationIds or
    *  `"METHOD /path"` strings. Absent: every operation, capped at 60.
-   *  Present: only these, and the generic `call_<api>` tool is withheld. */
+   *  Present: only these, and the generic `call_<api>` tool is withheld —
+   *  always. If none of them resolve (document missing, moved, or an
+   *  operation renamed) the API gets no tools that run: it fails closed. */
   operations?: string[];
   /** Calls per second this API may see from one step: `count` is the burst
    *  the bucket holds, `perSec` the refill rate. `"5/s"` → {5, 5};

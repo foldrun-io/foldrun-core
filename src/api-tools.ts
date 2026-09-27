@@ -344,8 +344,20 @@ export function buildApiTools(
     // this process. Two steps on two workers each get their own.
     const bucket = api.rate ? new TokenBucket(api.rate.count, api.rate.perSec) : null;
     const ops = api.resolvedOperations ?? [];
-    // An explicit `operations:` list means "only these": no escape hatch.
-    const withGeneric = !(api.operations && ops.length);
+    // An explicit `operations:` list means "only these": no escape hatch,
+    // ever. It fails closed. If the document did not load, or yielded none of
+    // the listed operations, the API gets no tools this run rather than the
+    // generic one: an allowlist that opens when a vendor renames an
+    // operation or a URL moves is not an allowlist.
+    const allowlisted = !!api.operations?.length;
+    const withGeneric = !allowlisted;
+    if (allowlisted && !ops.length) {
+      promptLines.push(
+        `- **${api.name}** — unavailable this run: its \`operations:\` allowlist resolved no operations, ` +
+          `so no tool is exposed. Report it as blocked; do not reach this API another way.`,
+      );
+      continue;
+    }
 
     const typedNames: string[] = [];
     for (const op of ops) {

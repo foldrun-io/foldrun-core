@@ -368,14 +368,15 @@ export function attachOperations(
   const out = specs.map((spec) => {
     if (!spec.openapi) return spec;
     const { doc, error } = loadOpenApiDocument(tenant, workspaceRoot, spec.openapi);
+    const closed = spec.operations?.length ? " — its operations: allowlist fails closed, so it has no tools this run" : "";
     if (error) {
-      warnings.push(`api ${spec.name}: openapi ${error}`);
+      warnings.push(`api ${spec.name}: openapi ${error}${closed}`);
       return spec;
     }
     const parsed = parseOpenApi(doc, { operations: spec.operations, methods: spec.methods });
     for (const w of parsed.warnings) warnings.push(`api ${spec.name}: ${w}`);
     if (!parsed.operations.length) {
-      warnings.push(`api ${spec.name}: the OpenAPI document yielded no operations (methods: ${spec.methods.join(", ")})`);
+      warnings.push(`api ${spec.name}: the OpenAPI document yielded no operations (methods: ${spec.methods.join(", ")})${closed}`);
       return spec;
     }
     return { ...spec, resolvedOperations: parsed.operations };
