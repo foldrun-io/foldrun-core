@@ -130,3 +130,15 @@ test("identities: one name for a bundle of settings, checked the way the block i
   assert.match(readBrowseSettings({ identities: ["au"] }).error!, /identities must be a map of name to settings/);
   assert.match(readBrowseSettings({ identities: { "no spaces": {} } }).error!, /is not a plain name/);
 });
+
+// A window or none. YAML hands over a boolean; a quoted one is the same wish.
+// Anything else is a typo worth saying out loud, not a silent headless run.
+test("headless is true or false, and only false is carried", () => {
+  assert.equal(readBrowseSettings({ headless: false }).settings.headless, false);
+  assert.equal(readBrowseSettings({ headless: "false" }).settings.headless, false);
+  assert.equal(readBrowseSettings({ headless: true }).settings.headless, true);
+  assert.equal(readBrowseSettings({ engine: "chrome", headless: false }).settings.engine, "chromium");
+  assert.equal(readBrowseSettings({ headless: false }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ headless: "no" }).error!, /web_browse\.headless is true or false/);
+  assert.match(readBrowseSettings({ headless: 0 }).error!, /true or false/);
+});

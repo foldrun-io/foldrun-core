@@ -1150,6 +1150,8 @@ function agentContext(
     ...(browseSettings.storage_origin ? { FOLDRUN_BROWSER_STORAGE_ORIGIN: browseSettings.storage_origin } : {}),
     // The named identities, as one JSON map the tool picks from by name.
     ...(browseSettings.identities ? { FOLDRUN_BROWSER_IDENTITIES: JSON.stringify(browseSettings.identities) } : {}),
+    // Only the non-default travels: a window, on a virtual screen if need be.
+    ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

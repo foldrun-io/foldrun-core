@@ -438,6 +438,9 @@ export interface BrowseSettings {
    *  Australian phone" is six settings; a name says it once. Each value is a
    *  map of text (or JSON for headers), validated here the way the block is. */
   identities?: Record<string, Record<string, string>>;
+  /** false runs the full browser with a window, on a virtual screen where
+   *  the machine has none. Unset or true is the usual no-window browser. */
+  headless?: boolean;
 }
 
 // What a person writes, and what Playwright calls it. "chromium" and "webkit"
@@ -454,7 +457,7 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chromium" | "firefox" | "webkit"> =
   webkit: "webkit",
 };
 const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless"] as const;
 // What one identity may carry: the block's own settings, and the call
 // arguments that describe who the browser is rather than what one call does.
 const IDENTITY_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "proxy", "headers", "geolocation", "permissions", "color_scheme", "block"] as const;
@@ -521,6 +524,14 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
         identities[name] = read.identity!;
       }
       if (Object.keys(identities).length) settings.identities = identities;
+      continue;
+    }
+    // The one setting that is a yes or no. YAML gives a boolean; a quoted
+    // "false" is the same wish and is read as one.
+    if (k === "headless") {
+      const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
+      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.headless is true or false, not ${JSON.stringify(v)}.` };
+      settings.headless = b;
       continue;
     }
     if (typeof v !== "string") {
