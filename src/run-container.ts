@@ -614,6 +614,7 @@ RUN apt-get update \\
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
+ && (playwright install --with-deps chrome >/dev/null 2>&1 || echo "real Chrome unavailable on this arch — engine: chrome falls back to chromium") \\
  && chmod -R a+rX /opt/browser
 WORKDIR /opt/runner
 COPY foldrun-core.tgz driver.mjs entry.sh ./

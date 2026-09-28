@@ -412,7 +412,7 @@ export interface SearchChoice {
  * single call decides — mode, actions, wait_for, block — stays in the call.
  */
 export interface BrowseSettings {
-  engine?: "chromium" | "firefox" | "webkit";
+  engine?: "chrome" | "chromium" | "firefox" | "webkit";
   user_agent?: string;
   device?: string;
   locale?: string;
@@ -449,8 +449,12 @@ export interface BrowseSettings {
 // accepted forever: agents written before this keep working, and the engine
 // names remain the truth underneath (chrome here is the open-source Chromium
 // build, not the branded Chrome; safari is WebKit, Safari's engine).
-const BROWSE_ENGINE_ALIASES: Record<string, "chromium" | "firefox" | "webkit"> = {
-  chrome: "chromium",
+const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | "webkit"> = {
+  // `chrome` is the branded Google Chrome (Playwright channel "chrome"), where
+  // the image has it; `chromium` is the open-source build. Same engine, a
+  // truer user-agent and codecs. Both still fall back to chromium if Chrome
+  // is not installed (a laptop without it, or an arch Google does not ship).
+  chrome: "chrome",
   chromium: "chromium",
   firefox: "firefox",
   safari: "webkit",

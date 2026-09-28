@@ -35,8 +35,8 @@ test("an engine that does not exist is refused by name, not silently ignored", (
 // A file should read the way people speak: chrome and safari, not chromium
 // and webkit. Underneath they are still the engines Playwright knows, and the
 // old spellings keep working so nothing written before this breaks.
-test("chrome and safari are what a person writes; the engine is what runs", () => {
-  assert.equal(readBrowseSettings({ engine: "chrome" }).settings.engine, "chromium");
+test("chrome is real Chrome (its own engine); safari is what a person writes for WebKit", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome" }).settings.engine, "chrome", "branded Chrome, distinct from chromium");
   assert.equal(readBrowseSettings({ engine: "safari" }).settings.engine, "webkit");
   assert.equal(readBrowseSettings({ engine: "firefox" }).settings.engine, "firefox");
 });
@@ -44,7 +44,8 @@ test("chrome and safari are what a person writes; the engine is what runs", () =
 test("the engine names still work, so no agent written before this breaks", () => {
   assert.equal(readBrowseSettings({ engine: "chromium" }).settings.engine, "chromium");
   assert.equal(readBrowseSettings({ engine: "webkit" }).settings.engine, "webkit");
-  assert.equal(readBrowseSettings({ engine: "Chrome" }).settings.engine, "chromium", "case is not a trap");
+  assert.equal(readBrowseSettings({ engine: "chromium" }).settings.engine, "chromium", "the open-source build");
+  assert.equal(readBrowseSettings({ engine: "Chrome" }).settings.engine, "chrome", "case is not a trap");
 });
 
 test("a setting that is not text is refused", () => {
@@ -115,7 +116,7 @@ test("identities: one name for a bundle of settings, checked the way the block i
   });
   assert.equal(good.error, undefined);
   assert.deepEqual(good.settings.identities, {
-    "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chromium", headers: "{\"x-tenant\":\"acme\"}" },
+    "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chrome", headers: "{\"x-tenant\":\"acme\"}" },
     "au-desktop": { locale: "en-AU" },
   });
   assert.equal(good.rest, undefined, "identities are settings, not a vendor");
@@ -137,7 +138,7 @@ test("headless is true or false, and only false is carried", () => {
   assert.equal(readBrowseSettings({ headless: false }).settings.headless, false);
   assert.equal(readBrowseSettings({ headless: "false" }).settings.headless, false);
   assert.equal(readBrowseSettings({ headless: true }).settings.headless, true);
-  assert.equal(readBrowseSettings({ engine: "chrome", headless: false }).settings.engine, "chromium");
+  assert.equal(readBrowseSettings({ engine: "chrome", headless: false }).settings.engine, "chrome");
   assert.equal(readBrowseSettings({ headless: false }).rest, undefined, "a setting, not a vendor");
   assert.match(readBrowseSettings({ headless: "no" }).error!, /web_browse\.headless is true or false/);
   assert.match(readBrowseSettings({ headless: 0 }).error!, /true or false/);
