@@ -37,6 +37,9 @@ export interface FlowWarning {
    *  `foldrun check` must fail on rather than note. Absent means advisory,
    *  which every structural warning in this file is. */
   level?: "error" | "warn";
+  /** A stable tag for warnings a caller wants to single out — the deploy
+   *  surfaces `kind: "outward"` as a non-blocking warning. */
+  kind?: string;
 }
 
 // Anaphora: phrases that only mean something if earlier output exists.
@@ -98,6 +101,14 @@ function looksLikeProse(verify: string): boolean {
 export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   const warnings: FlowWarning[] = [];
   const agentNames = known ? new Set(known.agents) : null;
+
+  // A frontmatter enum the parser could not read, or a step line whose
+  // `[[target]]` is malformed — recorded by parseFlow, reported here at
+  // error level so `foldrun check` fails on it, the way a bad step option
+  // does. A value nothing can read is never a silent default.
+  for (const fp of flow.frontProblems ?? []) {
+    warnings.push({ step: null, level: "error", message: fp, detail: "The line is written but its value cannot be read, so a run would use a silent default instead of what the author meant. Write one of the values the option names, or a target in lower case, digits and dashes." });
+  }
 
   // Cron's oldest trap, and an expensive one: when day-of-month AND
   // day-of-week are both restricted they are OR'd, not AND'd — the scheduler
@@ -302,6 +313,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         step: step.group,
         line: step.line,
         level: "error",
+        kind: "outward",
         message: `[[${step.agent}]] can act outside this workspace and this step has no verify: and no gate`,
         detail:
           "A step that sends, posts, buys or publishes needs one of two things: a `verify:` the " +

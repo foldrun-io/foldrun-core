@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   readTree,
   deployIssues,
+  deployWarnings,
   planDeploy,
   deployWorkspace,
   deployedCommit,
@@ -307,4 +308,43 @@ test("a deploy does not destroy what the agents produced", () => {
       assert.ok(fs.existsSync(path.join(ws, kept)), `a deploy destroyed ${kept}`);
     }
   });
+});
+
+
+// ── findings 1, 5, 6, 2 ──────────────────────────────────────────────────────
+
+test("schedule: on an agent is refused by deploy, not carried in dead", () => {
+  const files = workspace({ "agents/writer/agent.md": "---\nname: writer\ndescription: t\nschedule: \"0 9 * * 1\"\n---\n\nWrite.\n" });
+  assert.ok(deployIssues(files).some((i) => /only a flow runs on a clock/.test(i.message)));
+});
+
+test("a flow enum typo and a malformed step target are deploy issues", () => {
+  const overlap = workspace({ "flows/publish.md": "---\nname: publish\noverlap: que\n---\n\n1. [[writer]] — write it\n" });
+  assert.ok(deployIssues(overlap).some((i) => /overlap: que/.test(i.message)));
+  const target = workspace({ "flows/publish.md": "---\nname: publish\n---\n\n1. [[Writer_One]] — write it\n" });
+  // The step never resolves as a step, so both the malformed-target problem
+  // and (because the flow now has no steps) "no steps" are reported.
+  assert.ok(deployIssues(target).some((i) => /named in lower case/.test(i.message)));
+});
+
+test("an outward step without a gate is a deploy WARNING, not a blocking issue", () => {
+  const files = workspace({
+    "tools/mailer.md": "---\nname: mailer\ntransport: http\nbase: https://api.example.com\nmethods: [POST]\noutward: true\n---\n\nSends.\n",
+    "agents/writer/agent.md": "---\nname: writer\ndescription: t\ntools: [mailer]\n---\n\nWrite.\n",
+    "flows/publish.md": "---\nname: publish\n---\n\n1. [[writer]] — send it\n",
+  });
+  // Not blocking:
+  assert.ok(!deployIssues(files).some((i) => /act outside this workspace/.test(i.message)));
+  // But surfaced as a warning naming the step:
+  const warns = deployWarnings(files);
+  assert.ok(warns.some((w) => /act outside this workspace/.test(w.message)), warns.map((w) => w.message).join(" | "));
+});
+
+test("a gated outward step raises no deploy warning", () => {
+  const files = workspace({
+    "tools/mailer.md": "---\nname: mailer\ntransport: http\nbase: https://api.example.com\nmethods: [POST]\noutward: true\n---\n\nSends.\n",
+    "agents/writer/agent.md": "---\nname: writer\ndescription: t\ntools: [mailer]\n---\n\nWrite.\n",
+    "flows/publish.md": "---\nname: publish\n---\n\n1! [[writer]] — send it\n",
+  });
+  assert.deepEqual(deployWarnings(files), []);
 });

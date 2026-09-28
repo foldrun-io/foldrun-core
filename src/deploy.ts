@@ -26,11 +26,14 @@ import {
   workspaceDir,
   listRuns,
   parseFlow,
+  parseToolDef,
   WORKSPACE_DIRS,
   assertSafeName,
   type DeployFile,
   notifyWorkspaceChanged,
 } from "./store.ts";
+import { lintFlow } from "./flow-lint.ts";
+import { refNames } from "./refs.ts";
 import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
@@ -77,6 +80,10 @@ export interface DeployPlan {
   updated: string[];
   /** Empty when the deploy is safe to apply. */
   issues: DeployIssue[];
+  /** Advisory, non-blocking: a deploy proceeds with these. Today this is
+   *  the outward-without-a-gate lint — the same one `foldrun check` fails
+   *  on, surfaced here so a push over the API is not the last to hear it. */
+  warnings: DeployIssue[];
   /** Set when a run is in flight, which blocks the swap. */
   blockedBy: string[];
 }
@@ -188,6 +195,48 @@ export function readTree(dir: string): DeployFile[] {
  * not on disk yet. A deploy that would leave the workspace failing its own
  * checker should not be a deploy.
  */
+/** Best-effort outward-gate warnings for a deploy: a step whose agent grants
+ *  a workspace tool marked `outward: true` and has no `verify:`/gate. Reads
+ *  only the deployed files, so a library or gallery outward tool is not seen
+ *  here — `foldrun check`, which resolves every scope, remains the real gate.
+ *  Non-blocking by decision: the deploy proceeds and says so. */
+export function deployWarnings(files: DeployFile[]): DeployIssue[] {
+  const front = (content: string): Record<string, unknown> => {
+    try { return matter(content).data as Record<string, unknown>; } catch { return {}; }
+  };
+  // Workspace tools that change something outside the workspace.
+  const outwardTools = new Set<string>();
+  for (const f of files) {
+    const m = f.path.match(/^tools\/([^/]+?)(?:\/tool)?\.md$/);
+    if (!m) continue;
+    const data = front(f.content);
+    const def = parseToolDef(data, m[1], f.content);
+    // `outward: true` is read off the frontmatter, the same test the runtime
+    // and the CLI use; parseToolDef does not fold it onto the def.
+    if (def && data.outward === true) outwardTools.add(def.name ?? m[1]);
+  }
+  // Agents that grant one of them.
+  const outwardAgents: string[] = [];
+  const agentNames: string[] = [];
+  for (const f of files) {
+    const m = f.path.match(/^agents\/([^/]+)\/agent\.md$/);
+    if (!m) continue;
+    agentNames.push(m[1]);
+    if (refNames(front(f.content).tools).some((t: string) => outwardTools.has(t))) outwardAgents.push(m[1]);
+  }
+  if (!outwardAgents.length) return [];
+  const out: DeployIssue[] = [];
+  for (const f of files) {
+    if (!/^flows\/[^/]+\.md$/.test(f.path)) continue;
+    let flow;
+    try { flow = parseFlow(path.basename(f.path), f.content); } catch { continue; }
+    for (const w of lintFlow(flow, { agents: agentNames, outwardAgents })) {
+      if (w.kind === "outward") out.push({ where: `${f.path}${w.line ? `:${w.line}` : ""}`, message: w.message });
+    }
+  }
+  return out;
+}
+
 export function deployIssues(files: DeployFile[]): DeployIssue[] {
   const issues: DeployIssue[] = [];
   const at = (where: string, message: string) => issues.push({ where, message });
@@ -229,6 +278,11 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     }
     const problem = timezoneProblem(front.timezone);
     if (problem) at(f.path, problem);
+    // `schedule:` on an agent or AGENTS.md runs nothing — only a flow has a
+    // clock. Refuse it where it was written rather than deploy it dead.
+    if (front.schedule !== undefined) {
+      at(f.path, "schedule: an agent has no schedule of its own — only a flow runs on a clock. Put schedule: on the flow that runs this agent, or remove it.");
+    }
     // The same refusal check gives: a web key that cannot work never ships.
     for (const w of webProblems(front)) at(f.path, w);
     const lang = languageProblem(front.language);
@@ -260,6 +314,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
       continue;
     }
     if (parsed.steps.length === 0) at(f.path, "no steps");
+    for (const fp of parsed.frontProblems) at(f.path, fp);
     for (const s of parsed.steps) {
       const target = s.subflow ?? s.agent;
       const known = s.subflow ? flowNames.has(target) : agents.has(target);
@@ -366,6 +421,7 @@ export function planDeploy(tenant: string, workspace: string, files: DeployFile[
     updated: updated.sort(),
     removed: removed.sort(),
     issues: deployIssues(files),
+    warnings: deployWarnings(files),
     blockedBy: runsInFlight(tenant, workspace),
   };
 }

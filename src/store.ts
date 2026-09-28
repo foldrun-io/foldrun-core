@@ -837,6 +837,9 @@ export interface AgentInfo {
   /** web_search:/web_fetch:/web_browse: values that cannot work. The run says
    *  so in its trail and carries on; check and deploy say so first. */
   webProblems: string[];
+  /** `schedule:` written on an agent, which nothing runs — only a flow has
+   *  a clock. The message, or null when there is no such line. */
+  scheduleProblem: string | null;
 }
 
 // Recognised HTTP verbs a tool may declare. Deliberately NOT named
@@ -1267,6 +1270,17 @@ export interface FlowInfo {
    *  Only ever an opt-out of the safe default, never the other way round. */
   live: boolean;
 
+  /** `description:` — one line on what this flow is for, shown in listings
+   *  and the trace. Read here so a documented, scaffolded field means
+   *  something rather than sitting in every file unread. */
+  description: string | null;
+
+  /** Flow-level frontmatter values the parser could not read — a bad
+   *  `overlap:`/`priority:`/`catchup:`/`on:`/`signature:`, or a step line
+   *  whose `[[target]]` is malformed. Errors, the way a bad step option is,
+   *  rather than a silent default. */
+  frontProblems: string[];
+
   steps: FlowStep[];
 }
 
@@ -1317,6 +1331,14 @@ export function agentAssets(tenant: string, workspace: string, agent: string): A
   return { skills, memory };
 }
 
+/** `schedule:` on an agent runs nothing — only a flow has a clock. Named so
+ *  it fails loudly rather than deploying clean and never firing. */
+function agentScheduleProblem(data: Record<string, unknown>): string | null {
+  return data.schedule !== undefined
+    ? "schedule: an agent has no schedule of its own — only a flow runs on a clock. Put schedule: on the flow that runs this agent, or remove it."
+    : null;
+}
+
 /** A per-run `budget:` as a number, or null. A period other than "run"
  *  written here is a mistake the lint names; it is not silently a cap. */
 function runBudget(raw: unknown): number | null {
@@ -1353,6 +1375,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
         webProblems: webProblems(data),
+        scheduleProblem: agentScheduleProblem(data),
       };
     });
 }
@@ -1520,6 +1543,9 @@ export function markerPresent(text: string | null | undefined, marker: string): 
 export function parseFlow(file: string, raw: string): FlowInfo {
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
+  // Flow-level problems: a malformed step target (below) and unreadable
+  // frontmatter enums (before the return). Reported as errors by flow-lint.
+  const frontProblems: string[] = [];
   // Frontmatter is stripped by matter(), so add it back to keep line numbers
   // pointing at the real file rather than the body.
   const offset = raw.slice(0, raw.length - content.length).split("\n").length - 1;
@@ -1574,6 +1600,15 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       });
       open = steps[steps.length - 1];
       continue;
+    }
+    // A line shaped like a numbered step whose `[[target]]` STEP_RE would
+    // not accept — capitals or an underscore in the name — used to fall
+    // through and be swallowed as prose, so the step silently vanished.
+    // Name it instead: an agent is [a-z0-9-], and a real one that is merely
+    // missing is a separate, later error.
+    const shape = line.match(/^\s*\d+[?!]?\.?\s+\[\[(flow:)?([^\]]*)\]\]/);
+    if (shape && !STEP_RE.test(line)) {
+      frontProblems.push(`step \`[[${shape[1] ?? ""}${shape[2]}]]\` on line ${lineNo + offset}: a step targets an agent or flow named in lower case, digits and dashes — not \`${shape[2]}\`.`);
     }
     // An indented line that is not an option continues the instruction —
     // but only while the step is still open.
@@ -1697,6 +1732,21 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     }
   }
   endBlock();
+  // A frontmatter enum written with a typo — `overlap: que` — read as null
+  // and ran with the silent default. flows.md promises otherwise ("a value
+  // the option cannot read is a check error, never a guess"); make it true
+  // for these too, not only for step options.
+  const badEnum = (key: string, val: unknown, allowed: string[]) => {
+    if (typeof val === "string" && val.trim() && !allowed.includes(val.trim())) {
+      frontProblems.push(`${key}: ${val} — the values are ${allowed.join(", ")}.`);
+    }
+  };
+  badEnum("overlap", data.overlap, ["skip", "queue"]);
+  badEnum("priority", data.priority, ["high", "normal", "low"]);
+  badEnum("catchup", data.catchup, ["none", "last"]);
+  badEnum("on", data.on, ["completed", "failed", "blocked", "any"]);
+  badEnum("signature", data.signature, ["github", "stripe", "slack", "hmac"]);
+
   steps.sort((a, b) => a.group - b.group);
   return {
     name: data.name ?? file.replace(/\.md$/, ""),
@@ -1739,6 +1789,8 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     sla: durationOf(data.sla),
     approvers: approverList(data.approvers),
     approveWithin: durationOf(data.approve_within),
+    description: typeof data.description === "string" ? data.description.trim() || null : null,
+    frontProblems,
     steps,
   };
 }

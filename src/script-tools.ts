@@ -40,8 +40,9 @@ export interface ScriptSpec {
   args: Record<string, string>; // arg name → description
   interpreter?: string; // optional override, e.g. "python3", "bash"
   /** Seconds this script may run — for the crawl that legitimately takes
-   *  five minutes. Defaults to 120, capped at 600: a limit an author can
-   *  raise is a budget; one they can remove is a hang. */
+   *  five minutes. Unset means no platform clock; there was a two-minute
+   *  default and a ten-minute cap here and both were removed (see the note
+   *  above `timeoutFor`). */
   timeout?: number;
   /** The script itself, when the tool is a single markdown file with its
    *  code in a fenced block. Materialised to a file at call time — the
