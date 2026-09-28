@@ -3,7 +3,7 @@
 // the two from standing on each other.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readBrowseSettings, resolveSearch, webProblems } from "../src/providers.ts";
+import { readBrowseSettings, resolveSearch, webProblems, WEB_BROWSE_ACTIONS } from "../src/providers.ts";
 
 test("a bare name still means a vendor, and carries no settings", () => {
   const read = readBrowseSettings("browserbase");
@@ -158,4 +158,45 @@ test("headless is true or false, and only false is carried", () => {
   assert.equal(readBrowseSettings({ headless: false }).rest, undefined, "a setting, not a vendor");
   assert.match(readBrowseSettings({ headless: "no" }).error!, /web_browse\.headless is true or false/);
   assert.match(readBrowseSettings({ headless: 0 }).error!, /true or false/);
+});
+
+test("lightpanda is an engine a file may name", () => {
+  assert.equal(readBrowseSettings({ engine: "lightpanda" }).settings.engine, "lightpanda");
+  assert.equal(readBrowseSettings({ engine: "LightPanda" }).settings.engine, "lightpanda");
+});
+
+test("allowed_domains: a list or a line of domains, lowercased, nothing else", () => {
+  assert.deepEqual(readBrowseSettings({ allowed_domains: ["Portal.Example.com", "*.cdn.example.com"] }).settings.allowed_domains, ["portal.example.com", "*.cdn.example.com"]);
+  assert.deepEqual(readBrowseSettings({ allowed_domains: "a.com, b.org" }).settings.allowed_domains, ["a.com", "b.org"]);
+  assert.equal(readBrowseSettings({ allowed_domains: ["a.com"] }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ allowed_domains: ["https://a.com"] }).error!, /not a domain or \*\.domain/);
+  assert.match(readBrowseSettings({ allowed_domains: ["a.com/path"] }).error!, /not a domain/);
+  assert.match(readBrowseSettings({ allowed_domains: 3 }).error!, /list of domains/);
+});
+
+test("deny: only actions that exist — a misspelt denial would deny nothing", () => {
+  assert.deepEqual(readBrowseSettings({ deny: ["eval", "Download", "js"] }).settings.deny, ["eval", "download", "js"]);
+  assert.match(readBrowseSettings({ deny: ["evall"] }).error!, /evall is not a web_browse action/);
+  assert.ok(WEB_BROWSE_ACTIONS.includes("login"), "the new verbs are deniable");
+});
+
+test("boundaries, webgpu and ignore_https_errors are true or false, only true carried", () => {
+  for (const k of ["boundaries", "webgpu", "ignore_https_errors"] as const) {
+    assert.equal(readBrowseSettings({ [k]: true }).settings[k], true);
+    assert.equal(readBrowseSettings({ [k]: "true" }).settings[k], true);
+    assert.equal(readBrowseSettings({ [k]: false }).settings[k], undefined);
+    assert.match(readBrowseSettings({ [k]: "maybe" }).error!, new RegExp(`web_browse\\.${k} is true or false`));
+  }
+});
+
+test("init and extensions are paths inside the workspace", () => {
+  assert.deepEqual(readBrowseSettings({ init: ["scripts/stub.js"] }).settings.init, ["scripts/stub.js"]);
+  assert.deepEqual(readBrowseSettings({ extensions: "library/ext/a" }).settings.extensions, ["library/ext/a"]);
+  assert.match(readBrowseSettings({ init: ["/etc/passwd"] }).error!, /inside the workspace/);
+  assert.match(readBrowseSettings({ extensions: ["../other/ext"] }).error!, /inside the workspace/);
+});
+
+test("state_key names a secret, never the key", () => {
+  assert.equal(readBrowseSettings({ state_key: "BROWSER_STATE_KEY" }).settings.state_key, "BROWSER_STATE_KEY");
+  assert.match(readBrowseSettings({ state_key: "9f3a0c…" }).error!, /NAME of a vault secret/);
 });

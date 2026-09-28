@@ -616,6 +616,25 @@ RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && (playwright install --with-deps chrome chrome-beta >/dev/null 2>&1 || echo "real Chrome unavailable on this arch — engine: chrome falls back to chromium") \\
  && chmod -R a+rX /opt/browser
+# Lightpanda (engine: lightpanda): a browser that runs the JavaScript and
+# never draws — a fraction of Chromium's memory for reading and filling
+# pages. Its own program, which web_browse starts beside a call and drives
+# over the DevTools protocol; shipped unmodified (AGPL-3.0). Pinned by
+# checksum: 0.3.6 is the newest build this glibc (Debian 12, 2.36) runs —
+# 0.3.7 on wants 2.38. Raise it with the base image. An arch without a
+# build leaves the engine out, and the tool says so when asked for it.
+RUN arch=$(uname -m) \\
+ && case "$arch" in \\
+      x86_64) sum=e438c0ad44e0f6916c14cf13beb003512c60438d8fd200738d2e596e73f652d6 ;; \\
+      aarch64) sum=29c059cd0755a195350cc79dbcf7ee9580fd575ec3eaa31db755dbada417e616 ;; \\
+      *) sum= ;; \\
+    esac \\
+ && mkdir -p /opt/browser/lightpanda \\
+ && if [ -n "$sum" ] \\
+      && curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.3.6/lightpanda-$arch-linux" \\
+      && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; then \\
+      chmod a+rx /opt/browser/lightpanda/lightpanda && /opt/browser/lightpanda/lightpanda version; \\
+    else rm -f /opt/browser/lightpanda/lightpanda; echo "lightpanda not installed for $arch — engine: lightpanda says so when asked"; fi
 WORKDIR /opt/runner
 COPY foldrun-core.tgz driver.mjs entry.sh ./
 RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\

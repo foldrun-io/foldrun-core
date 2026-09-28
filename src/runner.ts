@@ -1154,6 +1154,15 @@ function agentContext(
     ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
     ...(browseSettings.version ? { FOLDRUN_BROWSER_VERSION: browseSettings.version } : {}),
     ...(browseSettings.live ? { FOLDRUN_BROWSER_LIVE: "1" } : {}),
+    // What the agent may do, from its file: a lock the call cannot widen.
+    ...(browseSettings.allowed_domains ? { FOLDRUN_BROWSER_ALLOWED_DOMAINS: browseSettings.allowed_domains.join(",") } : {}),
+    ...(browseSettings.deny ? { FOLDRUN_BROWSER_DENY: browseSettings.deny.join(",") } : {}),
+    ...(browseSettings.boundaries ? { FOLDRUN_BROWSER_BOUNDARIES: "1" } : {}),
+    ...(browseSettings.init ? { FOLDRUN_BROWSER_INIT: browseSettings.init.join(",") } : {}),
+    ...(browseSettings.extensions ? { FOLDRUN_BROWSER_EXTENSIONS: browseSettings.extensions.join(",") } : {}),
+    ...(browseSettings.webgpu ? { FOLDRUN_BROWSER_WEBGPU: "1" } : {}),
+    ...(browseSettings.ignore_https_errors ? { FOLDRUN_BROWSER_IGNORE_HTTPS_ERRORS: "1" } : {}),
+    ...(browseSettings.state_key ? { FOLDRUN_BROWSER_STATE_KEY: browseSettings.state_key } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

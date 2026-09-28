@@ -412,7 +412,7 @@ export interface SearchChoice {
  * single call decides — mode, actions, wait_for, block — stays in the call.
  */
 export interface BrowseSettings {
-  engine?: "chrome" | "chromium" | "firefox" | "webkit";
+  engine?: "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda";
   user_agent?: string;
   device?: string;
   locale?: string;
@@ -452,7 +452,40 @@ export interface BrowseSettings {
    *  Chromium-only (chrome/chromium). Unset: each call is a fresh page, with
    *  only cookies carried by a session. */
   live?: boolean;
+  /** The domains this agent's browser may reach at all — pages, scripts,
+   *  fetches, sockets. A lock, not a default: a call may narrow it and never
+   *  widen it, so no page's text can talk the model past it. */
+  allowed_domains?: string[];
+  /** Actions this agent may never take (eval, download, upload, …), checked
+   *  before a browser opens. Names from WEB_BROWSE_ACTIONS, plus js. */
+  deny?: string[];
+  /** true marks the page's words in every reply with a nonce the page cannot
+   *  know, so text written to look like instructions stays the page's. */
+  boundaries?: boolean;
+  /** Workspace paths of scripts run in every page before its own. */
+  init?: string[];
+  /** Workspace paths of unpacked Chrome extensions to load (Chromium, in the step). */
+  extensions?: string[];
+  /** true gives pages WebGPU, on a software GPU where there is none. */
+  webgpu?: boolean;
+  /** true opens pages whose certificate does not check out (staging, self-signed). */
+  ignore_https_errors?: boolean;
+  /** The NAME of a vault secret whose value encrypts state= logins at rest. */
+  state_key?: string;
 }
+
+/** Every action web_browse takes, which is what `deny:` may name. The
+ *  gallery test holds this equal to the tool's own list, so a new action
+ *  cannot be undeniable, and a misspelt denial — which would deny nothing —
+ *  is refused at check time instead. */
+export const WEB_BROWSE_ACTIONS = [
+  "click", "dblclick", "rightclick", "hover", "check", "uncheck", "drag", "fill", "type", "press", "select",
+  "wait", "goto", "screenshot", "pdf", "scroll", "paste", "upload", "download", "extract", "frame", "tab",
+  "back", "forward", "reload", "focus", "clear", "highlight", "keyboard", "keydown", "keyup", "mouse", "wheel",
+  "tap", "swipe", "clipboard", "eval", "get", "expect", "if", "mock", "unmock", "offline", "cookie",
+  "localstorage", "sessionstorage", "viewport", "dialog", "solve",
+  "pushstate", "insert", "webmcp", "login",
+] as const;
 
 // What a person writes, and what Playwright calls it. "chromium" and "webkit"
 // are engine names; "chrome" and "safari" are what everyone else calls those
@@ -460,7 +493,7 @@ export interface BrowseSettings {
 // accepted forever: agents written before this keep working, and the engine
 // names remain the truth underneath (chrome here is the open-source Chromium
 // build, not the branded Chrome; safari is WebKit, Safari's engine).
-const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | "webkit"> = {
+const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda"> = {
   // `chrome` is the branded Google Chrome (Playwright channel "chrome"), where
   // the image has it; `chromium` is the open-source build. Same engine, a
   // truer user-agent and codecs. Both still fall back to chromium if Chrome
@@ -470,9 +503,22 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | 
   firefox: "firefox",
   safari: "webkit",
   webkit: "webkit",
+  // A browser that runs the JavaScript and never draws: a fraction of
+  // Chromium's memory, and no screenshots.
+  lightpanda: "lightpanda",
 };
-const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live"] as const;
+const BROWSE_ENGINES = ["chrome", "firefox", "safari", "lightpanda"] as const;
+const BROWSE_SETTING_KEYS = [
+  "engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live",
+  "allowed_domains", "deny", "boundaries", "init", "extensions", "webgpu", "ignore_https_errors", "state_key",
+] as const;
+const BROWSE_DOMAIN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+/** A list setting: YAML's list, or one comma-separated line. */
+function browseList(v: unknown): string[] | null {
+  if (Array.isArray(v)) return v.every((x) => typeof x === "string") ? v.map((x) => x.trim()).filter(Boolean) : null;
+  if (typeof v === "string") return v.split(",").map((x) => x.trim()).filter(Boolean);
+  return null;
+}
 // What one identity may carry: the block's own settings, and the call
 // arguments that describe who the browser is rather than what one call does.
 const IDENTITY_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "proxy", "headers", "geolocation", "permissions", "color_scheme", "block"] as const;
@@ -549,10 +595,40 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       settings.headless = b;
       continue;
     }
-    if (k === "live") {
+    if (k === "live" || k === "boundaries" || k === "webgpu" || k === "ignore_https_errors") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
-      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.live is true or false, not ${JSON.stringify(v)}.` };
-      if (b) settings.live = true;
+      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.${k} is true or false, not ${JSON.stringify(v)}.` };
+      if (b) settings[k] = true;
+      continue;
+    }
+    if (k === "allowed_domains") {
+      const list = browseList(v)?.map((d) => d.toLowerCase());
+      if (!list) return { settings, rest: left(rest), error: "web_browse.allowed_domains is a list of domains, like [example.com, \"*.example.com\"]." };
+      const bad = list.find((d) => !BROWSE_DOMAIN.test(d));
+      if (bad) return { settings, rest: left(rest), error: `web_browse.allowed_domains: ${bad} is not a domain or *.domain — no scheme, no path.` };
+      if (list.length) settings.allowed_domains = list;
+      continue;
+    }
+    if (k === "deny") {
+      const list = browseList(v)?.map((d) => d.toLowerCase());
+      if (!list) return { settings, rest: left(rest), error: "web_browse.deny is a list of actions, like [eval, download]." };
+      const known = new Set<string>([...WEB_BROWSE_ACTIONS, "js"]);
+      const bad = list.find((a) => !known.has(a));
+      if (bad) return { settings, rest: left(rest), error: `web_browse.deny: ${bad} is not a web_browse action — a misspelt denial would deny nothing. The actions are ${[...known].join(", ")}.` };
+      if (list.length) settings.deny = list;
+      continue;
+    }
+    if (k === "init" || k === "extensions") {
+      const list = browseList(v);
+      if (!list) return { settings, rest: left(rest), error: `web_browse.${k} is a list of workspace paths, like [${k === "init" ? "scripts/stub.js" : "library/extensions/my-ext"}].` };
+      const bad = list.find((p) => p.startsWith("/") || p.split(/[\\/]/).includes("..") || p.includes(","));
+      if (bad) return { settings, rest: left(rest), error: `web_browse.${k}: ${bad} must be a path inside the workspace (no leading /, no .., no comma).` };
+      if (list.length) settings[k] = list;
+      continue;
+    }
+    if (k === "state_key") {
+      if (typeof v !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(v)) return { settings, rest: left(rest), error: "web_browse.state_key must be the NAME of a vault secret (CAPITALS), never the key — store it with `foldrun secrets set NAME` and declare it under secrets:." };
+      settings.state_key = v;
       continue;
     }
     if (k === "version") {
