@@ -1152,6 +1152,7 @@ function agentContext(
     ...(browseSettings.identities ? { FOLDRUN_BROWSER_IDENTITIES: JSON.stringify(browseSettings.identities) } : {}),
     // Only the non-default travels: a window, on a virtual screen if need be.
     ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
+    ...(browseSettings.version ? { FOLDRUN_BROWSER_VERSION: browseSettings.version } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

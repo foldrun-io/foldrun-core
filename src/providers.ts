@@ -441,6 +441,12 @@ export interface BrowseSettings {
   /** false runs the full browser with a window, on a virtual screen where
    *  the machine has none. Unset or true is the usual no-window browser. */
   headless?: boolean;
+  /** Which build of the engine to run: a Chrome release channel
+   *  (`stable`/`beta`/`dev`) or a label naming a binary installed in the
+   *  image (`/opt/browser/<engine>/<version>/`). Unset is the pinned
+   *  default. Resolved in the tool, which falls back to the default and
+   *  says so when the named build is not installed. */
+  version?: string;
 }
 
 // What a person writes, and what Playwright calls it. "chromium" and "webkit"
@@ -461,7 +467,7 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | 
   webkit: "webkit",
 };
 const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version"] as const;
 // What one identity may carry: the block's own settings, and the call
 // arguments that describe who the browser is rather than what one call does.
 const IDENTITY_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "proxy", "headers", "geolocation", "permissions", "color_scheme", "block"] as const;
@@ -536,6 +542,12 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
       if (b === undefined) return { settings, rest: left(rest), error: `web_browse.headless is true or false, not ${JSON.stringify(v)}.` };
       settings.headless = b;
+      continue;
+    }
+    if (k === "version") {
+      const val = String(v).trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(val)) return { settings, rest: left(rest), error: `web_browse.version: ${JSON.stringify(v)} — a plain label like stable, beta, dev, or a build name (letters, digits, dot, dash, underscore).` };
+      settings.version = val;
       continue;
     }
     if (typeof v !== "string") {

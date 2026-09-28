@@ -134,6 +134,14 @@ test("identities: one name for a bundle of settings, checked the way the block i
 
 // A window or none. YAML hands over a boolean; a quoted one is the same wish.
 // Anything else is a typo worth saying out loud, not a silent headless run.
+test("version: a plain build label, validated and carried", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome", version: "beta" }).settings.version, "beta");
+  assert.equal(readBrowseSettings({ version: "153.0.6" }).settings.version, "153.0.6");
+  assert.equal(readBrowseSettings({ version: "stable" }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ version: "beta; rm -rf" }).error!, /web_browse\.version/);
+  assert.match(readBrowseSettings({ version: "../etc" }).error!, /web_browse\.version/);
+});
+
 test("headless is true or false, and only false is carried", () => {
   assert.equal(readBrowseSettings({ headless: false }).settings.headless, false);
   assert.equal(readBrowseSettings({ headless: "false" }).settings.headless, false);
