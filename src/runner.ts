@@ -1153,6 +1153,7 @@ function agentContext(
     // Only the non-default travels: a window, on a virtual screen if need be.
     ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
     ...(browseSettings.version ? { FOLDRUN_BROWSER_VERSION: browseSettings.version } : {}),
+    ...(browseSettings.live ? { FOLDRUN_BROWSER_LIVE: "1" } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

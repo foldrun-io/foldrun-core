@@ -134,6 +134,14 @@ test("identities: one name for a bundle of settings, checked the way the block i
 
 // A window or none. YAML hands over a boolean; a quoted one is the same wish.
 // Anything else is a typo worth saying out loud, not a silent headless run.
+test("live: true or false, only true carried", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome", live: true }).settings.live, true);
+  assert.equal(readBrowseSettings({ live: "true" }).settings.live, true);
+  assert.equal(readBrowseSettings({ live: false }).settings.live, undefined);
+  assert.equal(readBrowseSettings({ live: true }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ live: "yes" }).error!, /web_browse\.live is true or false/);
+});
+
 test("version: a plain build label, validated and carried", () => {
   assert.equal(readBrowseSettings({ engine: "chrome", version: "beta" }).settings.version, "beta");
   assert.equal(readBrowseSettings({ version: "153.0.6" }).settings.version, "153.0.6");

@@ -447,6 +447,11 @@ export interface BrowseSettings {
    *  default. Resolved in the tool, which falls back to the default and
    *  says so when the named build is not installed. */
   version?: string;
+  /** true keeps the browser and its open page alive between this agent's
+   *  calls in a step, so a multi-step form can be driven one step per call.
+   *  Chromium-only (chrome/chromium). Unset: each call is a fresh page, with
+   *  only cookies carried by a session. */
+  live?: boolean;
 }
 
 // What a person writes, and what Playwright calls it. "chromium" and "webkit"
@@ -467,7 +472,7 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | 
   webkit: "webkit",
 };
 const BROWSE_ENGINES = ["chrome", "firefox", "safari"] as const;
-const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version"] as const;
+const BROWSE_SETTING_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live"] as const;
 // What one identity may carry: the block's own settings, and the call
 // arguments that describe who the browser is rather than what one call does.
 const IDENTITY_KEYS = ["engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "proxy", "headers", "geolocation", "permissions", "color_scheme", "block"] as const;
@@ -542,6 +547,12 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
       if (b === undefined) return { settings, rest: left(rest), error: `web_browse.headless is true or false, not ${JSON.stringify(v)}.` };
       settings.headless = b;
+      continue;
+    }
+    if (k === "live") {
+      const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
+      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.live is true or false, not ${JSON.stringify(v)}.` };
+      if (b) settings.live = true;
       continue;
     }
     if (k === "version") {
