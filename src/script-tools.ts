@@ -21,6 +21,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { runInContainer } from "./container.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { platform } from "./platform.ts";
 
 // A script's only clock is the `timeout:` its own tool.md declares. There
 // was a two-minute default and a ten-minute cap here; both were the
@@ -307,7 +308,17 @@ export function resolveRunPath(agentDir: string, run: string, libraryScripts: st
     return path.resolve(workspaceRoot, "tools", run.slice("workspace/tools/".length));
   }
   if (run.startsWith("account/tools/")) {
-    return path.resolve(libraryRoot, "tools", run.slice("account/tools/".length));
+    const rel = run.slice("account/tools/".length);
+    const own = path.resolve(libraryRoot, "tools", rel);
+    // A gallery tool nobody installed has no copy in the library. In a
+    // sandbox the gallery is laid down under the library, so the path above
+    // is it; a run on the host has no such merge, so it looks on the shelf.
+    const gallery = platform.galleryDir();
+    if (!fs.existsSync(own) && gallery) {
+      const shelf = path.resolve(gallery, "tools", rel);
+      if (fs.existsSync(shelf)) return shelf;
+    }
+    return own;
   }
   // Canonical prefixes, then the legacy spellings they replaced.
   for (const p of ["workspace/scripts/", "shared/"]) {
