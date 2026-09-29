@@ -14,7 +14,7 @@
 import { platform } from "./platform.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
+import { dataRoot, singleWorkspace, singleAccountRoot, MAX_EDITABLE_FILE } from "./paths.ts";
 import matter from "gray-matter";
 import { KINDS } from "./kinds.ts";
 import { recordRevision, registerTreeReader } from "./history.ts";
@@ -237,7 +237,9 @@ export function writeLibraryFile(
   content: string,
   meta: { by?: string; message?: string } = {},
 ) {
-  if (content.length > 256 * 1024) throw new Error("file too large");
+  // 512 KB: a folder tool's program is one file, and the gallery browser's is
+  // past 256 KB. Still a file a person edits, not a store for data.
+  if (content.length > MAX_EDITABLE_FILE) throw new Error("file too large");
   const norm = assertLibraryPath(kind, rel);
   if (norm.endsWith(".md")) matter(content); // reject broken frontmatter
   const p = path.join(libraryDir(tenant, kind), norm);

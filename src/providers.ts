@@ -244,6 +244,9 @@ export const BROWSER_APIS: readonly BrowserApi[] = [
   { name: "brightdata", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
     secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
     what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
+  { name: "cdp", aliases: ["devtools"], title: "Any DevTools address", how: "direct", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
+    secretFormat: "the ws://, wss:// or http(s):// DevTools address, token included where the browser needs one",
+    what: "any browser that serves the DevTools protocol — a Chrome started with --remote-debugging-port, a self-hosted pool, a vendor not listed here" },
   { name: "zenrows", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
     what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
@@ -412,7 +415,7 @@ export interface SearchChoice {
  * single call decides — mode, actions, wait_for, block — stays in the call.
  */
 export interface BrowseSettings {
-  engine?: "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda";
+  engine?: "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda" | "obscura";
   user_agent?: string;
   device?: string;
   locale?: string;
@@ -472,6 +475,11 @@ export interface BrowseSettings {
   ignore_https_errors?: boolean;
   /** The NAME of a vault secret whose value encrypts state= logins at rest. */
   state_key?: string;
+  /** true records every call, so the run page always has the recording to play. */
+  video?: boolean;
+  /** false stops the tool streaming its page to the run page while the step
+   *  runs. Unset is on wherever the platform can take the frames. */
+  live_view?: boolean;
 }
 
 /** Every action web_browse takes, which is what `deny:` may name. The
@@ -493,7 +501,7 @@ export const WEB_BROWSE_ACTIONS = [
 // accepted forever: agents written before this keep working, and the engine
 // names remain the truth underneath (chrome here is the open-source Chromium
 // build, not the branded Chrome; safari is WebKit, Safari's engine).
-const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda"> = {
+const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | "webkit" | "lightpanda" | "obscura"> = {
   // `chrome` is the branded Google Chrome (Playwright channel "chrome"), where
   // the image has it; `chromium` is the open-source build. Same engine, a
   // truer user-agent and codecs. Both still fall back to chromium if Chrome
@@ -506,11 +514,15 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | 
   // A browser that runs the JavaScript and never draws: a fraction of
   // Chromium's memory, and no screenshots.
   lightpanda: "lightpanda",
+  // A headless browser in Rust around V8 that does draw (screenshots, a
+  // raster PDF), light like Lightpanda; no request interception.
+  obscura: "obscura",
 };
-const BROWSE_ENGINES = ["chrome", "firefox", "safari", "lightpanda"] as const;
+const BROWSE_ENGINES = ["chrome", "firefox", "safari", "lightpanda", "obscura"] as const;
 const BROWSE_SETTING_KEYS = [
   "engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live",
   "allowed_domains", "deny", "boundaries", "init", "extensions", "webgpu", "ignore_https_errors", "state_key",
+  "video", "live_view",
 ] as const;
 const BROWSE_DOMAIN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 /** A list setting: YAML's list, or one comma-separated line. */
@@ -595,10 +607,17 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       settings.headless = b;
       continue;
     }
-    if (k === "live" || k === "boundaries" || k === "webgpu" || k === "ignore_https_errors") {
+    if (k === "live" || k === "boundaries" || k === "webgpu" || k === "ignore_https_errors" || k === "video") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
       if (b === undefined) return { settings, rest: left(rest), error: `web_browse.${k} is true or false, not ${JSON.stringify(v)}.` };
       if (b) settings[k] = true;
+      continue;
+    }
+    // The one that is on by default: only false travels.
+    if (k === "live_view") {
+      const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
+      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.live_view is true or false, not ${JSON.stringify(v)}.` };
+      if (!b) settings.live_view = false;
       continue;
     }
     if (k === "allowed_domains") {
@@ -627,7 +646,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       continue;
     }
     if (k === "state_key") {
-      if (typeof v !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(v)) return { settings, rest: left(rest), error: "web_browse.state_key must be the NAME of a vault secret (CAPITALS), never the key — store it with `foldrun secrets set NAME` and declare it under secrets:." };
+      if (typeof v !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(v)) return { settings, rest: left(rest), error: "web_browse.state_key must be the NAME of a vault secret (CAPITALS), never the key — store it with `foldrun secrets set NAME` and declare it under secrets:." };
       settings.state_key = v;
       continue;
     }

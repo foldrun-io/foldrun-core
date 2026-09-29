@@ -635,6 +635,26 @@ RUN arch=$(uname -m) \\
       && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; then \\
       chmod a+rx /opt/browser/lightpanda/lightpanda && /opt/browser/lightpanda/lightpanda version; \\
     else rm -f /opt/browser/lightpanda/lightpanda; echo "lightpanda not installed for $arch — engine: lightpanda says so when asked"; fi
+# Obscura (engine: obscura): a headless browser in Rust around V8 that does
+# draw — screenshots, a raster PDF, a screencast — light like Lightpanda.
+# Apache-2.0. The plain build, not -stealth: this platform does not help a
+# page not see automation. Two binaries, obscura and obscura-worker, which
+# must sit side by side. Pinned by checksum; glibc 2.35 is its floor, so
+# Debian 12 runs it. As above, a failed download leaves the engine out.
+RUN arch=$(uname -m) \\
+ && case "$arch" in \\
+      x86_64) sum=1534d1e6ddaf3d080ec4091eb41d0a4d8cc042a48b607d3c410fc13b482a9eec ;; \\
+      aarch64) sum=5ecf980bca3060236a7a86ec7ed83d943e6598ee87caa46d20325d90bc75f979 ;; \\
+      *) sum= ;; \\
+    esac \\
+ && mkdir -p /opt/browser/obscura \\
+ && if [ -n "$sum" ] \\
+      && curl -fsSL -o /tmp/obscura.tgz "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.3/obscura-$arch-linux.tar.gz" \\
+      && echo "$sum  /tmp/obscura.tgz" | sha256sum -c - >/dev/null \\
+      && tar -xzf /tmp/obscura.tgz -C /opt/browser/obscura obscura obscura-worker; then \\
+      chmod a+rx /opt/browser/obscura/obscura /opt/browser/obscura/obscura-worker && /opt/browser/obscura/obscura --version; \\
+    else rm -rf /opt/browser/obscura/*; echo "obscura not installed for $arch — engine: obscura says so when asked"; fi \\
+ && rm -f /tmp/obscura.tgz
 WORKDIR /opt/runner
 COPY foldrun-core.tgz driver.mjs entry.sh ./
 RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\

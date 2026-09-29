@@ -53,7 +53,7 @@ import {
 import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles } from "./starter.ts";
-import { trimSlashes } from "./paths.ts";
+import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -2413,7 +2413,9 @@ export function writeWorkspaceFile(
   content: string,
   meta: ChangeMeta = {},
 ) {
-  if (content.length > 256 * 1024) throw new Error("file too large");
+  // 512 KB: a folder tool's program is one file, and the gallery browser's is
+  // past 256 KB. Still a file a person edits, not a store for data.
+  if (content.length > MAX_EDITABLE_FILE) throw new Error("file too large");
   matter(content); // reject files whose frontmatter doesn't parse
   const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
   const existed = fs.existsSync(p);

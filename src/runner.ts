@@ -1163,6 +1163,8 @@ function agentContext(
     ...(browseSettings.webgpu ? { FOLDRUN_BROWSER_WEBGPU: "1" } : {}),
     ...(browseSettings.ignore_https_errors ? { FOLDRUN_BROWSER_IGNORE_HTTPS_ERRORS: "1" } : {}),
     ...(browseSettings.state_key ? { FOLDRUN_BROWSER_STATE_KEY: browseSettings.state_key } : {}),
+    ...(browseSettings.video ? { FOLDRUN_BROWSER_VIDEO: "1" } : {}),
+    ...(browseSettings.live_view === false ? { FOLDRUN_BROWSER_LIVE_VIEW: "0" } : {}),
   };
 
   // Scripts declared as tools — callable by name, no bash required.

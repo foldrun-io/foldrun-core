@@ -200,3 +200,13 @@ test("state_key names a secret, never the key", () => {
   assert.equal(readBrowseSettings({ state_key: "BROWSER_STATE_KEY" }).settings.state_key, "BROWSER_STATE_KEY");
   assert.match(readBrowseSettings({ state_key: "9f3a0c…" }).error!, /NAME of a vault secret/);
 });
+
+test("obscura is an engine; video records every call; live_view carries only false", () => {
+  assert.equal(readBrowseSettings({ engine: "obscura" }).settings.engine, "obscura");
+  assert.equal(readBrowseSettings({ video: true }).settings.video, true);
+  assert.equal(readBrowseSettings({ video: false }).settings.video, undefined);
+  assert.equal(readBrowseSettings({ live_view: false }).settings.live_view, false);
+  assert.equal(readBrowseSettings({ live_view: true }).settings.live_view, undefined, "on is the default, nothing to carry");
+  assert.match(readBrowseSettings({ live_view: "off" }).error!, /web_browse\.live_view is true or false/);
+  assert.match(readBrowseSettings({ state_key: "A".repeat(65) }).error!, /NAME of a vault secret/, "the tool's 64-character cap, checked here too");
+});

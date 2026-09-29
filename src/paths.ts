@@ -128,3 +128,8 @@ export function trimChars(s: string, chars: string): string {
   while (b > a && chars.includes(s[b - 1])) b--;
   return s.slice(a, b);
 }
+
+/** The largest file a person (or the gallery) writes into a workspace or the
+ *  library through the store: 512 KB. A folder tool's program is one file,
+ *  and the gallery browser's passed 256 KB on 2026-09-29. */
+export const MAX_EDITABLE_FILE = 512 * 1024;
