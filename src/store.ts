@@ -1307,6 +1307,13 @@ export interface FlowInfo {
    *  failed all week is not going to fix itself, and every one of those runs
    *  costs money and sends mail. Null: never quarantined. */
   disableAfter: number | null;
+  /** `pause_when:` — a marker (DONE, NOTHING LEFT) that, leading a line of
+   *  any step's reply in the flow's latest run, pauses its schedule: the
+   *  work is finished, so firing again would only spend money saying so.
+   *  Derived from that run, like disable_after, so a run that finds work
+   *  again (a person clicking Run after adding some) lifts it by itself.
+   *  Null: never paused. */
+  pauseWhen: string | null;
   /** `sla:` — seconds a run of this flow is expected to take. A run still
    *  going well past it is reported once, as a notification, and keeps
    *  running: this is a smoke alarm, not a timeout. Null: no expectation. */
@@ -1848,6 +1855,9 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
     disableAfter: Number.isFinite(Number(data.disable_after)) && Number(data.disable_after) > 0
       ? Math.min(100, Math.floor(Number(data.disable_after)))
+      : null,
+    pauseWhen: typeof data.pause_when === "string" && data.pause_when.trim() && data.pause_when.trim().length <= 60
+      ? data.pause_when.trim()
       : null,
     sla: durationOf(data.sla),
     approvers: approverList(data.approvers),

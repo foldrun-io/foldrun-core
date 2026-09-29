@@ -29,7 +29,7 @@ export type Edition = "self-hosted" | "hosted";
  *  told, because a silent drop reads exactly like a broken hook. */
 export type TriggerAdmission =
   | { admit: true }
-  | { admit: false; reason: "duplicate" | "throttled" | "quarantined" | "debounced"; detail: string; firesAt?: number };
+  | { admit: false; reason: "duplicate" | "throttled" | "quarantined" | "paused" | "debounced"; detail: string; firesAt?: number };
 
 export interface PlatformHooks {
   /** Is this a hosted install? The ONE question every commercial surface —

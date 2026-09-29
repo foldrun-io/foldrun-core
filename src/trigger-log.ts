@@ -38,6 +38,7 @@ export type TriggerOutcome =
   | "throttled"
   | "debounced"
   | "quarantined"
+  | "paused"
   | "overlap-skipped"
   | "missed"
   | "failed";
