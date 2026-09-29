@@ -747,10 +747,14 @@ export async function downloadUrl(
  * Null means "download it".
  */
 const PREVIEW_TYPES: Record<string, string> = {
-  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
-  ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".m4v": "video/mp4",
-  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
-  ".pdf": "application/pdf",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
+  ".bmp": "image/bmp", ".ico": "image/x-icon", ".cur": "image/x-icon", ".apng": "image/apng",
+  ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".m4v": "video/mp4", ".mkv": "video/x-matroska",
+  ".ogv": "video/ogg", ".3gp": "video/3gpp", ".3gpp": "video/3gpp", ".3g2": "video/3gpp2", ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".avi": "video/x-msvideo",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".m4r": "audio/mp4", ".m4b": "audio/mp4", ".aac": "audio/aac",
+  ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".aif": "audio/aiff", ".aiff": "audio/aiff", ".weba": "audio/webm",
+  ".pdf": "application/pdf", ".ai": "application/pdf",
+  ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2",
 };
 const PREVIEW_TYPES_SET = new Set(Object.values(PREVIEW_TYPES));
 export function previewType(rel: string): string | null {

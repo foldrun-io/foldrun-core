@@ -320,7 +320,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/agents\` · \`/agents/<a>/run\` | GET POST · POST | list agents, run one |
 | \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
 | \`/tools/<t>/test\` | POST | exercise one tool alone |
-| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` | GET POST PUT DELETE · GET · POST | workspace files |
+| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
 | \`/assets\` | POST | upload an asset |
 | \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
 | \`/vocabulary\` | GET | what this workspace's documents may say |
