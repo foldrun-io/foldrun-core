@@ -38,6 +38,7 @@ import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
+import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
 import { repoDir } from "./gitrepo.ts";
@@ -284,7 +285,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
       at(f.path, "schedule: an agent has no schedule of its own — only a flow runs on a clock. Put schedule: on the flow that runs this agent, or remove it.");
     }
     // The same refusal check gives: a web key that cannot work never ships.
-    for (const w of webProblems(front)) at(f.path, w);
+    for (const w of [...webProblems(front), ...actionProblems(front)]) at(f.path, w);
     const lang = languageProblem(front.language);
     if (lang) at(f.path, lang);
     for (const w of localeProblems(front)) at(f.path, w);

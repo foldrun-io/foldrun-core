@@ -45,6 +45,7 @@ import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
+import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
 import {
@@ -1378,7 +1379,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         timezoneProblem: timezoneProblem(data.timezone),
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
-        webProblems: webProblems(data),
+        webProblems: [...webProblems(data), ...actionProblems(data)],
         scheduleProblem: agentScheduleProblem(data),
       };
     });

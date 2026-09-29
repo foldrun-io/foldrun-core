@@ -94,6 +94,12 @@ export type SearchShape = "anthropic" | "plugin" | "openai" | "builtin_fn" | "di
  *  2026-09-16; the wrapper in the gallery's web_search tool carries the
  *  matching request and response mapping. */
 export interface SearchApi {
+  /** The vendor's API reference the adapter was built from, the day it was
+   *  last matched to it, and what that page could not confirm. Read by
+   *  web-actions.ts; a check older than 90 days fails its test. */
+  docs?: string;
+  checked?: string;
+  gaps?: string;
   name: string;
   aliases?: string[];
   title: string;
@@ -116,47 +122,47 @@ export interface SearchApi {
 }
 
 export const SEARCH_APIS: readonly SearchApi[] = [
-  { name: "brave", title: "Brave Search", host: "api.search.brave.com", endpoint: "https://api.search.brave.com/res/v1/web/search",
+  { name: "brave", docs: "https://api-dashboard.search.brave.com/app/documentation/web-search/query", checked: "2026-09-29", title: "Brave Search", host: "api.search.brave.com", endpoint: "https://api.search.brave.com/res/v1/web/search",
     method: "GET", auth: { header: "X-Subscription-Token" }, secret: "BRAVE_SEARCH_API_KEY",
     index: "Brave's own — ~40B pages, ~100M refreshed a day; the index Claude searches" },
-  { name: "exa", title: "Exa", host: "api.exa.ai", endpoint: "https://api.exa.ai/search",
+  { name: "exa", docs: "https://exa.ai/docs/reference/search", checked: "2026-09-29", title: "Exa", host: "api.exa.ai", endpoint: "https://api.exa.ai/search",
     method: "POST", auth: { header: "x-api-key" }, secret: "EXA_API_KEY",
     index: "Exa's own semantic index — by meaning, not keywords" },
-  { name: "tavily", title: "Tavily", host: "api.tavily.com", endpoint: "https://api.tavily.com/search",
+  { name: "tavily", docs: "https://docs.tavily.com/documentation/api-reference/endpoint/search", checked: "2026-09-29", title: "Tavily", host: "api.tavily.com", endpoint: "https://api.tavily.com/search",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "TAVILY_API_KEY",
     index: "Tavily's own crawler plus bought-in feeds" },
-  { name: "parallel", title: "Parallel", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/search",
+  { name: "parallel", docs: "https://docs.parallel.ai/api-reference/search-api/search", checked: "2026-09-29", title: "Parallel", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/search",
     method: "POST", auth: { header: "x-api-key" }, secret: "PARALLEL_API_KEY",
     index: "Parallel's own closed index",
     note: "Wants an objective beside the queries; the wrapper writes one from the query." },
-  { name: "you", aliases: ["youcom", "you.com"], title: "You.com", host: "ydc-index.io", endpoint: "https://ydc-index.io/v1/search",
+  { name: "you", docs: "https://you.com/docs/api-reference/search/v1-search", checked: "2026-09-29", aliases: ["youcom", "you.com"], title: "You.com", host: "ydc-index.io", endpoint: "https://ydc-index.io/v1/search",
     method: "POST", auth: { header: "X-API-Key" }, secret: "YOU_API_KEY",
     index: "You.com's own index and cache (self-reported)" },
-  { name: "jina", title: "Jina Search", host: "s.jina.ai", endpoint: "https://s.jina.ai/",
+  { name: "jina", docs: "https://s.jina.ai/docs", checked: "2026-09-29", gaps: "response fields (title, url, description, content) are not in any official schema; read from live responses", title: "Jina Search", host: "s.jina.ai", endpoint: "https://s.jina.ai/",
     method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "JINA_API_KEY",
     index: "Jina's — top results, each with its page content already read",
     note: "s.jina.ai refuses without a key (checked live 2026-09-16); r.jina.ai, the reader, does not." },
-  { name: "firecrawl", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/search",
+  { name: "firecrawl", docs: "https://docs.firecrawl.dev/api-reference/endpoint/search", checked: "2026-09-29", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/search",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "FIRECRAWL_API_KEY",
     index: "Firecrawl's — open-source core, self-hostable" },
-  { name: "perplexity", title: "Perplexity Search", host: "api.perplexity.ai", endpoint: "https://api.perplexity.ai/search",
+  { name: "perplexity", docs: "https://docs.perplexity.ai/api-reference/search-post", checked: "2026-09-29", title: "Perplexity Search", host: "api.perplexity.ai", endpoint: "https://api.perplexity.ai/search",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "PERPLEXITY_API_KEY",
     index: "Perplexity's own crawl — the Search API returns results, not an answer" },
-  { name: "linkup", title: "Linkup", host: "api.linkup.so", endpoint: "https://api.linkup.so/v1/search",
+  { name: "linkup", docs: "https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search", checked: "2026-09-29", title: "Linkup", host: "api.linkup.so", endpoint: "https://api.linkup.so/v1/search",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "LINKUP_API_KEY",
     index: "Linkup's — agent-shaped, each result with its content" },
   // ---- the SERP scrapers: Google's own results page, read for you. Not
   // an index of their own, and not Google partners — there is no such
   // programme. The one kind to use when the question is about Google
   // itself: where a page ranks, what the SERP shows.
-  { name: "serper", title: "Serper", host: "google.serper.dev", endpoint: "https://google.serper.dev/search",
+  { name: "serper", docs: "https://serper.dev", checked: "2026-09-29", gaps: "no public API reference page; parameters and fields confirmed from the homepage only", title: "Serper", host: "google.serper.dev", endpoint: "https://google.serper.dev/search",
     method: "POST", auth: { header: "X-API-KEY" }, secret: "SERPER_API_KEY",
     index: "Google's results page, scraped — ~$1 / 1,000; fast, developers' favourite" },
-  { name: "serpapi", title: "SerpApi", host: "serpapi.com", endpoint: "https://serpapi.com/search",
+  { name: "serpapi", docs: "https://serpapi.com/search-api", checked: "2026-09-29", title: "SerpApi", host: "serpapi.com", endpoint: "https://serpapi.com/search",
     method: "GET", auth: { header: "", prefix: "" }, secret: "SERPAPI_API_KEY",
     index: "Google's results page, scraped — the dearest, 80+ engines",
     note: "The key travels as the api_key query parameter; the egress proxy fills the URL as it fills a header." },
-  { name: "dataforseo", title: "DataForSEO", host: "api.dataforseo.com", endpoint: "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
+  { name: "dataforseo", docs: "https://docs.dataforseo.com/v3/serp/google/organic/live/advanced/", checked: "2026-09-29", title: "DataForSEO", host: "api.dataforseo.com", endpoint: "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
     method: "POST", auth: { header: "Authorization", prefix: "Basic " }, secret: "DATAFORSEO_AUTH_BASIC",
     secretFormat: "base64 of `login:password` — DataForSEO authenticates with HTTP basic auth, and the proxy fills one placeholder verbatim: `printf 'LOGIN:PASSWORD' | base64`",
     index: "Google's results page, scraped — $0.60 / 1,000 standard queue; what rank-desk uses" },
@@ -187,26 +193,26 @@ export interface FetchApi extends Omit<SearchApi, "index"> {
 }
 
 export const FETCH_APIS: readonly FetchApi[] = [
-  { name: "jina", title: "Jina Reader", host: "r.jina.ai", endpoint: "https://r.jina.ai/",
+  { name: "jina", docs: "https://jina.ai/reader/", checked: "2026-09-29", gaps: "the {code, status, data} JSON wrapper is not shown on an official page", title: "Jina Reader", host: "r.jina.ai", endpoint: "https://r.jina.ai/",
     method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "JINA_API_KEY", secretOptional: true,
     tier: "reader", batch: 1, what: "clean markdown, text or html; works without a key at 20 requests a minute (checked live 2026-09-16)" },
-  { name: "firecrawl", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/scrape",
+  { name: "firecrawl", docs: "https://docs.firecrawl.dev/api-reference/endpoint/scrape", checked: "2026-09-29", title: "Firecrawl", host: "api.firecrawl.dev", endpoint: "https://api.firecrawl.dev/v2/scrape",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "FIRECRAWL_API_KEY",
     tier: "reader", batch: 1, what: "main-content markdown or html, boilerplate stripped; one URL per call" },
-  { name: "exa", title: "Exa Contents", host: "api.exa.ai", endpoint: "https://api.exa.ai/contents",
+  { name: "exa", docs: "https://exa.ai/docs/reference/get-contents", checked: "2026-09-29", title: "Exa Contents", host: "api.exa.ai", endpoint: "https://api.exa.ai/contents",
     method: "POST", auth: { header: "x-api-key" }, secret: "EXA_API_KEY",
     tier: "extract", batch: 100, what: "text for up to 100 URLs in one call; always fetched fresh (maxAgeHours: 0), not Exa's cache" },
-  { name: "tavily", title: "Tavily Extract", host: "api.tavily.com", endpoint: "https://api.tavily.com/extract",
+  { name: "tavily", docs: "https://docs.tavily.com/documentation/api-reference/endpoint/extract", checked: "2026-09-29", title: "Tavily Extract", host: "api.tavily.com", endpoint: "https://api.tavily.com/extract",
     method: "POST", auth: { header: "Authorization", prefix: "Bearer " }, secret: "TAVILY_API_KEY",
     tier: "extract", batch: 20, what: "markdown or text for up to 20 URLs in one call, failures listed beside successes" },
-  { name: "parallel", title: "Parallel Extract", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/extract",
+  { name: "parallel", docs: "https://docs.parallel.ai/api-reference/extract/extract", checked: "2026-09-29", title: "Parallel Extract", host: "api.parallel.ai", endpoint: "https://api.parallel.ai/v1/extract",
     method: "POST", auth: { header: "x-api-key" }, secret: "PARALLEL_API_KEY",
     tier: "extract", batch: 20, what: "full-page markdown for several URLs at once; handles JavaScript pages and PDFs" },
-  { name: "zyte", title: "Zyte API", host: "api.zyte.com", endpoint: "https://api.zyte.com/v1/extract",
+  { name: "zyte", docs: "https://docs.zyte.com/zyte-api/usage/reference.html", checked: "2026-09-29", title: "Zyte API", host: "api.zyte.com", endpoint: "https://api.zyte.com/v1/extract",
     method: "POST", auth: { header: "Authorization", prefix: "Basic " }, secret: "ZYTE_API_KEY_BASIC",
     secretFormat: "base64 of `<api key>:` — Zyte authenticates with HTTP basic auth, and the proxy fills a placeholder verbatim, so the vault holds the encoded form: `printf 'KEY:' | base64`",
     tier: "unblocker", batch: 1, what: "the page rendered in a real browser behind Zyte's proxy pool — for the sites that refuse everything else; pay per successful request" },
-  { name: "scrapingbee", aliases: ["scraping-bee", "scraping_bee"], title: "ScrapingBee", host: "app.scrapingbee.com", endpoint: "https://app.scrapingbee.com/api/v1/",
+  { name: "scrapingbee", docs: "https://www.scrapingbee.com/documentation/", checked: "2026-09-29", aliases: ["scraping-bee", "scraping_bee"], title: "ScrapingBee", host: "app.scrapingbee.com", endpoint: "https://app.scrapingbee.com/api/v1/",
     method: "GET", auth: { header: "Authorization", prefix: "Bearer " }, secret: "SCRAPINGBEE_API_KEY",
     tier: "unblocker", batch: 1, what: "the page rendered in a real browser (render_js) behind ScrapingBee's proxy pool; credits per call, more for JavaScript" },
 ];
@@ -218,6 +224,15 @@ export const FETCH_APIS: readonly FetchApi[] = [
  *  wrapper holds the real value the way it already holds a cookie secret,
  *  and creates the session itself where the vendor wants one. */
 export interface BrowserApi {
+  /** Steps of web_browse this browser cannot do, per the vendor's own docs.
+   *  Kept equal to the tool's VENDORS table by the platform's gallery test. */
+  lacks?: string[];
+  /** The vendor's API reference the adapter was built from, the day it was
+   *  last matched to it, and what that page could not confirm. Read by
+   *  web-actions.ts; a check older than 90 days fails its test. */
+  docs?: string;
+  checked?: string;
+  gaps?: string;
   name: string;
   aliases?: string[];
   title: string;
@@ -232,22 +247,22 @@ export interface BrowserApi {
 }
 
 export const BROWSER_APIS: readonly BrowserApi[] = [
-  { name: "browserbase", title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
+  { name: "browserbase", docs: "https://docs.browserbase.com/reference/api/create-a-session", checked: "2026-09-29", lacks: ["download"], title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
     what: "hosted Chromium with stealth; POST /v1/sessions (X-BB-API-Key) returns connectUrl" },
-  { name: "steel", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
+  { name: "steel", docs: "https://docs.steel.dev/overview/sessions-api/quickstart", checked: "2026-09-29", gaps: "the REST session call (POST /v1/sessions, steel-api-key) is not on a page that loaded — only the SDK and the connect URL are confirmed", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
     what: "hosted Chromium, open-source core; POST /v1/sessions (steel-api-key), then wss://connect.steel.dev?apiKey&sessionId" },
-  { name: "hyperbrowser", title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
+  { name: "hyperbrowser", docs: "https://hyperbrowser.ai/docs/api-reference/create-new-session.md", checked: "2026-09-29", lacks: ["download"], title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
     what: "hosted Chromium with built-in unblocking; a session returns its wsEndpoint" },
-  { name: "browserless", title: "Browserless", how: "direct", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
+  { name: "browserless", docs: "https://docs.browserless.io/baas/connection-url-patterns.md", checked: "2026-09-29", title: "Browserless", how: "direct", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
     what: "hosted Chrome; wss://production-sfo.browserless.io?token=… (other regions by name)",
     note: "SSPL-licensed: the free path is out for a paid service; the cloud is a plain vendor." },
-  { name: "brightdata", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
+  { name: "brightdata", docs: "https://docs.brightdata.com/products/scraping-browser/configuration.md", checked: "2026-09-29", lacks: ["download", "upload", "tab"], gaps: "the limits are from a summary of the configuration page, not quoted verbatim", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
     secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
     what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
-  { name: "cdp", aliases: ["devtools"], title: "Any DevTools address", how: "direct", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
+  { name: "cdp", docs: "https://chromedevtools.github.io/devtools-protocol/", checked: "2026-09-29", aliases: ["devtools"], title: "Any DevTools address", how: "direct", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
     secretFormat: "the ws://, wss:// or http(s):// DevTools address, token included where the browser needs one",
     what: "any browser that serves the DevTools protocol — a Chrome started with --remote-debugging-port, a self-hosted pool, a vendor not listed here" },
-  { name: "zenrows", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
+  { name: "zenrows", docs: "https://docs.zenrows.com/browser-sessions/get-started/playwright.md", checked: "2026-09-29", lacks: ["solve"], aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
     what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
 
