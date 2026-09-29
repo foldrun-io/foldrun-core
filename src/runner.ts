@@ -85,7 +85,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { readBrowseSettings, resolveSearch } from "./providers.ts";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv } from "./providers.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
@@ -910,7 +910,12 @@ function agentContext(
   // `web_search:` and `web_fetch:` name who answers; resolved here, early,
   // because three later things hang off the answer — the secret the step
   // must hold, the env the tool reads, and the egress grant for the host.
-  const searchChoice = resolveSearch((front as Record<string, unknown>).web_search, "search");
+  // `web_search:` carries the account engine's settings (engines, categories,
+  // safesearch, …) beside the provider name, read off first the way
+  // web_browse's are, so the provider resolver sees only its own part.
+  const searchRead = readSearchSettings((front as Record<string, unknown>).web_search);
+  const searchChoice = resolveSearch(searchRead.rest, "search");
+  if (searchRead.error) searchChoice.error = searchChoice.error ?? searchRead.error;
   const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch, "fetch");
   // A remote browser's key is materialised, not proxied: CDP is a websocket
   // and the wrapper opens the session itself, the way it seeds a cookie.
@@ -1127,6 +1132,8 @@ function agentContext(
     ...(searchChoice.shape === "direct" && searchChoice.provider
       ? { FOLDRUN_WEB_SEARCH_VIA: searchChoice.provider, FOLDRUN_WEB_SEARCH_SECRET: searchChoice.secret ?? "" }
       : {}),
+    // The `web_search:` block's SearXNG settings, as defaults the tool reads.
+    ...searchSettingsEnv(searchRead.settings),
     ...(fetchChoice.shape === "direct" && fetchChoice.provider
       ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
       : {}),
@@ -1366,6 +1373,7 @@ function agentContext(
     unknownTools,
     shadowed,
     legacyUse,
+    retiredTools: retiredToolNames(front),
     mcpServers,
     mcpNames,
     apiTools,
@@ -1373,7 +1381,6 @@ function agentContext(
     // The merged spec lists — inline plus tools:-granted — for the isolated
     // path, which serialises specs across the container boundary rather
     // than using the servers built here.
-    retiredTools: retiredToolNames(front),
     apiSpecs: apis,
     scriptSpecs,
     searchRoots,
@@ -1687,6 +1694,7 @@ async function runStep(
     for (const w of apiWarnings) push("error", `openapi: ${w}`);
     if (formatWarning) push("error", formatWarning);
     if (legacyUse.length) push("error", legacyUseError(legacyUse));
+    for (const t of retiredTools) push("error", retiredToolError(t));
     for (const t of unknownTools) {
       push(
         "error",
@@ -1694,7 +1702,6 @@ async function runStep(
       );
     }
     for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
-    for (const t of retiredTools) push("error", retiredToolError(t));
     for (const name of shadowed) {
       push("error", `tools: "${name}" is a built-in, so your tool of the same name was not granted — write it as [[${name}]] to mean yours`);
     }

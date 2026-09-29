@@ -735,6 +735,166 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
   return { settings, rest: Object.keys(rest).length ? rest : undefined };
 }
 
+/**
+ * `web_search:` settings — what the account's own engine (SearXNG) is asked,
+ * not who answers.
+ *
+ *    web_search:
+ *      engines: [bing, google cse, duckduckgo]
+ *      categories: [general, news]
+ *      safesearch: moderate
+ *
+ * Every SearXNG request option that changes what comes back has a key here;
+ * the ones that only change its HTML page (theme, results_on_new_tab,
+ * image_proxy, url_formatting) do not, because in JSON they do nothing and a
+ * key that does nothing is a question someone asks later. Engine and
+ * category names are checked for shape here and against the running
+ * instance by the tool (its /config), because the instance decides which of
+ * SearXNG's engines are loaded. Plugin ids are a short list that changes
+ * rarely, so a misspelt one — which would enable nothing — is refused here.
+ *
+ * The settings speak SearXNG, so they are refused beside `name:` — with
+ * `web_search: exa` they would be silently ignored.
+ */
+export interface SearchSettings {
+  /** Ask only these engines. A default: a call's `engines=` or
+   *  `categories=` replaces it, and it beats `categories` beside it — the
+   *  tool never sends SearXNG both, which would add the categories' engines
+   *  to the list. */
+  engines?: string[];
+  /** Never ask these, whatever the call says. A lock, like
+   *  web_browse.allowed_domains: a call may not widen it. */
+  exclude_engines?: string[];
+  /** The SearXNG categories to search (general, news, science, it, …),
+   *  when no engine list is in force. A default a call replaces. */
+  categories?: string[];
+  /** 0 off, 1 moderate, 2 strict. */
+  safesearch?: 0 | 1 | 2;
+  /** The default recency when a call does not say. */
+  time_range?: "day" | "week" | "month" | "year";
+  /** Seconds SearXNG waits for its engines before answering with what it has. */
+  timeout?: number;
+  /** SearXNG plugins to switch on, and off, for this agent's searches. */
+  plugins?: string[];
+  exclude_plugins?: string[];
+  /** Where the open-access DOI rewrite plugin points a paper's link. */
+  doi_resolver?: string;
+}
+
+/** SearXNG's plugin ids (searx/plugins/*.py, 2026-09-29). The gallery test
+ *  keeps this equal to the list the tool documents. */
+export const WEB_SEARCH_PLUGINS = [
+  "ahmia_filter", "calculator", "hash_plugin", "hostnames", "infinite_scroll", "oa_doi_rewrite",
+  "self_info", "time_zone", "tor_check", "tracker_url_remover", "unit_converter",
+] as const;
+const SEARCH_SETTING_KEYS = [
+  "engines", "exclude_engines", "categories", "safesearch", "time_range", "timeout", "plugins", "exclude_plugins", "doi_resolver",
+] as const;
+// SearXNG names engines the way people do — "google cse", "wikicommons.images",
+// "yandex api" — so a space and a dot are allowed. A comma is not: the tool
+// sends the list comma-joined, and one inside a name would split it.
+const SEARCH_ENGINE_NAME = /^[a-z0-9][a-z0-9 ._-]{0,63}$/i;
+const SEARCH_CATEGORY_NAME = /^[a-z][a-z0-9 _-]{0,31}$/i;
+const SAFESEARCH_WORDS: Record<string, 0 | 1 | 2> = { off: 0, none: 0, moderate: 1, strict: 2 };
+
+/** The settings in a `web_search:` block, and the provider part with them
+ *  removed — the shape readBrowseSettings has, for the same reason. */
+export function readSearchSettings(raw: unknown): { settings: SearchSettings; rest: unknown; error?: string } {
+  const left = (o: Record<string, unknown>) => (Object.keys(o).length ? o : undefined);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { settings: {}, rest: raw };
+  const settings: SearchSettings = {};
+  const rest: Record<string, unknown> = {};
+  const fail = (error: string) => ({ settings, rest: left(rest), error });
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(SEARCH_SETTING_KEYS as readonly string[]).includes(k)) {
+      rest[k] = v;
+      continue;
+    }
+    if (v === undefined || v === null || v === "") continue;
+    if (k === "engines" || k === "exclude_engines") {
+      const list = browseList(v)?.map((e) => e.toLowerCase());
+      if (!list) return fail(`web_search.${k} is a list of SearXNG engine names, like [bing, google cse, duckduckgo].`);
+      const bad = list.find((e) => !SEARCH_ENGINE_NAME.test(e));
+      if (bad !== undefined) return fail(`web_search.${k}: ${JSON.stringify(bad)} is not an engine name — letters, digits, space, dot, dash.`);
+      if (list.length) settings[k] = [...new Set(list)];
+      continue;
+    }
+    if (k === "categories") {
+      const list = browseList(v)?.map((c) => c.toLowerCase());
+      if (!list) return fail("web_search.categories is a list of SearXNG categories, like [general, news].");
+      const bad = list.find((c) => !SEARCH_CATEGORY_NAME.test(c));
+      if (bad !== undefined) return fail(`web_search.categories: ${JSON.stringify(bad)} is not a category name.`);
+      if (list.length) settings.categories = [...new Set(list)];
+      continue;
+    }
+    if (k === "plugins" || k === "exclude_plugins") {
+      const list = browseList(v)?.map((p) => p.toLowerCase());
+      if (!list) return fail(`web_search.${k} is a list of SearXNG plugin ids, like [oa_doi_rewrite].`);
+      // Matched without underscores: SearXNG has respelt ids between releases
+      // (infiniteScroll → infinite_scroll), and the tool sends whichever
+      // spelling the running instance uses.
+      const bare = (p: string) => p.replace(/_/g, "");
+      const bad = list.find((p) => !WEB_SEARCH_PLUGINS.some((id) => bare(id) === bare(p)));
+      if (bad !== undefined) {
+        return fail(`web_search.${k}: ${bad} is not a SearXNG plugin — a misspelt one would switch nothing. The plugins are ${WEB_SEARCH_PLUGINS.join(", ")}.`);
+      }
+      if (list.length) settings[k] = [...new Set(list)];
+      continue;
+    }
+    if (k === "safesearch") {
+      const n = typeof v === "number" ? v : typeof v === "string" ? (SAFESEARCH_WORDS[v.trim().toLowerCase()] ?? (/^[012]$/.test(v.trim()) ? Number(v) : NaN)) : NaN;
+      if (n !== 0 && n !== 1 && n !== 2) return fail(`web_search.safesearch is off, moderate or strict (or 0, 1, 2), not ${JSON.stringify(v)}.`);
+      settings.safesearch = n;
+      continue;
+    }
+    if (k === "time_range") {
+      const r = String(v).trim().toLowerCase();
+      if (r !== "day" && r !== "week" && r !== "month" && r !== "year") return fail(`web_search.time_range is day, week, month or year, not ${JSON.stringify(v)}.`);
+      settings.time_range = r;
+      continue;
+    }
+    if (k === "timeout") {
+      const n = typeof v === "number" ? v : Number(String(v).replace(/s$/, ""));
+      if (!Number.isFinite(n) || n < 0.5 || n > 30) return fail(`web_search.timeout is seconds, 0.5 to 30, not ${JSON.stringify(v)}.`);
+      settings.timeout = n;
+      continue;
+    }
+    // doi_resolver: a host SearXNG knows (oadoi.org, doi.org, …), checked
+    // against the instance by the tool; here only that it is a host.
+    if (typeof v !== "string" || !BROWSE_DOMAIN.test(v.trim().toLowerCase())) {
+      return fail(`web_search.doi_resolver is a resolver's host, like oadoi.org or doi.org, not ${JSON.stringify(v)}.`);
+    }
+    settings.doi_resolver = v.trim().toLowerCase();
+  }
+  const both = (settings.engines ?? []).find((e) => settings.exclude_engines?.includes(e));
+  if (both) return fail(`web_search: ${both} is in both engines and exclude_engines — say which.`);
+  const bothP = (settings.plugins ?? []).find((p) => settings.exclude_plugins?.includes(p));
+  if (bothP) return fail(`web_search: ${bothP} is in both plugins and exclude_plugins — say which.`);
+  if (Object.keys(settings).length && (rest.name !== undefined || rest.key !== undefined)) {
+    return fail(
+      `web_search: ${Object.keys(settings).join(", ")} ${Object.keys(settings).length === 1 ? "is a setting" : "are settings"} for the account's own engine (SearXNG); ` +
+        `beside name: ${String(rest.name)} ${Object.keys(settings).length === 1 ? "it" : "they"} would do nothing. Drop name: to use them, or drop them to use ${String(rest.name)}.`,
+    );
+  }
+  return { settings, rest: left(rest) };
+}
+
+/** The `web_search:` block's settings as the env the tool reads. Only what
+ *  was said travels — an unset key is SearXNG's own default. */
+export function searchSettingsEnv(s: SearchSettings): Record<string, string> {
+  return {
+    ...(s.engines ? { FOLDRUN_WEB_SEARCH_ENGINES: s.engines.join(",") } : {}),
+    ...(s.exclude_engines ? { FOLDRUN_WEB_SEARCH_EXCLUDE_ENGINES: s.exclude_engines.join(",") } : {}),
+    ...(s.categories ? { FOLDRUN_WEB_SEARCH_CATEGORIES: s.categories.join(",") } : {}),
+    ...(s.safesearch !== undefined ? { FOLDRUN_WEB_SEARCH_SAFESEARCH: String(s.safesearch) } : {}),
+    ...(s.time_range ? { FOLDRUN_WEB_SEARCH_TIME_RANGE: s.time_range } : {}),
+    ...(s.timeout !== undefined ? { FOLDRUN_WEB_SEARCH_TIMEOUT: String(s.timeout) } : {}),
+    ...(s.plugins ? { FOLDRUN_WEB_SEARCH_PLUGINS: s.plugins.join(",") } : {}),
+    ...(s.exclude_plugins ? { FOLDRUN_WEB_SEARCH_EXCLUDE_PLUGINS: s.exclude_plugins.join(",") } : {}),
+    ...(s.doi_resolver ? { FOLDRUN_WEB_SEARCH_DOI_RESOLVER: s.doi_resolver } : {}),
+  };
+}
+
 function readChoice(raw: unknown, field: string): { name: string; secret?: string } | { error: string } {
   if (typeof raw === "string") return { name: raw };
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -830,8 +990,8 @@ export function webProblems(front: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const [key, kind] of [["web_search", "search"], ["web_fetch", "fetch"], ["web_browse", "browse"]] as const) {
     let value = front[key];
-    if (kind === "browse") {
-      const read = readBrowseSettings(value);
+    if (kind === "browse" || kind === "search") {
+      const read = kind === "browse" ? readBrowseSettings(value) : readSearchSettings(value);
       if (read.error) {
         out.push(read.error);
         continue;
