@@ -128,3 +128,27 @@ test("nothing left after a failed attempt means no retry, said on the record", a
     assert.ok(s.events.some((e) => /over budget — nothing left to spend for attempt 2/.test(e.text)), s.events.map((e) => e.text).join(" | "));
   });
 });
+
+test("a person's stop mid-step is said on the step, and the step is not retried", async () => {
+  const { readRun, writeRun } = await import("../src/store.ts");
+  let calls = 0;
+  const fake: Fake = async (args) => {
+    calls += 1;
+    // What stopRun does from another process while the step runs: flag the
+    // record, then destroy the sandbox — which ends the attempt as a failure.
+    const rec = readRun("acme", "desk", args.runId!)!;
+    rec.stopRequested = true;
+    rec.status = "failed";
+    rec.steps[0].events.push({ t: new Date().toISOString(), type: "error", text: "stopped by a person — sandbox destroyed" });
+    writeRun("acme", "desk", rec);
+    return { status: "failed", result: null, costUsd: null, reason: "Error (exit 143)" };
+  };
+  await withFake(fake, null, async () => {
+    const run = startFlowRun("acme", "desk", [step({ retry: 1 })], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(calls, 1, "a stopped step is not retried");
+    assert.equal(done?.stopRequested, true);
+    const texts = done!.steps[0].events.map((e) => e.text);
+    assert.ok(texts.some((t) => /stopped by a person mid-step/.test(t)), `the trail says a person stopped it: ${texts.join(" | ")}`);
+  });
+});

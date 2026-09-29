@@ -3966,6 +3966,24 @@ function driveRunInner(
                 const outcome: string = step.status;
                 recordAttempt(step, attempt, outcome === "completed" ? "completed" : "failed", attemptStartedAt, eventsBefore, reattach);
                 save();
+                // A stop destroys the step's sandbox, which reads here as a
+                // failed attempt. stopRun writes "stopped by a person" onto
+                // this step in the record, and the save() above writes this
+                // process's copy over it — so the trail ended on the
+                // sandbox's own last words, "sandbox ended: Error (exit 143)",
+                // and a person's stop read as the platform killing a healthy
+                // step (abandon-desk, 2026-09-29: stopped from the CLI after
+                // ten minutes, then chased as an unexplained kill). Say so,
+                // whether or not a retry was left.
+                if (outcome === "failed" && run.stopRequested) {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: "stopped by a person mid-step — its sandbox was destroyed, which is what ended this attempt; not retried",
+                  });
+                  save();
+                  break;
+                }
                 if (outcome !== "failed" || attempt === attempts) break;
                 // An outward step whose tools ran and whose check then failed
                 // is not retried: the check cannot say the send did not
@@ -3979,10 +3997,10 @@ function driveRunInner(
                   save();
                   break;
                 }
-                // A stop destroys the step's sandbox, which reads here as a
-                // failed attempt — and a failed attempt used to be retried in
-                // a fresh sandbox, so a stopped `retry: 2` step ran twice
-                // more. save() merges the flag from the record.
+                // A failed attempt used to be retried in a fresh sandbox even
+                // after a stop, so a stopped `retry: 2` step ran twice more.
+                // The check above ends the loop on a stop; this one covers a
+                // stop that lands while the outward check was being written.
                 save();
                 if (run.stopRequested) break;
                 // The retry policy. An attempt the cluster ended for want of
