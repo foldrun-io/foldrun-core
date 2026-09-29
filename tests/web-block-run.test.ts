@@ -88,3 +88,16 @@ test("the older keys still work, and the record asks for the rewrite", async () 
   assert.equal(args!.env.FOLDRUN_WEB_SEARCH_VIA, "brave");
   assert.ok(events.some((e) => /web_search: is retired — write it under web:/.test(e)), events.join("\n"));
 });
+
+test("a vendor's session block reaches the tool as JSON; your own proxy's secret is declared", async () => {
+  const { args, events } = await runAgent("tools: [web]\nweb:\n  browse:\n    via: steel\n    session:\n      proxy: { own: MY_PROXY }\n      captcha: true\n      timeout: 10m\n");
+  assert.equal(args!.env.FOLDRUN_BROWSER_VENDOR, "steel");
+  assert.deepEqual(JSON.parse(args!.env.FOLDRUN_BROWSER_SESSION), { proxy: { own: "MY_PROXY" }, captcha: true, timeout: 600 });
+  assert.ok(events.some((e) => /secret MY_PROXY is not set/.test(e)), events.join("\n"));
+});
+
+test("a session option the vendor has not got is on the record, and no session is sent", async () => {
+  const { args, events } = await runAgent("tools: [web]\nweb:\n  browse:\n    via: steel\n    session:\n      region: eu\n");
+  assert.equal(args!.env.FOLDRUN_BROWSER_SESSION, undefined);
+  assert.ok(events.some((e) => /error: web\.browse\.session\.region: Steel has no such option/.test(e)), events.join("\n"));
+});

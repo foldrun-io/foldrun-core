@@ -223,7 +223,46 @@ export const FETCH_APIS: readonly FetchApi[] = [
  *  where the key cannot ride the egress proxy: CDP is a websocket, so the
  *  wrapper holds the real value the way it already holds a cookie secret,
  *  and creates the session itself where the vendor wants one. */
+/** What a vendor's own session can be asked for, per its docs — the keys of
+ *  `web.browse.session:` it accepts. Absent means it has no such option;
+ *  naming one is an error in `check` that says which vendors do. */
+export interface SessionSupport {
+  /** on: a proxy can be switched on; always: it is always on (true is a
+   *  no-op, false an error); the rest say which parts of a location, and
+   *  whether a proxy of your own is taken. */
+  proxy?: { on?: boolean; always?: boolean; country?: boolean; state?: boolean; city?: boolean; own?: boolean; needsCountry?: boolean; stateOrCity?: boolean };
+  captcha?: boolean;
+  stealth?: boolean;
+  region?: readonly string[];
+  /** The session's life, in seconds: [least, most]. */
+  timeout?: readonly [number, number];
+  /** Saved logins across runs: the vendor's contexts or profiles. */
+  keep?: boolean;
+  record?: boolean;
+  block?: readonly ("ads" | "trackers" | "cookies")[];
+  /** Where `options:` goes, as written: the session request's body, or the
+   *  connection URL's query. Absent: the vendor takes none. */
+  options?: "body" | "query";
+  /** web.browse settings this vendor's browser will not take. */
+  refuses?: readonly string[];
+}
+
+/** `web.browse.session:` — what the vendor's session is asked for. */
+export interface BrowseSession {
+  proxy?: boolean | { country?: string; state?: string; city?: string; own?: string };
+  captcha?: boolean;
+  stealth?: boolean;
+  region?: string;
+  /** seconds */
+  timeout?: number;
+  keep?: string;
+  record?: boolean;
+  block?: ("ads" | "trackers" | "cookies")[];
+  options?: Record<string, unknown>;
+}
+
 export interface BrowserApi {
+  session?: SessionSupport;
   /** Steps of web_browse this browser cannot do, per the vendor's own docs.
    *  Kept equal to the tool's VENDORS table by the platform's gallery test. */
   lacks?: string[];
@@ -247,22 +286,28 @@ export interface BrowserApi {
 }
 
 export const BROWSER_APIS: readonly BrowserApi[] = [
-  { name: "browserbase", docs: "https://docs.browserbase.com/reference/api/create-a-session", checked: "2026-09-29", lacks: ["download"], title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
+  { name: "browserbase", docs: "https://docs.browserbase.com/reference/api/create-a-session", checked: "2026-09-29", title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
+    session: { proxy: { on: true, country: true, state: true, city: true, own: true, needsCountry: true }, captcha: true, stealth: true, region: ["us-west-2", "us-east-1", "eu-central-1", "ap-southeast-1"], timeout: [60, 21600], keep: true, record: true, block: ["ads"], options: "body" },
     what: "hosted Chromium with stealth; POST /v1/sessions (X-BB-API-Key) returns connectUrl" },
-  { name: "steel", docs: "https://docs.steel.dev/overview/sessions-api/quickstart", checked: "2026-09-29", gaps: "the REST session call (POST /v1/sessions, steel-api-key) is not on a page that loaded — only the SDK and the connect URL are confirmed", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
+  { name: "steel", docs: "https://docs.steel.dev/overview/sessions-api/quickstart", checked: "2026-09-29", gaps: "session field names are from the official steel-node SDK source; the API reference page is script-only", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
+    session: { proxy: { on: true, country: true, state: true, city: true, own: true }, captcha: true, stealth: true, timeout: [15, 86400], keep: true, block: ["ads"], options: "body" },
     what: "hosted Chromium, open-source core; POST /v1/sessions (steel-api-key), then wss://connect.steel.dev?apiKey&sessionId" },
-  { name: "hyperbrowser", docs: "https://hyperbrowser.ai/docs/api-reference/create-new-session.md", checked: "2026-09-29", lacks: ["download"], title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
+  { name: "hyperbrowser", docs: "https://hyperbrowser.ai/docs/api-reference/create-new-session.md", checked: "2026-09-29", title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
+    session: { proxy: { on: true, country: true, state: true, city: true, own: true, stateOrCity: true }, captcha: true, stealth: true, region: ["us", "us-central", "us-west", "us-east", "asia-south", "europe-west"], timeout: [60, 43200], keep: true, record: true, block: ["ads", "trackers", "cookies"], options: "body" },
     what: "hosted Chromium with built-in unblocking; a session returns its wsEndpoint" },
   { name: "browserless", docs: "https://docs.browserless.io/baas/connection-url-patterns.md", checked: "2026-09-29", title: "Browserless", how: "direct", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
+    session: { proxy: { on: true, country: true, city: true, own: true }, captcha: true, stealth: true, region: ["sfo", "lon", "ams"], timeout: [1, 86400], block: ["ads"], options: "query" },
     what: "hosted Chrome; wss://production-sfo.browserless.io?token=… (other regions by name)",
     note: "SSPL-licensed: the free path is out for a paid service; the cloud is a plain vendor." },
-  { name: "brightdata", docs: "https://docs.brightdata.com/products/scraping-browser/configuration.md", checked: "2026-09-29", lacks: ["download", "upload", "tab"], gaps: "the limits are from a summary of the configuration page, not quoted verbatim", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
+  { name: "brightdata", docs: "https://docs.brightdata.com/products/scraping-browser/configuration.md", checked: "2026-09-29", lacks: ["tab"], gaps: "the limits are from a summary of the configuration page, not quoted verbatim", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
+    session: { proxy: { always: true, country: true }, captcha: true, block: ["ads", "cookies"] },
     secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
     what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
   { name: "cdp", docs: "https://chromedevtools.github.io/devtools-protocol/", checked: "2026-09-29", aliases: ["devtools"], title: "Any DevTools address", how: "direct", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
     secretFormat: "the ws://, wss:// or http(s):// DevTools address, token included where the browser needs one",
     what: "any browser that serves the DevTools protocol — a Chrome started with --remote-debugging-port, a self-hosted pool, a vendor not listed here" },
-  { name: "zenrows", docs: "https://docs.zenrows.com/browser-sessions/get-started/playwright.md", checked: "2026-09-29", lacks: ["solve"], aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
+  { name: "zenrows", docs: "https://docs.zenrows.com/browser-sessions/get-started/playwright.md", checked: "2026-09-29", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
+    session: { proxy: { always: true, country: true }, timeout: [60, 900], options: "query", refuses: ["user_agent", "device"] },
     what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
 
@@ -547,6 +592,8 @@ export interface BrowseSettings {
   /** false stops the tool streaming its page to the run page while the step
    *  runs. Unset is on wherever the platform can take the frames. */
   live_view?: boolean;
+  /** What the vendor's own session is asked for (only with a vendor). */
+  session?: BrowseSession;
 }
 
 /** Every action web_browse takes, which is what `deny:` may name. The
@@ -589,7 +636,7 @@ const BROWSE_ENGINES = ["chrome", "firefox", "safari", "lightpanda", "obscura"] 
 const BROWSE_SETTING_KEYS = [
   "engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live",
   "allowed_domains", "deny", "boundaries", "init", "extensions", "webgpu", "ignore_https_errors", "state_key",
-  "video", "live_view",
+  "video", "live_view", "session",
 ] as const;
 const BROWSE_DOMAIN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 /** A list setting: YAML's list, or one comma-separated line. */
@@ -638,6 +685,147 @@ function readIdentity(name: string, raw: unknown): { identity?: Record<string, s
 /** The settings in a `web_browse:` block, and the vendor part with them
  *  removed — so one key carries both without either learning about the
  *  other. A string, or a block with no settings, gives no settings at all. */
+const SESSION_KEYS = ["proxy", "captcha", "stealth", "region", "timeout", "keep", "record", "block", "options"] as const;
+const BLOCKABLE = ["ads", "trackers", "cookies"] as const;
+
+/** A duration as a person writes one — 90s, 30m, 2h, 1d, or a bare number
+ *  of seconds — in seconds; null when it is none of those. */
+function seconds(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return Math.round(v);
+  const m = typeof v === "string" ? /^\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)?\s*$/i.exec(v) : null;
+  if (!m) return null;
+  return Math.round(Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400 }[(m[2] ?? "s").toLowerCase() as "s"]);
+}
+
+/** The shape of `web.browse.session:`, before anyone knows the vendor. What
+ *  the vendor can do is browseSessionProblems' question. */
+export function readBrowseSession(raw: unknown): { session?: BrowseSession; error?: string } {
+  const at = "web_browse.session";
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { error: `${at} is a block — what the vendor's own session is asked for: proxy, captcha, stealth, region, timeout, keep, record, block, options.` };
+  }
+  const out: BrowseSession = {};
+  const bool = (k: string, v: unknown) => (v === true || v === "true" ? true : v === false || v === "false" ? false : undefined);
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(SESSION_KEYS as readonly string[]).includes(k)) return { error: `${at}.${k}: is not a session setting. They are ${SESSION_KEYS.join(", ")}.` };
+    if (v === undefined || v === null || v === "") continue;
+    if (k === "captcha" || k === "stealth" || k === "record") {
+      const b = bool(k, v);
+      if (b === undefined) return { error: `${at}.${k} is true or false, not ${JSON.stringify(v)}.` };
+      out[k] = b;
+    } else if (k === "proxy") {
+      const b = bool(k, v);
+      if (b !== undefined) { out.proxy = b; continue; }
+      if (typeof v !== "object" || Array.isArray(v)) return { error: `${at}.proxy is true, false, or a block: country, state, city — or own: a secret holding your proxy's URL.` };
+      const p: { country?: string; state?: string; city?: string; own?: string } = {};
+      for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) {
+        if (pk === "country" || pk === "state") {
+          if (typeof pv !== "string" || !/^[A-Za-z]{2}$/.test(pv.trim())) return { error: `${at}.proxy.${pk} is a two-letter code, like ${pk === "country" ? "AU" : "CA"} — not ${JSON.stringify(pv)}.` };
+          p[pk] = pv.trim().toUpperCase();
+        } else if (pk === "city") {
+          if (typeof pv !== "string" || !pv.trim()) return { error: `${at}.proxy.city is a city's name.` };
+          p.city = pv.trim();
+        } else if (pk === "own") {
+          if (typeof pv !== "string" || !SECRET_NAME.test(pv.trim())) return { error: `${at}.proxy.own names a secret holding your proxy's URL (http://user:pass@host:port) — the NAME, never the URL.` };
+          p.own = pv.trim();
+        } else {
+          return { error: `${at}.proxy.${pk}: is not a proxy setting. They are country, state, city, own.` };
+        }
+      }
+      if (p.own && (p.country || p.state || p.city)) return { error: `${at}.proxy: own is your proxy, so its location is yours to set there — drop country, state and city, or own.` };
+      if (p.state && p.country && p.country !== "US") return { error: `${at}.proxy.state is for the US only.` };
+      out.proxy = p;
+    } else if (k === "region" || k === "keep") {
+      if (typeof v !== "string" || !v.trim()) return { error: `${at}.${k} is a name.` };
+      if (k === "keep" && !/^[a-z0-9][a-z0-9-]{0,62}$/.test(v.trim())) return { error: `${at}.keep is a short name in lower case, like client-portal — the saved login it keeps.` };
+      out[k] = v.trim();
+    } else if (k === "timeout") {
+      const n = seconds(v);
+      if (n === null) return { error: `${at}.timeout is a duration, like 90s, 30m or 2h — not ${JSON.stringify(v)}.` };
+      out.timeout = n;
+    } else if (k === "block") {
+      const list = browseList(v);
+      const bad = list?.find((x) => !(BLOCKABLE as readonly string[]).includes(x));
+      if (!list || bad !== undefined) return { error: `${at}.block is a list of ${BLOCKABLE.join(", ")}${bad ? ` — not ${bad}` : ""}.` };
+      out.block = [...new Set(list)] as BrowseSession["block"];
+    } else {
+      if (typeof v !== "object" || Array.isArray(v)) return { error: `${at}.options is a block, passed to the vendor as written.` };
+      out.options = v as Record<string, unknown>;
+    }
+  }
+  return { session: out };
+}
+
+/**
+ * Everything wrong with a session block for this vendor: a setting the
+ * vendor has no option for (naming the vendors that do), a value outside its
+ * range, and the browse settings its browser will not take. The rule the
+ * actions follow — the file is fixed, nothing is quietly dropped.
+ */
+export function browseSessionProblems(settings: BrowseSettings, vendor: string | null): string[] {
+  const s = settings.session;
+  const out: string[] = [];
+  const api = vendor ? findBrowserApi(vendor) : undefined;
+  const sup = api?.session ?? {};
+  const who = (pred: (x: SessionSupport) => boolean | undefined) =>
+    BROWSER_APIS.filter((b) => b.session && pred(b.session)).map((b) => b.name).join(", ") || "none";
+  const at = "web_browse.session";
+  for (const key of api?.session?.refuses ?? []) {
+    if ((settings as Record<string, unknown>)[key] !== undefined) {
+      out.push(`web_browse.${key}: ${api!.title} does not let a session change it (its docs) — drop it, or render elsewhere.`);
+    }
+  }
+  if (!s) return out;
+  if (!api) {
+    out.push(`${at}: is what a vendor's own session is asked for, and this browser is the account's own — name one with via:, or drop session:.`);
+    return out;
+  }
+  const label = api.title;
+  const need = (key: string, ok: boolean | undefined, pred: (x: SessionSupport) => boolean | undefined) => {
+    if (!ok) out.push(`${at}.${key}: ${label} has no such option. These do: ${who(pred)}.`);
+  };
+  if (s.proxy !== undefined) {
+    const p = sup.proxy;
+    if (s.proxy === false && p?.always) out.push(`${at}.proxy: ${label} always goes through its own proxy network — false cannot be kept.`);
+    else if (s.proxy === true) need("proxy", p?.on || p?.always, (x) => x.proxy?.on || x.proxy?.always);
+    else if (typeof s.proxy === "object") {
+      for (const part of ["country", "state", "city", "own"] as const) {
+        if (s.proxy[part] !== undefined) need(`proxy.${part}`, p?.[part], (x) => x.proxy?.[part]);
+      }
+      if (p?.needsCountry && !s.proxy.own && !s.proxy.country) out.push(`${at}.proxy: ${label} needs a country for a proxy location (its docs) — add country:.`);
+      if (p?.stateOrCity && s.proxy.state && s.proxy.city) out.push(`${at}.proxy: ${label} takes a state or a city, not both (its docs).`);
+    }
+  }
+  if (s.captcha !== undefined) need("captcha", sup.captcha, (x) => x.captcha);
+  if (s.stealth !== undefined) need("stealth", sup.stealth, (x) => x.stealth);
+  if (s.record !== undefined) need("record", sup.record, (x) => x.record);
+  if (s.keep !== undefined) {
+    need("keep", sup.keep, (x) => x.keep);
+    // A saved login lives in the vendor's own browser context, which is
+    // used as it is: a context made to measure would not be the saved one.
+    for (const key of ["user_agent", "device", "locale", "timezone", "identities"] as const) {
+      if ((settings as Record<string, unknown>)[key] !== undefined) {
+        out.push(`web_browse.${key}: with session.keep the vendor's saved browser is used as it stands, so ${key} cannot be applied — drop one of them.`);
+      }
+    }
+  }
+  if (s.region !== undefined) {
+    if (!sup.region) need("region", false, (x) => Boolean(x.region));
+    else if (!sup.region.includes(s.region)) out.push(`${at}.region: ${label}'s regions are ${sup.region.join(", ")} — not ${s.region}.`);
+  }
+  if (s.timeout !== undefined) {
+    if (!sup.timeout) need("timeout", false, (x) => Boolean(x.timeout));
+    else if (s.timeout < sup.timeout[0] || s.timeout > sup.timeout[1]) {
+      out.push(`${at}.timeout: ${label} takes ${sup.timeout[0]}s to ${sup.timeout[1]}s, not ${s.timeout}s.`);
+    }
+  }
+  for (const b of s.block ?? []) {
+    if (!sup.block?.includes(b)) out.push(`${at}.block: ${label} cannot block ${b}. These can: ${who((x) => x.block?.includes(b))}.`);
+  }
+  if (s.options !== undefined && !sup.options) out.push(`${at}.options: ${label} takes no options beyond these.`);
+  return out;
+}
+
 export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; rest: unknown; error?: string } {
   // An empty leftover is nothing at all. Returned as `{}` it reads to the
   // vendor resolver as "the long form, with no name", which is a second
@@ -681,6 +869,12 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       continue;
     }
     // The one that is on by default: only false travels.
+    if (k === "session") {
+      const r = readBrowseSession(v);
+      if (r.error) return { settings, rest: left(rest), error: r.error };
+      settings.session = r.session;
+      continue;
+    }
     if (k === "live_view") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
       if (b === undefined) return { settings, rest: left(rest), error: `web_browse.live_view is true or false, not ${JSON.stringify(v)}.` };
@@ -1065,16 +1259,19 @@ export function webProblems(front: Record<string, unknown>): string[] {
   const out: string[] = [...web.problems];
   for (const kind of ["search", "fetch", "browse"] as const) {
     let value = web.raw[kind];
+    let browse: BrowseSettings | null = null;
     if (kind === "browse" || kind === "search") {
       const read = kind === "browse" ? readBrowseSettings(value) : readSearchSettings(value);
       if (read.error) {
         out.push(read.error);
         continue;
       }
+      if (kind === "browse") browse = read.settings as BrowseSettings;
       value = read.rest;
     }
     const choice = resolveSearch(value, kind);
     if (choice.error) out.push(choice.error);
+    else if (browse) out.push(...browseSessionProblems(browse, choice.provider));
   }
   return out.map((m) => webSpelling(m, web.from));
 }

@@ -86,7 +86,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, legacyWebKeyError, webSpelling } from "./providers.ts";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, legacyWebKeyError, webSpelling, browseSessionProblems } from "./providers.ts";
 import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
@@ -986,6 +986,10 @@ function agentContext(
   const browseSettings = browseRead.settings;
   const browseChoice = resolveSearch(browseRead.rest, "browse");
   if (browseRead.error) browseChoice.error = browseChoice.error ?? browseRead.error;
+  // What the vendor's own session is asked for, checked against what that
+  // vendor offers; a problem is on the record and the session is not sent.
+  const sessionProblems = browseChoice.error ? [] : browseSessionProblems(browseSettings, browseChoice.provider);
+  const browseSession = browseChoice.shape === "direct" && browseChoice.provider && !sessionProblems.length ? browseSettings.session : undefined;
   // crawl, map, extract, answer, monitor: a provider each, or foldrun's own.
   // Same three consequences as a search API — the secret the step holds, the
   // env the web tool reads, the one host the key may reach.
@@ -1003,6 +1007,9 @@ function agentContext(
   const declared: string[] = [
     ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
     ...actionChoices.flatMap((c) => (c.provider ? [c.secret] : [])),
+    // Your own proxy for a vendor's session: its URL is a secret, declared by
+    // naming it, like a provider's key.
+    ...(browseSession && typeof browseSession.proxy === "object" && browseSession.proxy.own ? [browseSession.proxy.own] : []),
     ...[searchChoice, fetchChoice, browseChoice].flatMap((c) => {
       if (c.shape !== "direct" || !c.secret) return [];
       // Jina's reader answers without a key. Declaring an absent optional
@@ -1213,6 +1220,9 @@ function agentContext(
     ...(browseChoice.shape === "direct" && browseChoice.provider
       ? { FOLDRUN_BROWSER_VENDOR: browseChoice.provider, FOLDRUN_BROWSER_SECRET: browseChoice.secret ?? "" }
       : {}),
+    // The vendor session's settings (`web.browse.session:`), as JSON the
+    // tool maps onto that vendor's own option names.
+    ...(browseSession ? { FOLDRUN_BROWSER_SESSION: JSON.stringify(browseSession) } : {}),
     // The `web_browse:` block, as defaults the tool reads when the call did
     // not say otherwise. Env rather than arguments because the tool is a
     // script the model calls: a default nobody typed should not have to be
@@ -1324,6 +1334,7 @@ function agentContext(
   const providerWebTools: Record<string, string> = {};
   if (browseChoice.error) providerWarnings.push(browseChoice.error);
   providerWarnings.push(
+    ...sessionProblems,
     ...web.problems,
     ...actionChoices.flatMap((c) => (c.error ? [c.error] : [])),
     ...web.legacy.map(legacyWebKeyError),
