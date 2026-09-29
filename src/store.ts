@@ -44,7 +44,7 @@ import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts"
 import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
-import { webProblems } from "./providers.ts";
+import { webProblems, webConfig, legacyWebKeyError } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
@@ -1379,7 +1379,9 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         timezoneProblem: timezoneProblem(data.timezone),
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
-        webProblems: [...webProblems(data), ...actionProblems(data)],
+        // Retired per-action keys are named here for `check`, not at deploy:
+        // they still work, so a desk that has not been rewritten still ships.
+        webProblems: [...webProblems(data), ...actionProblems(data), ...webConfig(data).legacy.map(legacyWebKeyError)],
         scheduleProblem: agentScheduleProblem(data),
       };
     });

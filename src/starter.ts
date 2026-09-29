@@ -150,9 +150,10 @@ description: Finds one thing worth writing about, and says why.
 model: fast
 effort: high
 tools:
-  - web_search
-  - web_fetch
+  - web
   - read
+web:
+  actions: [search, fetch]
 ---
 
 Pick exactly one topic, in a short paragraph, and say who it helps and why now.
@@ -404,7 +405,7 @@ description: Finds and summarises sources.
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
-tools: [web_search, read, my-folder-tool]  # built-ins and your own tools/, one list
+tools: [web, read, my-folder-tool]  # built-ins and your own tools/, one list
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool

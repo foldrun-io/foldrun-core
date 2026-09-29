@@ -85,7 +85,8 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv } from "./providers.ts";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, legacyWebKeyError, webSpelling } from "./providers.ts";
+import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
@@ -913,10 +914,13 @@ function agentContext(
   // `web_search:` carries the account engine's settings (engines, categories,
   // safesearch, …) beside the provider name, read off first the way
   // web_browse's are, so the provider resolver sees only its own part.
-  const searchRead = readSearchSettings((front as Record<string, unknown>).web_search);
+  // All of it comes from the agent's `web:` block now — `web: {search: exa}`
+  // — with the older per-action keys (`web_search:`) still read beneath it.
+  const web = webConfig(front as Record<string, unknown>, workspaceFrontmatter(agentDir, tenant));
+  const searchRead = readSearchSettings(web.raw.search);
   const searchChoice = resolveSearch(searchRead.rest, "search");
   if (searchRead.error) searchChoice.error = searchChoice.error ?? searchRead.error;
-  const fetchChoice = resolveSearch((front as Record<string, unknown>).web_fetch, "fetch");
+  const fetchChoice = resolveSearch(web.raw.fetch, "fetch");
   // A remote browser's key is materialised, not proxied: CDP is a websocket
   // and the wrapper opens the session itself, the way it seeds a cookie.
   // `web_browse:` carries two things in one key: how the browser presents
@@ -926,12 +930,19 @@ function agentContext(
   // means the account's own browser with those defaults. Nearest wins: the
   // agent's block, else the workspace's, else the account's — the shape
   // `provider:` already uses.
-  const browseFront =
-    (front as Record<string, unknown>).web_browse ?? workspaceFrontmatter(agentDir, tenant).web_browse;
-  const browseRead = readBrowseSettings(browseFront);
+  const browseRead = readBrowseSettings(web.raw.browse);
   const browseSettings = browseRead.settings;
   const browseChoice = resolveSearch(browseRead.rest, "browse");
   if (browseRead.error) browseChoice.error = browseChoice.error ?? browseRead.error;
+  // crawl, map, extract, answer, monitor: a provider each, or foldrun's own.
+  // Same three consequences as a search API — the secret the step holds, the
+  // env the web tool reads, the one host the key may reach.
+  const actionChoices = NEWER_ACTIONS.map((action) => ({ action, ...resolveActionApi(action, web.raw[action]) }));
+  const builtins = [
+    ...(searchChoice.provider && searchChoice.shape !== "direct" && !searchChoice.error ? ["search=WebSearch"] : []),
+    ...(fetchChoice.provider && fetchChoice.shape !== "direct" && !fetchChoice.error ? ["fetch=WebFetch"] : []),
+  ];
+  const webBuiltin: Record<string, string> = builtins.length ? { FOLDRUN_WEB_BUILTIN: builtins.join(",") } : {};
   // A direct search API is paid for with the customer's own key, stored
   // under a fixed vault name (EXA_API_KEY, BRAVE_SEARCH_API_KEY, …). Naming
   // the API in frontmatter is declaring that secret — nobody should have to
@@ -939,6 +950,7 @@ function agentContext(
   // nothing and say so only at the provider.
   const declared: string[] = [
     ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
+    ...actionChoices.flatMap((c) => (c.provider ? [c.secret] : [])),
     ...[searchChoice, fetchChoice, browseChoice].flatMap((c) => {
       if (c.shape !== "direct" || !c.secret) return [];
       // Jina's reader answers without a key. Declaring an absent optional
@@ -1137,6 +1149,13 @@ function agentContext(
     ...(fetchChoice.shape === "direct" && fetchChoice.provider
       ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
       : {}),
+    ...Object.fromEntries(actionChoices.flatMap((c) => (c.provider
+      ? [[`FOLDRUN_WEB_${c.action.toUpperCase()}_VIA`, c.provider], [`FOLDRUN_WEB_${c.action.toUpperCase()}_SECRET`, c.secret]]
+      : []))),
+    // Which actions the web tool may take (`web: {actions: [...]}`); unset is all.
+    ...(web.actions ? { FOLDRUN_WEB_ACTIONS: web.actions.join(",") } : {}),
+    // A model provider's own search or fetch, which the web tool hands over to.
+    ...webBuiltin,
     // A remote browser: the wrapper connects over CDP to this vendor with
     // the named key, and the platform leaves the account's pod alone.
     ...(browseChoice.shape === "direct" && browseChoice.provider
@@ -1252,6 +1271,11 @@ function agentContext(
   // written against `web_search` survives the switch.
   const providerWebTools: Record<string, string> = {};
   if (browseChoice.error) providerWarnings.push(browseChoice.error);
+  providerWarnings.push(
+    ...web.problems,
+    ...actionChoices.flatMap((c) => (c.error ? [c.error] : [])),
+    ...web.legacy.map(legacyWebKeyError),
+  );
   for (const [key, choice, builtin] of [
     ["web_search", searchChoice, "WebSearch"],
     ["web_fetch", fetchChoice, "WebFetch"],
@@ -1274,6 +1298,14 @@ function agentContext(
     const toolName = ref.name;
     if (ref.mode === "ask") {
       disabled.push(toolName);
+      continue;
+    }
+    // `web` is our own tool, granted with the rest of them above. A model
+    // provider answering search or fetch on its own side (`web: {search:
+    // zai}`) adds that provider's tool beside it; the web tool's search then
+    // names it (FOLDRUN_WEB_BUILTIN) rather than asking our engine.
+    if (toolName === "web" && !ref.linked) {
+      allowed.push(...Object.values(providerWebTools));
       continue;
     }
 
@@ -1408,6 +1440,8 @@ function agentContext(
     // needs them again to grant a direct API's key to its host.
     searchChoice,
     fetchChoice,
+    actionChoices,
+    web,
     language,
     // Stamped with the step's own zone: when one of these refuses, the
     // reset time it reports is told in the calendar the step works to,
@@ -1652,7 +1686,7 @@ async function runStep(
       unknownTools, shadowed, legacyUse, retiredTools, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
-      searchChoice, fetchChoice, language, region,
+      searchChoice, fetchChoice, actionChoices, web, language, region,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
@@ -1687,7 +1721,7 @@ async function runStep(
     // And one more only when something written could not be read as a zone.
     for (const problem of clock.problems) push("error", problem);
     if (providerLabel) push("info", `provider: ${providerLabel}`);
-    for (const w of providerWarnings) push("error", w);
+    for (const w of providerWarnings) push("error", webSpelling(w, web.from));
     // A level that wrote a language nobody can read was skipped, not obeyed.
     for (const l of language.lines) push("info", l);
     for (const l of region.lines) push("info", l);
@@ -1994,6 +2028,9 @@ async function runStep(
           addGrant(grant, choice.secret, liveSecrets[choice.secret], choice.host);
         }
       }
+      for (const c of actionChoices) {
+        if (c.provider && c.secret in liveSecrets) addGrant(grant, c.secret, liveSecrets[c.secret], c.host);
+      }
       for (const api of apiSpecs) {
         const host = hostOf(api.base);
         if (!host) continue;
@@ -2018,6 +2055,9 @@ async function runStep(
       // another route. The record says which way it went, and why.
       const materialisers = [
         ...scriptSpecs.filter((sc) => sc.secrets !== "proxied").map((sc) => sc.name),
+        // web proxies its keys — unless it may browse: a remote browser's key
+        // goes into a websocket, and cookie and login secrets into the page.
+        ...(scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse")) ? ["web (browse)"] : []),
         ...(allowed.includes("Bash") ? ["bash"] : []),
       ];
       const materialise = !lease || materialisers.length > 0;

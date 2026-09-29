@@ -68,11 +68,13 @@ const EFFORTS: Completion[] = [
 // survive vendor renames — then the exact SDK names, accepted so a Claude Code
 // subagent runs here unchanged.
 const TOOL_GROUPS: Completion[] = [
-  // `files`, `bash`, `web` and `fetch` are retired (tool-names.ts) — none is
-  // offered, so nobody new writes them.
+  // `files`, `bash` and `fetch` are retired (tool-names.ts) and not offered.
+  // `web` is our gallery tool, offered here because it is the one way onto
+  // the web.
   { label: "read", hint: "Read, Glob, Grep — may look, never write" },
   { label: "write", hint: "Read, Write, Edit, Glob, Grep" },
   { label: "code", hint: "Bash — runs anything in the sandbox" },
+  { label: "web", hint: "search, fetch, browse, crawl, map, extract, answer, monitor — providers under web:" },
 ];
 
 const SDK_TOOL_NAMES: Completion[] = [

@@ -266,6 +266,58 @@ export const BROWSER_APIS: readonly BrowserApi[] = [
     what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
 
+/** The web's actions, in the order the docs list them. */
+export const WEB_ACTIONS = ["search", "fetch", "browse", "crawl", "map", "extract", "answer", "monitor"] as const;
+export type WebAction = (typeof WEB_ACTIONS)[number];
+
+/** A provider for one of the actions that came after search, fetch and
+ *  browse. Only what the runtime needs — the vault name of the key and the
+ *  one host it may go to — plus the docs the adapter in the `web` tool was
+ *  built from. None has been called live from here: no account holds these
+ *  keys yet, so each is as good as its docs page. */
+export interface ActionApi {
+  name: string;
+  title: string;
+  host: string;
+  secret: string;
+  docs: string;
+  checked: string;
+  gaps?: string;
+}
+
+export const ACTION_APIS: Record<"crawl" | "map" | "extract" | "answer" | "monitor", readonly ActionApi[]> = {
+  crawl: [
+    { name: "firecrawl", title: "Firecrawl crawl", host: "api.firecrawl.dev", secret: "FIRECRAWL_API_KEY", docs: "https://docs.firecrawl.dev/api-reference/endpoint/crawl-post", checked: "2026-09-29" },
+    { name: "tavily", title: "Tavily crawl", host: "api.tavily.com", secret: "TAVILY_API_KEY", docs: "https://docs.tavily.com/documentation/api-reference/endpoint/crawl", checked: "2026-09-29", gaps: "its results carry no title; the first heading is used" },
+  ],
+  map: [
+    { name: "firecrawl", title: "Firecrawl map", host: "api.firecrawl.dev", secret: "FIRECRAWL_API_KEY", docs: "https://docs.firecrawl.dev/api-reference/endpoint/map", checked: "2026-09-29" },
+    { name: "tavily", title: "Tavily map", host: "api.tavily.com", secret: "TAVILY_API_KEY", docs: "https://docs.tavily.com/documentation/api-reference/endpoint/map", checked: "2026-09-29" },
+  ],
+  extract: [
+    { name: "firecrawl", title: "Firecrawl JSON extraction", host: "api.firecrawl.dev", secret: "FIRECRAWL_API_KEY", docs: "https://docs.firecrawl.dev/features/llm-extract", checked: "2026-09-29", gaps: "the feature page puts the result at data.json, the endpoint reference at data.answer; both are read" },
+    { name: "zyte", title: "Zyte custom attributes", host: "api.zyte.com", secret: "ZYTE_API_KEY_BASIC", docs: "https://docs.zyte.com/zyte-api/usage/extract/custom-attributes.html", checked: "2026-09-29", gaps: "no free-text prompt: a prompt becomes one attribute's description" },
+    { name: "hyperbrowser", title: "Hyperbrowser extract", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY", docs: "https://hyperbrowser.ai/docs/web-scraping/extract", checked: "2026-09-29", gaps: "whether schema or prompt is required is not stated" },
+  ],
+  answer: [
+    { name: "exa", title: "Exa answer", host: "api.exa.ai", secret: "EXA_API_KEY", docs: "https://exa.ai/docs/reference/answer", checked: "2026-09-29" },
+    { name: "linkup", title: "Linkup sourced answer", host: "api.linkup.so", secret: "LINKUP_API_KEY", docs: "https://docs.linkup.so/pages/documentation/api-reference/endpoint/post-search", checked: "2026-09-29" },
+    { name: "tavily", title: "Tavily answer", host: "api.tavily.com", secret: "TAVILY_API_KEY", docs: "https://docs.tavily.com/documentation/api-reference/endpoint/search", checked: "2026-09-29", gaps: "the sources are the results it searched, not per-sentence citations" },
+    { name: "parallel", title: "Parallel Responses", host: "api.parallel.ai", secret: "PARALLEL_API_KEY", docs: "https://docs.parallel.ai/responses-api/responses-quickstart.md", checked: "2026-09-29", gaps: "the citation nesting is not pinned down; both spellings are read" },
+    { name: "perplexity", title: "Perplexity Agent API", host: "api.perplexity.ai", secret: "PERPLEXITY_API_KEY", docs: "https://docs.perplexity.ai/api-reference/agent-post", checked: "2026-09-29", gaps: "Sonar chat completions ended 27 Sep 2026; whether preset fast searches unasked is not stated, so web_search is asked for" },
+    { name: "you", title: "You.com answer", host: "api.you.com", secret: "YOU_API_KEY", docs: "https://you.com/docs/guides/answer/quickstart.md", checked: "2026-09-29", gaps: "the answer's place (data.answer or answer) and the citation field names are not pinned down; both are read" },
+  ],
+  monitor: [
+    { name: "parallel", title: "Parallel Monitor", host: "api.parallel.ai", secret: "PARALLEL_API_KEY", docs: "https://docs.parallel.ai/api-reference/monitor/create-monitor", checked: "2026-09-29", gaps: "an event's output has no documented title or url; its text and citations are read" },
+    { name: "firecrawl", title: "Firecrawl change tracking", host: "api.firecrawl.dev", secret: "FIRECRAWL_API_KEY", docs: "https://docs.firecrawl.dev/features/change-tracking", checked: "2026-09-29" },
+  ],
+};
+
+export function findActionApi(action: keyof typeof ACTION_APIS, name: string): ActionApi | undefined {
+  const key = name.trim().toLowerCase();
+  return ACTION_APIS[action].find((a) => a.name === key);
+}
+
 export function findBrowserApi(name: string): BrowserApi | undefined {
   const key = name.trim().toLowerCase();
   return BROWSER_APIS.find((a) => a.name === key || a.aliases?.includes(key));
@@ -1001,10 +1053,18 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
  *  core so `check`, the deploy gate and the run all refuse the same thing
  *  in the same words — the timezone rule's shape. Empty when all three are
  *  unset or answerable. */
+/** An error the resolvers word for the older per-action keys, reworded for
+ *  the file as written: `web_browse.engine` → `web.browse.engine` when the
+ *  value came from the web: block, unchanged when it came from web_browse:. */
+export function webSpelling(msg: string, from?: Partial<Record<WebAction, "web" | "legacy" | "workspace">>): string {
+  return msg.replace(/\bweb_(search|fetch|browse)(?=[.:])/g, (whole, a: WebAction) => (!from || from[a] === "web" ? `web.${a}` : whole));
+}
+
 export function webProblems(front: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  for (const [key, kind] of [["web_search", "search"], ["web_fetch", "fetch"], ["web_browse", "browse"]] as const) {
-    let value = front[key];
+  const web = webConfig(front);
+  const out: string[] = [...web.problems];
+  for (const kind of ["search", "fetch", "browse"] as const) {
+    let value = web.raw[kind];
     if (kind === "browse" || kind === "search") {
       const read = kind === "browse" ? readBrowseSettings(value) : readSearchSettings(value);
       if (read.error) {
@@ -1016,5 +1076,74 @@ export function webProblems(front: Record<string, unknown>): string[] {
     const choice = resolveSearch(value, kind);
     if (choice.error) out.push(choice.error);
   }
-  return out;
+  return out.map((m) => webSpelling(m, web.from));
+}
+
+/**
+ * The agent's `web:` block, read once for everyone — the runner, `check`
+ * and the deploy gate:
+ *
+ *    tools: [web]
+ *    web:
+ *      actions: [search, fetch, crawl]   # what it may do; all when absent
+ *      search: brave                     # who does each; absent is foldrun
+ *      browse: { engine: firefox }       # search and browse also take their settings
+ *
+ * `raw` is each action's value as written. The older spelling — a key per
+ * action, `web_search: brave` — is still read, so nothing deployed changes
+ * what it does; `legacy` names those keys so `check` can ask for the
+ * rewrite. `web:` wins where both say something. Browse alone cascades: the
+ * workspace's (or account's) block applies when the agent's says nothing,
+ * as `web_browse:` always did.
+ */
+export function webConfig(
+  front: Record<string, unknown>,
+  workspaceFront?: Record<string, unknown>,
+): {
+  actions: WebAction[] | null;
+  raw: Record<WebAction, unknown>;
+  from: Partial<Record<WebAction, "web" | "legacy" | "workspace">>;
+  legacy: string[];
+  problems: string[];
+} {
+  const problems: string[] = [];
+  const block = front.web;
+  let web: Record<string, unknown> = {};
+  if (block !== undefined && block !== null) {
+    if (typeof block === "object" && !Array.isArray(block)) web = block as Record<string, unknown>;
+    else problems.push("web: is a block — actions: and a provider per action, e.g. `web: {fetch: jina}`.");
+  }
+  for (const k of Object.keys(web)) {
+    if (k !== "actions" && !(WEB_ACTIONS as readonly string[]).includes(k)) {
+      problems.push(`web.${k}: is not an action. The actions: ${WEB_ACTIONS.join(", ")}; and actions: for which of them the agent may use.`);
+    }
+  }
+  let actions: WebAction[] | null = null;
+  if (web.actions !== undefined) {
+    const list = Array.isArray(web.actions) ? web.actions.map((a) => String(a).trim().toLowerCase()) : null;
+    const bad = list?.filter((a) => !(WEB_ACTIONS as readonly string[]).includes(a)) ?? [];
+    if (!list) problems.push(`web.actions: is a list, e.g. [search, fetch].`);
+    else if (bad.length) problems.push(`web.actions: ${bad.join(", ")} ${bad.length === 1 ? "is not an action" : "are not actions"}. The actions: ${WEB_ACTIONS.join(", ")}.`);
+    else actions = [...new Set(list)] as WebAction[];
+  }
+  const legacy = WEB_ACTIONS.map((a) => `web_${a}`).filter((k) => front[k] !== undefined && front[k] !== null && front[k] !== "");
+  const wsWeb = workspaceFront?.web && typeof workspaceFront.web === "object" && !Array.isArray(workspaceFront.web)
+    ? (workspaceFront.web as Record<string, unknown>) : {};
+  const from: Partial<Record<WebAction, "web" | "legacy" | "workspace">> = {};
+  const raw = Object.fromEntries(WEB_ACTIONS.map((a) => {
+    let v = web[a];
+    if (v !== undefined) from[a] = "web";
+    else if ((v = front[`web_${a}`]) !== undefined) from[a] = "legacy";
+    else if (a === "browse" && (v = wsWeb.browse ?? workspaceFront?.web_browse) !== undefined) {
+      from[a] = wsWeb.browse !== undefined ? "web" : "workspace";
+    }
+    return [a, v];
+  })) as Record<WebAction, unknown>;
+  return { actions, raw, from, legacy, problems };
+}
+
+/** The sentence `check` and the run log give for a retired per-action key. */
+export function legacyWebKeyError(key: string): string {
+  const action = key.replace(/^web_/, "");
+  return `${key}: is retired — write it under web:, as \`web: {${action}: …}\`, with the same value. It is still read for now.`;
 }

@@ -14,19 +14,13 @@ import { refList, refNames, type Ref } from "./refs.ts";
 
 /** Groups: one word an author can hold in their head, expanded to SDK names. */
 export const TOOL_MAP: Record<string, string[]> = {
-  // `web` includes Anthropic's server-side WebSearch, the one built-in tool
-  // that runs off the box and bills per call; `fetch` is the local half only.
-  // Neither is the normal way to reach the web here. The three tools an
-  // author writes are one lowercase family — `web_search` finds URLs,
-  // `web_fetch` reads one, `web_browse` drives one — all served from the
-  // gallery, all on the run record, all working whichever model is driving.
-  // None of them is aliased here on purpose: a name in TOOL_MAP shadows a
-  // real tool of the same name (see runner.ts), so aliasing `web_fetch` would
-  // silently replace our tool with the SDK's and change what an agent gets.
-  // `web` and `fetch` still grant what they did, so a deployed agent that
-  // says them keeps running — but they are retired (RETIRED_TOOLS, below):
-  // two ways onto the web, one of them off the run record, was a trap.
-  web: ["WebSearch", "WebFetch"],
+  // The web is one tool of ours, `web` — search, fetch, browse, crawl, map,
+  // extract, answer, monitor, served from the gallery and on the run record
+  // whichever model is driving. So `web` is deliberately NOT here: a name in
+  // TOOL_MAP shadows a real tool of the same name (see runner.ts). Until
+  // 2026-09-29 it was, granting Anthropic's WebSearch and WebFetch; an agent
+  // that says `web` now gets ours. `fetch` still grants the SDK's WebFetch so
+  // a deployed agent keeps running, but it is retired (RETIRED_TOOLS, below).
   fetch: ["WebFetch"],
   // `read` is deliberately separate from `write`: an agent that may inspect a
   // repository but must never modify it is a real and common design. The pair
@@ -43,19 +37,23 @@ export const TOOL_MAP: Record<string, string[]> = {
 /** Names an author may no longer write, and what to write instead. They are
  *  still granted, so nothing deployed breaks; `check` and the run log say the
  *  rewrite. The SDK's WebSearch/WebFetch remain the runtime's to use — a
- *  `web_search: zai` swaps them in — just not the author's to name. */
+ *  model provider's own search (`web: {search: zai}`) swaps them in — just
+ *  not the author's to name. web_search, web_fetch and web_browse are the
+ *  gallery tools `web` replaced; they still run. */
 export const RETIRED_TOOLS: Record<string, string> = {
   files: "write",
   bash: "code",
-  web: "web_search, web_fetch",
-  fetch: "web_fetch",
-  WebSearch: "web_search",
-  WebFetch: "web_fetch",
+  fetch: "web",
+  WebSearch: "web",
+  WebFetch: "web",
+  web_search: "web",
+  web_fetch: "web",
+  web_browse: "web",
 };
 
 /** Exact SDK tool names, accepted alongside the group aliases so a Claude Code
  *  subagent's `tools: Read, Grep` works unchanged. The aliases exist because
- *  vendors rename tools; `web` survives a rename that `WebSearch` would not. */
+ *  vendors rename tools; `write` survives a rename that `Write` would not. */
 export const BUILTIN_TOOLS = new Set([
   "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash",
   "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite",
@@ -123,7 +121,10 @@ export function retiredToolNames(front: ToolFrontmatter): string[] {
 
 /** The one sentence every reader of a retired name says. */
 export function retiredToolError(name: string): string {
-  const why = name === "files" || name === "bash" ? "the same grant, under the name that says what it does" : "ours, on the run record, and swappable with a provider";
+  const why =
+    name === "files" || name === "bash" ? "the same grant, under the name that says what it does"
+    : name.startsWith("web_") ? `one tool for every web action — action=${name.slice(4)}, and its provider under web:`
+    : "ours: every web action, on the run record, each swappable with a provider";
   return `tools: "${name}" is retired — use ${RETIRED_TOOLS[name]} instead: ${why}. It is still granted for now.`;
 }
 
