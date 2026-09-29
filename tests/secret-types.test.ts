@@ -131,6 +131,28 @@ test("file secret: content stored, materialised to a 0600 path, blocked from env
     }
   }));
 
+test("two steps of one agent get their own secret-files directory; one finishing leaves the other's", () =>
+  withVault(() => {
+    setFileSecret("acme", "SSH_KEY", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n");
+    const { env } = resolveSecrets("acme", ["SSH_KEY"]);
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-"));
+    try {
+      // A fan-out: both copies run in the same agent directory at once.
+      const a = materializeFileSecrets(agentDir, env);
+      const b = materializeFileSecrets(agentDir, env);
+      assert.notEqual(a.dir, b.dir);
+      assert.notEqual(a.env.SSH_KEY, b.env.SSH_KEY);
+      assert.equal(fs.statSync(a.dir!).mode & 0o777, 0o700);
+      cleanupFileSecrets(a.dir);
+      assert.ok(!fs.existsSync(a.env.SSH_KEY));
+      assert.ok(fs.existsSync(b.env.SSH_KEY), "the first to finish no longer deletes the other's key");
+      cleanupFileSecrets(b.dir);
+      assert.ok(!fs.existsSync(path.join(agentDir, ".secret-files")), "the last one out removes the parent");
+    } finally {
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  }));
+
 test("ssh connection with a key: wrapper script + key file + component vars", () =>
   withVault(() => {
     setSshSecret("acme", "PROD_VM", {

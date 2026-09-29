@@ -9,9 +9,12 @@
 // `"$PROD_VM" 'uptime'` or `"$STRIPE" /v1/charges` and never learns whether
 // it was key or password, one header or five.
 //
-// Everything lands in a per-run scratch directory inside the agent's own
+// Everything lands in a per-step scratch directory inside the agent's own
 // tree (so it crosses into a container with the workspace) but dot-prefixed
-// and never archived or copied back — it holds live credentials.
+// and never archived or copied back — it holds live credentials. Per step,
+// not per agent: two steps of one agent run in parallel on the in-process
+// path (a fan-out), and with one shared directory the first to finish
+// deleted the keys the other was still using.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -33,10 +36,10 @@ function writeWrapper(dir: string, name: string, body: string): string {
 }
 
 /**
- * Turn any @file/@ssh/@api values in `env` into files under
- * `<agentDir>/.secret-files`, rewriting each to its path. Returns the
- * directory written (for cleanup) and the transformed env. Plain values
- * pass through untouched.
+ * Turn any @file/@ssh/@api values in `env` into files under a fresh
+ * `<agentDir>/.secret-files/step-XXXXXX`, rewriting each to its path.
+ * Returns the directory written (for cleanup) and the transformed env.
+ * Plain values pass through untouched.
  */
 export function materializeFileSecrets(
   agentDir: string,
@@ -47,8 +50,10 @@ export function materializeFileSecrets(
   );
   if (entries.length === 0) return { env, dir: null };
 
-  const dir = path.join(agentDir, ".secret-files");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const parent = path.join(agentDir, ".secret-files");
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const dir = fs.mkdtempSync(path.join(parent, "step-"));
+  fs.chmodSync(dir, 0o700);
   const out = { ...env };
   for (const [name, value] of entries) {
     // Lowercased name as the filename keeps it predictable without leaking
@@ -95,7 +100,14 @@ export function materializeFileSecrets(
   return { env: out, dir };
 }
 
-/** Best-effort removal of a materialised secret-files directory. */
+/** Best-effort removal of a materialised secret-files directory — this
+ *  step's own, and the shared parent once no other step is using it. */
 export function cleanupFileSecrets(dir: string | null) {
-  if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  if (!dir) return;
+  fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    fs.rmdirSync(path.dirname(dir));
+  } catch {
+    // another step's directory is still in there
+  }
 }
