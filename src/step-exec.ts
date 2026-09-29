@@ -100,13 +100,12 @@ export const STOP_POLL_MS = 2000;
  *  capped by the timeout itself, so the step and its check together never
  *  run past timeout + this. Under the isolated path's backstop (+60 s). */
 export const VERIFY_FLOOR_MS = 30_000;
-/** A step with no `timeout:` still cannot hang forever in its check. */
-export const VERIFY_DEFAULT_MS = 30 * 60_000;
 
 /** How long a `verify:` may run: what is left of the step's `timeout:`,
- *  with a floor, or the platform's limit when the flow set none. */
-export function verifyBudgetMs(timeoutSec: number | undefined, elapsedMs: number): number {
-  if (!timeoutSec || timeoutSec <= 0) return VERIFY_DEFAULT_MS;
+ *  with a floor. Null when the flow set no timeout — `timeout:` is the only
+ *  clock there is, and a stop still ends the check. */
+export function verifyBudgetMs(timeoutSec: number | undefined, elapsedMs: number): number | null {
+  if (!timeoutSec || timeoutSec <= 0) return null;
   const total = timeoutSec * 1000;
   return Math.max(total - elapsedMs, Math.min(VERIFY_FLOOR_MS, total));
 }
@@ -507,19 +506,21 @@ export async function executeStep(
   // "Done" should mean a check passed, not that the model stopped talking.
   // The loop's clocks are cleared by now, so the check gets its own: what is
   // left of the step's `timeout:` (never less than VERIFY_FLOOR_MS of it),
-  // and a stop read on the same clock the loop used. A `verify:` that hangs
+  // and a stop read on the same clock the loop used. No `timeout:`, no clock:
+  // it is the only one there is, here as in the loop. A `verify:` that hangs
   // — a build waiting on a lock, a judge that never answers — used to hold
   // the step, and the run, with nothing to end it.
   if (status === "completed" && opts.verify) {
     const verifyMs = verifyBudgetMs(opts.timeoutSec, Date.now() - startedAt);
     const halt = new AbortController();
     let cut: "timeout" | "stopped" | null = null;
-    const clocks: NodeJS.Timeout[] = [
-      setTimeout(() => {
+    const clocks: NodeJS.Timeout[] = [];
+    if (verifyMs !== null) {
+      clocks.push(setTimeout(() => {
         cut ??= "timeout";
         halt.abort();
-      }, verifyMs),
-    ];
+      }, verifyMs));
+    }
     if (opts.stopRequested) {
       clocks.push(setInterval(() => {
         try {
@@ -546,7 +547,7 @@ export async function executeStep(
       for (const t of clocks) clearTimeout(t);
     }
     if (cut === "timeout") {
-      emit("error", `verify \`${opts.verify}\` → timed out after ${Math.round(verifyMs / 1000)}s (${opts.timeoutSec ? "what was left of timeout: in the flow file" : "the platform's limit for a check"}) — it was stopped`);
+      emit("error", `verify \`${opts.verify}\` → timed out after ${Math.round(verifyMs! / 1000)}s (what was left of timeout: in the flow file) — it was stopped`);
       status = "failed";
     } else if (cut === "stopped") {
       emit("error", `verify \`${opts.verify}\` → stopped by a person mid-check`);

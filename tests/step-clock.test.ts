@@ -181,7 +181,7 @@ test("verify: gets what is left of the timeout, with a floor the timeout still c
   assert.equal(verifyBudgetMs(600, 100_000), 500_000);
   assert.equal(verifyBudgetMs(600, 590_000), 30_000, "nearly out: the floor");
   assert.equal(verifyBudgetMs(10, 9_000), 10_000, "the floor never exceeds the timeout itself");
-  assert.equal(verifyBudgetMs(undefined, 0), 30 * 60_000, "no timeout: the platform's limit");
+  assert.equal(verifyBudgetMs(undefined, 0), null, "no timeout: no clock, as for the loop");
 });
 
 import { verifyBudgetMs } from "../src/step-exec.ts";
