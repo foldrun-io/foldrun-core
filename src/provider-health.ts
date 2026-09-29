@@ -24,7 +24,7 @@ import matter from "gray-matter";
 import { getSecret } from "./secrets.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
 import { accountDir, workspaceDir, listWorkspaces, listAgents, parseProvider, type ProviderSpec } from "./store.ts";
-import { platform } from "./platform.ts";
+import { fetchUntrusted } from "./untrusted-fetch.ts";
 
 export type HealthVerdict = "ok" | "credential" | "not-found" | "busy" | "unreachable" | "provider-error";
 
@@ -138,12 +138,12 @@ export async function checkProvider(
   for (const [k, v] of Object.entries(spec.headers ?? {})) headers[k.toLowerCase()] = resolve(tenant, workspace, v);
 
   try {
-    const res = await platform.fetchUntrusted(url, {
+    const res = await fetchUntrusted(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    }, { sameOrigin: true });
     const { verdict, detail } = verdictFor(res.status);
     // The check is itself a use of the credential, and the most informative
     // one there is: it was made for exactly this purpose.

@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
+import { fetchUntrusted } from "./untrusted-fetch.ts";
 
 /**
  * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
@@ -549,12 +550,12 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<string>
       client_secret: config.client_secret,
       ...(config.extra ?? {}),
     });
-    const res = await platform.fetchUntrusted(config.token_url, {
+    const res = await fetchUntrusted(config.token_url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
       signal: AbortSignal.timeout(15_000),
-    });
+    }, { sameOrigin: true });
     const payload = (await res.json().catch(() => ({}))) as {
       access_token?: string;
       expires_in?: number;
@@ -700,7 +701,7 @@ async function exchangeServiceAccount(config: ServiceAccountConfig, cacheKey: st
     const signature = base64url(signer.sign(config.private_key));
     const jwt = `${header}.${claim}.${signature}`;
 
-    const res = await platform.fetchUntrusted(config.token_url, {
+    const res = await fetchUntrusted(config.token_url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -708,7 +709,7 @@ async function exchangeServiceAccount(config: ServiceAccountConfig, cacheKey: st
         assertion: jwt,
       }).toString(),
       signal: AbortSignal.timeout(15_000),
-    });
+    }, { sameOrigin: true });
     const payload = (await res.json().catch(() => ({}))) as {
       access_token?: string;
       expires_in?: number;

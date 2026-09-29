@@ -147,7 +147,9 @@ export interface PlatformHooks {
    * a provider base URL, an OpenAPI source. On a platform these run on the
    * worker or web tier, which can reach what a sandbox cannot, so the
    * platform refuses private and cluster addresses. Default: plain fetch,
-   * which is a laptop calling its own LAN on purpose.
+   * which is a laptop calling its own LAN on purpose. Core calls this only
+   * through untrusted-fetch.ts, once per hop with `redirect: "manual"`, so
+   * every redirect target is checked here like the first URL was.
    */
   fetchUntrusted(url: string, init?: RequestInit): Promise<Response>;
 }
