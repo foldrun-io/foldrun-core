@@ -906,12 +906,16 @@ function agentContext(
   // below. The tool is the unit of code, so its dependencies live in tool.md
   // and travel with it; the agent should not have to repeat them.
   const toolRuntimes: RuntimeSpec[] = [];
+  // Does any granted tool act outside the workspace (`outward: true`)? The
+  // retry policy reads it: see launchStep.
+  let outward = false;
   const grantOwnTool = (name: string) => {
     const def = available[name];
     if (!def) {
       missingTools.push(name);
       return;
     }
+    if (def.outward) outward = true;
     if (def.kind === "http") apis.push(def.spec);
     else if (def.kind === "script") {
       scriptSpecs.push(...parseScripts([def.spec]));
@@ -1478,6 +1482,7 @@ function agentContext(
     // than using the servers built here.
     apiSpecs: apis,
     scriptSpecs,
+    outward: outward || scriptSpecs.some((sc) => sc.outward),
     searchRoots,
     historyDigest,
     deskDigest,
@@ -1659,6 +1664,10 @@ async function runStep(
   let redactions: [string, string][] = [];
   let fileDir: string | null = null;
   let disposeRuntime: (() => void) | undefined;
+  // Can this step's tools act outside the workspace? Set once its context is
+  // read; the verdict at the end of this function reads it.
+  let canActOutward = false;
+  const eventsAtStart = step.events.length;
   const redact = (text: string) => {
     let out = text;
     for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
@@ -1755,8 +1764,10 @@ async function runStep(
       searchChoice, fetchChoice, actionChoices, web, language, region,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
+      outward,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
     disposeRuntime = runtime.dispose;
+    canActOutward = outward;
     // A retry that moved the step up a class (an evicted or OOM-killed
     // attempt) wins over the agent's own `size:` for the attempts after.
     const size = step.sizeUp ?? agentSize;
@@ -2574,6 +2585,21 @@ async function runStep(
   }
   step.finishedAt = new Date().toISOString();
   save();
+  return { actedThenFailedCheck: canActOutward && actedThenFailedCheck(step.events.slice(eventsAtStart)) };
+}
+
+/**
+ * Did this attempt call its tools and then fail only on the check after —
+ * `verify:`, `output: json`, a schema? For a step whose tools act outward
+ * that is the one failure a retry must not answer: the email went, the post
+ * is up, and the check failing says nothing about whether they happened. A
+ * second attempt sends them again. Read off the attempt's own events, which
+ * both executors write the same way (step-exec.ts).
+ */
+export function actedThenFailedCheck(events: { type: string; text: string }[]): boolean {
+  if (!events.some((e) => e.type === "tool")) return false;
+  const last = events.filter((e) => e.type === "error").at(-1)?.text ?? "";
+  return /^(verify `|output: json — |schema: the value does not fit)/.test(last);
 }
 
 // Block until a human approves or rejects the pending steps. Polls the run
@@ -3913,7 +3939,7 @@ function driveRunInner(
                 step.status = "running";
                 if (ceiling.ceilingUsd !== null) reserved.set(step, ceiling.ceilingUsd);
                 save();
-                await runStep(
+                const verdict = await runStep(
                   path.join(pDir, "agents", step.agent),
                   tenant,
                   step,
@@ -3941,6 +3967,18 @@ function driveRunInner(
                 recordAttempt(step, attempt, outcome === "completed" ? "completed" : "failed", attemptStartedAt, eventsBefore, reattach);
                 save();
                 if (outcome !== "failed" || attempt === attempts) break;
+                // An outward step whose tools ran and whose check then failed
+                // is not retried: the check cannot say the send did not
+                // happen, and a retry would do it twice.
+                if (verdict?.actedThenFailedCheck) {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: `not retried — this step's tools can act outside the workspace and ran before the check failed; another attempt could repeat what they did (${attempts - attempt} left unused)`,
+                  });
+                  save();
+                  break;
+                }
                 // A stop destroys the step's sandbox, which reads here as a
                 // failed attempt — and a failed attempt used to be retried in
                 // a fresh sandbox, so a stopped `retry: 2` step ran twice

@@ -323,6 +323,25 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       });
     }
 
+    // retry: re-runs a failed step from the start. For a step that sends,
+    // a failure can come after the send — the verify: or the JSON check
+    // failed on a step whose email went — and the retry sends it again. The
+    // runner declines that one retry (see actedThenFailedCheck in runner.ts)
+    // but a crash mid-send still reruns; the author should know.
+    if (known?.outwardAgents?.includes(step.agent ?? "") && step.retry) {
+      warnings.push({
+        step: i,
+        line: step.line,
+        kind: "outward",
+        message: `[[${step.agent}]] can act outside this workspace and this step has retry: ${step.retry}`,
+        detail:
+          "A retry runs the whole step again, sends included. The runner does not retry a failure " +
+          "that came from the check after the step's tools ran, but an attempt that failed mid-way — " +
+          "a timeout, a crash, a provider error after the first send — is retried and may repeat " +
+          "what it already did. Make the send idempotent (check a ledger before sending), or drop retry:.",
+      });
+    }
+
     // `each: items` fans out over DATA, and only an `output: json` step in
     // an earlier group produces any. Without one the step expands to
     // nothing every time, quietly — the exact failure this file exists for.
