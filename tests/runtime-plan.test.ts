@@ -65,7 +65,38 @@ test("requirements.txt and package.json beside a folder tool count as its runtim
       packages: ["openpyxl==3.1.5", "requests>=2"],
       npm: ["sharp@^0.33.5", "lodash"],
       node: true,
+      // By name only: an index URL can carry a password.
+      ignored: ["-r", "--index-url"],
     });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a hash-pinned requirements.txt installs its requirements, and says the hashes were not applied", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-folder-"));
+  try {
+    // What pip-compile --generate-hashes writes: every pin continued onto
+    // its hash lines. It used to yield nothing installable at all.
+    fs.writeFileSync(
+      path.join(dir, "requirements.txt"),
+      [
+        "certifi==2024.8.30 \\",
+        "    --hash=sha256:aaaa \\",
+        "    --hash=sha256:bbbb",
+        "    # via requests",
+        "requests==2.32.3 --hash=sha256:cccc",
+        "idna == 3.10",
+        "",
+      ].join("\n"),
+    );
+    const block = folderRuntime(dir)!;
+    assert.deepEqual(block.packages, ["certifi==2024.8.30", "requests==2.32.3", "idna==3.10"]);
+    assert.deepEqual(block.ignored, ["--hash"]);
+    const spec = parseRuntime(block)!;
+    assert.deepEqual(spec.packages, ["certifi==2024.8.30", "requests==2.32.3", "idna==3.10"]);
+    assert.equal(spec.rejected, undefined, "nothing refused");
+    assert.deepEqual(spec.ignored, ["--hash"]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

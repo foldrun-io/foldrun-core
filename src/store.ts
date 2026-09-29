@@ -678,22 +678,40 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
  */
 /**
  * A folder tool's `requirements.txt` and `package.json`, as a `runtime:`
- * block. Plain requirement lines only: comments, blanks, and option lines
- * (`-r`, `--index-url`, `-e`) are left out here, and anything else that is
- * not a requirement is refused later by parseRuntime with a log line, the
- * same as it would be in tool.md. `dependencies` only — a tool's dev
- * dependencies are its author's, not its runtime's.
+ * block. Requirement lines only: comments and blanks are left out, and so
+ * are options — whole option lines (`-r`, `--index-url`, `-e`) and the ones
+ * a requirement carries (`--hash=…`). Options never reach the installer,
+ * which takes them from the same argv as its operands; their NAMES are kept
+ * in `ignored`, never their values (an index URL can carry a password), so
+ * the build log can say what was not applied. Anything else that is not a
+ * requirement is refused later by parseRuntime with a log line, the same as
+ * it would be in tool.md. `dependencies` only — a tool's dev dependencies
+ * are its author's, not its runtime's.
  */
 export function folderRuntime(folder: string): Record<string, unknown> | null {
-  const out: { packages?: string[]; npm?: string[]; node?: boolean } = {};
+  const out: { packages?: string[]; npm?: string[]; node?: boolean; ignored?: string[] } = {};
   const req = path.join(folder, "requirements.txt");
   if (fs.existsSync(req)) {
-    const lines = fs
-      .readFileSync(req, "utf8")
-      .split(/\r?\n/)
-      .map((l) => l.replace(/\s+#.*$/, "").replace(/\s+/g, "").trim())
-      .filter((l) => l && !l.startsWith("#") && !l.startsWith("-"));
-    if (lines.length) out.packages = lines;
+    const packages: string[] = [];
+    const ignored = new Set<string>();
+    // Logical lines: a trailing backslash continues onto the next, which is
+    // how pip-compile --generate-hashes writes every pin. Read line by line,
+    // `pandas==2.1 \` became `pandas==2.1\`, was refused as invalid, and
+    // its hash lines were dropped as options: a hash-pinned file installed
+    // nothing at all.
+    const logical = fs.readFileSync(req, "utf8").replace(/\\\r?\n/g, " ").split(/\r?\n/);
+    for (const raw of logical) {
+      const line = raw.replace(/(^|\s)#.*$/, "").trim();
+      if (!line) continue;
+      // The requirement is what comes before its first option.
+      const [head, ...opts] = line.split(/\s+(?=-)/);
+      for (const o of line.startsWith("-") ? [line, ...opts] : opts) ignored.add(o.split(/[\s=]/)[0]);
+      if (line.startsWith("-")) continue;
+      const requirement = head.replace(/\s+/g, "");
+      if (requirement) packages.push(requirement);
+    }
+    if (packages.length) out.packages = packages;
+    if (ignored.size) out.ignored = [...ignored];
   }
   const pkg = path.join(folder, "package.json");
   if (fs.existsSync(pkg)) {
@@ -708,7 +726,7 @@ export function folderRuntime(folder: string): Record<string, unknown> | null {
       // An unreadable package.json declares nothing; tool.md still can.
     }
   }
-  return out.packages || out.npm ? out : null;
+  return out.packages || out.npm || out.ignored ? out : null;
 }
 
 /** tool.md's own `runtime:` plus what the folder's files add. */
@@ -717,11 +735,13 @@ function mergeRuntimeBlocks(own: unknown, extra: Record<string, unknown>): Recor
   const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
   const packages = [...new Set([...list(base.packages ?? base.pip), ...list(extra.packages)])];
   const npm = [...new Set([...list(base.npm), ...list(extra.npm)])];
+  const ignored = [...new Set([...list(base.ignored), ...list(extra.ignored)])];
   delete base.pip;
   return {
     ...base,
     ...(packages.length ? { packages } : {}),
     ...(npm.length ? { npm } : {}),
+    ...(ignored.length ? { ignored } : {}),
     ...(extra.node && base.node === undefined ? { node: true } : {}),
   };
 }

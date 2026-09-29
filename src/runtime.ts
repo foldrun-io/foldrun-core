@@ -38,6 +38,10 @@ export interface RuntimeSpec {
    *  the script with "no module named pandas" is the least debuggable outcome
    *  available. Never part of the fingerprint — it names nothing installed. */
   rejected?: string[];
+  /** Installer options a requirements.txt carried (`--hash`, `-r`,
+   *  `--index-url`), by name only. Not applied — the installer takes options
+   *  from the same argv as its packages — and said so in the build log. */
+  ignored?: string[];
 }
 
 /**
@@ -82,6 +86,7 @@ export function parseRuntime(raw: unknown): RuntimeSpec | null {
     npm: list(e.npm, NPM_REQUIREMENT),
   };
   if (rejected.length) spec.rejected = rejected;
+  if (Array.isArray(e.ignored) && e.ignored.length) spec.ignored = e.ignored.map(String);
   return wantsPython(spec) || wantsNode(spec) ? spec : null;
 }
 
@@ -114,6 +119,8 @@ export function mergeRuntimes(...specs: (RuntimeSpec | null | undefined)[]): Run
   };
   const rejected = uniq(present.flatMap((s) => s.rejected ?? []));
   if (rejected.length) merged.rejected = rejected;
+  const ignored = uniq(present.flatMap((s) => s.ignored ?? []));
+  if (ignored.length) merged.ignored = ignored;
   return merged;
 }
 
@@ -490,9 +497,14 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   const shared = path.join(cacheRoot, fp);
   // Loud, and before anything else: a dropped requirement surfaces later as
   // an import error inside a script, which points at the wrong thing entirely.
-  const dropped = spec.rejected?.length
-    ? [`runtime ${fp}: ignored invalid requirement(s): ${spec.rejected.join(", ")}`]
-    : [];
+  const dropped = [
+    ...(spec.rejected?.length ? [`runtime ${fp}: ignored invalid requirement(s): ${spec.rejected.join(", ")}`] : []),
+    ...(spec.ignored?.length
+      ? [
+          `runtime ${fp}: requirements.txt option(s) not applied: ${spec.ignored.join(", ")} — the requirements are installed${spec.ignored.includes("--hash") ? " without hash checking" : ""}`,
+        ]
+      : []),
+  ];
 
   // The platform's shared layer first: environments built once, by the
   // platform, for every account that declares exactly this — mounted
