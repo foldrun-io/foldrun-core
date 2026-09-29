@@ -82,9 +82,7 @@ export function parseRuntime(raw: unknown): RuntimeSpec | null {
     npm: list(e.npm, NPM_REQUIREMENT),
   };
   if (rejected.length) spec.rejected = rejected;
-  const wantsSomething =
-    spec.python !== undefined || spec.node !== undefined || spec.packages.length || spec.npm.length;
-  return wantsSomething ? spec : null;
+  return wantsPython(spec) || wantsNode(spec) ? spec : null;
 }
 
 /**
@@ -149,6 +147,10 @@ export interface PreparedRuntime {
   /** Human-readable lines describing what was built, for the run log. */
   log: string[];
   error: string | null;
+  /** Removes what only this step may use — the private build a wedged or
+   *  failed shared build left it with. Absent when there is nothing to
+   *  remove; call it when the step is done with the environment. */
+  dispose?: () => void;
 }
 
 const EMPTY: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
@@ -233,8 +235,10 @@ function wire(root: string, spec: RuntimeSpec, note: string): PreparedRuntime {
   return { interpreters, env, log: [note], error: null };
 }
 
-const wantsPython = (s: RuntimeSpec) => s.python !== undefined || s.packages.length > 0;
-const wantsNode = (s: RuntimeSpec) => s.node !== undefined || s.npm.length > 0;
+// `python: false` says "not this one" — it used to read as a declaration
+// because it was not undefined, and built a venv nobody asked for.
+const wantsPython = (s: RuntimeSpec) => (s.python !== undefined && s.python !== false) || s.packages.length > 0;
+const wantsNode = (s: RuntimeSpec) => (s.node !== undefined && s.node !== false) || s.npm.length > 0;
 
 /** How long a build may hold the claim, and therefore how long another step
  *  will wait on it, before it is treated as abandoned. Longer than the 300s
@@ -263,39 +267,91 @@ function sleepSync(ms: number): void {
  * every later step inherits. `mkdir` is the lock because it is atomic on
  * every filesystem this runs on; O_EXCL on a file would do as well.
  */
-function claimBuild(root: string): boolean {
+// The claim carries a token naming its holder, so a build releases only a
+// claim that is still its own: one whose claim was taken over as abandoned
+// used to remove the new holder's lock on its way out, and a third step then
+// built into the same directory beside the second.
+export function claimBuild(root: string): string | null {
   const lock = path.join(root, ".building");
-  try {
+  const token = crypto.randomUUID();
+  const take = () => {
     fs.mkdirSync(lock);
-    return true;
+    fs.writeFileSync(path.join(lock, "owner"), token);
+    return token;
+  };
+  try {
+    return take();
   } catch {
     // Held — unless whoever held it died. A crashed build leaves the marker
     // behind forever, and without this every later step would wait the full
-    // timeout and then build privately, permanently.
+    // timeout and then build privately, permanently. A live build is never
+    // taken this way: it beats on the claim between installer runs (see
+    // heartbeat), and no single run may outlast the timeout.
     try {
       if (Date.now() - fs.statSync(lock).mtimeMs > buildTimeoutMs()) {
         fs.rmSync(lock, { recursive: true, force: true });
-        fs.mkdirSync(lock);
-        return true;
+        return take();
       }
     } catch {
       // Someone else won the steal. Wait for them like any other holder.
     }
+    return null;
+  }
+}
+
+/** Is the claim on `root` still the one `token` took? */
+function ownsBuild(root: string, token: string): boolean {
+  try {
+    return fs.readFileSync(path.join(root, ".building", "owner"), "utf8") === token;
+  } catch {
     return false;
   }
 }
 
+/** Say the build is alive: the claim's mtime is the clock claimBuild reads.
+ *  Synchronous installers block the event loop, so this cannot be a timer —
+ *  it is called before and after every installer run instead. */
+function heartbeat(root: string, token: string): void {
+  if (ownsBuild(root, token)) touch(path.join(root, ".building"));
+}
+
+/** Release the claim — only if it is still ours. */
+export function releaseBuild(root: string, token: string): void {
+  if (ownsBuild(root, token)) fs.rmSync(path.join(root, ".building"), { recursive: true, force: true });
+}
+
+/** How long a failed shared build is news to the steps that waited on it.
+ *  Older than this it describes an earlier attempt, and a new one is due. */
+const FAILED_TTL_MS = 60_000;
+
 /** Wait for another process's build, up to the point where it is abandoned.
  *  Waits for the claim to be released, not merely for `.ready` to exist: a
  *  stale entry being rebuilt still has its old marker for a moment, and
- *  reading that as "done" would wire the half-rebuilt directory up. */
-function awaitReady(root: string): boolean {
+ *  reading that as "done" would wire the half-rebuilt directory up. A build
+ *  that failed says so in `.failed`, and the wait ends there — it used to
+ *  spin the full six minutes on a lock that was already gone. */
+function awaitReady(root: string): { ready: true } | { ready: false; failed: string | null } {
   const until = Date.now() + buildTimeoutMs();
   while (Date.now() < until) {
-    if (!fs.existsSync(path.join(root, ".building")) && fs.existsSync(path.join(root, ".ready"))) return true;
+    if (!fs.existsSync(path.join(root, ".building"))) {
+      if (fs.existsSync(path.join(root, ".ready"))) return { ready: true };
+      const failed = readFailed(root);
+      if (failed !== null) return { ready: false, failed };
+    }
     sleepSync(250);
   }
-  return false;
+  return { ready: false, failed: null };
+}
+
+/** The error a recent failed build of `root` left, or null. */
+function readFailed(root: string): string | null {
+  const file = path.join(root, ".failed");
+  try {
+    if (Date.now() - fs.statSync(file).mtimeMs > FAILED_TTL_MS) return null;
+    return (JSON.parse(fs.readFileSync(file, "utf8")) as { error?: string }).error ?? "the build failed";
+  } catch {
+    return null;
+  }
 }
 
 /** A requirement's distribution name: `requests[socks]>=2` → `requests`. */
@@ -345,10 +401,19 @@ export function checkEntry(root: string, spec: RuntimeSpec): string | null {
         ? "the venv's python no longer runs (the image's python has changed)"
         : "the python venv is missing";
     }
-    const res = spawnSync(venvPython, ["-c", PY_CHECK, ...spec.packages.map(distName)], {
-      encoding: "utf8",
-      timeout: 60_000,
-    });
+    const probe = () =>
+      spawnSync(venvPython, ["-c", PY_CHECK, ...spec.packages.map(distName)], {
+        encoding: "utf8",
+        timeout: checkTimeoutMs(),
+      });
+    // A check that ran out of time says nothing about the venv — only that
+    // the host is busy (a cold disk, twenty steps importing at once). Read as
+    // broken, it deleted a venv other steps were running in and rebuilt it.
+    // Asked once more; still no answer, and the entry is used as it stands.
+    const timedOut = (r: ReturnType<typeof probe>) => (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+    let res = probe();
+    if (timedOut(res)) res = probe();
+    if (timedOut(res)) return null;
     if (res.status === 3) return `the venv is missing ${String(res.stdout).trim().split(",").join(", ")}`;
     if (res.status !== 0) return "the venv's python no longer runs (the image's python has changed)";
   }
@@ -358,6 +423,13 @@ export function checkEntry(root: string, spec: RuntimeSpec): string | null {
     }
   }
   return null;
+}
+
+/** How long the venv's python gets to answer checkEntry. Env-overridable
+ *  for the same reason as the build timeout: tests cannot wait a minute. */
+function checkTimeoutMs(): number {
+  const raw = Number(process.env.FOLDRUN_RUNTIME_CHECK_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
 }
 
 /** Days an entry may go unused before a later build prunes it. */
@@ -457,23 +529,47 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   if (!held) {
     // A concurrent step is building exactly this. Waiting for it beats
     // duplicating it — the work is identical and it is already underway.
-    if (awaitReady(shared) && !checkEntry(shared, spec)) {
+    const waited = awaitReady(shared);
+    if (waited.ready && !checkEntry(shared, spec)) {
       const hit = wire(shared, spec, `runtime ${fp}: cached (built by a concurrent step)`);
       return { ...hit, log: [...dropped, ...hit.log] };
+    }
+    // It failed, and just now: the same declaration would fail the same way
+    // here, so say what it said rather than spend another five minutes on it.
+    if (!waited.ready && waited.failed !== null) {
+      return { ...EMPTY, log: dropped, error: `runtime ${fp}: a concurrent step's build of this runtime failed — ${waited.failed}` };
     }
     // It never finished. Build privately instead: slower and uncached, but a
     // step that runs is worth more than a cache entry, and a wedged lock must
     // never be able to stop work. In the tmpdir, not the cache — a private
     // build is by definition not worth keeping, and leaving these beside the
-    // real entries would grow a directory nothing ever prunes.
+    // real entries would grow a directory nothing ever prunes. Removed by
+    // dispose() when the step is done with it.
     root = fs.mkdtempSync(path.join(os.tmpdir(), `foldrun-runtime-${fp}-`));
-  } else if (stale || !fs.existsSync(path.join(shared, ".ready"))) {
-    // A clean slate: whatever a stale or half-finished build left behind is
-    // exactly what must not be built on top of.
-    for (const leftover of [".ready", "venv", "node_modules", "package.json", "package-lock.json"]) {
-      fs.rmSync(path.join(shared, leftover), { recursive: true, force: true });
+  } else {
+    fs.rmSync(path.join(shared, ".failed"), { force: true });
+    if (stale || !fs.existsSync(path.join(shared, ".ready"))) {
+      // A clean slate: whatever a stale or half-finished build left behind is
+      // exactly what must not be built on top of.
+      for (const leftover of [".ready", "venv", "node_modules", "package.json", "package-lock.json"]) {
+        fs.rmSync(path.join(shared, leftover), { recursive: true, force: true });
+      }
     }
   }
+  const privateRoot = root === shared ? null : root;
+  const disposePrivate = () => {
+    if (privateRoot) fs.rmSync(privateRoot, { recursive: true, force: true });
+  };
+  // Every installer run goes through here, so the claim is beaten on before
+  // and after each one — no run can go quieter than its own timeout.
+  const install = (...args: Parameters<typeof run>) => {
+    if (held) heartbeat(shared, held);
+    try {
+      return run(...args);
+    } finally {
+      if (held) heartbeat(shared, held);
+    }
+  };
 
   const ready = path.join(root, ".ready");
   const interpreters: Record<string, string> = {};
@@ -486,6 +582,12 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   const wantsPy = wantsPython(spec);
   const wantsNd = wantsNode(spec);
   const built: Record<string, unknown> = { built: new Date().toISOString() };
+  let succeeded = false;
+  let failure = "the build failed";
+  const fail = (error: string): PreparedRuntime => {
+    failure = error;
+    return { ...EMPTY, log, error };
+  };
 
   try {
 
@@ -519,15 +621,13 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
       const want = pin ?? (hasCommand("python3", root) ? "python3" : "3");
       // --seed puts pip in the venv as well, for the agent that types
       // `pip install` in Bash; uv itself does not need it.
-      const made = run(uv, ["venv", "--seed", "-q", "--python", want, path.join(root, "venv")], root, 300_000, uvEnv);
+      const made = install(uv, ["venv", "--seed", "-q", "--python", want, path.join(root, "venv")], root, 300_000, uvEnv);
       if (!made.ok) {
-        return {
-          ...EMPTY,
-          log,
-          error: pin
+        return fail(
+          pin
             ? `python ${pin} could not be provided (uv tried the image and a download): ${made.out.slice(-400)}`
             : `failed to create venv: ${made.out.slice(-400)}`,
-        };
+        );
       }
     } else {
       // No uv: the image's own interpreter or nothing. A pin the image cannot
@@ -535,28 +635,26 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
       // silence, and "I asked for 3.12" then ran on 3.11.
       const exe = pin ? (hasCommand(`python${pin}`, root) ? `python${pin}` : null) : hasCommand("python3", root) ? "python3" : null;
       if (!exe) {
-        return {
-          ...EMPTY,
-          log,
-          error: pin
+        return fail(
+          pin
             ? `python ${pin} is not installed here, and uv (which could fetch it) is not available`
             : `no python3 on this host, and uv (which could fetch one) is not available`,
-        };
+        );
       }
-      const made = run(exe, ["-m", "venv", path.join(root, "venv")], root);
-      if (!made.ok) return { ...EMPTY, log, error: `failed to create venv: ${made.out.slice(0, 300)}` };
+      const made = install(exe, ["-m", "venv", path.join(root, "venv")], root);
+      if (!made.ok) return fail(`failed to create venv: ${made.out.slice(0, 300)}`);
     }
-    const version = run(venvPython, ["-c", "import platform; print(platform.python_version())"], root, 30_000);
+    const version = install(venvPython, ["-c", "import platform; print(platform.python_version())"], root, 30_000);
     built.python = version.ok ? version.out : "unknown";
     built.installer = uv ? "uv" : "pip";
     log.push(`runtime ${fp}: created venv (python ${built.python}${uv ? " via uv" : ""})`);
 
     if (spec.packages.length) {
       const installed = uv
-        ? run(uv, ["pip", "install", "-q", "--python", venvPython, ...spec.packages], root, 300_000, uvEnv)
-        : run(path.join(root, "venv", "bin", "pip"), ["install", "--disable-pip-version-check", "-q", ...spec.packages], root);
+        ? install(uv, ["pip", "install", "-q", "--python", venvPython, ...spec.packages], root, 300_000, uvEnv)
+        : install(path.join(root, "venv", "bin", "pip"), ["install", "--disable-pip-version-check", "-q", ...spec.packages], root);
       if (!installed.ok) {
-        return { ...EMPTY, log, error: `${uv ? "uv pip" : "pip"} install failed: ${installed.out.slice(-500)}` };
+        return fail(`${uv ? "uv pip" : "pip"} install failed: ${installed.out.slice(-500)}`);
       }
       built.packages = spec.packages;
       log.push(`runtime ${fp}: installed ${spec.packages.join(", ")}`);
@@ -572,7 +670,7 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
       // Not --silent: it sets npm's loglevel to silent, which suppresses the
       // explanation along with the noise. A build log nobody reads is cheaper
       // than a failure nobody can explain.
-      const installed = run(
+      const installed = install(
         "npm",
         ["install", "--no-fund", "--no-audit", "--no-progress", ...spec.npm],
         root,
@@ -589,7 +687,7 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
         },
       );
       if (!installed.ok) {
-        return { ...EMPTY, log, error: `npm install failed: ${installed.out.slice(-500)}` };
+        return fail(`npm install failed: ${installed.out.slice(-500)}`);
       }
       built.npm = spec.npm;
       log.push(`runtime ${fp}: installed ${spec.npm.join(", ")}`);
@@ -600,9 +698,16 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   // apply: an installer that exits 0 without installing what was asked (it
   // has happened, with npm and a cache it could not write) is caught here,
   // where the log still has the build beside it.
+  if (held) heartbeat(shared, held);
   const problem = checkEntry(root, spec);
-  if (problem) return { ...EMPTY, log, error: `runtime ${fp}: built but ${problem}` };
+  if (problem) return fail(`runtime ${fp}: built but ${problem}`);
 
+  // A build that lost its claim — it went quiet past the timeout and another
+  // step took the entry over — must not mark ready what the new holder may
+  // be clearing out beneath it — nor use it, for the same reason.
+  if (held && !ownsBuild(shared, held)) {
+    return fail(`runtime ${fp}: the build was taken over by another step as abandoned (over ${Math.round(buildTimeoutMs() / 1000)}s without a sign of life); run the step again`);
+  }
   fs.writeFileSync(ready, JSON.stringify(built));
   const wired = wire(root, spec, "");
   Object.assign(interpreters, wired.interpreters);
@@ -611,12 +716,28 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
     const pruned = pruneRuntimes(cacheRoot, fp);
     if (pruned.length) log.push(`runtime: pruned ${pruned.length} entr${pruned.length === 1 ? "y" : "ies"} unused for ${maxAgeDays()} days`);
   }
-  return { interpreters, env, log, error: null };
+  succeeded = true;
+  return { interpreters, env, log, error: null, ...(privateRoot ? { dispose: disposePrivate } : {}) };
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err);
+    throw err;
   } finally {
-    // Whatever happened — built, failed, threw — the claim is released. A
-    // failed build leaves no `.ready`, so the next step retries it rather
-    // than inheriting a half-built environment.
-    if (held) fs.rmSync(path.join(shared, ".building"), { recursive: true, force: true });
+    // Whatever happened — built, failed, threw — the claim is released, and
+    // only if it is still ours. A failed build leaves no `.ready`, so the
+    // next step retries it rather than inheriting a half-built environment;
+    // it leaves `.failed`, so the steps waiting on it stop waiting now. A
+    // failed private build is removed here: nothing will ever use it.
+    if (held) {
+      if (!succeeded && ownsBuild(shared, held)) {
+        try {
+          fs.writeFileSync(path.join(shared, ".failed"), JSON.stringify({ error: failure, at: new Date().toISOString() }));
+        } catch {
+          // best effort — a waiter without it waits the timeout, as before
+        }
+      }
+      releaseBuild(shared, held);
+    }
+    if (!succeeded) disposePrivate();
   }
 }
 

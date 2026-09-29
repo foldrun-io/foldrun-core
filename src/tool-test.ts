@@ -313,11 +313,18 @@ export async function testTool(
       file,
       toolRuntime.interpreters,
     );
-    const { code, out } = await runOnce(cmd, [...args, ...flags], cwd, {
-      ...hostSafeBaseEnv(),
-      ...toolRuntime.env,
-      ...env,
-    });
+    let ran: Awaited<ReturnType<typeof runOnce>>;
+    try {
+      ran = await runOnce(cmd, [...args, ...flags], cwd, {
+        ...hostSafeBaseEnv(),
+        ...toolRuntime.env,
+        ...env,
+      });
+    } finally {
+      // A private build (a concurrent one was wedged) is this test's alone.
+      toolRuntime.dispose?.();
+    }
+    const { code, out } = ran;
 
     // A script that needs arguments and got none has not failed — it has not
     // been tested. Saying "exited 2" would send someone looking for a bug.

@@ -14,7 +14,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareRuntime, parseRuntime, fingerprint, safeTenantSegment } from "../src/runtime.ts";
+import { spawn } from "node:child_process";
+import { prepareRuntime, parseRuntime, fingerprint, safeTenantSegment, claimBuild, releaseBuild, checkEntry } from "../src/runtime.ts";
 
 const SPEC = { python: true as const, packages: [], npm: [] };
 const FP = fingerprint(SPEC);
@@ -87,6 +88,13 @@ test("a live claim is waited on, not raced", () => {
         "the fallback build is private — it must not be published as the shared entry",
       );
       assert.ok(!fs.existsSync(path.join(entry(root), ".ready")), "and it is not marked ready");
+      // The private build lives in the tmpdir, and nothing prunes that: the
+      // step removes it when it is done.
+      const priv = path.dirname(path.dirname(path.dirname(out.interpreters[".py"])));
+      assert.ok(fs.existsSync(priv));
+      assert.ok(out.dispose, "a private build comes with its own disposer");
+      out.dispose!();
+      assert.ok(!fs.existsSync(priv), "disposed");
     } finally {
       if (previous === undefined) delete process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS;
       else process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS = previous;
@@ -223,5 +231,91 @@ test("`node: true` alone installs nothing, so a bare ready entry is still a hit"
     fs.writeFileSync(path.join(dir, ".ready"), "");
     const hit = prepareRuntime("acct", spec);
     assert.equal(hit.error, null, "no packages were asked for, so none can be missing");
+  });
+});
+
+test("a claim taken over as abandoned is not released by the build that lost it", () => {
+  inTempData((root) => {
+    const previous = process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS;
+    process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS = "50";
+    try {
+      const dir = entry(root);
+      fs.mkdirSync(dir, { recursive: true });
+      const lock = path.join(dir, ".building");
+      const first = claimBuild(dir)!;
+      assert.ok(first);
+      assert.equal(claimBuild(dir), null, "held, and fresh: not taken");
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, past, past);
+      const second = claimBuild(dir)!;
+      assert.ok(second && second !== first, "quiet past the timeout: taken over");
+      // The first build finishes late. Its finally used to remove the lock
+      // whoever held it, and a third step then built beside the second.
+      releaseBuild(dir, first);
+      assert.ok(fs.existsSync(lock), "the new holder's claim survives");
+      releaseBuild(dir, second);
+      assert.ok(!fs.existsSync(lock));
+    } finally {
+      if (previous === undefined) delete process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS;
+      else process.env.FOLDRUN_RUNTIME_BUILD_TIMEOUT_MS = previous;
+    }
+  });
+});
+
+test("a concurrent build that failed ends the wait at once, with its error", () => {
+  inTempData((root) => {
+    const dir = entry(root);
+    fs.mkdirSync(path.join(dir, ".building"), { recursive: true });
+    // The holder, in another process (the wait blocks this one): it fails
+    // after a moment, leaving .failed and releasing the claim.
+    spawn("sh", ["-c", `sleep 0.4; printf '{"error":"pip exploded"}' > .failed; rm -rf .building`], { cwd: dir, stdio: "ignore" });
+    const started = Date.now();
+    const out = prepareRuntime("acct", SPEC);
+    assert.ok(Date.now() - started < 5000, `it did not wait out the six minutes (${Date.now() - started}ms)`);
+    assert.match(out.error ?? "", /a concurrent step's build of this runtime failed — pip exploded/);
+  });
+});
+
+test("a failed shared build leaves .failed; the next claimant clears it and retries", () => {
+  const spec = parseRuntime({ node: true, npm: ["foldrun-no-such-package-3f9a1c"] })!;
+  inTempData((root) => {
+    const dir = path.join(root, "acct", ".runtimes", fingerprint(spec));
+    const out = prepareRuntime("acct", spec);
+    assert.ok(out.error);
+    const failed = JSON.parse(fs.readFileSync(path.join(dir, ".failed"), "utf8"));
+    assert.match(failed.error, /npm install failed/);
+    assert.ok(!fs.existsSync(path.join(dir, ".building")), "the claim is released");
+  });
+});
+
+test("python: false is not a declaration of python", () => {
+  assert.equal(parseRuntime({ python: false }), null, "nothing wanted, nothing built");
+  assert.equal(parseRuntime({ node: false }), null);
+  const spec = parseRuntime({ python: false, node: true })!;
+  inTempData((root) => {
+    const out = prepareRuntime("acct", spec);
+    assert.equal(out.error, null, out.error ?? "");
+    assert.ok(!out.interpreters[".py"], "no venv wired");
+    assert.ok(!fs.existsSync(path.join(root, "acct", ".runtimes", fingerprint(spec), "venv")), "and none built");
+  });
+});
+
+test("a health check that times out is inconclusive — the entry is used, not rebuilt", () => {
+  inTempData((root) => {
+    const previous = process.env.FOLDRUN_RUNTIME_CHECK_TIMEOUT_MS;
+    process.env.FOLDRUN_RUNTIME_CHECK_TIMEOUT_MS = "200";
+    try {
+      // A venv whose python is merely slow to answer (a busy host).
+      const bin = path.join(root, "venv", "bin");
+      fs.mkdirSync(bin, { recursive: true });
+      fs.writeFileSync(path.join(bin, "python"), "#!/bin/sh\nsleep 5\n", { mode: 0o755 });
+      assert.equal(checkEntry(root, { python: true, packages: ["pandas"], npm: [] }), null);
+      // One that answers and fails is still broken.
+      fs.writeFileSync(path.join(bin, "python"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      assert.match(checkEntry(root, { python: true, packages: ["pandas"], npm: [] }) ?? "", /no longer runs/);
+    } finally {
+      if (previous === undefined) delete process.env.FOLDRUN_RUNTIME_CHECK_TIMEOUT_MS;
+      else process.env.FOLDRUN_RUNTIME_CHECK_TIMEOUT_MS = previous;
+    }
   });
 });

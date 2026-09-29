@@ -81,7 +81,7 @@ import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./trans
 import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
-import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
+import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, type PreparedRuntime, type RuntimeSpec } from "./runtime.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
@@ -1140,7 +1140,7 @@ function agentContext(
   const runtimeLog: string[] = [];
   let runtimeError: string | null = null;
   let exec: ExecutionContext | null = null;
-  let runtime = { interpreters: {} as Record<string, string>, env: {} as Record<string, string>, log: [] as string[], error: null as string | null };
+  let runtime: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
 
   if (executor === "docker") {
     const image = ensureImage(runtimeSpec);
@@ -1490,7 +1490,7 @@ function agentContext(
     // what the tools declared, and a tool whose program needs a package it
     // asked for by name fails inside the container with "cannot find" while
     // the host path, which uses this same merged spec, works fine.
-    runtime: { log: runtimeLog, error: runtimeError, executor, spec: runtimeSpec },
+    runtime: { log: runtimeLog, error: runtimeError, executor, spec: runtimeSpec, dispose: runtime.dispose },
     secretEnv: { ...runtime.env, ...secretEnv },
     formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).foldrun_version).warning,
     providerEnv,
@@ -1658,6 +1658,7 @@ async function runStep(
   // cover a script's own stdout.
   let redactions: [string, string][] = [];
   let fileDir: string | null = null;
+  let disposeRuntime: (() => void) | undefined;
   const redact = (text: string) => {
     let out = text;
     for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
@@ -1755,6 +1756,7 @@ async function runStep(
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       translator, fallbackTranslator,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
+    disposeRuntime = runtime.dispose;
     // A retry that moved the step up a class (an evicted or OOM-killed
     // attempt) wins over the agent's own `size:` for the attempts after.
     const size = step.sizeUp ?? agentSize;
@@ -2562,6 +2564,12 @@ async function runStep(
       cleanupFileSecrets(fileDir);
     } catch {
       // best-effort — a leftover scratch file is swept with the run's outputs
+    }
+    try {
+      // A private runtime build (see prepareRuntime) is this step's alone.
+      disposeRuntime?.();
+    } catch {
+      // best-effort — it is in the tmpdir
     }
   }
   step.finishedAt = new Date().toISOString();
