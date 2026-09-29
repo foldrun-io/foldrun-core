@@ -487,7 +487,7 @@ test("tools: offers built-ins and your own tools in one list", () => {
   const text = "---\nname: a\ntools:\n  - ";
   const c = completionsAt("agents/a/agent.md", text, text.length, VOCAB);
   const labels = c!.items.map((i) => i.label);
-  assert.ok(labels.includes("files"), "built-in group");
+  assert.ok(labels.includes("write"), "built-in group");
   assert.ok(labels.includes("google-ads"), "your tool");
 });
 

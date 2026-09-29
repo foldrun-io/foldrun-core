@@ -14,13 +14,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ownToolNames, isRuntimeTool, legacyUseNames, legacyUseError } from "../src/tool-names.ts";
+import { ownToolNames, isRuntimeTool, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError, TOOL_MAP } from "../src/tool-names.ts";
 import { libraryUsage } from "../src/library.ts";
 import { listAgents } from "../src/store.ts";
 import { convert } from "../scripts/migrate-use-to-tools.mjs";
 
 test("a built-in name is never one of the author's own", () => {
-  for (const name of ["read", "files", "bash", "web", "fetch", "search", "history", "Read", "Bash", "WebFetch"]) {
+  for (const name of ["read", "write", "files", "code", "bash", "web", "fetch", "search", "history", "Read", "Bash", "WebFetch"]) {
     assert.ok(isRuntimeTool(name), `${name} is a runtime tool`);
   }
   assert.ok(!isRuntimeTool("site_repo"));
@@ -121,4 +121,20 @@ test("the migration merges use: into tools: in whichever form tools: already has
   // Nothing to do, nothing touched — including a body that mentions the word.
   assert.equal(convert("---\nname: a\ntools: [read]\n---\n\nuse: this wisely\n"), null);
   assert.equal(convert("no frontmatter\nuse: [x]\n"), null);
+});
+
+test("write and code are the names; files and bash stay as their aliases", () => {
+  assert.deepEqual(TOOL_MAP.write, TOOL_MAP.files);
+  assert.deepEqual(TOOL_MAP.code, TOOL_MAP.bash);
+  assert.deepEqual(ownToolNames({ tools: ["write", "code"] }), []);
+});
+
+test("the SDK's web names are retired: still granted, but named for rewrite", () => {
+  assert.deepEqual(retiredToolNames({ tools: ["web", "read", "WebFetch", "web", "fetch", "WebSearch"] }), ["web", "WebFetch", "fetch", "WebSearch"]);
+  // Ours are not retired, and a [[link]] is the author's own file.
+  assert.deepEqual(retiredToolNames({ tools: ["web_search", "web_fetch", "web_browse", "[[web]]"] }), []);
+  assert.match(retiredToolError("web"), /web_search, web_fetch/);
+  assert.match(retiredToolError("WebFetch"), /write web_fetch instead/);
+  // Still runtime tools, so a deployed agent keeps what it had.
+  assert.ok(isRuntimeTool("web") && isRuntimeTool("WebFetch"));
 });

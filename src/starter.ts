@@ -150,7 +150,8 @@ description: Finds one thing worth writing about, and says why.
 model: fast
 effort: high
 tools:
-  - web
+  - web_search
+  - web_fetch
   - read
 ---
 
@@ -165,7 +166,7 @@ Do not write the article.
 name: writer
 description: Turns a brief into a short draft.
 tools:
-  - files
+  - write
 ---
 
 Write a short draft from the brief you were given. Save it to outputs/draft.md.
@@ -403,7 +404,7 @@ description: Finds and summarises sources.
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
-tools: [WebSearch, Read, my-folder-tool]  # built-ins and your own tools/, one list
+tools: [web_search, read, my-folder-tool]  # built-ins and your own tools/, one list
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool

@@ -30,7 +30,7 @@ test("tools: [ offers the workspace's own tools, minus ones already chosen", () 
 
 test("tools: [ offers groups, own tools and SDK names alike", () => {
   const labels = at("---\ntools: [")!.items.map((i) => i.label);
-  assert.ok(labels.includes("files"), "runtime group");
+  assert.ok(labels.includes("write"), "runtime group");
   assert.ok(labels.includes("site_repo"), "your own tool");
   assert.ok(labels.includes("Read"), "exact SDK name");
 });

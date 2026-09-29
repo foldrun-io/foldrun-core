@@ -40,7 +40,7 @@ import matter from "gray-matter";
 export function readFrontmatter(file: string): Record<string, unknown> {
   return matter(fs.readFileSync(file, "utf8")).data as Record<string, unknown>;
 }
-import { ownToolNames, legacyUseNames } from "./tool-names.ts";
+import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
@@ -812,6 +812,9 @@ export interface AgentInfo {
   /** Names still written under the removed `use:` key. Nothing is granted
    *  for them; `foldrun check` and the run log say what to write instead. */
   legacyUse: string[];
+  /** Retired built-in names still in `tools:` (web, fetch, WebSearch,
+   *  WebFetch) — granted, but `check` says what to write instead. */
+  retiredTools: string[];
   /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
    *  consult_<name> tool. The team's edges, as the author drew them. */
   consults: string[];
@@ -1365,6 +1368,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         apis: parseApis(data.apis),
         ownTools: ownToolNames(data),
         legacyUse: legacyUseNames(data),
+        retiredTools: retiredToolNames(data),
         consults: refNames(data.agents),
         skills: data.skills === undefined ? null : refNames(data.skills),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],

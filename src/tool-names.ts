@@ -23,13 +23,32 @@ export const TOOL_MAP: Record<string, string[]> = {
   // None of them is aliased here on purpose: a name in TOOL_MAP shadows a
   // real tool of the same name (see runner.ts), so aliasing `web_fetch` would
   // silently replace our tool with the SDK's and change what an agent gets.
+  // `web` and `fetch` still grant what they did, so a deployed agent that
+  // says them keeps running — but they are retired (RETIRED_TOOLS, below):
+  // two ways onto the web, one of them off the run record, was a trap.
   web: ["WebSearch", "WebFetch"],
   fetch: ["WebFetch"],
-  // `read` is deliberately separate from `files`: an agent that may inspect a
-  // repository but must never modify it is a real and common design.
+  // `read` is deliberately separate from `write`: an agent that may inspect a
+  // repository but must never modify it is a real and common design. The pair
+  // says what it grants; `files` was the old name for `write` and stays as
+  // its alias, as `bash` does for `code`, which is not only shell — anything
+  // in the sandbox runs through it.
   read: ["Read", "Glob", "Grep"],
+  write: ["Read", "Write", "Edit", "Glob", "Grep"],
   files: ["Read", "Write", "Edit", "Glob", "Grep"],
+  code: ["Bash"],
   bash: ["Bash"],
+};
+
+/** Names an author may no longer write, and what to write instead. They are
+ *  still granted, so nothing deployed breaks; `check` and the run log say the
+ *  rewrite. The SDK's WebSearch/WebFetch remain the runtime's to use — a
+ *  `web_search: zai` swaps them in — just not the author's to name. */
+export const RETIRED_TOOLS: Record<string, string> = {
+  web: "web_search, web_fetch",
+  fetch: "web_fetch",
+  WebSearch: "web_search",
+  WebFetch: "web_fetch",
 };
 
 /** Exact SDK tool names, accepted alongside the group aliases so a Claude Code
@@ -88,6 +107,21 @@ export function ownToolNames(front: ToolFrontmatter): string[] {
  *  for these; they exist so the error can quote the exact `tools:` line. */
 export function legacyUseNames(front: ToolFrontmatter): string[] {
   return refNames(front.use);
+}
+
+/** Retired names written bare in `tools:`, deduped. A `[[link]]` is the
+ *  author's own file, so it is never one of these. */
+export function retiredToolNames(front: ToolFrontmatter): string[] {
+  const out: string[] = [];
+  for (const ref of toolRefs(front)) {
+    if (!ref.linked && RETIRED_TOOLS[ref.name] && !out.includes(ref.name)) out.push(ref.name);
+  }
+  return out;
+}
+
+/** The one sentence every reader of a retired name says. */
+export function retiredToolError(name: string): string {
+  return `tools: "${name}" is retired — write ${RETIRED_TOOLS[name]} instead: ours, on the run record, and swappable with a provider. It is still granted for now.`;
 }
 
 /** The one sentence every reader of a `use:` key says. */

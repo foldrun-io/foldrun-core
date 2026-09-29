@@ -26,7 +26,7 @@ const isolatedRun = () => {
   return mode === "container" || (!!mode && mode in platform.isolation);
 };
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
-import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError } from "./tool-names.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
   accountDir,
@@ -1373,6 +1373,7 @@ function agentContext(
     // The merged spec lists — inline plus tools:-granted — for the isolated
     // path, which serialises specs across the container boundary rather
     // than using the servers built here.
+    retiredTools: retiredToolNames(front),
     apiSpecs: apis,
     scriptSpecs,
     searchRoots,
@@ -1641,7 +1642,7 @@ async function runStep(
     const {
       front, clockEnv, clock, systemPrompt, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
-      unknownTools, shadowed, legacyUse, mcpServers, mcpNames,
+      unknownTools, shadowed, legacyUse, retiredTools, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       searchChoice, fetchChoice, language, region,
@@ -1689,10 +1690,11 @@ async function runStep(
     for (const t of unknownTools) {
       push(
         "error",
-        `tools: "${t}" is not a tool group (web, fetch, read, files, bash, search, history), an SDK tool name, or a tool in this workspace's library — nothing was granted for it`,
+        `tools: "${t}" is not a tool group (read, write, code, search, history, desks), an SDK tool name, or a tool in this workspace's library — nothing was granted for it`,
       );
     }
     for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
+    for (const t of retiredTools) push("error", retiredToolError(t));
     for (const name of shadowed) {
       push("error", `tools: "${name}" is a built-in, so your tool of the same name was not granted — write it as [[${name}]] to mean yours`);
     }

@@ -68,11 +68,11 @@ const EFFORTS: Completion[] = [
 // survive vendor renames — then the exact SDK names, accepted so a Claude Code
 // subagent runs here unchanged.
 const TOOL_GROUPS: Completion[] = [
+  // `files` and `bash` still work as aliases; `web` and `fetch` are retired
+  // (tool-names.ts) — neither is offered, so nobody new writes them.
   { label: "read", hint: "Read, Glob, Grep — may look, never write" },
-  { label: "files", hint: "Read, Write, Edit, Glob, Grep" },
-  { label: "web", hint: "WebSearch (Anthropic's servers, billed per search), WebFetch" },
-  { label: "fetch", hint: "WebFetch only — the SDK's; prefer the web_fetch tool" },
-  { label: "bash", hint: "Bash — arbitrary commands" },
+  { label: "write", hint: "Read, Write, Edit, Glob, Grep" },
+  { label: "code", hint: "Bash — runs anything in the sandbox" },
 ];
 
 const SDK_TOOL_NAMES: Completion[] = [
@@ -82,8 +82,6 @@ const SDK_TOOL_NAMES: Completion[] = [
   { label: "Glob", hint: "exact SDK name" },
   { label: "Grep", hint: "exact SDK name" },
   { label: "Bash", hint: "exact SDK name" },
-  { label: "WebSearch", hint: "exact SDK name" },
-  { label: "WebFetch", hint: "exact SDK name" },
 ];
 
 const METHODS: Completion[] = ["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => ({ label: m }));
