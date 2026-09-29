@@ -96,6 +96,20 @@ export interface ExecOptions {
 
 /** How often the stop flag is read while a step runs. */
 export const STOP_POLL_MS = 2000;
+/** The least a `verify:` gets when the step used up most of its `timeout:` —
+ *  capped by the timeout itself, so the step and its check together never
+ *  run past timeout + this. Under the isolated path's backstop (+60 s). */
+export const VERIFY_FLOOR_MS = 30_000;
+/** A step with no `timeout:` still cannot hang forever in its check. */
+export const VERIFY_DEFAULT_MS = 30 * 60_000;
+
+/** How long a `verify:` may run: what is left of the step's `timeout:`,
+ *  with a floor, or the platform's limit when the flow set none. */
+export function verifyBudgetMs(timeoutSec: number | undefined, elapsedMs: number): number {
+  if (!timeoutSec || timeoutSec <= 0) return VERIFY_DEFAULT_MS;
+  const total = timeoutSec * 1000;
+  return Math.max(total - elapsedMs, Math.min(VERIFY_FLOOR_MS, total));
+}
 /** After an interrupt is asked for, how long the model loop gets to wind
  *  down on its own before the query is aborted outright. */
 export const INTERRUPT_GRACE_MS = 10_000;
@@ -314,6 +328,7 @@ export async function executeStep(
   // was nothing to check it against. The backstop timer fires regardless,
   // and a stop is read on a clock rather than between groups.
   let ended: "timeout" | "stopped" | null = null;
+  const startedAt = Date.now();
   const timers: NodeJS.Timeout[] = [];
   const endWith = (why: "timeout" | "stopped") => {
     if (ended) return;
@@ -490,17 +505,57 @@ export async function executeStep(
   }
 
   // "Done" should mean a check passed, not that the model stopped talking.
+  // The loop's clocks are cleared by now, so the check gets its own: what is
+  // left of the step's `timeout:` (never less than VERIFY_FLOOR_MS of it),
+  // and a stop read on the same clock the loop used. A `verify:` that hangs
+  // — a build waiting on a lock, a judge that never answers — used to hold
+  // the step, and the run, with nothing to end it.
   if (status === "completed" && opts.verify) {
-    const verdict = await checkVerify(agentDir, opts.verify, {
-      env: opts.verifyEnv ?? {},
-      result,
-      conclusion,
-      data,
-      modelEnv: opts.env,
-    });
-    emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`);
-    if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000));
-    if (!verdict.ok) status = "failed";
+    const verifyMs = verifyBudgetMs(opts.timeoutSec, Date.now() - startedAt);
+    const halt = new AbortController();
+    let cut: "timeout" | "stopped" | null = null;
+    const clocks: NodeJS.Timeout[] = [
+      setTimeout(() => {
+        cut ??= "timeout";
+        halt.abort();
+      }, verifyMs),
+    ];
+    if (opts.stopRequested) {
+      clocks.push(setInterval(() => {
+        try {
+          if (opts.stopRequested!()) {
+            cut ??= "stopped";
+            halt.abort();
+          }
+        } catch {
+          // an unreadable record is not a stop
+        }
+      }, STOP_POLL_MS));
+    }
+    let verdict: VerifyVerdict;
+    try {
+      verdict = await checkVerify(agentDir, opts.verify, {
+        env: opts.verifyEnv ?? {},
+        result,
+        conclusion,
+        data,
+        modelEnv: opts.env,
+        signal: halt.signal,
+      });
+    } finally {
+      for (const t of clocks) clearTimeout(t);
+    }
+    if (cut === "timeout") {
+      emit("error", `verify \`${opts.verify}\` → timed out after ${Math.round(verifyMs / 1000)}s (${opts.timeoutSec ? "what was left of timeout: in the flow file" : "the platform's limit for a check"}) — it was stopped`);
+      status = "failed";
+    } else if (cut === "stopped") {
+      emit("error", `verify \`${opts.verify}\` → stopped by a person mid-check`);
+      status = "failed";
+    } else {
+      emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`);
+      if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000));
+      if (!verdict.ok) status = "failed";
+    }
   }
 
   return { status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage };
@@ -584,6 +639,9 @@ export async function checkVerify(
     /** The step's own model environment, for `judge:` — it grades on the
      *  fast tier through the same credential the step rode. */
     modelEnv?: Record<string, string | undefined>;
+    /** Ends a shell check or a judge mid-way: the step's clock ran out, or a
+     *  person asked the run to stop. */
+    signal?: AbortSignal;
   },
 ): Promise<VerifyVerdict> {
   const m = verify.trim().match(VERIFY_ASSERTION);
@@ -597,7 +655,7 @@ export async function checkVerify(
     const replyFile = path.join(dir, "reply.md");
     fs.writeFileSync(replyFile, ctx.conclusion ?? ctx.result ?? "");
     try {
-      const { code, out } = await runVerify(agentDir, verify, { ...ctx.env, FOLDRUN_REPLY_FILE: replyFile }, ctx.data);
+      const { code, out } = await runVerify(agentDir, verify, { ...ctx.env, FOLDRUN_REPLY_FILE: replyFile }, ctx.data, ctx.signal);
       return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out };
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -633,7 +691,7 @@ export async function checkVerify(
       return { ok, headline: ok ? "present and non-empty" : `${value} is missing or empty`, detail: "" };
     }
     case "judge": {
-      const verdict = await judgeReply(value, output, ctx.modelEnv ?? {});
+      const verdict = await judgeReply(value, output, ctx.modelEnv ?? {}, ctx.signal);
       const ok = /^\s*PASS\b/i.test(verdict);
       return { ok, headline: ok ? "PASS" : "FAIL", detail: verdict.slice(0, 300) };
     }
@@ -650,8 +708,12 @@ async function judgeReply(
   rubric: string,
   output: string,
   env: Record<string, string | undefined>,
+  signal?: AbortSignal,
 ): Promise<string> {
   const texts: string[] = [];
+  const abortController = new AbortController();
+  if (signal?.aborted) abortController.abort();
+  signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   try {
     const q = query({
       prompt:
@@ -665,6 +727,7 @@ async function judgeReply(
         settingSources: [],
         env,
         maxTurns: 1,
+        abortController,
       },
     });
     for await (const message of q) {
@@ -687,10 +750,11 @@ function runVerify(
   command: string,
   env: Record<string, string>,
   data?: unknown,
+  signal?: AbortSignal,
 ): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    // No clock of the platform's: a verify like `npm run build` takes what
-    // it takes, and the step's own `timeout:` is the bound if the flow set one.
+    // The clock is the caller's (executeStep): what is left of the step's
+    // `timeout:`, ended through `signal`, which a stop also fires.
     // The allowlisted host base plus what the caller passed: the step's
     // secrets and identifiers on the in-process path (runner.ts), the
     // container's own environment on the isolated one (run-container.ts).
@@ -699,7 +763,20 @@ function runVerify(
       cwd: agentDir,
       env: { ...hostSafeEnv(), ...env },
       stdio: ["pipe", "pipe", "pipe"],
+      // Its own process group, so an abort ends what the shell started
+      // (`npm run build` and its children) and not only bash.
+      detached: true,
     });
+    const kill = () => {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
+    if (signal?.aborted) kill();
+    else signal?.addEventListener("abort", kill, { once: true });
+    child.on("close", () => signal?.removeEventListener("abort", kill));
     // An `output: json` step's data arrives on stdin, so a check can be
     // `jq -e '.total > 0'` — arithmetic in a real tool, reading the value
     // the step actually returned rather than re-parsing its prose.

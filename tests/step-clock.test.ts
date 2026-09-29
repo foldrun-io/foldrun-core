@@ -145,3 +145,43 @@ test("a step cut off by its timeout is charged for the turns it took, each count
   }));
 
 import { priceTurn as priceTurnFor } from "../src/step-exec.ts";
+
+// ----------------------------------------------------------------- verify:
+
+/** A model loop that answers at once. */
+const doneQuery: QueryFn = () => {
+  const stream = (async function* () {
+    yield { type: "assistant", message: { usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: "text", text: "done" }] } };
+    yield { type: "result", subtype: "success", total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } };
+  })();
+  return Object.assign(stream, { interrupt: async () => {} });
+};
+
+test("a verify: that hangs is ended by what is left of the step's timeout", () =>
+  withAgent(async (agentDir) => {
+    const events: string[] = [];
+    const started = Date.now();
+    const out = await executeStep(opts(agentDir, { timeoutSec: 1, verify: "sleep 30" }, events), doneQuery);
+    assert.equal(out.status, "failed");
+    assert.ok(Date.now() - started < 5000, `the check was cut on the clock (${Date.now() - started}ms)`);
+    assert.ok(events.some((e) => /^error: verify `sleep 30` → timed out after 1s/.test(e)), events.join(" | "));
+  }));
+
+test("a stop lands in a verify: too", () =>
+  withAgent(async (agentDir) => {
+    const events: string[] = [];
+    const started = Date.now();
+    const out = await executeStep(opts(agentDir, { timeoutSec: 600, verify: "sleep 30", stopRequested: () => true }, events), doneQuery);
+    assert.equal(out.status, "failed");
+    assert.ok(Date.now() - started < 6000, `the stop was read on the poll (${Date.now() - started}ms)`);
+    assert.ok(events.some((e) => e === "error: verify `sleep 30` → stopped by a person mid-check"), events.join(" | "));
+  }));
+
+test("verify: gets what is left of the timeout, with a floor the timeout still caps", () => {
+  assert.equal(verifyBudgetMs(600, 100_000), 500_000);
+  assert.equal(verifyBudgetMs(600, 590_000), 30_000, "nearly out: the floor");
+  assert.equal(verifyBudgetMs(10, 9_000), 10_000, "the floor never exceeds the timeout itself");
+  assert.equal(verifyBudgetMs(undefined, 0), 30 * 60_000, "no timeout: the platform's limit");
+});
+
+import { verifyBudgetMs } from "../src/step-exec.ts";
