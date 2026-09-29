@@ -227,7 +227,9 @@ export interface Driver {
   remove(key: string): Promise<void>;
   /** A URL a browser can GET directly, or null when the driver has no such
    *  thing (fs) and the route must stream the bytes itself. */
-  presignGet(key: string, filename: string, mime: string, ttlSec?: number): Promise<string | null>;
+  /** `inlineType`: show it rather than save it — only ever a type from
+   *  previewType(), which cannot run script. Anything else is attachment. */
+  presignGet(key: string, filename: string, mime: string, ttlSec?: number, inlineType?: string): Promise<string | null>;
   /** A URL a browser can PUT directly to, so upload bytes never transit the
    *  dashboard process. Null on fs, where the route takes the body. */
   presignPut(key: string, mime: string, ttlSec?: number): Promise<string | null>;
@@ -548,11 +550,14 @@ function s3Driver(cfg: S3Config): Driver {
       // 404 on delete is the desired end state, not an error.
       if (!res.ok && res.status !== 404) await fail(res, "delete");
     },
-    async presignGet(key, filename, mime, ttlSec = 300) {
+    async presignGet(key, filename, mime, ttlSec = 300, inlineType) {
+      // Attachment, unless the caller names a preview type — and then only a
+      // type previewType() vouches for, with that type forced, so a stored
+      // page can never come back as a page. See presign()'s note.
+      const safe = inlineType && PREVIEW_TYPES_SET.has(inlineType) ? inlineType : null;
       return presign(cfg, await credentials(cfg), "GET", key, ttlSec, {
-        // Never inline. See presign()'s note — this is the XSS boundary.
-        "response-content-disposition": `attachment; filename="${filename.replace(/["\\]/g, "")}"`,
-        "response-content-type": mime,
+        "response-content-disposition": `${safe ? "inline" : "attachment"}; filename="${filename.replace(/["\\]/g, "")}"`,
+        "response-content-type": safe ?? mime,
       });
     },
     async presignPut(key, _mime, ttlSec = 600) {
@@ -723,12 +728,33 @@ export async function downloadUrl(
   tenant: string,
   workspace: string,
   record: FileRecord,
+  opts: { inline?: boolean } = {},
 ): Promise<string | null> {
+  const inlineType = opts.inline ? previewType(record.path) ?? undefined : undefined;
   return driverFor(tenant, workspace).presignGet(
     blobKey(tenant, workspace, record.sha),
     path.basename(record.path),
     record.mime,
+    300,
+    inlineType,
   );
+}
+
+/**
+ * The types a stored file may be shown as, rather than saved: pictures,
+ * video, audio and PDF, by extension. None of them runs script in a page —
+ * SVG is left out for exactly that reason, and so is anything HTML-shaped.
+ * Null means "download it".
+ */
+const PREVIEW_TYPES: Record<string, string> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
+  ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".m4v": "video/mp4",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+  ".pdf": "application/pdf",
+};
+const PREVIEW_TYPES_SET = new Set(Object.values(PREVIEW_TYPES));
+export function previewType(rel: string): string | null {
+  return PREVIEW_TYPES[path.extname(rel).toLowerCase()] ?? null;
 }
 
 /** A link the browser can PUT to, plus the key it will land at. Null on fs. */
