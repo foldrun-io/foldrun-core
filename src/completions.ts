@@ -68,8 +68,8 @@ const EFFORTS: Completion[] = [
 // survive vendor renames — then the exact SDK names, accepted so a Claude Code
 // subagent runs here unchanged.
 const TOOL_GROUPS: Completion[] = [
-  // `files` and `bash` still work as aliases; `web` and `fetch` are retired
-  // (tool-names.ts) — neither is offered, so nobody new writes them.
+  // `files`, `bash`, `web` and `fetch` are retired (tool-names.ts) — none is
+  // offered, so nobody new writes them.
   { label: "read", hint: "Read, Glob, Grep — may look, never write" },
   { label: "write", hint: "Read, Write, Edit, Glob, Grep" },
   { label: "code", hint: "Bash — runs anything in the sandbox" },

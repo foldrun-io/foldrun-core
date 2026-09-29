@@ -812,8 +812,8 @@ export interface AgentInfo {
   /** Names still written under the removed `use:` key. Nothing is granted
    *  for them; `foldrun check` and the run log say what to write instead. */
   legacyUse: string[];
-  /** Retired built-in names still in `tools:` (web, fetch, WebSearch,
-   *  WebFetch) — granted, but `check` says what to write instead. */
+  /** Retired built-in names still in `tools:` (files, bash, web, fetch,
+   *  WebSearch, WebFetch) — granted, but `check` says what to write instead. */
   retiredTools: string[];
   /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
    *  consult_<name> tool. The team's edges, as the author drew them. */

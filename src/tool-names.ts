@@ -30,9 +30,9 @@ export const TOOL_MAP: Record<string, string[]> = {
   fetch: ["WebFetch"],
   // `read` is deliberately separate from `write`: an agent that may inspect a
   // repository but must never modify it is a real and common design. The pair
-  // says what it grants; `files` was the old name for `write` and stays as
-  // its alias, as `bash` does for `code`, which is not only shell — anything
-  // in the sandbox runs through it.
+  // says what it grants. `files` and `bash` were the old names for `write`
+  // and `code` (`code`, because it is not only shell — anything in the
+  // sandbox runs through it); both are retired, below.
   read: ["Read", "Glob", "Grep"],
   write: ["Read", "Write", "Edit", "Glob", "Grep"],
   files: ["Read", "Write", "Edit", "Glob", "Grep"],
@@ -45,6 +45,8 @@ export const TOOL_MAP: Record<string, string[]> = {
  *  rewrite. The SDK's WebSearch/WebFetch remain the runtime's to use — a
  *  `web_search: zai` swaps them in — just not the author's to name. */
 export const RETIRED_TOOLS: Record<string, string> = {
+  files: "write",
+  bash: "code",
   web: "web_search, web_fetch",
   fetch: "web_fetch",
   WebSearch: "web_search",
@@ -121,7 +123,8 @@ export function retiredToolNames(front: ToolFrontmatter): string[] {
 
 /** The one sentence every reader of a retired name says. */
 export function retiredToolError(name: string): string {
-  return `tools: "${name}" is retired — write ${RETIRED_TOOLS[name]} instead: ours, on the run record, and swappable with a provider. It is still granted for now.`;
+  const why = name === "files" || name === "bash" ? "the same grant, under the name that says what it does" : "ours, on the run record, and swappable with a provider";
+  return `tools: "${name}" is retired — use ${RETIRED_TOOLS[name]} instead: ${why}. It is still granted for now.`;
 }
 
 /** The one sentence every reader of a `use:` key says. */

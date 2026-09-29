@@ -32,7 +32,7 @@ test("own tools are whatever in tools: a built-in does not claim", () => {
     "internal_links",
   ]);
   // Only built-ins means nothing of the author's — the sandbox stays offline.
-  assert.deepEqual(ownToolNames({ tools: ["read", "bash"] }), []);
+  assert.deepEqual(ownToolNames({ tools: ["read", "code"] }), []);
   assert.deepEqual(ownToolNames({}), []);
   // A non-list is ignored rather than crashing the parse.
   assert.deepEqual(ownToolNames({ tools: "read" }), []);
@@ -123,10 +123,12 @@ test("the migration merges use: into tools: in whichever form tools: already has
   assert.equal(convert("no frontmatter\nuse: [x]\n"), null);
 });
 
-test("write and code are the names; files and bash stay as their aliases", () => {
+test("write and code are the names; files and bash still grant the same, retired", () => {
   assert.deepEqual(TOOL_MAP.write, TOOL_MAP.files);
   assert.deepEqual(TOOL_MAP.code, TOOL_MAP.bash);
   assert.deepEqual(ownToolNames({ tools: ["write", "code"] }), []);
+  assert.deepEqual(retiredToolNames({ tools: ["files", "bash", "write", "code"] }), ["files", "bash"]);
+  assert.match(retiredToolError("files"), /use write instead: the same grant/);
 });
 
 test("the SDK's web names are retired: still granted, but named for rewrite", () => {
@@ -134,7 +136,7 @@ test("the SDK's web names are retired: still granted, but named for rewrite", ()
   // Ours are not retired, and a [[link]] is the author's own file.
   assert.deepEqual(retiredToolNames({ tools: ["web_search", "web_fetch", "web_browse", "[[web]]"] }), []);
   assert.match(retiredToolError("web"), /web_search, web_fetch/);
-  assert.match(retiredToolError("WebFetch"), /write web_fetch instead/);
+  assert.match(retiredToolError("WebFetch"), /use web_fetch instead/);
   // Still runtime tools, so a deployed agent keeps what it had.
   assert.ok(isRuntimeTool("web") && isRuntimeTool("WebFetch"));
 });
