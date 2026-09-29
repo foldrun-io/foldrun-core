@@ -195,17 +195,22 @@ test("what was rejected does not change the cache key", () => {
 // which reads as a broken tool rather than a broken runtime. Found in
 // production: gbp-desk's post_image reported sharp missing for two runs while
 // the runtime line above it said the entry was cached.
-test("a ready entry that cannot satisfy the declaration is an error, not a hit", () => {
-  const spec = parseRuntime({ node: true, npm: ["sharp"] })!;
+test("a ready entry that cannot satisfy the declaration is rebuilt, not trusted", () => {
+  // It used to be reported as an error and left in place, so every later
+  // step failed the same way until someone deleted the directory by hand. It
+  // is rebuilt now; this package does not exist, so the rebuild itself fails
+  // and says so, which proves the path without needing the network to work.
+  const spec = parseRuntime({ node: true, npm: ["foldrun-no-such-package-3f9a1c"] })!;
   const fp = fingerprint(spec);
   inTempData((root) => {
     const dir = path.join(root, "acct", ".runtimes", fp);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, ".ready"), ""); // ready, but nothing installed
     const hit = prepareRuntime("acct", spec);
-    assert.ok(hit.error, "an entry promising sharp with no node_modules must not pass as a hit");
-    assert.match(hit.error!, /node_modules/);
+    assert.match(hit.log.join("\n"), /cached entry unusable \(node_modules is missing foldrun-no-such-package-3f9a1c\); rebuilding/);
+    assert.ok(hit.error, "a rebuild of a package that does not exist must fail loudly");
     assert.ok(!hit.env.NODE_PATH, "nothing to point NODE_PATH at");
+    assert.ok(!fs.existsSync(path.join(dir, ".ready")), "the stale marker is gone, so the next step retries");
   });
 });
 

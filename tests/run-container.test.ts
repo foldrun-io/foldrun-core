@@ -280,6 +280,30 @@ test("an empty or unset FOLDRUN_RUNNER_IMAGE builds the content-hash tag; a real
   assert.equal(explicit.tag, "me/runner:x");
 });
 
+// The slim image is its own tag and its own override, so a step that asks
+// for it can never be handed the full image by name collision, and setting
+// one override never moves the other.
+test("the slim variant has its own tag and its own override", () => {
+  const prev = process.env.FOLDRUN_RUNNER_SLIM_IMAGE;
+  try {
+    delete process.env.FOLDRUN_RUNNER_SLIM_IMAGE;
+    const full = withRunnerImage(undefined, () => runnerImageTag());
+    const slim = withRunnerImage(undefined, () => runnerImageTag("slim"));
+    assert.equal(slim, `${full}-slim`);
+    // FOLDRUN_RUNNER_IMAGE names the full image only.
+    const ref = withRunnerImage("reg/runner:full", () => runnerImageRef({ variant: "slim" }));
+    assert.equal(ref.tag, slim);
+    assert.equal(ref.explicit, false);
+    process.env.FOLDRUN_RUNNER_SLIM_IMAGE = "reg/runner:slim";
+    const set = withRunnerImage("reg/runner:full", () => runnerImageRef({ variant: "slim" }));
+    assert.deepEqual(set, { tag: "reg/runner:slim", explicit: true });
+    assert.equal(withRunnerImage("reg/runner:full", () => runnerImageRef()).tag, "reg/runner:full");
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_RUNNER_SLIM_IMAGE;
+    else process.env.FOLDRUN_RUNNER_SLIM_IMAGE = prev;
+  }
+});
+
 // A secret whose value holds a newline used to be dropped from the env
 // file without a word — docker's --env-file is one KEY=value per line —
 // and the step failed later, elsewhere, on a variable that read as unset.

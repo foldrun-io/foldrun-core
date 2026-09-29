@@ -42,6 +42,7 @@ import {
   listRuns,
   syncBundleFor,
   parseToolDef,
+  type ToolDef,
   parseFlow,
   readFlow,
   markerPresent,
@@ -80,7 +81,7 @@ import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./trans
 import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
-import { mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
+import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, type RuntimeSpec } from "./runtime.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
@@ -336,6 +337,57 @@ const workspaceRootOf = (agentDir: string) => path.join(agentDir, "..", "..");
  * writing instructions means *as well as*, because an account rule nobody can
  * silently drop is the point of having one.
  */
+/** An agent's own `runtime:` block, else its workspace's (AGENTS.md, the
+ *  Linux Foundation standard name; project.md stays accepted so nothing
+ *  that already exists breaks). */
+function ownRuntime(front: Record<string, unknown>, agentDir: string, tenant: string): RuntimeSpec | null {
+  return parseRuntime(front.runtime) ?? parseRuntime(workspaceFrontmatter(agentDir, tenant).runtime);
+}
+
+/** What one granted script tool's program needs. */
+function toolRuntime(def: ToolDef): RuntimeSpec | null {
+  return def.kind === "script" ? parseRuntime((def.spec as { runtime?: unknown }).runtime) : null;
+}
+
+/**
+ * The runtime one agent's steps are built with: its own declaration (else its
+ * workspace's), merged with every script tool it grants. The runner builds
+ * exactly this for a step; the platform builds it ahead of time when the
+ * workspace is deployed, so a package that will not install is reported at
+ * deploy and a scheduled step finds its environment ready. One function, so
+ * the two can never disagree about what an agent needs.
+ */
+export function agentRuntimeSpec(tenant: string, workspace: string, agentDir: string): RuntimeSpec | null {
+  const file = path.join(agentDir, "agent.md");
+  if (!fs.existsSync(file)) return null;
+  const front = safeMatter(fs.readFileSync(file, "utf8")).data;
+  const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
+  const tools = ownToolNames(front)
+    .map((name) => available[name])
+    .filter((def): def is ToolDef => Boolean(def))
+    .map(toolRuntime);
+  return mergeRuntimes(ownRuntime(front, agentDir, tenant), ...tools);
+}
+
+/** Every distinct runtime a workspace's agents need, with who needs it. */
+export function workspaceRuntimePlan(
+  tenant: string,
+  workspace: string,
+): { fingerprint: string; spec: RuntimeSpec; agents: string[] }[] {
+  const byFp = new Map<string, { fingerprint: string; spec: RuntimeSpec; agents: string[] }>();
+  const agentsRoot = path.join(workspaceDir(tenant, workspace), "agents");
+  if (!fs.existsSync(agentsRoot)) return [];
+  for (const name of fs.readdirSync(agentsRoot).sort()) {
+    const spec = agentRuntimeSpec(tenant, workspace, path.join(agentsRoot, name));
+    if (!spec) continue;
+    const fp = fingerprint(spec);
+    const entry = byFp.get(fp) ?? { fingerprint: fp, spec, agents: [] };
+    entry.agents.push(name);
+    byFp.set(fp, entry);
+  }
+  return [...byFp.values()];
+}
+
 function workspaceFrontmatter(agentDir: string, tenant: string): Record<string, unknown> {
   return {
     ...(readAgentsMd(accountDir(tenant))?.data ?? {}),
@@ -863,7 +915,7 @@ function agentContext(
     if (def.kind === "http") apis.push(def.spec);
     else if (def.kind === "script") {
       scriptSpecs.push(...parseScripts([def.spec]));
-      const rt = parseRuntime((def.spec as { runtime?: unknown }).runtime);
+      const rt = toolRuntime(def);
       if (rt) toolRuntimes.push(rt);
     }
     else {
@@ -1073,15 +1125,8 @@ function agentContext(
   // Runtime: an agent's own `runtime:` block, else its workspace's. Built once
   // per declaration and cached, so scripts get their dependencies without
   // polluting the host.
-  let runtimeSpec = parseRuntime(front.runtime);
-  if (!runtimeSpec) {
-    // AGENTS.md is the Linux Foundation standard name (60k+ repos, same
-    // nearest-wins cascade we already use); project.md stays accepted so
-    // nothing that already exists breaks.
-    runtimeSpec = parseRuntime(workspaceFrontmatter(agentDir, tenant).runtime);
-  }
   // Plus whatever the tools this agent granted declared for themselves.
-  runtimeSpec = mergeRuntimes(runtimeSpec, ...toolRuntimes);
+  let runtimeSpec = mergeRuntimes(ownRuntime(front, agentDir, tenant), ...toolRuntimes);
   // Execution: a container per run when Docker is available (real isolation),
   // otherwise the host venv path so local development still works.
   const executor = chooseExecutor();
@@ -1107,6 +1152,13 @@ function agentContext(
         network: parseApis(front.apis).length > 0 || ownToolNames(front).length > 0,
       };
     }
+  } else if (isolatedRun()) {
+    // The sandbox builds it (run-container.ts, beside pip's network and the
+    // mounted cache); building it here as well was pure waste, and on a
+    // worker image without python it was worse than waste — it logged
+    // "python3 is not available on this host" as an error on every Python
+    // step, above a sandbox build that had succeeded, and sent every reader
+    // of the trace after the wrong machine.
   } else {
     runtime = prepareRuntime(tenant, runtimeSpec);
     runtimeLog.push(...runtime.log);

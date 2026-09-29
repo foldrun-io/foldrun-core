@@ -676,6 +676,56 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
  *
  * Flat files keep working unchanged — the shape is a migration, not a break.
  */
+/**
+ * A folder tool's `requirements.txt` and `package.json`, as a `runtime:`
+ * block. Plain requirement lines only: comments, blanks, and option lines
+ * (`-r`, `--index-url`, `-e`) are left out here, and anything else that is
+ * not a requirement is refused later by parseRuntime with a log line, the
+ * same as it would be in tool.md. `dependencies` only — a tool's dev
+ * dependencies are its author's, not its runtime's.
+ */
+export function folderRuntime(folder: string): Record<string, unknown> | null {
+  const out: { packages?: string[]; npm?: string[]; node?: boolean } = {};
+  const req = path.join(folder, "requirements.txt");
+  if (fs.existsSync(req)) {
+    const lines = fs
+      .readFileSync(req, "utf8")
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\s+#.*$/, "").replace(/\s+/g, "").trim())
+      .filter((l) => l && !l.startsWith("#") && !l.startsWith("-"));
+    if (lines.length) out.packages = lines;
+  }
+  const pkg = path.join(folder, "package.json");
+  if (fs.existsSync(pkg)) {
+    try {
+      const deps = (JSON.parse(fs.readFileSync(pkg, "utf8")) as { dependencies?: Record<string, string> }).dependencies ?? {};
+      const npm = Object.entries(deps).map(([name, range]) => (range && range !== "*" && range !== "latest" ? `${name}@${range}` : name));
+      if (npm.length) {
+        out.npm = npm;
+        out.node = true;
+      }
+    } catch {
+      // An unreadable package.json declares nothing; tool.md still can.
+    }
+  }
+  return out.packages || out.npm ? out : null;
+}
+
+/** tool.md's own `runtime:` plus what the folder's files add. */
+function mergeRuntimeBlocks(own: unknown, extra: Record<string, unknown>): Record<string, unknown> {
+  const base = own && typeof own === "object" && !Array.isArray(own) ? { ...(own as Record<string, unknown>) } : {};
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+  const packages = [...new Set([...list(base.packages ?? base.pip), ...list(extra.packages)])];
+  const npm = [...new Set([...list(base.npm), ...list(extra.npm)])];
+  delete base.pip;
+  return {
+    ...base,
+    ...(packages.length ? { packages } : {}),
+    ...(npm.length ? { npm } : {}),
+    ...(extra.node && base.node === undefined ? { node: true } : {}),
+  };
+}
+
 function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"): Record<string, ToolDef> {
   if (!fs.existsSync(dir)) return {};
   const out: Record<string, ToolDef> = {};
@@ -701,6 +751,12 @@ function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"):
       // the runner can find it from an agent directory two levels down.
       if (folder && typeof d.run === "string" && !/^(workspace|account|shared|library)\//.test(d.run)) {
         d.run = `${scope}/tools/${folder}/${d.run.replace(/^\.\//, "")}`;
+      }
+      // The ecosystem's own dependency files, beside the code that needs them,
+      // count as `runtime:` — a tool copied out of a repo keeps working.
+      if (folder) {
+        const extra = folderRuntime(path.join(dir, folder));
+        if (extra) d.runtime = mergeRuntimeBlocks(d.runtime, extra);
       }
       const def = parseToolDef(d, fallbackName, content);
       // `outward: true` rides on the definition so a caller that resolved the

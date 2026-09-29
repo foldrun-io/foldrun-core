@@ -101,6 +101,15 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
   return out;
 }
 
+/** Interpreter names that mean a language rather than a binary, and the
+ *  extension whose prepared interpreter serves them. */
+const GENERIC_INTERPRETER: Record<string, string> = {
+  python: ".py",
+  python3: ".py",
+  "/usr/bin/python3": ".py",
+  "/usr/bin/env python3": ".py",
+};
+
 // Pick how to execute a file when no interpreter is declared.
 //
 // Exported because the tool tester has to make the same choice, and used to
@@ -112,7 +121,18 @@ export function commandFor(
   abs: string,
   overrides: Record<string, string> = {},
 ): { cmd: string; args: string[] } {
-  if (spec.interpreter) return { cmd: spec.interpreter, args: [abs] };
+  if (spec.interpreter) {
+    // `interpreter: python3` names the language, not a particular binary, and
+    // it is how most tool files are written. Taken literally it ran the bare
+    // system python beside a venv built for this very tool, and the tool
+    // died on its first import ("No module named openpyxl") while the log
+    // above it said the runtime was cached. A generic python name is served
+    // by the prepared venv when there is one; a path or anything else is
+    // still obeyed as written.
+    const lang = GENERIC_INTERPRETER[spec.interpreter.trim()];
+    if (lang && overrides[lang]) return { cmd: overrides[lang], args: [abs] };
+    return { cmd: spec.interpreter, args: [abs] };
+  }
   const ext = path.extname(abs).toLowerCase();
   // A prepared runtime (venv, npm prefix) wins over the host interpreter.
   if (overrides[ext]) return { cmd: overrides[ext], args: [abs] };

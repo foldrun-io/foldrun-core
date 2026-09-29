@@ -3,14 +3,17 @@
 // An agent (or its workspace) declares what its scripts need:
 //
 //   runtime:
-//     python: "3.12"           # optional pin; the host interpreter is used
+//     python: "3.12"           # optional pin; uv fetches it when the image lacks it
 //     packages: [pandas, requests]
 //     node: true
 //     npm: [lodash]
 //
 // The platform builds that environment once, keyed by a fingerprint of the
-// declaration, and reuses it for every later run. Python gets a venv; Node
-// gets an npm prefix exposed through NODE_PATH. Nothing is installed into
+// declaration, and reuses it for every later run — after checking it still
+// holds what it promises. Python gets a venv (built with uv when the image has
+// it, pip otherwise); Node gets an npm prefix exposed through NODE_PATH, and
+// both put their bin directory first on PATH so a shebang or a bare `python3`
+// finds them too. Entries nobody has used for 30 days are pruned. Nothing is installed into
 // the host's global site-packages, so two agents can want different versions
 // of the same library without colliding.
 //
@@ -192,11 +195,23 @@ function wire(root: string, spec: RuntimeSpec, note: string): PreparedRuntime {
   const env: Record<string, string> = {};
   const venvPython = path.join(root, "venv", "bin", "python");
   const nodeModules = path.join(root, "node_modules");
+  const bins: string[] = [];
   if (wantsPython(spec) && fs.existsSync(venvPython)) {
     interpreters[".py"] = venvPython;
     env.VIRTUAL_ENV = path.join(root, "venv");
+    bins.push(path.join(root, "venv", "bin"));
   }
-  if (wantsNode(spec) && fs.existsSync(nodeModules)) env.NODE_PATH = nodeModules;
+  if (wantsNode(spec) && fs.existsSync(nodeModules)) {
+    env.NODE_PATH = nodeModules;
+    if (fs.existsSync(path.join(nodeModules, ".bin"))) bins.push(path.join(nodeModules, ".bin"));
+  }
+  // First on PATH, so the environment is the one that answers however a
+  // script is started: `interpreter: python3` in a tool file, a
+  // `#!/usr/bin/env python3` shebang, or the agent typing `python3` in Bash.
+  // Before this only a .py file with no declared interpreter got the venv,
+  // and a tool that said `interpreter: python3` — the usual way to write one —
+  // ran on the bare system python and died on its first import.
+  if (bins.length) env.PATH = [...bins, process.env.PATH ?? ""].filter(Boolean).join(path.delimiter);
 
   // A `.ready` root that cannot actually satisfy the declaration is worse than
   // no cache: it reports "cached", wires nothing, and the failure surfaces
@@ -270,14 +285,128 @@ function claimBuild(root: string): boolean {
   }
 }
 
-/** Wait for another process's build, up to the point where it is abandoned. */
-function awaitReady(ready: string): boolean {
+/** Wait for another process's build, up to the point where it is abandoned.
+ *  Waits for the claim to be released, not merely for `.ready` to exist: a
+ *  stale entry being rebuilt still has its old marker for a moment, and
+ *  reading that as "done" would wire the half-rebuilt directory up. */
+function awaitReady(root: string): boolean {
   const until = Date.now() + buildTimeoutMs();
   while (Date.now() < until) {
-    if (fs.existsSync(ready)) return true;
+    if (!fs.existsSync(path.join(root, ".building")) && fs.existsSync(path.join(root, ".ready"))) return true;
     sleepSync(250);
   }
   return false;
+}
+
+/** A requirement's distribution name: `requests[socks]>=2` → `requests`. */
+export function distName(req: string): string {
+  return req.split(/[[<>=!~]/)[0].trim();
+}
+
+/** An npm requirement's package name: `@scope/pkg@^1` → `@scope/pkg`. */
+export function npmName(req: string): string {
+  const m = /^(@[^/]+\/)?[^@]+/.exec(req);
+  return m ? m[0] : req;
+}
+
+// Asks the venv's own interpreter which declared distributions it can find.
+// importlib.metadata, not `import x`: the distribution and the module are
+// often named differently (beautifulsoup4 is bs4, pillow is PIL), and the
+// declaration names distributions.
+const PY_CHECK = [
+  "import sys, importlib.metadata as m",
+  "miss = []",
+  "for n in sys.argv[1:]:",
+  "    try: m.version(n)",
+  "    except m.PackageNotFoundError: miss.append(n)",
+  "print(','.join(miss))",
+  "sys.exit(3 if miss else 0)",
+].join("\n");
+
+/**
+ * Does a `.ready` entry still hold what the declaration asks for? Null when it
+ * does, else why not.
+ *
+ * `.ready` is written once and trusted for ever, and that trust was misplaced
+ * more than once: a build interrupted between install and marker, a cache
+ * volume restored without its contents, and — the quiet one — an image whose
+ * python moved (bookworm's 3.11 to trixie's 3.13), which leaves every venv
+ * with a valid-looking bin/python pointing at an interpreter that is gone.
+ * Each reported "cached" and failed later inside somebody's tool. One spawn
+ * of the venv's python per step is the price of never doing that again.
+ */
+export function checkEntry(root: string, spec: RuntimeSpec): string | null {
+  const venvPython = path.join(root, "venv", "bin", "python");
+  if (wantsPython(spec)) {
+    // existsSync follows the link, so a bin/python pointing at an interpreter
+    // an image upgrade removed reads as missing here, which is the truth.
+    if (!fs.existsSync(venvPython)) {
+      return fs.lstatSync(venvPython, { throwIfNoEntry: false })
+        ? "the venv's python no longer runs (the image's python has changed)"
+        : "the python venv is missing";
+    }
+    const res = spawnSync(venvPython, ["-c", PY_CHECK, ...spec.packages.map(distName)], {
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    if (res.status === 3) return `the venv is missing ${String(res.stdout).trim().split(",").join(", ")}`;
+    if (res.status !== 0) return "the venv's python no longer runs (the image's python has changed)";
+  }
+  for (const req of spec.npm) {
+    if (!fs.existsSync(path.join(root, "node_modules", npmName(req), "package.json"))) {
+      return `node_modules is missing ${npmName(req)}`;
+    }
+  }
+  return null;
+}
+
+/** Days an entry may go unused before a later build prunes it. */
+function maxAgeDays(): number {
+  const raw = Number(process.env.FOLDRUN_RUNTIME_MAX_AGE_DAYS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30;
+}
+
+/**
+ * Remove entries nobody has used for maxAgeDays. `.ready`'s mtime is the
+ * last-used clock (every hit touches it); an entry with no `.ready` is a
+ * failed build and ages from its directory's own mtime. Never an entry that
+ * is being built, and never `keep`. Runs after a successful build — the only
+ * moment a cache grows — so it costs nothing on the hot path.
+ */
+export function pruneRuntimes(cacheRoot: string, keep: string): string[] {
+  const cutoff = Date.now() - maxAgeDays() * 86_400_000;
+  const removed: string[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(cacheRoot);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    // .uv-cache and .python are shared by every entry; never an entry.
+    if (name.startsWith(".") || name === keep) continue;
+    const dir = path.join(cacheRoot, name);
+    try {
+      if (fs.existsSync(path.join(dir, ".building"))) continue;
+      const ready = path.join(dir, ".ready");
+      const clock = fs.existsSync(ready) ? fs.statSync(ready).mtimeMs : fs.statSync(dir).mtimeMs;
+      if (clock < cutoff) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        removed.push(name);
+      }
+    } catch {
+      // Another process removed or claimed it meanwhile; its business.
+    }
+  }
+  return removed;
+}
+
+/** Is `uv` on this host? Asked once per process. FOLDRUN_UV=0 forces pip. */
+let uvKnown: string | null | undefined;
+function findUv(): string | null {
+  if (process.env.FOLDRUN_UV === "0") return null;
+  if (uvKnown === undefined) uvKnown = run("uv", ["--version"], os.tmpdir(), 30_000).ok ? "uv" : null;
+  return uvKnown;
 }
 
 // Build (or reuse) the environment for one runtime declaration.
@@ -285,19 +414,40 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   if (!spec) return EMPTY;
 
   const fp = fingerprint(spec);
-  const shared = path.join(dataRoot(), tenant, ".runtimes", fp);
+  const cacheRoot = path.join(dataRoot(), tenant, ".runtimes");
+  const shared = path.join(cacheRoot, fp);
   // Loud, and before anything else: a dropped requirement surfaces later as
   // an import error inside a script, which points at the wrong thing entirely.
   const dropped = spec.rejected?.length
     ? [`runtime ${fp}: ignored invalid requirement(s): ${spec.rejected.join(", ")}`]
     : [];
 
-  // Already built: wire it up and skip the install. The whole point of the
-  // cache — on the hosted path this directory is a mounted volume, so the
-  // hit rate across a run is close to one.
+  // The platform's shared layer first: environments built once, by the
+  // platform, for every account that declares exactly this — mounted
+  // read-only into the run (FOLDRUN_RUNTIME_SHARED, run-k8s.ts). Only a
+  // healthy entry is used; anything else falls through to the account's own
+  // cache, which is writable and builds what the shared layer lacks.
+  const sharedLayer = process.env.FOLDRUN_RUNTIME_SHARED;
+  if (sharedLayer) {
+    const entry = path.join(sharedLayer, fp);
+    if (fs.existsSync(path.join(entry, ".ready")) && !checkEntry(entry, spec)) {
+      const hit = wire(entry, spec, `runtime ${fp}: shared`);
+      return { ...hit, log: [...dropped, ...hit.log] };
+    }
+  }
+
+  // Already built, and still holding what it promises: wire it up and skip
+  // the install. On the hosted path this directory is a mounted volume, so
+  // the hit rate across a run is close to one. An entry that fails the check
+  // is rebuilt, not trusted and not merely reported.
+  let stale: string | null = null;
   if (fs.existsSync(path.join(shared, ".ready"))) {
-    const hit = wire(shared, spec, `runtime ${fp}: cached`);
-    return { ...hit, log: [...dropped, ...hit.log] };
+    stale = checkEntry(shared, spec);
+    if (!stale) {
+      touch(path.join(shared, ".ready"));
+      const hit = wire(shared, spec, `runtime ${fp}: cached`);
+      return { ...hit, log: [...dropped, ...hit.log] };
+    }
   }
 
   fs.mkdirSync(shared, { recursive: true });
@@ -307,7 +457,7 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
   if (!held) {
     // A concurrent step is building exactly this. Waiting for it beats
     // duplicating it — the work is identical and it is already underway.
-    if (awaitReady(path.join(shared, ".ready"))) {
+    if (awaitReady(shared) && !checkEntry(shared, spec)) {
       const hit = wire(shared, spec, `runtime ${fp}: cached (built by a concurrent step)`);
       return { ...hit, log: [...dropped, ...hit.log] };
     }
@@ -317,26 +467,47 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
     // build is by definition not worth keeping, and leaving these beside the
     // real entries would grow a directory nothing ever prunes.
     root = fs.mkdtempSync(path.join(os.tmpdir(), `foldrun-runtime-${fp}-`));
+  } else if (stale || !fs.existsSync(path.join(shared, ".ready"))) {
+    // A clean slate: whatever a stale or half-finished build left behind is
+    // exactly what must not be built on top of.
+    for (const leftover of [".ready", "venv", "node_modules", "package.json", "package-lock.json"]) {
+      fs.rmSync(path.join(shared, leftover), { recursive: true, force: true });
+    }
   }
 
   const ready = path.join(root, ".ready");
   const interpreters: Record<string, string> = {};
   const env: Record<string, string> = {};
   const log: string[] = [...dropped];
+  if (stale) log.push(`runtime ${fp}: cached entry unusable (${stale}); rebuilding`);
 
   const venvPython = path.join(root, "venv", "bin", "python");
   const nodeModules = path.join(root, "node_modules");
   const wantsPy = wantsPython(spec);
   const wantsNd = wantsNode(spec);
+  const built: Record<string, unknown> = { built: new Date().toISOString() };
 
   try {
 
   if (wantsPy) {
-    const base = typeof spec.python === "string" ? `python${spec.python}` : "python3";
-    const exe = [base, "python3"].find((c) => run("command", ["-v", c], root).ok || run(c, ["--version"], root).ok);
-    if (!exe) {
-      return { ...EMPTY, error: `python interpreter "${base}" is not available on this host` };
-    }
+    const uv = findUv();
+    const pin = typeof spec.python === "string" ? spec.python : null;
+    // uv's own caches sit beside the entries they fill, so they live as long
+    // as the cache volume does: a second environment asking for pandas links
+    // it out of .uv-cache instead of downloading it again, and a pinned
+    // python fetched once into .python serves every later venv. Copy, not
+    // hardlink — the volume may be NFS or EFS, where links across the cache
+    // and the entry are not guaranteed.
+    const uvEnv = {
+      UV_CACHE_DIR: path.join(cacheRoot, ".uv-cache"),
+      // Inside the entry when the platform builds for the shared layer: that
+      // build may write only its own entry, and a venv whose interpreter
+      // lived beside it would point at nothing once mounted elsewhere.
+      UV_PYTHON_INSTALL_DIR:
+        process.env.FOLDRUN_RUNTIME_PYTHON_IN_ENTRY === "1" ? path.join(root, ".python") : path.join(cacheRoot, ".python"),
+      UV_LINK_MODE: "copy",
+      UV_NO_PROGRESS: "1",
+    };
     // A sealed venv, never --system-site-packages. Inheriting the image's
     // packages would make a warm start cheaper, and it was measured on the
     // production box on 2026-08-29: a venv that shadows a baked `pandas` with
@@ -344,20 +515,52 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
     // ABI-compatible — `pandas<2` on top of numpy 2 dies at import with
     // "numpy.dtype size changed". A pin that silently produces a broken
     // interpreter is worse than any install it saves.
-    const made = run(exe, ["-m", "venv", path.join(root, "venv")], root);
-    if (!made.ok) return { ...EMPTY, error: `failed to create venv: ${made.out.slice(0, 300)}` };
-    log.push(`runtime ${fp}: created venv (${exe})`);
+    if (uv) {
+      const want = pin ?? (hasCommand("python3", root) ? "python3" : "3");
+      // --seed puts pip in the venv as well, for the agent that types
+      // `pip install` in Bash; uv itself does not need it.
+      const made = run(uv, ["venv", "--seed", "-q", "--python", want, path.join(root, "venv")], root, 300_000, uvEnv);
+      if (!made.ok) {
+        return {
+          ...EMPTY,
+          log,
+          error: pin
+            ? `python ${pin} could not be provided (uv tried the image and a download): ${made.out.slice(-400)}`
+            : `failed to create venv: ${made.out.slice(-400)}`,
+        };
+      }
+    } else {
+      // No uv: the image's own interpreter or nothing. A pin the image cannot
+      // meet is an error, said as one — it used to fall back to python3 in
+      // silence, and "I asked for 3.12" then ran on 3.11.
+      const exe = pin ? (hasCommand(`python${pin}`, root) ? `python${pin}` : null) : hasCommand("python3", root) ? "python3" : null;
+      if (!exe) {
+        return {
+          ...EMPTY,
+          log,
+          error: pin
+            ? `python ${pin} is not installed here, and uv (which could fetch it) is not available`
+            : `no python3 on this host, and uv (which could fetch one) is not available`,
+        };
+      }
+      const made = run(exe, ["-m", "venv", path.join(root, "venv")], root);
+      if (!made.ok) return { ...EMPTY, log, error: `failed to create venv: ${made.out.slice(0, 300)}` };
+    }
+    const version = run(venvPython, ["-c", "import platform; print(platform.python_version())"], root, 30_000);
+    built.python = version.ok ? version.out : "unknown";
+    built.installer = uv ? "uv" : "pip";
+    log.push(`runtime ${fp}: created venv (python ${built.python}${uv ? " via uv" : ""})`);
 
     if (spec.packages.length) {
-      const pip = path.join(root, "venv", "bin", "pip");
-      const installed = run(pip, ["install", "--disable-pip-version-check", "-q", ...spec.packages], root);
+      const installed = uv
+        ? run(uv, ["pip", "install", "-q", "--python", venvPython, ...spec.packages], root, 300_000, uvEnv)
+        : run(path.join(root, "venv", "bin", "pip"), ["install", "--disable-pip-version-check", "-q", ...spec.packages], root);
       if (!installed.ok) {
-        return { ...EMPTY, error: `pip install failed: ${installed.out.slice(-500)}` };
+        return { ...EMPTY, log, error: `${uv ? "uv pip" : "pip"} install failed: ${installed.out.slice(-500)}` };
       }
+      built.packages = spec.packages;
       log.push(`runtime ${fp}: installed ${spec.packages.join(", ")}`);
     }
-    interpreters[".py"] = venvPython;
-    env.VIRTUAL_ENV = path.join(root, "venv");
   }
 
   if (wantsNd) {
@@ -386,19 +589,48 @@ export function prepareRuntime(tenant: string, spec: RuntimeSpec | null): Prepar
         },
       );
       if (!installed.ok) {
-        return { ...EMPTY, error: `npm install failed: ${installed.out.slice(-500)}` };
+        return { ...EMPTY, log, error: `npm install failed: ${installed.out.slice(-500)}` };
       }
+      built.npm = spec.npm;
       log.push(`runtime ${fp}: installed ${spec.npm.join(", ")}`);
     }
-    if (fs.existsSync(nodeModules)) env.NODE_PATH = nodeModules;
   }
 
-  fs.writeFileSync(ready, new Date().toISOString());
+  // Checked before it is marked ready, by the same test every later hit will
+  // apply: an installer that exits 0 without installing what was asked (it
+  // has happened, with npm and a cache it could not write) is caught here,
+  // where the log still has the build beside it.
+  const problem = checkEntry(root, spec);
+  if (problem) return { ...EMPTY, log, error: `runtime ${fp}: built but ${problem}` };
+
+  fs.writeFileSync(ready, JSON.stringify(built));
+  const wired = wire(root, spec, "");
+  Object.assign(interpreters, wired.interpreters);
+  Object.assign(env, wired.env);
+  if (held) {
+    const pruned = pruneRuntimes(cacheRoot, fp);
+    if (pruned.length) log.push(`runtime: pruned ${pruned.length} entr${pruned.length === 1 ? "y" : "ies"} unused for ${maxAgeDays()} days`);
+  }
   return { interpreters, env, log, error: null };
   } finally {
     // Whatever happened — built, failed, threw — the claim is released. A
     // failed build leaves no `.ready`, so the next step retries it rather
     // than inheriting a half-built environment.
     if (held) fs.rmSync(path.join(shared, ".building"), { recursive: true, force: true });
+  }
+}
+
+function hasCommand(cmd: string, cwd: string): boolean {
+  return run(cmd, ["--version"], cwd, 30_000).ok;
+}
+
+/** Mark an entry used now; the clock pruneRuntimes reads. Best effort — a
+ *  read-only cache mount is still a perfectly good cache. */
+function touch(file: string): void {
+  try {
+    const now = new Date();
+    fs.utimesSync(file, now, now);
+  } catch {
+    // read-only or gone; neither is a reason to fail the step
   }
 }

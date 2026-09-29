@@ -380,6 +380,16 @@ export function applyContainerChanges(
  */
 export const RUNTIME_CACHE = "/home/agent/.foldrun/runner/.runtimes";
 
+/**
+ * Where the platform's shared runtime layer is mounted, read-only, in a run
+ * pod — and read-write, one entry at a time, in the pod that builds an entry
+ * for it (foldrun-platform runtime-warm.ts). A fixed path for the same reason
+ * as RUNTIME_CACHE: a venv hard-codes its own location. Laid out as
+ * <FOLDRUN_DATA>/shared/.runtimes so the builder's prepareRuntime("shared", …)
+ * lands exactly here with FOLDRUN_DATA=/opt/foldrun-runtimes.
+ */
+export const SHARED_RUNTIMES = "/opt/foldrun-runtimes/shared/.runtimes";
+
 /** Docker's own volume-name charset: a leading alphanumeric, then
  *  alphanumerics plus `_ . -`. The mount source is handed straight to the
  *  daemon, so it is validated against this rather than assumed. */
@@ -503,6 +513,10 @@ try {
     : { interpreters: {}, env: {}, log: [], error: null };
   for (const line of runtime.log) emit("info", "runtime: " + line);
   if (runtime.error) emit("error", "runtime: " + runtime.error);
+  // The step's own environment gets it too, not only the script tools: an
+  // agent that runs "python3 x.py" or a shebang script through Bash should
+  // meet the packages its runtime declared, not the image's bare python.
+  Object.assign(env, runtime.env);
 
   // API and script tools, rebuilt in here from their specs. Secrets were
   // substituted into API headers before the input crossed the boundary, so
@@ -593,11 +607,54 @@ try {
 // and the run flags grant only the three capabilities those two commands
 // need. By the time any model-directed code executes, the process is uid
 // 10001 with no capabilities at all.
-const DOCKERFILE = `FROM node:22-slim
+const CORE_INSTALL = `WORKDIR /opt/runner
+COPY foldrun-core.tgz driver.mjs entry.sh ./
+RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
+ && npm cache clean --force >/dev/null 2>&1 \\
+ && mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} ${SHARED_RUNTIMES} \\
+ && chown -R agent:agent /workspace /library /opt/runner /home/agent/.foldrun /opt/foldrun-runtimes \\
+ && chmod +x /opt/runner/entry.sh
+ENTRYPOINT ["/opt/runner/entry.sh"]
+`;
+
+/** The uv release copied into the image. Pinned: a floating uv is a floating
+ *  resolver, and the runtime cache is keyed on the declaration, not on it. */
+export const UV_VERSION = "0.11.25";
+
+// Two images from one file, as build targets.
+//
+//   full  (the default, the last stage) — everything, browsers included. The
+//         per-account browser pod runs it, and so does any step that may
+//         browse, because the tool falls back to in-pod Chromium whenever
+//         the pod is unavailable or the run is a test.
+//   slim  — the same base, core and Playwright *client*, no browsers. About
+//         a quarter of the size: the browsers were 1.4 GB of a 3.1 GB image
+//         that every step pulled and every step started, whether or not it
+//         ever opened a page. A step that grants no browsing runs this
+//         (run-k8s.ts picks), and its declared packages arrive at run time
+//         through the runtime cache — uv is in the base for exactly that.
+//
+// The browsers sit BELOW the core install in `full`, as they always have,
+// so a core change rebuilds one thin layer and not 1.4 GB of Chromium.
+const DOCKERFILE = `FROM node:22-slim AS base
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
+# uv builds the declared python environments (runtime.ts): a fraction of
+# pip's time, and it can fetch a pinned python the image does not carry.
+COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
+
+FROM base AS slim
+# The Playwright client only, the same pinned version as the browser pod's
+# server (the wire protocol is version-locked), so a tool that imports it
+# still loads; there is nothing here for it to launch.
+# npm's download cache is dropped in the same layer: it was 190 MB of every
+# image, read by nothing after the build.
+RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null && npm cache clean --force >/dev/null 2>&1
+${CORE_INSTALL}
+FROM base AS browsers
 # Real browsers, because directories and portals increasingly render with
 # JavaScript and WebFetch sees only the empty shell. Chromium is the one the
 # browser tool drives by default; Firefox and WebKit (Safari's engine) are
@@ -611,11 +668,11 @@ RUN apt-get update \\
 # Raise it on purpose, with the gallery tests and one real call.
 # axe-core beside it is web_browse's mode=a11y: one file the tool injects
 # into the page; without it the mode falls back to its own shorter checks.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && (playwright install --with-deps chrome chrome-beta >/dev/null 2>&1 || echo "real Chrome unavailable on this arch — engine: chrome falls back to chromium") \\
- && chmod -R a+rX /opt/browser
+ && chmod -R a+rX /opt/browser \\
+ && npm cache clean --force >/dev/null 2>&1
 # Lightpanda (engine: lightpanda): a browser that runs the JavaScript and
 # never draws — a fraction of Chromium's memory for reading and filling
 # pages. Its own program, which web_browse starts beside a call and drives
@@ -655,14 +712,9 @@ RUN arch=$(uname -m) \\
       chmod a+rx /opt/browser/obscura/obscura /opt/browser/obscura/obscura-worker && /opt/browser/obscura/obscura --version; \\
     else rm -rf /opt/browser/obscura/*; echo "obscura not installed for $arch — engine: obscura says so when asked"; fi \\
  && rm -f /tmp/obscura.tgz
-WORKDIR /opt/runner
-COPY foldrun-core.tgz driver.mjs entry.sh ./
-RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
- && mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} \\
- && chown -R agent:agent /workspace /library /opt/runner /home/agent/.foldrun \\
- && chmod +x /opt/runner/entry.sh
-ENTRYPOINT ["/opt/runner/entry.sh"]
-`;
+
+FROM browsers AS full
+${CORE_INSTALL}`;
 
 const ENTRY = `#!/bin/sh
 set -e
@@ -693,7 +745,10 @@ function corePackageDir(): string {
   throw new Error("could not locate @foldrun/core's package root");
 }
 
-export function runnerImageTag(): string {
+/** Which build target of the runner image (see DOCKERFILE). */
+export type RunnerVariant = "full" | "slim";
+
+export function runnerImageTag(variant: RunnerVariant = "full"): string {
   // The fingerprint hashes the *built code*, not the version — a version
   // string that nobody bumped would pin every future run to the runner
   // image of whatever core happened to build first.
@@ -705,7 +760,7 @@ export function runnerImageTag(): string {
       if (fs.statSync(abs).isFile()) hash.update(String(entry)).update(fs.readFileSync(abs));
     }
   }
-  return `foldrun-runner:${hash.digest("hex").slice(0, 12)}`;
+  return `foldrun-runner:${hash.digest("hex").slice(0, 12)}${variant === "slim" ? "-slim" : ""}`;
 }
 
 /**
@@ -729,14 +784,20 @@ export function runnerImageTag(): string {
  * least one component"), so it falls through to the content-hash tag exactly
  * as an unset value does. Pure, so the resolution is testable without docker.
  */
-export function runnerImageRef(opts: { platform?: string } = {}): { tag: string; explicit: boolean } {
-  const set = process.env.FOLDRUN_RUNNER_IMAGE;
+export function runnerImageRef(
+  opts: { platform?: string; variant?: RunnerVariant } = {},
+): { tag: string; explicit: boolean } {
+  // Each variant has its own override: FOLDRUN_RUNNER_IMAGE names the full
+  // image as it always has, FOLDRUN_RUNNER_SLIM_IMAGE the slim one.
+  const set = opts.variant === "slim" ? process.env.FOLDRUN_RUNNER_SLIM_IMAGE : process.env.FOLDRUN_RUNNER_IMAGE;
   if (set) return { tag: set, explicit: true };
   const arch = opts.platform ? `-${opts.platform.split("/").pop()}` : "";
-  return { tag: runnerImageTag() + arch, explicit: false };
+  return { tag: runnerImageTag(opts.variant) + arch, explicit: false };
 }
 
-export function ensureRunnerImage(opts: { platform?: string } = {}): { tag: string; log: string[] } {
+export function ensureRunnerImage(
+  opts: { platform?: string; variant?: RunnerVariant } = {},
+): { tag: string; log: string[] } {
   const { tag, explicit } = runnerImageRef(opts);
   const log: string[] = [];
   if (explicit) return { tag, log };
@@ -756,7 +817,15 @@ export function ensureRunnerImage(opts: { platform?: string } = {}): { tag: stri
     fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
     fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
     log.push(`building runner image ${tag} (first run only)`);
-    const args = ["build", ...(opts.platform ? ["--platform", opts.platform] : []), "-t", tag, build];
+    const args = [
+      "build",
+      ...(opts.platform ? ["--platform", opts.platform] : []),
+      "--target",
+      opts.variant ?? "full",
+      "-t",
+      tag,
+      build,
+    ];
     const out = spawnSync(cli(), args, { encoding: "utf8" });
     if (out.status !== 0) {
       throw new Error(`runner image build failed:\n${(out.stderr || out.stdout).slice(-2000)}`);

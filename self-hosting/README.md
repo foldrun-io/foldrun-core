@@ -30,7 +30,7 @@ invite — it is yours. Create an API key in Settings, point the CLI at it
 - A model credential. Either set `ANTHROPIC_API_KEY` for the whole install
   ("models included" — every run borrows it), or set none and let each
   agent bring its own `provider:` block. ~30 providers work.
-- 4 GB of RAM to be comfortable. The runner image is 1.1 GB; two default
+- 4 GB of RAM to be comfortable. The runner image is about 4.3 GB with its browsers (a slim variant without them, for steps that never browse, is about 1.1 GB); two default
   steps reserve 2 GB each.
 
 ## What you get, and what you do not
@@ -51,7 +51,7 @@ and voids every webhook URL. Losing the volume loses the workspaces.
 | image | what |
 |---|---|
 | `ghcr.io/foldrun-io/platform` | the control plane. ~575 MB |
-| `ghcr.io/foldrun-io/runner` | the step sandbox: node, python, git, Chromium, Firefox, WebKit. ~1.1 GB |
+| `ghcr.io/foldrun-io/runner` | the step sandbox: node, python, uv, git, Chromium, Firefox, WebKit. ~4.3 GB (the `slim` build target, without browsers, ~1.1 GB) |
 
 Pin them for a real install — `FOLDRUN_IMAGE=ghcr.io/foldrun-io/platform:v2026.09.08.4`
 and `FOLDRUN_RUNNER_IMAGE=ghcr.io/foldrun-io/runner:v2026.09.08.4` — so a restart
