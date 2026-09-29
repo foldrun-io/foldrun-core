@@ -556,7 +556,7 @@ function s3Driver(cfg: S3Config): Driver {
       // page can never come back as a page. See presign()'s note.
       const safe = inlineType && PREVIEW_TYPES_SET.has(inlineType) ? inlineType : null;
       return presign(cfg, await credentials(cfg), "GET", key, ttlSec, {
-        "response-content-disposition": `${safe ? "inline" : "attachment"}; filename="${filename.replace(/["\\]/g, "")}"`,
+        "response-content-disposition": contentDisposition(safe ? "inline" : "attachment", filename),
         "response-content-type": safe ?? mime,
       });
     },
@@ -564,6 +564,18 @@ function s3Driver(cfg: S3Config): Driver {
       return presign(cfg, await credentials(cfg), "PUT", key, ttlSec);
     },
   };
+}
+
+/**
+ * The Content-Disposition a presigned GET asks the store to send back. The
+ * store echoes it as a header, and header values are bytes: a raw "報告.pdf"
+ * comes back mangled or refused. RFC 6266: an ASCII `filename` for old
+ * clients, the exact name percent-encoded as UTF-8 in `filename*`.
+ */
+export function contentDisposition(type: "inline" | "attachment", filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/g, "_");
+  const exact = encodeURIComponent(filename).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${exact}`;
 }
 
 /**

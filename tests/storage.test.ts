@@ -271,11 +271,47 @@ test("a presigned GET is signed as an attachment, and expires", async () => {
     // The one that matters: an agent-written .html can never render as a page.
     assert.match(
       parsed.searchParams.get("response-content-disposition") ?? "",
-      /^attachment; filename="report\.html"$/,
+      /^attachment; filename="report\.html"; filename\*=UTF-8''report\.html$/,
     );
     assert.ok(parsed.searchParams.get("X-Amz-Signature"));
     assert.equal(parsed.searchParams.get("X-Amz-Expires"), "300");
     assert.equal(parsed.searchParams.get("X-Amz-SignedHeaders"), "host");
+  } finally {
+    for (const k of [
+      "FOLDRUN_STORAGE_DRIVER",
+      "FOLDRUN_S3_ENDPOINT",
+      "FOLDRUN_S3_BUCKET",
+      "FOLDRUN_S3_ACCESS_KEY_ID",
+      "FOLDRUN_S3_SECRET_ACCESS_KEY",
+    ]) delete process.env[k];
+  }
+});
+
+test("a presigned GET for a non-Latin-1 name carries an ASCII fallback and the exact name, encoded", async () => {
+  process.env.FOLDRUN_STORAGE_DRIVER = "s3";
+  process.env.FOLDRUN_S3_ENDPOINT = "https://acct.r2.cloudflarestorage.com";
+  process.env.FOLDRUN_S3_BUCKET = "foldrun-files";
+  process.env.FOLDRUN_S3_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE";
+  process.env.FOLDRUN_S3_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+  try {
+    const { downloadUrl, contentDisposition } = await import("../src/storage.ts");
+    const url = (await downloadUrl(TENANT, WS, {
+      path: "out/報告 résumé 🎉.pdf",
+      sha: "b".repeat(64),
+      size: 10,
+      mime: "application/pdf",
+      updatedAt: new Date(0).toISOString(),
+      by: "run:run-1",
+    }))!;
+    const cd = new URL(url).searchParams.get("response-content-disposition") ?? "";
+    // What the store echoes back must be a valid header value: ASCII only.
+    assert.ok(/^[\x20-\x7e]*$/.test(cd), cd);
+    assert.doesNotThrow(() => new Headers({ "content-disposition": cd }));
+    const exact = /filename\*=UTF-8''(.+)$/.exec(cd)?.[1];
+    assert.equal(decodeURIComponent(exact!), "報告 résumé 🎉.pdf");
+    assert.match(cd, /^attachment; filename="[\x20-\x7e]+\.pdf"; /);
+    // Quotes and backslashes cannot close the fallback's quoted string.
+    assert.equal(contentDisposition("inline", 'a"b\\c.png'), `inline; filename="a_b_c.png"; filename*=UTF-8''a%22b%5Cc.png`);
   } finally {
     for (const k of [
       "FOLDRUN_STORAGE_DRIVER",
@@ -410,7 +446,7 @@ test("with no static key, the S3 driver signs with the pod's role credentials, t
     assert.equal(url.searchParams.get("X-Amz-Security-Token"), "session-token-xyz", "the token is signed in");
     assert.ok(url.searchParams.get("X-Amz-Credential")?.startsWith("ASIAROLEKEY/"));
     assert.match(url.searchParams.get("X-Amz-Credential")!, /\/ap-southeast-2\/s3\/aws4_request$/);
-    assert.equal(url.searchParams.get("response-content-disposition"), 'attachment; filename="report.html"');
+    assert.equal(url.searchParams.get("response-content-disposition"), `attachment; filename="report.html"; filename*=UTF-8''report.html`);
     await d.presignPut("k/x", "text/plain");
     assert.equal(asks, 1, "credentials are cached until they near expiry");
   } finally {
