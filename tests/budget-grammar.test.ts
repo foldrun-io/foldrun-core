@@ -96,4 +96,8 @@ test("an agent's per-run cap is the tighter of two, and the note names the line 
   // No agent cap: the flow's share, or nothing.
   assert.deepEqual(stepCeilingFor(3, null, 1, "writer"), { ceilingUsd: 3, note: "budget: in the flow file" });
   assert.deepEqual(stepCeilingFor(null, undefined, 1, "writer"), { ceilingUsd: null, note: "budget: in the flow file" });
+  // Launched with three more of its own steps not yet started: a quarter of
+  // what is left each, so the four together cannot spend more than the cap.
+  assert.deepEqual(stepCeilingFor(null, 2.5, 0.5, "writer", 4), { ceilingUsd: 0.5, note: "budget: on the writer agent" });
+  assert.deepEqual(stepCeilingFor(0.4, 2.5, 0.5, "writer", 4), { ceilingUsd: 0.4, note: "budget: in the flow file" });
 });

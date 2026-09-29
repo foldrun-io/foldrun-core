@@ -1701,7 +1701,9 @@ async function runStep(
       ? fs.readFileSync(stubFile, "utf8").split(/\n---\n/)
       : [`stub result from ${step.agent}`];
     const call = step.events.filter((e) => e.text.startsWith("stub call")).length;
-    push("info", `stub call ${call + 1}`);
+    // The ceiling it was given rides on the line, so the budget arithmetic
+    // around fan-out is testable without a model to stop.
+    push("info", `stub call ${call + 1}${stepBudgetUsd !== null ? ` (ceiling $${stepBudgetUsd.toFixed(2)})` : ""}`);
     step.status = "completed";
     // A stub answer may open with `cost: 0.25` — a pretend price, so the
     // parts of orchestration that watch money (budget:) are testable too.
@@ -3820,18 +3822,27 @@ function driveRunInner(
         // An agent's own `budget:` — the most it may spend in one run — is
         // read at launch, so a cap raised mid-run applies to the next step.
         const agentBudgets = new Map(listAgents(tenant, workspace).map((a) => [a.name, a.budget]));
+        // The ceiling each attempt now running was given. A step records its
+        // cost only when it ends, so while it runs its ceiling stands in for
+        // what it may yet spend — otherwise every fan-out copy of one agent
+        // saw none of its siblings' spend and got the agent's whole budget.
+        const reserved = new Map<StepRecord, number>();
         // The ceiling for one attempt of one step, read NOW: what is left of
         // the run's budget shared across the group, or the agent's own cap
-        // less what its steps have cost. Computed before every attempt, not
-        // once before the loop — a retry's share is what is left after the
-        // failed attempt spent, and the step's own figure already carries
-        // that spend (it is the sum of its tries).
+        // less what its steps have cost or hold in flight, shared with its
+        // steps in this group still waiting to start. Computed before every
+        // attempt, not once before the loop — a retry's share is what is left
+        // after the failed attempt spent, and the step's own figure already
+        // carries that spend (it is the sum of its tries).
         const ceilingFor = (step: StepRecord) =>
           stepCeilingFor(
             stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length),
             agentBudgets.get(step.agent),
-            run.steps.filter((s) => s !== step && s.agent === step.agent).reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
+            run.steps
+              .filter((s) => s.agent === step.agent)
+              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s !== step && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
             step.agent,
+            1 + launching.filter((s) => s !== step && s.agent === step.agent && s.status === "pending" && !reserved.has(s)).length,
           );
         // parallel: — the instances of one fan-out template share a pool.
         // Keyed by what the instances share (agent + instruction), since
@@ -3892,6 +3903,7 @@ function driveRunInner(
                 const eventsBefore = step.events.length;
                 step.attempts = attempt;
                 step.status = "running";
+                if (ceiling.ceilingUsd !== null) reserved.set(step, ceiling.ceilingUsd);
                 save();
                 await runStep(
                   path.join(pDir, "agents", step.agent),
@@ -3914,7 +3926,7 @@ function driveRunInner(
                     return run.stopRequested === true;
                   },
                   flowTimezone,
-                );
+                ).finally(() => reserved.delete(step));
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
                 const outcome: string = step.status;

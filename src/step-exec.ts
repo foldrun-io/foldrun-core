@@ -180,7 +180,11 @@ export function stepCeiling(budgetUsd: number | null | undefined, spentUsd: numb
  *
  * Two caps can apply to one step: the flow's `budget:` gives it an equal
  * share of what the run has left; the agent's own `budget:` is the most that
- * agent may spend in one run, less what its earlier steps in this run cost.
+ * agent may spend in one run, less what its steps in this run have cost or
+ * may still cost, shared across `sharing` — this step and the agent's steps
+ * launched with it that have not started yet. Without the share, twenty
+ * fan-out copies of one agent each got the whole remainder, because none of
+ * them has recorded a cent when the next one starts.
  * The tighter one wins, and the note says which, because "over budget" with
  * no line to go and raise is a message that sends someone to the wrong file.
  */
@@ -189,10 +193,11 @@ export function stepCeilingFor(
   agentBudgetUsd: number | null | undefined,
   agentSpentUsd: number,
   agent: string,
+  sharing = 1,
 ): { ceilingUsd: number | null; note: string } {
   const flow = { ceilingUsd: flowShareUsd, note: "budget: in the flow file" };
   if (!agentBudgetUsd || agentBudgetUsd <= 0) return flow;
-  const left = Math.max(0, agentBudgetUsd - agentSpentUsd);
+  const left = Math.max(0, agentBudgetUsd - agentSpentUsd) / Math.max(1, sharing);
   if (flowShareUsd !== null && flowShareUsd <= left) return flow;
   return { ceilingUsd: left, note: `budget: on the ${agent} agent` };
 }

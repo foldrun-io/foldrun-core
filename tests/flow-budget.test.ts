@@ -107,6 +107,26 @@ test("an agent's own budget: is per run — its next step in the same run is ref
     { a: "budget: 0.5" },
   ));
 
+test("an agent's budget: is shared across its fan-out copies, not handed whole to each", () =>
+  withStubbedRun(
+    { maker: "one\ntwo\nthree\nfour", a: "cost: 0.25\nhandled" },
+    "---\nname: capped\n---\n1. [[maker]] — list\n2. [[a]] — one\n   each: lines\n",
+    (run) => {
+      assert.equal(run.status, "completed");
+      const copies = run.steps.filter((s) => s.item);
+      assert.equal(copies.length, 4);
+      // Four copies launched together under a $1 cap: $0.25 each, never $1
+      // each — the shares sum to the cap however many copies fan out. (The
+      // stub finishes at once, so each later copy also sees the $0.25 the
+      // earlier ones spent: still $0.25.)
+      for (const c of copies) {
+        const line = c.events.find((e) => e.text.startsWith("stub call"))!.text;
+        assert.match(line, /\(ceiling \$0\.25\)/);
+      }
+    },
+    { a: "budget: 1" },
+  ));
+
 test("an agent's budget: written with a period is not a cap — the lint names it, the run ignores it", () =>
   withStubbedRun(
     { a: "cost: 0.60\nfirst" },
