@@ -38,6 +38,12 @@ export interface ExecOutcome {
    *  Anthropic's table, which is wrong for a routed model — these are the
    *  raw numbers a caller with a gateway's own prices can reprice from. */
   usage: { inputTokens: number; outputTokens: number } | null;
+  /** Set only when some turns ran on a different model from the step's — a
+   *  sub-agent with its own `model:`. The sum of every turn, each priced at
+   *  its own model. `usage` above is one lump and cannot be repriced at the
+   *  step's model without charging the sub-agent's turns at the wrong rate;
+   *  the runner reads this instead (repriced in runner.ts). */
+  turnsCostUsd?: number;
   /** Why the model's last turn ended, as the SDK's result message says:
    *  end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal or
    *  model_context_window_exceeded. Null when no result arrived. */
@@ -304,7 +310,10 @@ export async function executeStep(
         autoAllowBashIfSandboxed: false,
         failIfUnavailable: false,
       },
-      env: opts.env,
+      // With sub-agents, the SDK would also offer its built-in ones
+      // (general-purpose has every tool the session has). Only the declared
+      // ones may run; the guard in the hook below refuses the rest as well.
+      env: subagents ? { ...(opts.env ?? process.env), CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1" } : opts.env,
       mcpServers: opts.mcpServers,
       // canUseTool is only asked when the SDK wants permission, and it never
       // asks for a read inside the cwd — so `Read workspace/storage/x` went
@@ -318,12 +327,16 @@ export async function executeStep(
           hooks: [async (hookInput: HookInput) => {
             if (hookInput.hook_event_name !== "PreToolUse") return {};
             // A sub-agent's calls come through here too, tagged with its
-            // name; anything outside its own list is refused before the
-            // shared checks below (which apply to it unchanged).
-            const via = "agent_id" in hookInput && hookInput.agent_id ? ((hookInput as { agent_type?: string }).agent_type ?? "subagent") : undefined;
-            if (via && "agent_id" in hookInput && hookInput.agent_id) subagentNames.set(String(hookInput.agent_id), via);
-            if (guardSubagent && via) {
-              const why = guardSubagent(via, hookInput.tool_name);
+            // name; anything outside its own list — or from a sub-agent this
+            // step did not declare — is refused before the shared checks
+            // below (which apply to it unchanged). So is a delegation from
+            // the main thread to anything but a declared sub-agent.
+            const agentId = "agent_id" in hookInput && hookInput.agent_id ? String(hookInput.agent_id) : undefined;
+            const agentType = agentId ? (hookInput as { agent_type?: string }).agent_type : undefined;
+            const via = agentId ? (agentType ?? "subagent") : undefined;
+            if (agentId && via) subagentNames.set(agentId, via);
+            if (guardSubagent) {
+              const why = guardSubagent({ agentId, agentType, tool: hookInput.tool_name, input: (hookInput.tool_input ?? {}) as Record<string, unknown> });
               if (why) {
                 emit("error", why, { subagent: via });
                 return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: why } };
@@ -348,6 +361,10 @@ export async function executeStep(
               PostToolUse: [{
                 hooks: [async (hookInput: HookInput) => {
                   if (hookInput.hook_event_name !== "PostToolUse") return {};
+                  // A sub-agent's call: the message is for the step's own
+                  // model, and draining it here would hand it to a context
+                  // that ends with the delegation — and lose it.
+                  if ("agent_id" in hookInput && hookInput.agent_id) return {};
                   const context = await opts.inbox!().catch(() => null);
                   return context ? { hookSpecificOutput: { hookEventName: "PostToolUse" as const, additionalContext: context } } : {};
                 }],
@@ -423,8 +440,23 @@ export async function executeStep(
   // closing `result` never arrives: a timeout or a stop ends the loop before
   // it, and a step that made 193 model calls was recorded as $0 (lawyer-desk,
   // 2026-09-25 09:00).
-  const turns = new Map<string, Record<string, number | undefined>>();
+  // Each with the rate it is priced at: a sub-agent with its own `model:`
+  // runs its turns on that model, and pricing them at the parent's put a
+  // max sub-agent under a fast parent at a fifth of its cost — against the
+  // ceiling and on the bill.
+  const turns = new Map<string, { u: Record<string, number | undefined>; price: { input: number; output: number } | null }>();
   let anonymousTurns = 0;
+  const specByName = new Map((subagents ?? []).map((s) => [s.name, s]));
+  const priceOf = (message: unknown): { input: number; output: number } | null => {
+    const parent = (message as { parent_tool_use_id?: string | null }).parent_tool_use_id;
+    if (!parent) return opts.price ?? null;
+    const declared = specByName.get(delegations.get(parent) ?? "")?.model;
+    if (declared === undefined || declared === "inherit" || declared === opts.model) return opts.price ?? null;
+    const model = (message as { message?: { model?: unknown } }).message?.model;
+    return knownPrice(typeof model === "string" ? model : undefined) ?? knownPrice(declared);
+  };
+  const turnsTotal = () => [...turns.values()].reduce((sum, t) => sum + priceTurn(t.u, t.price), 0);
+  const mixedModels = () => [...turns.values()].some((t) => t.price !== (opts.price ?? null));
 
   // Open tool calls, by the provider's id, so the result can be paired with
   // its call and the trace can say how long each tool ran.
@@ -444,9 +476,9 @@ export async function executeStep(
     if (message.type === "assistant") {
       const m = message.message as unknown as { id?: string; usage?: Record<string, number | undefined> };
       const u = m.usage;
-      if (u) turns.set(m.id ?? `turn-${anonymousTurns++}`, u);
+      if (u) turns.set(m.id ?? `turn-${anonymousTurns++}`, { u, price: priceOf(message) });
       if (ceiling && u) {
-        spentUsd = [...turns.values()].reduce((sum, t) => sum + priceTurn(t, opts.price ?? null), 0);
+        spentUsd = turnsTotal();
         if (spentUsd >= ceiling) {
           emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
           status = "failed";
@@ -527,10 +559,10 @@ export async function executeStep(
     let input = 0;
     let output = 0;
     let priced = 0;
-    for (const t of turns.values()) {
+    for (const { u: t, price } of turns.values()) {
       input += (t.input_tokens ?? 0) + (t.cache_creation_input_tokens ?? 0) + (t.cache_read_input_tokens ?? 0);
       output += t.output_tokens ?? 0;
-      priced += priceTurn(t, opts.price ?? null);
+      priced += priceTurn(t, price);
     }
     costUsd = priced;
     usage ??= { inputTokens: input, outputTokens: output };
@@ -641,7 +673,11 @@ export async function executeStep(
     }
   }
 
-  return { status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage, stopReason };
+  return {
+    status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage,
+    ...(mixedModels() ? { turnsCostUsd: turnsTotal() } : {}),
+    stopReason,
+  };
 }
 
 // ------------------------------------------------------------ output: json

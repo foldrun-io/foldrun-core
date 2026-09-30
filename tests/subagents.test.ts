@@ -11,7 +11,7 @@ import path from "node:path";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { subagentTools, toAgentDefinitions, subagentGuard, gatherSubagents, checkOverlap, type SubagentSpec } from "../src/subagents.ts";
 import { executeStep, type ExecOptions, type QueryFn } from "../src/step-exec.ts";
-import { buildSubagentSpecs } from "../src/runner.ts";
+import { buildSubagentSpecs, repriced } from "../src/runner.ts";
 import { workspaceDir } from "../src/store.ts";
 
 const researcher: SubagentSpec = {
@@ -39,15 +39,27 @@ test("every SDK definition carries an explicit tool list — an absent one would
   }
 });
 
-test("the guard: a sub-agent may not delegate, nor use a tool outside its list; the main thread is not judged", () => {
+test("the guard: a sub-agent may not delegate, nor use a tool outside its list", () => {
   const guard = subagentGuard([researcher]);
-  assert.match(guard("researcher", "Agent") ?? "", /cannot start another/);
-  assert.match(guard("researcher", "Bash") ?? "", /not one of researcher's tools/);
-  assert.equal(guard("researcher", "Read"), null);
-  assert.equal(guard(undefined, "Bash"), null, "main thread");
-  assert.equal(guard("general-purpose", "Bash"), null, "not ours to judge");
+  const sub = (tool: string, agentType: string | undefined = "researcher") => guard({ agentId: "a1", agentType, tool, input: {} });
+  assert.match(sub("Agent") ?? "", /cannot start another/);
+  assert.match(sub("Bash") ?? "", /not one of researcher's tools/);
+  assert.equal(sub("Read"), null);
+  assert.equal(guard({ tool: "Bash", input: {} }), null, "the main thread's own tools are canUseTool's business");
 });
 
+test("the guard: an agent this step did not declare is refused — the SDK's built-ins included", () => {
+  const guard = subagentGuard([researcher]);
+  // A call from inside a sub-agent nobody declared: general-purpose has every tool.
+  assert.match(guard({ agentId: "a1", agentType: "general-purpose", tool: "Bash", input: {} }) ?? "", /general-purpose.*not declared/);
+  assert.match(guard({ agentId: "a1", tool: "Read", input: {} }) ?? "", /not declared/, "no agent_type at all");
+  // The delegation itself, from the main thread.
+  const gp = guard({ tool: "Agent", input: { subagent_type: "general-purpose", prompt: "anything" } }) ?? "";
+  assert.match(gp, /general-purpose/);
+  assert.match(gp, /researcher/, "names the ones it may use");
+  assert.match(guard({ tool: "Task", input: { prompt: "no type" } }) ?? "", /researcher/, "no subagent_type is not a pass");
+  assert.equal(guard({ tool: "Agent", input: { subagent_type: "researcher", prompt: "read" } }), null);
+});
 test("check's overlap reads groups the way the runtime does", () => {
   assert.deepEqual(checkOverlap(["read", "web"], ["write"]).sort(), ["Glob", "Grep", "Read"]);
   assert.deepEqual(checkOverlap(["read"], ["code"]), []);
@@ -103,6 +115,12 @@ test("the parent's hooks judge a sub-agent's calls: its list, and the same file 
     const bash = await fromSub("Bash", { command: "ls" });
     assert.equal(bash.hookSpecificOutput?.permissionDecision, "deny", "outside the sub-agent's list");
     const nest = await fromSub("Agent", { subagent_type: "researcher", prompt: "again" });
+    const builtin = await pre({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" }, agent_id: "a2", agent_type: "general-purpose" } as unknown as HookInput);
+    assert.equal(builtin.hookSpecificOutput?.permissionDecision, "deny", "an undeclared sub-agent is not waved through");
+    const toBuiltin = await pre({ hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { subagent_type: "general-purpose", prompt: "x" } } as unknown as HookInput);
+    assert.equal(toBuiltin.hookSpecificOutput?.permissionDecision, "deny", "the main thread may delegate only to a declared one");
+    assert.match(toBuiltin.hookSpecificOutput?.permissionDecisionReason ?? "", /researcher/);
+    assert.equal((seen.env as Record<string, string>).CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1", "the SDK's built-in agents are switched off");
     assert.equal(nest.hookSpecificOutput?.permissionDecision, "deny", "depth one");
     const escape = await fromSub("Read", { file_path: "/etc/passwd" });
     assert.equal(escape.hookSpecificOutput?.permissionDecision, "deny", "confine.ts applies to the sub-agent's reads");
@@ -165,6 +183,66 @@ test("no subagents: no agents option and no Agent tool — the step is what it w
     await executeStep({ ...execOpts(agentDir, []), subagents: undefined, allowed: ["Read"] }, query);
     assert.equal(seen.agents, undefined);
   }));
+
+test("a person's message reaches the step's own model, never a sub-agent's context", () =>
+  withAgent(async (agentDir) => {
+    let seen: Record<string, unknown> = {};
+    const query: QueryFn = ({ options }) => {
+      seen = options;
+      return Object.assign((async function* () {
+        yield { type: "result", subtype: "success" };
+      })(), { async interrupt() {} });
+    };
+    let drained = 0;
+    await executeStep({ ...execOpts(agentDir, []), inbox: async () => (drained++, "stop after the second file") }, query);
+    type Post = (input: HookInput) => Promise<{ hookSpecificOutput?: { additionalContext?: string } }>;
+    const post = (seen.hooks as { PostToolUse: { hooks: Post[] }[] }).PostToolUse[0].hooks[0];
+    const fromSub = await post({ hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {}, tool_response: "", agent_id: "a1", agent_type: "researcher" } as unknown as HookInput);
+    assert.deepEqual(fromSub, {}, "nothing handed to the sub-agent");
+    assert.equal(drained, 0, "and the inbox is left for the parent");
+    const fromMain = await post({ hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {}, tool_response: "" } as unknown as HookInput);
+    assert.equal(fromMain.hookSpecificOutput?.additionalContext, "stop after the second file");
+  }));
+
+/** A fast parent that delegates to a max sub-agent; no closing result. */
+function mixedQuery(subModel: string | undefined): QueryFn {
+  return () => Object.assign((async function* () {
+    yield { type: "assistant", message: { id: "m1", model: "claude-haiku-4-5", usage: { input_tokens: 1000, output_tokens: 1000 }, content: [
+      { type: "tool_use", id: "call-agent", name: "Agent", input: { subagent_type: "researcher", prompt: "dig" } },
+    ] }, parent_tool_use_id: null };
+    yield { type: "assistant", message: { id: "m2", ...(subModel ? { model: subModel } : {}), usage: { input_tokens: 0, output_tokens: 100_000 }, content: [
+      { type: "text", text: "digging" },
+    ] }, parent_tool_use_id: "call-agent" };
+  })(), { async interrupt() {} });
+}
+const HAIKU = { input: 1e-6, output: 5e-6 };
+const maxResearcher: SubagentSpec = { ...researcher, model: "opus" };
+
+test("a sub-agent's turns are priced at its own model — the bill", () =>
+  withAgent(async (agentDir) => {
+    for (const subModel of ["claude-opus-4-8", undefined]) {
+      const out = await executeStep({ ...execOpts(agentDir, []), subagents: [maxResearcher], price: HAIKU }, mixedQuery(subModel));
+      // parent: 1000 in + 1000 out at haiku; sub-agent: 100k out at opus ($25/MTok).
+      const want = 1000 * 1e-6 + 1000 * 5e-6 + 100_000 * 25e-6;
+      assert.ok(Math.abs((out.costUsd ?? 0) - want) < 1e-9, `${subModel ?? "no model field"}: ${out.costUsd} vs ${want}`);
+      assert.ok(Math.abs((out.turnsCostUsd ?? 0) - want) < 1e-9, "the per-turn total rides out for the runner's repricing");
+    }
+  }));
+
+test("a sub-agent's turns are priced at its own model — the live ceiling", () =>
+  withAgent(async (agentDir) => {
+    const events: { type: string; text: string }[] = [];
+    // At haiku rates the sub-agent's turn is $0.50 — under $1. At opus it is $2.50.
+    await executeStep({ ...execOpts(agentDir, events), subagents: [maxResearcher], price: HAIKU, budgetUsd: 1 }, mixedQuery("claude-opus-4-8"));
+    assert.ok(events.some((e) => e.type === "error" && /over budget/.test(e.text)), "stopped at the ceiling");
+  }));
+
+test("the runner reprices a mixed-model step from its turns, not all at the parent's catalogue rate", () => {
+  const catalog = { baseUrl: "x", fetchedAt: "", models: [{ id: "cheap", name: "cheap", contextLength: null, promptPrice: 1e-6, completionPrice: 1e-6, tools: true, reasoning: null }] };
+  const usage = { inputTokens: 1000, outputTokens: 101_000 };
+  assert.equal(repriced(catalog as never, "cheap", usage, 3, () => {}, 2.506), 2.506);
+  assert.ok(Math.abs(repriced(catalog as never, "cheap", usage, 3, () => {})! - 0.102) < 1e-9, "one model: the catalogue as before");
+});
 
 // --------------------------------------------- built from the files, host-side
 

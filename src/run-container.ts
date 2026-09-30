@@ -127,6 +127,9 @@ export interface ContainerStepOutcome {
   data?: unknown;
   costUsd: number | null;
   usage?: { inputTokens: number; outputTokens: number } | null;
+  /** Every turn priced at its own model, when sub-agents ran on others —
+   *  see ExecOutcome.turnsCostUsd. */
+  turnsCostUsd?: number;
   /** What the sandbox actually touched — see the driver's readActuals. */
   res?: StepActuals | null;
   /** Set by the isolated executors only — an in-process step rents no
@@ -603,6 +606,7 @@ try {
   // A consult's spend belongs to the step that asked.
   const consultCost = consult.drainCost();
   if (consultCost > 0) outcome.costUsd = (outcome.costUsd ?? 0) + consultCost;
+  if (consultCost > 0 && typeof outcome.turnsCostUsd === "number") outcome.turnsCostUsd += consultCost;
   process.stdout.write(JSON.stringify({ e: "done", ...outcome, res: readActuals() }) + "\\n");
   process.exit(0);
 } catch (err) {
@@ -892,6 +896,7 @@ export function parseDriverLine(
         conclusion: typeof parsed.conclusion === "string" ? parsed.conclusion : null,
         ...("data" in parsed ? { data: parsed.data } : {}),
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
+        ...(typeof parsed.turnsCostUsd === "number" ? { turnsCostUsd: parsed.turnsCostUsd } : {}),
         usage:
           parsed.usage &&
           typeof parsed.usage.inputTokens === "number" &&

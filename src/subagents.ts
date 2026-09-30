@@ -126,18 +126,42 @@ export function toAgentDefinitions(specs: SubagentSpec[]): Record<string, {
   return out;
 }
 
+/** One tool call as the parent's PreToolUse hook sees it. */
+export interface GuardedCall {
+  /** The SDK's agent_id: set when the call comes from inside a sub-agent. */
+  agentId?: string;
+  /** The SDK's agent_type: which sub-agent. */
+  agentType?: string;
+  tool: string;
+  input: Record<string, unknown>;
+}
+
 /**
- * For the parent's PreToolUse hook: given the sub-agent a call came from (the
- * SDK's agent_type) and the tool, a reason to refuse — or null. A call from
- * the main thread (no agent_type, or one that is not ours) is not judged here.
+ * For the parent's PreToolUse hook, on a step that has sub-agents: a reason
+ * to refuse the call — or null.
+ *
+ * Only DECLARED sub-agents may run. The SDK also offers its built-ins
+ * (general-purpose and the rest, with every tool the session has); they are
+ * switched off in executeStep, and refused here too. A call from inside a
+ * sub-agent whose type is missing or not declared used to pass unjudged —
+ * `general-purpose` was a way round every sub-agent's own list.
  */
-export function subagentGuard(specs: SubagentSpec[]): (agentType: string | undefined, tool: string) => string | null {
+export function subagentGuard(specs: SubagentSpec[]): (call: GuardedCall) => string | null {
   const by = new Map(specs.map((s) => [s.name, s]));
-  return (agentType, tool) => {
-    if (!agentType) return null;
-    const s = by.get(agentType);
-    if (!s) return null;
-    if ((DELEGATE_TOOLS as readonly string[]).includes(tool)) {
+  const declared = specs.map((s) => s.name).join(", ");
+  const isDelegate = (tool: string) => (DELEGATE_TOOLS as readonly string[]).includes(tool);
+  return ({ agentId, agentType, tool, input }) => {
+    if (!agentId) {
+      // The main thread: its tools are canUseTool's business — except the
+      // delegation itself, which may name only a declared sub-agent.
+      if (!isDelegate(tool)) return null;
+      const to = typeof input.subagent_type === "string" ? input.subagent_type : "";
+      if (by.has(to)) return null;
+      return `${to ? `"${to}" is not a sub-agent this step declared` : "name the sub-agent to delegate to"} — subagent_type must be one of: ${declared}`;
+    }
+    const s = agentType ? by.get(agentType) : undefined;
+    if (!s) return `${agentType ? `"${agentType}"` : "an unnamed sub-agent"} is not declared in subagents: for this step (only ${declared}) — its calls are refused`;
+    if (isDelegate(tool)) {
       return `${s.name} is a sub-agent and cannot start another — do the work with your own tools`;
     }
     if (s.disallowedTools.includes(tool)) return `${tool} is disallowed for ${s.name}`;

@@ -1644,15 +1644,23 @@ async function publishPublicDir(
   }
 }
 
-function repriced(
+export function repriced(
   catalog: Catalog | null,
   model: string,
   usage: { inputTokens: number; outputTokens: number } | null,
   sdkCost: number | null,
   push: (type: "info" | "error", text: string) => void,
+  /** The step's turns each priced at its own model — set when a sub-agent
+   *  ran on a different model (ExecOutcome.turnsCostUsd). The lump `usage`
+   *  priced at the step's model would bill those turns at the wrong rate. */
+  turnsCostUsd?: number | null,
 ): number | null {
   const known = usage ? catalogCost(catalog, model, usage) : null;
   if (known === null) return sdkCost;
+  if (typeof turnsCostUsd === "number") {
+    push("info", `cost from each model turn at its own model's rate: $${turnsCostUsd.toFixed(6)} (sub-agents ran on other models)`);
+    return turnsCostUsd;
+  }
   if (sdkCost !== null && Math.abs(known - sdkCost) > 0.000001) {
     push("info", `cost repriced from the gateway's catalogue: $${known.toFixed(6)} (sdk said $${sdkCost.toFixed(6)})`);
   }
@@ -2536,7 +2544,7 @@ async function runStep(
       // so — OOMKilled, Evicted — on the record, where the retry reads it.
       if (outcome.status === "failed" && outcome.reason) push("error", `sandbox ended: ${outcome.reason}`);
       if (outcome.data !== undefined) step.data = redactData(outcome.data);
-      step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push);
+      step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push, outcome.turnsCostUsd);
       step.tokens = outcome.usage
         ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
         : null;
@@ -2708,7 +2716,7 @@ async function runStep(
       if (outcome.data !== undefined) step.data = redactData(outcome.data);
       // A consult's spend belongs to the step that asked.
       const consultCost = consultTools.drainCost();
-      const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push);
+      const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push, outcome.turnsCostUsd);
       step.costUsd = stepCost === null && consultCost === 0 ? null : (stepCost ?? 0) + consultCost;
       step.tokens = outcome.usage
         ? { input: outcome.usage.inputTokens, output: outcome.usage.outputTokens }
