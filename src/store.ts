@@ -26,6 +26,7 @@ import { recordRevision, registerTreeReader, type RevisionFile } from "./history
 import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
 import type { TestEffect } from "./test-mode.ts";
+import type { OperatorEvent } from "./operator.ts";
 import matter from "gray-matter";
 
 /**
@@ -2873,6 +2874,30 @@ export interface RunEvent {
    *  state write, a withheld secret. The run page lists these; the text is
    *  still the trace's line. See test-mode.ts. */
   effect?: TestEffect;
+  /** Set when a person was involved mid-step: a question the agent asked
+   *  (ask_person), its answer, or a message a person sent in (operator.ts). */
+  operator?: OperatorEvent;
+}
+
+/** A question an agent asked a person while its step ran (tools: [ask]). */
+export interface StepQuestion {
+  id: string;
+  question: string;
+  options?: string[];
+  askedAt: string;
+  answer?: string;
+  answeredAt?: string;
+  by?: string | null;
+  /** true when the wait ran out with no answer. */
+  unanswered?: boolean;
+}
+
+/** A message a person sent into a running step, and when the agent got it. */
+export interface StepMessage {
+  text: string;
+  by?: string | null;
+  at: string;
+  deliveredAt: string;
 }
 
 /** One attempt of a step — see StepRecord.tries. */
@@ -2906,6 +2931,11 @@ export function sumAttempts(tries: StepAttempt[]): Pick<StepAttempt, "costUsd" |
 export interface StepRecord {
   agent: string;
   instruction: string;
+  /** Questions the agent asked a person mid-step (tools: [ask]), newest
+   *  last. One without an answer (and not `unanswered`) is still open. */
+  questions?: StepQuestion[];
+  /** Messages a person sent into the running step, as delivered. */
+  messages?: StepMessage[];
   group: number;
   optional: boolean;
   /** Carried from the flow — see FlowStep. Both are resolved at run

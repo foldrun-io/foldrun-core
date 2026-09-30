@@ -15,6 +15,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { HookInput, McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
+import type { OperatorEvent } from "./operator.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 import { hostSafeEnv } from "./host-env.ts";
@@ -95,6 +96,10 @@ export interface ExecOptions {
    *  runner answers from the run record (stopRun writes there from another
    *  process); a container has a sandbox that is destroyed instead. */
   stopRequested?: () => boolean;
+  /** Reads the run's inbox (operator.ts inboxReader): what a person wrote
+   *  in while the step runs, handed to the model after its next tool call.
+   *  Absent where nobody can write in (no egress proxy). */
+  inbox?: () => Promise<string | null>;
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
 
@@ -123,7 +128,7 @@ export type QueryLike = AsyncIterable<unknown> & { interrupt(): Promise<unknown>
 export type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => QueryLike;
 
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
-export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect };
+export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect; operator?: OperatorEvent };
 
 
 /** Conservative per-token rates for a model nothing else can price — an
@@ -300,6 +305,21 @@ export async function executeStep(
             return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const, updatedInput: verdict.updatedInput } };
           }],
         }],
+        // A message a person sent into the running step reaches the model
+        // after its next tool call, as context — never as a change to what it
+        // may do. A model that is only writing, calling no tools, hears it at
+        // the next call it makes.
+        ...(opts.inbox
+          ? {
+              PostToolUse: [{
+                hooks: [async (hookInput: HookInput) => {
+                  if (hookInput.hook_event_name !== "PostToolUse") return {};
+                  const context = await opts.inbox!().catch(() => null);
+                  return context ? { hookSpecificOutput: { hookEventName: "PostToolUse" as const, additionalContext: context } } : {};
+                }],
+              }],
+            }
+          : {}),
       },
       canUseTool: async (toolName: string, input: Record<string, unknown>) => {
         // The toolset was already narrowed to what the agent declared, so

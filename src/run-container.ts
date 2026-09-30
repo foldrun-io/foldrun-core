@@ -31,6 +31,7 @@ import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
+import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
 
@@ -76,6 +77,8 @@ export interface ContainerStepInput {
   history?: RunDigest[];
   /** tools: [desks] — the account's other workspaces' runs, gathered host-side. */
   desks?: RunDigest[];
+  /** tools: [ask] — ask_person, and how long it may wait for an answer. */
+  ask?: { timeoutSec: number };
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -489,6 +492,7 @@ try {
   const { buildScriptTools } = await import("@foldrun/core/script-tools");
   const { buildConsultTools } = await import("@foldrun/core/agent-tools");
   const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
+  const { httpChannel, buildAskTool, inboxReader } = await import("@foldrun/core/operator");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
@@ -544,6 +548,11 @@ try {
   const search = buildSearchTools(input.search ?? []);
   const history = input.history?.length ? buildHistoryTools(input.history) : { server: null };
   const desks = input.desks?.length ? buildDeskTools(input.desks) : { server: null };
+  // A person in the loop, over the proxy this step's lease already names:
+  // ask_person when tools: [ask], and the run's inbox after every tool call.
+  const channel = httpChannel(env.FOLDRUN_EGRESS);
+  const ask = input.ask ? buildAskTool({ channel, timeoutSec: input.ask.timeoutSec, emit }) : { server: null };
+  const inbox = channel ? inboxReader(channel, emit) : undefined;
 
   const outcome = await executeStep({
     agentDir,
@@ -562,8 +571,10 @@ try {
       ...(search.server ? { foldrun_search: search.server } : {}),
       ...(history.server ? { foldrun_history: history.server } : {}),
       ...(desks.server ? { foldrun_desks: desks.server } : {}),
+      ...(ask.server ? { foldrun_ask: ask.server } : {}),
       ...input.mcpServers,
     },
+    ...(inbox ? { inbox } : {}),
     env,
     timeoutSec: input.timeoutSec,
     budgetUsd: input.budgetUsd,
@@ -851,7 +862,7 @@ export function ensureRunnerImage(
 
 export function parseDriverLine(
   line: string,
-): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean } | { e: "done" } & ContainerStepOutcome | null {
+): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; operator?: OperatorEvent } | { e: "done" } & ContainerStepOutcome | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
@@ -864,6 +875,7 @@ export function parseDriverLine(
         ...(typeof parsed.call === "string" ? { call: parsed.call } : {}),
         ...(typeof parsed.ms === "number" ? { ms: parsed.ms } : {}),
         ...(parsed.err === true ? { err: true } : {}),
+        ...(isOperatorEvent(parsed.operator) ? { operator: parsed.operator } : {}),
       };
     }
     if (parsed.e === "done") {

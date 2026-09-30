@@ -26,6 +26,8 @@ const isolatedRun = () => {
   return mode === "container" || (!!mode && mode in platform.isolation);
 };
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
+import { ASK_TOOL, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool } from "./operator.ts";
+import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
@@ -1368,6 +1370,7 @@ function agentContext(
   let wantSearch = false;
   let wantHistory = false;
   let wantDesks = false;
+  let wantAsk = false;
 
   for (const ref of toolRefs(front)) {
     const toolName = ref.name;
@@ -1399,11 +1402,12 @@ function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
-    } else if (toolName === "search" || toolName === "history" || toolName === "desks") {
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
       if (toolName === "search") wantSearch = true;
       else if (toolName === "history") wantHistory = true;
+      else if (toolName === "ask") wantAsk = true;
       else wantDesks = true;
       if (available[toolName]) shadowed.push(toolName);
     } else if (BUILTIN_TOOLS.has(toolName)) {
@@ -1451,6 +1455,14 @@ function agentContext(
   const historyTools = wantHistory ? buildHistoryTools(historyDigest) : { server: null, toolNames: [], promptLines: [] };
   const deskTools = wantDesks ? buildDeskTools(deskDigest) : { server: null, toolNames: [], promptLines: [] };
   allowed.push(...searchTools.toolNames, ...historyTools.toolNames, ...deskTools.toolNames);
+  // tools: [ask] — ask_person. Its server is built where the step runs (it
+  // needs the step's emit, and in a pod the proxy's address); here only the
+  // grant, the wait and the prompt's line.
+  const ask = wantAsk ? { timeoutSec: askTimeoutSec(front) } : null;
+  if (ask) {
+    allowed.push(ASK_TOOL);
+    parts.push(`# Asking a person\n\n${askPromptLine(ask.timeoutSec)}`);
+  }
   if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
     parts.push(`# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
   }
@@ -1497,6 +1509,7 @@ function agentContext(
     searchTools,
     historyTools,
     deskTools,
+    ask,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -1624,6 +1637,34 @@ export function recordAttempt(
   step.computeSecs = totals.computeSecs;
 }
 
+/** A question an agent asked mid-step goes where approvals go (the
+ *  workspace's notify:, `awaiting-approval` events), with the way to answer. */
+async function notifyQuestion(tenant: string, workspace: string, runId: string, agent: string, question: string, options?: string[]): Promise<void> {
+  const origin = (process.env.FOLDRUN_PUBLIC_URL ?? "").replace(/\/+$/, "");
+  const where = origin ? `${origin}/dashboard/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(runId)}${tenant !== "default" ? `?tenant=${encodeURIComponent(tenant)}` : ""}` : `run ${runId}`;
+  await sendPlainNotification(tenant, workspace, {
+    event: "awaiting-approval",
+    headline: `${agent} is asking you something`,
+    detail: `${question}${options?.length ? `\n\nOptions: ${options.join(" · ")}` : ""}\n\nAnswer it on ${where}, or \`foldrun answer ${runId} "…"\`.`,
+    runId,
+  }).catch(() => false);
+}
+
+/** The local stand-in for a person: the terminal, when there is one. */
+async function terminalAsk(question: string, options?: string[]): Promise<string | null> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const list = options?.length ? `\n${options.map((o, i) => `  ${i + 1}. ${o}`).join("\n")}\n` : "";
+    const raw = (await rl.question(`\n  the agent asks: ${question}${list}\n  your answer: `)).trim();
+    const n = Number(raw);
+    return options?.length && Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : raw || null;
+  } finally {
+    rl.close();
+  }
+}
+
 async function runStep(
   agentDir: string,
   tenant: string,
@@ -1699,7 +1740,16 @@ async function runStep(
   };
 
   const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
-    step.events.push({ t: new Date().toISOString(), type, text: redact(text), ...extra });
+    const t = new Date().toISOString();
+    step.events.push({ t, type, text: redact(text), ...extra });
+    // A person in the loop: the question, its answer, a message delivered —
+    // onto the step, so the run page, the API and history show them.
+    if (extra?.operator) {
+      applyOperatorEvent(step, extra.operator, t);
+      if (extra.operator.kind === "asked" && runId && !testRun) {
+        void notifyQuestion(tenant, path.basename(path.resolve(agentDir, "..", "..")), runId, step.agent, extra.operator.question, extra.operator.options);
+      }
+    }
     save();
   };
 
@@ -1771,6 +1821,7 @@ async function runStep(
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       searchChoice, fetchChoice, actionChoices, web, language, region,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
+      ask,
       translator, fallbackTranslator,
       outward,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
@@ -2028,7 +2079,11 @@ async function runStep(
     for (const m of missingConsults) {
       push("error", `agents: "${m}" is not an agent in this workspace — no consult tool granted`);
     }
-    const consultNames = consults.length ? [...mcpNames, "foldrun_agents"] : mcpNames;
+    const consultNames = [
+      ...mcpNames,
+      ...(consults.length ? ["foldrun_agents"] : []),
+      ...(ask ? ["foldrun_ask"] : []),
+    ];
 
     // The last provider refusal this step saw, for the fallback decision —
     // watched on both paths, because a refusal reads the same from a pod
@@ -2257,6 +2312,7 @@ async function runStep(
           })),
           history: historyDigest,
           desks: deskDigest,
+          ...(ask ? { ask } : {}),
         },
         env: Object.fromEntries(
           Object.entries({
@@ -2450,6 +2506,9 @@ async function runStep(
         { ...hostSafeEnv(), ...stepSecrets, ...providerEnv },
         (type, text) => push(type, text),
       );
+      // On this machine nobody can write in and there is no proxy: the
+      // question goes to the terminal when there is one, else unanswered.
+      const askTools = ask ? buildAskTool({ channel: null, timeoutSec: ask.timeoutSec, emit: push, local: terminalAsk }) : null;
       // @file secrets become 0600 paths here (host run), cleaned up in the
       // finally — once, however many attempts follow.
       const mat = materializeFileSecrets(agentDir, stepSecrets);
@@ -2471,6 +2530,7 @@ async function runStep(
           ...(searchTools.server ? { foldrun_search: searchTools.server } : {}),
           ...(historyTools.server ? { foldrun_history: historyTools.server } : {}),
           ...(deskTools.server ? { foldrun_desks: deskTools.server } : {}),
+          ...(askTools ? { foldrun_ask: askTools.server } : {}),
           ...mcpServers,
         },
         // Declared secrets reach the agent's scripts as env vars; the model

@@ -75,6 +75,7 @@ const TOOL_GROUPS: Completion[] = [
   { label: "write", hint: "Read, Write, Edit, Glob, Grep" },
   { label: "code", hint: "Bash — runs anything in the sandbox" },
   { label: "web", hint: "search, fetch, browse, crawl, map, extract, answer, monitor — providers under web:" },
+  { label: "ask", hint: "ask_person — ask the person running the desk mid-step, and wait for the answer" },
 ];
 
 const SDK_TOOL_NAMES: Completion[] = [
@@ -134,12 +135,13 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "description", insert: "description: ", hint: "required — what it does, and when" },
     { label: "model", insert: "model: default" },
     { label: "effort", insert: "effort: high", hint: "how hard it thinks" },
-    { label: "tools", insert: "tools:\n  - files", hint: "what the runtime gives it" },
+    { label: "tools", insert: "tools:\n  - write", hint: "what the runtime gives it" },
     { label: "secrets", insert: "secrets:\n  - ", hint: "credentials it may spend" },
     { label: "skills", insert: "skills:\n  - ", hint: "allowlist; omit to inherit all" },
     { label: "scripts", insert: "scripts:\n  - name: \n    run: \n    description: " },
     { label: "runtime", insert: "runtime:\n  python: \"3\"\n  packages: []" },
     { label: "mcpServers", insert: "mcpServers:\n  " },
+    { label: "ask", insert: "ask:\n  timeout: 30m", hint: "tools: [ask] — how long ask_person waits for a person (max 24h)" },
     { label: "permissionMode", insert: "permissionMode: plan", hint: "plan = read-only" },
     { label: "disallowedTools", insert: "disallowedTools:\n  - " },
     {
