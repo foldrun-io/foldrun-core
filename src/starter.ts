@@ -319,6 +319,8 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/runs/<id>/stop\` | POST | kill it — destroys the sandbox too |
 | \`/runs/<id>/rerun\` | POST | again, or from a chosen step |
 | \`/runs/<id>/approve\` | POST | release a run waiting on a human |
+| \`/runs/<id>/answer\` | POST | answer a question an agent is asking mid-step (\`tools: [ask]\`) |
+| \`/runs/<id>/message\` | POST | tell a running step something; \`step\` picks one of a parallel group |
 | \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
 | \`/flows/<f>/run\` | POST | start a flow |
 | \`/agents\` · \`/agents/<a>/run\` | GET POST · POST | list agents, run one |
@@ -414,7 +416,7 @@ description: Finds and summarises sources.
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
-tools: [web, read, my-folder-tool]  # built-ins and your own tools/, one list
+tools: [web, read, ask, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool
