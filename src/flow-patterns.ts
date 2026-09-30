@@ -22,6 +22,8 @@
 
 import { parseFlow, addFlowStep, reorderFlowSteps, parseWait, assertSafeName, type FlowStep } from "./store.ts";
 import { joinGroup, splitToRail, type Groups } from "./arrange.ts";
+import { lintFlow } from "./flow-lint.ts";
+import { removalImpact, stepLabel, type RemovalImpact } from "./step-removal.ts";
 
 // ---------- flow files ----------
 
@@ -64,7 +66,9 @@ export type PatternEdit =
   /** Fan-out, evaluator loop, ask, wait, rescue: options on one step. */
   | { op: "options"; step: number; set: PatternOptions }
   /** Approval gate: the `!` marker. */
-  | { op: "approve"; step: number; on: boolean };
+  | { op: "approve"; step: number; on: boolean }
+  /** Delete one step (removeStep). */
+  | { op: "remove"; step: number };
 
 const OPTION_RE = /^(\s+)([a-z_-]+):(.*)$/;
 const MARKER_RE = /^(\s*\d+)([?!])?(\.?\s+\[\[)/;
@@ -199,6 +203,53 @@ export function insertFlowStep(
   return { text, index, column };
 }
 
+/** The problems that make `check` fail, as a multiset of messages: the
+ *  parser's own per-step ones and the lint's error-level ones. */
+function errorsOf(raw: string): string[] {
+  const flow = parseFlow("flow.md", raw);
+  return [
+    ...flow.steps.flatMap((s) => s.problems ?? []),
+    ...lintFlow(flow).filter((w) => w.level === "error").map((w) => w.message.replace(/step \d+/g, "step")),
+  ];
+}
+
+/**
+ * What else changes when step `index` goes — said before it goes. The rule
+ * lives in step-removal.ts, which imports no parser, so the canvas can say
+ * it in the browser from the steps it already has.
+ */
+export function removeStepImpact(raw: string, index: number): RemovalImpact {
+  return removalImpact(parseFlow("flow.md", raw).steps, index);
+}
+
+/**
+ * Delete step `index` (its index in the parsed steps): its step line and the
+ * indented option lines under it, nothing else — prose after the step stays.
+ * When that empties its group, the groups after it renumber so there is no
+ * gap. The agent's file is not touched. Refused when the result would give
+ * `check` an error it did not have (a `case:` step left first, with nothing
+ * to route on).
+ */
+export function removeStep(raw: string, index: number): string {
+  const steps = parseFlow("flow.md", raw).steps;
+  if (!Number.isInteger(index) || !steps[index]) throw new Error(`no step ${index + 1}`);
+  const emptied = flowGroups(steps).some((g) => g.length === 1 && g[0] === index);
+  const { lines, first } = stepSpan(raw, index);
+  let end = first + 1;
+  while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
+  let out = [...lines.slice(0, first), ...lines.slice(end)].join("\n");
+  if (emptied && steps.length > 1) out = reorderFlowSteps(out, flowGroups(parseFlow("flow.md", out).steps));
+
+  const had = new Map<string, number>();
+  for (const e of errorsOf(raw)) had.set(e, (had.get(e) ?? 0) + 1);
+  for (const e of errorsOf(out)) {
+    const n = had.get(e) ?? 0;
+    if (n) had.set(e, n - 1);
+    else throw new Error(`removing ${stepLabel(steps, index)} would leave the flow with an error: ${e}`);
+  }
+  return out;
+}
+
 /** One pattern, applied to a flow file. */
 export function applyPatternEdit(raw: string, edit: PatternEdit): string {
   switch (edit.op) {
@@ -226,6 +277,8 @@ export function applyPatternEdit(raw: string, edit: PatternEdit): string {
       return setStepOptions(raw, edit.step, edit.set);
     case "approve":
       return setStepApprove(raw, edit.step, edit.on);
+    case "remove":
+      return removeStep(raw, edit.step);
     default:
       throw new Error(`unknown pattern edit ${(edit as { op?: unknown }).op}`);
   }
