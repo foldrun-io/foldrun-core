@@ -20,7 +20,7 @@ import { listAgents } from "../src/store.ts";
 import { convert } from "../scripts/migrate-use-to-tools.mjs";
 
 test("a built-in name is never one of the author's own", () => {
-  for (const name of ["read", "write", "files", "code", "bash", "fetch", "search", "history", "Read", "Bash", "WebFetch"]) {
+  for (const name of ["read", "write", "files", "code", "bash", "search", "history", "Read", "Bash"]) {
     assert.ok(isRuntimeTool(name), `${name} is a runtime tool`);
   }
   assert.ok(!isRuntimeTool("site_repo"));
@@ -131,17 +131,14 @@ test("write and code are the names; files and bash still grant the same, retired
   assert.match(retiredToolError("files"), /use write instead: the same grant/);
 });
 
-test("web is ours now; the SDK's web names and the three older web tools are retired, still granted", () => {
+test("web is the one web tool; no other web name is the runtime's or an alias", () => {
   assert.ok(!isRuntimeTool("web"), "web resolves to the gallery tool, not the SDK's pair");
   assert.deepEqual(ownToolNames({ tools: ["web"] }), ["web"]);
-  assert.deepEqual(
-    retiredToolNames({ tools: ["web", "read", "WebFetch", "fetch", "WebSearch", "web_search", "web_fetch", "web_browse"] }),
-    ["WebFetch", "fetch", "WebSearch", "web_search", "web_fetch", "web_browse"],
-  );
-  assert.deepEqual(retiredToolNames({ tools: ["[[web_search]]"] }), [], "a [[link]] is the author's own file");
-  assert.match(retiredToolError("WebFetch"), /use web instead/);
-  assert.match(retiredToolError("web_browse"), /use web instead: one tool for every web action — action=browse/);
-  // Still granted: the SDK names stay runtime tools; the old gallery tools stay own tools.
-  assert.ok(isRuntimeTool("WebFetch") && isRuntimeTool("fetch"));
-  assert.deepEqual(ownToolNames({ tools: ["web_search"] }), ["web_search"]);
+  // Not built-ins, not retired aliases: a name nothing defines, which the
+  // runner and `check` report as a tool that is not there.
+  for (const name of ["WebFetch", "WebSearch", "fetch", "web_search", "web_fetch", "web_browse"]) {
+    assert.ok(!isRuntimeTool(name), name);
+  }
+  assert.deepEqual(retiredToolNames({ tools: ["web", "WebFetch", "fetch", "web_search", "web_browse"] }), []);
+  assert.deepEqual(ownToolNames({ tools: ["web_browse"] }), ["web_browse"]);
 });

@@ -15,9 +15,9 @@ test("a folder tool lists its code beside its manifest", async () => {
   try {
     fs.mkdirSync(path.join(root, "workspace"), { recursive: true });
     const tools = path.join(root, "library", "tools");
-    fs.mkdirSync(path.join(tools, "web_browse"), { recursive: true });
-    fs.writeFileSync(path.join(tools, "web_browse", "tool.md"), "---\nname: web_browse\nrun: run.mjs\n---\nbody\n");
-    fs.writeFileSync(path.join(tools, "web_browse", "run.mjs"), "console.log(1)\n");
+    fs.mkdirSync(path.join(tools, "web"), { recursive: true });
+    fs.writeFileSync(path.join(tools, "web", "tool.md"), "---\nname: web\nrun: run.mjs\n---\nbody\n");
+    fs.writeFileSync(path.join(tools, "web", "run.mjs"), "console.log(1)\n");
     // A flat tool is already whole: it should not grow a files list.
     fs.writeFileSync(path.join(tools, "email.md"), "---\nname: email\n---\nbody\n");
 
@@ -25,11 +25,11 @@ test("a folder tool lists its code beside its manifest", async () => {
     const { listLibrary } = await import("../src/library.ts?folderfiles");
     const entries = listLibrary("acme", "tools");
 
-    const folder = entries.find((e) => e.path === "web_browse/tool.md");
+    const folder = entries.find((e) => e.path === "web/tool.md");
     assert.ok(folder, "the folder tool is listed");
     assert.deepEqual(
       folder.files?.slice().sort(),
-      ["web_browse/run.mjs", "web_browse/tool.md"],
+      ["web/run.mjs", "web/tool.md"],
       "its code comes with it, or a pull loses the program",
     );
 

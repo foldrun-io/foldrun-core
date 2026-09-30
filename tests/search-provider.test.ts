@@ -119,7 +119,7 @@ test("a model provider does not take a key here — that is the provider: block'
 // ---- fetch APIs ---------------------------------------------------------
 import { FETCH_APIS, findFetchApi } from "../src/providers.ts";
 
-test("every fetch API resolves for web_fetch with its secret and host", () => {
+test("every fetch API resolves for web.fetch with its secret and host", () => {
   for (const api of FETCH_APIS) {
     const got = resolveSearch(api.name, "fetch");
     assert.equal(got.shape, "direct", api.name);
@@ -134,14 +134,14 @@ test("Jina's reader is the one whose key is optional; its search is not", () => 
   assert.equal(resolveSearch("jina", "search").secretOptional, false);
 });
 
-test("a search-only API named for web_fetch is refused and told what can fetch", () => {
+test("a search-only API named for web.fetch is refused and told what can fetch", () => {
   const got = resolveSearch("brave", "fetch");
   assert.equal(got.provider, null);
   assert.match(got.error!, /searches but has no fetch here/);
   assert.match(got.error!, /jina/);
 });
 
-test("web_fetch: anthropic stays the one provider swap, and openai is refused honestly", () => {
+test("web.fetch: anthropic stays the one provider swap, and openai is refused honestly", () => {
   assert.equal(resolveSearch("anthropic", "fetch").shape, "anthropic");
   assert.match(resolveSearch("openai", "fetch").error!, /no fetch a tool can call/);
 });
@@ -176,7 +176,7 @@ test("names that cannot work are refused with the reason, for every kind", () =>
   assert.match(resolveSearch("google").error!, /serper, serpapi or dataforseo/);
 });
 
-test("a remote browser resolves for web_browse with its secret, and only for web_browse", () => {
+test("a remote browser resolves for web.browse with its secret, and only for browse", () => {
   for (const b of BROWSER_APIS) {
     const got = resolveSearch(b.name, "browse");
     assert.equal(got.shape, "direct", b.name);
@@ -199,10 +199,10 @@ import { webProblems } from "../src/providers.ts";
 
 test("webProblems names every web key that cannot work, and nothing else", () => {
   assert.deepEqual(webProblems({}), []);
-  assert.deepEqual(webProblems({ web_search: "exa", web_fetch: "jina", web_browse: "steel" }), []);
-  const bad = webProblems({ web_search: "deepseek", web_fetch: "brave", web_browse: "exa" });
+  assert.deepEqual(webProblems({ web: { search: "exa", fetch: "jina", browse: "steel" } }), []);
+  const bad = webProblems({ web: { search: "deepseek", fetch: "brave", browse: "exa" } });
   assert.equal(bad.length, 3);
-  assert.match(bad[0], /web_search: deepseek — DeepSeek has no server-side search/);
-  assert.match(bad[1], /web_fetch: brave — Brave Search searches but has no fetch here/);
-  assert.match(bad[2], /web_browse: exa — no remote browser by that name/);
+  assert.match(bad[0], /web\.search: deepseek — DeepSeek has no server-side search/);
+  assert.match(bad[1], /web\.fetch: brave — Brave Search searches but has no fetch here/);
+  assert.match(bad[2], /web\.browse: exa — no remote browser by that name/);
 });

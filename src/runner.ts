@@ -89,7 +89,7 @@ import { materializeFiles, harvestFiles } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, legacyWebKeyError, webSpelling, browseSessionProblems } from "./providers.ts";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, browseSessionProblems } from "./providers.ts";
 import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
@@ -1037,14 +1037,12 @@ function agentContext(
   //
   // Declared-and-absent is still an error; referenced-and-absent is the API
   // tool's own missingSecrets, reported where the tool is described.
-  // `web_search:` and `web_fetch:` name who answers; resolved here, early,
+  // `web: {search: …, fetch: …}` name who answers; resolved here, early,
   // because three later things hang off the answer — the secret the step
   // must hold, the env the tool reads, and the egress grant for the host.
-  // `web_search:` carries the account engine's settings (engines, categories,
+  // `web.search` carries the account engine's settings (engines, categories,
   // safesearch, …) beside the provider name, read off first the way
-  // web_browse's are, so the provider resolver sees only its own part.
-  // All of it comes from the agent's `web:` block now — `web: {search: exa}`
-  // — with the older per-action keys (`web_search:`) still read beneath it.
+  // browse's are, so the provider resolver sees only its own part.
   const web = webConfig(front as Record<string, unknown>, workspaceFrontmatter(agentDir, tenant));
   const searchRead = readSearchSettings(web.raw.search);
   const searchChoice = resolveSearch(searchRead.rest, "search");
@@ -1052,7 +1050,7 @@ function agentContext(
   const fetchChoice = resolveSearch(web.raw.fetch, "fetch");
   // A remote browser's key is materialised, not proxied: CDP is a websocket
   // and the wrapper opens the session itself, the way it seeds a cookie.
-  // `web_browse:` carries two things in one key: how the browser presents
+  // `web.browse` carries two things in one key: how the browser presents
   // itself (engine, user agent, device, locale, timezone) and, optionally,
   // which remote vendor renders the page. Settings are read off first so the
   // vendor resolver sees only the vendor part, and a block of settings alone
@@ -1261,7 +1259,7 @@ function agentContext(
     // The language the agent works in — what the search asks in, the locale
     // the browser reports, the Accept-Language a fetch sends. Not a secret.
     FOLDRUN_LANGUAGE: language.language,
-    // The country and what follows from it — web_search's gl, a script's
+    // The country and what follows from it — web search's gl, a script's
     // currency. Unset where nobody said, so nothing is invented.
     ...(region.region ? { FOLDRUN_REGION: region.region } : {}),
     ...(locale.currency ? { FOLDRUN_CURRENCY: locale.currency } : {}),
@@ -1277,12 +1275,12 @@ function agentContext(
     // one — the `websearch` library tool reads it. Not a secret; rides with
     // the clock so it reaches scripts, the sandbox and verify alike.
     ...(process.env.FOLDRUN_SEARCH_URL ? { FOLDRUN_SEARCH_URL: process.env.FOLDRUN_SEARCH_URL } : {}),
-    // Whose index our web_search asks when the agent named a search API.
+    // Whose index our web search asks when the agent named a search API.
     // Unset means the account's own engine. The name, never the key.
     ...(searchChoice.shape === "direct" && searchChoice.provider
       ? { FOLDRUN_WEB_SEARCH_VIA: searchChoice.provider, FOLDRUN_WEB_SEARCH_SECRET: searchChoice.secret ?? "" }
       : {}),
-    // The `web_search:` block's SearXNG settings, as defaults the tool reads.
+    // The `web.search` block's SearXNG settings, as defaults the tool reads.
     ...searchSettingsEnv(searchRead.settings),
     ...(fetchChoice.shape === "direct" && fetchChoice.provider
       ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
@@ -1302,7 +1300,7 @@ function agentContext(
     // The vendor session's settings (`web.browse.session:`), as JSON the
     // tool maps onto that vendor's own option names.
     ...(browseSession ? { FOLDRUN_BROWSER_SESSION: JSON.stringify(browseSession) } : {}),
-    // The `web_browse:` block, as defaults the tool reads when the call did
+    // The `web.browse` block, as defaults the tool reads when the call did
     // not say otherwise. Env rather than arguments because the tool is a
     // script the model calls: a default nobody typed should not have to be
     // typed by the model either.
@@ -1403,24 +1401,22 @@ function agentContext(
   const disabled: string[] = [];
   const unknownTools: string[] = [];
   const shadowed: string[] = [];
-  // `web_search:` and `web_fetch:` name who answers. Unset means ours — the
+  // `web: {search: …, fetch: …}` name who answers. Unset means ours — the
   // account's own engine, and our own fetch, both inside the run's sandbox
-  // and both on the run record. A provider name swaps the tool the runtime
-  // grants for the SDK's server-side one, which the run's endpoint executes:
-  // point the run at z.ai and z.ai's index answers the same tool Anthropic
-  // would have. The name the model sees is unchanged either way, so a prompt
-  // written against `web_search` survives the switch.
-  const providerWebTools: Record<string, string> = {};
+  // and both on the run record. A model provider's name adds the SDK's
+  // server-side tool beside ours, which the run's endpoint executes: point
+  // the run at z.ai and z.ai's index answers the search. The web tool hands
+  // the action over to it (FOLDRUN_WEB_BUILTIN).
+  const providerWebTools: string[] = [];
   if (browseChoice.error) providerWarnings.push(browseChoice.error);
   providerWarnings.push(
     ...sessionProblems,
     ...web.problems,
     ...actionChoices.flatMap((c) => (c.error ? [c.error] : [])),
-    ...web.legacy.map(legacyWebKeyError),
   );
-  for (const [key, choice, builtin] of [
-    ["web_search", searchChoice, "WebSearch"],
-    ["web_fetch", fetchChoice, "WebFetch"],
+  for (const [choice, builtin] of [
+    [searchChoice, "WebSearch"],
+    [fetchChoice, "WebFetch"],
   ] as const) {
     if (choice.error) {
       providerWarnings.push(choice.error);
@@ -1429,7 +1425,7 @@ function agentContext(
       // does not: our tool stays, and reads FOLDRUN_WEB_SEARCH_VIA to know
       // whose index to ask — through the egress proxy, with the customer's
       // own key, on the run record.
-      providerWebTools[key] = builtin;
+      providerWebTools.push(builtin);
     }
   }
   let wantSearch = false;
@@ -1448,7 +1444,7 @@ function agentContext(
     // zai}`) adds that provider's tool beside it; the web tool's search then
     // names it (FOLDRUN_WEB_BUILTIN) rather than asking our engine.
     if (toolName === "web" && !ref.linked) {
-      allowed.push(...Object.values(providerWebTools));
+      allowed.push(...providerWebTools);
       continue;
     }
 
@@ -1457,12 +1453,7 @@ function agentContext(
     // but a tool hidden by one is worth saying out loud rather than silently
     // ignoring. A `[[link]]` skips the built-ins entirely: the brackets mean
     // "my file", which is how a tool named `search` is granted at all.
-    if (providerWebTools[toolName] && !ref.linked) {
-      // A provider answers this one. The SDK's server-side tool goes in place
-      // of ours; `[[web_search]]` still reaches our file, because the
-      // brackets mean "my file" everywhere else and should here too.
-      allowed.push(providerWebTools[toolName]);
-    } else if (ref.linked) {
+    if (ref.linked) {
       // Granted above through ownToolNames, or reported missing there.
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
@@ -1590,7 +1581,7 @@ function agentContext(
     providerWarnings,
     fallbackEnv,
     region,
-    // Who answers web_search and web_fetch, resolved once up top. The step
+    // Who answers web search and fetch, resolved once up top. The step
     // needs them again to grant a direct API's key to its host.
     searchChoice,
     fetchChoice,
@@ -1935,7 +1926,7 @@ async function runStep(
     // And one more only when something written could not be read as a zone.
     for (const problem of clock.problems) push("error", problem);
     if (providerLabel) push("info", `provider: ${providerLabel}`);
-    for (const w of providerWarnings) push("error", webSpelling(w, web.from));
+    for (const w of providerWarnings) push("error", w);
     // A level that wrote a language nobody can read was skipped, not obeyed.
     for (const l of language.lines) push("info", l);
     for (const l of region.lines) push("info", l);

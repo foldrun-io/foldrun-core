@@ -1,4 +1,4 @@
-// `web_browse:` carries two things in one key: the browser's identity and,
+// `web: {browse: …}` carries two things in one key: the browser's identity and,
 // optionally, the vendor that renders the page. These are the rules that keep
 // the two from standing on each other.
 import test from "node:test";
@@ -27,9 +27,9 @@ test("settings and a vendor travel in the same block; via: is name:", () => {
 
 test("an engine that does not exist is refused by name, not silently ignored", () => {
   const read = readBrowseSettings({ engine: "opera" });
-  assert.match(read.error!, /web_browse\.engine: opera/);
+  assert.match(read.error!, /web\.browse\.engine: opera/);
   assert.match(read.error!, /chrome, firefox, safari/, "named the way the room talks, not by engine");
-  assert.deepEqual(webProblems({ web_browse: { engine: "opera" } }), [read.error]);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "opera" } } }), [read.error]);
 });
 
 // A file should read the way people speak: chrome and safari, not chromium
@@ -53,8 +53,8 @@ test("a setting that is not text is refused", () => {
 });
 
 test("check still reports a vendor that cannot work, block or not", () => {
-  assert.match(webProblems({ web_browse: { via: "nosuchvendor" } })[0], /no remote browser by that name/);
-  assert.deepEqual(webProblems({ web_browse: { engine: "firefox" } }), [], "a good block is not a problem");
+  assert.match(webProblems({ web: { browse: { via: "nosuchvendor" } } })[0], /no remote browser by that name/);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "firefox" } } }), [], "a good block is not a problem");
 });
 
 test("cookies are named in the file, never written into it", () => {
@@ -65,16 +65,16 @@ test("cookies are named in the file, never written into it", () => {
   const bad = readBrowseSettings({ cookies: "sid=1:abc; uid=123" });
   assert.match(bad.error!, /must be the NAME of a vault secret/);
   assert.match(bad.error!, /foldrun secrets set NAME/);
-  assert.deepEqual(webProblems({ web_browse: { cookies: "sid=1:abc" } }), [bad.error]);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "sid=1:abc" } } }), [bad.error]);
 });
 
 test("a cookie default must name the site it belongs to", () => {
   // Without a domain the cookies would ride on whatever host a call opened,
   // which is an agent handing one site another site's session.
   const loose = readBrowseSettings({ cookies: "MEDIUM_COOKIES" });
-  assert.match(loose.error!, /needs web_browse\.cookie_domain beside it/);
-  assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES" } }), [loose.error]);
-  assert.deepEqual(webProblems({ web_browse: { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" } }), []);
+  assert.match(loose.error!, /needs web\.browse\.cookie_domain beside it/);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "MEDIUM_COOKIES" } } }), [loose.error]);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" } } }), []);
 });
 
 // Storage is the sibling of cookies, for the sites whose login is not a
@@ -99,7 +99,7 @@ test("the storage itself pasted into the file is refused, like cookies", () => {
 
 test("storage without an origin is refused: storage is walled off per origin", () => {
   const read = readBrowseSettings({ storage: "APP_STORAGE" });
-  assert.match(read.error!, /needs web_browse\.storage_origin beside it/);
+  assert.match(read.error!, /needs web\.browse\.storage_origin beside it/);
 });
 
 test("a cookie domain is not an origin", () => {
@@ -120,10 +120,10 @@ test("identities: one name for a bundle of settings, checked the way the block i
     "au-desktop": { locale: "en-AU" },
   });
   assert.equal(good.rest, undefined, "identities are settings, not a vendor");
-  assert.deepEqual(webProblems({ web_browse: { identities: { au: { locale: "en-AU" } } } }), []);
+  assert.deepEqual(webProblems({ web: { browse: { identities: { au: { locale: "en-AU" } } } } }), []);
 
   // The same refusals as the block, named for the identity.
-  assert.match(readBrowseSettings({ identities: { au: { engine: "opera" } } }).error!, /web_browse\.identities\.au\.engine: opera/);
+  assert.match(readBrowseSettings({ identities: { au: { engine: "opera" } } }).error!, /web\.browse\.identities\.au\.engine: opera/);
   assert.match(readBrowseSettings({ identities: { au: { proxy: "http://u:p@host" } } }).error!, /identities\.au\.proxy must be the NAME of a vault secret/);
   assert.match(readBrowseSettings({ identities: { au: { cookies: "MEDIUM_COOKIES" } } }).error!, /cookies needs cookie_domain beside it/);
   assert.match(readBrowseSettings({ identities: { au: { mode: "text" } } }).error!, /identities\.au\.mode is not an identity setting/, "what one call does stays in the call");
@@ -139,15 +139,15 @@ test("live: true or false, only true carried", () => {
   assert.equal(readBrowseSettings({ live: "true" }).settings.live, true);
   assert.equal(readBrowseSettings({ live: false }).settings.live, undefined);
   assert.equal(readBrowseSettings({ live: true }).rest, undefined, "a setting, not a vendor");
-  assert.match(readBrowseSettings({ live: "yes" }).error!, /web_browse\.live is true or false/);
+  assert.match(readBrowseSettings({ live: "yes" }).error!, /web\.browse\.live is true or false/);
 });
 
 test("version: a plain build label, validated and carried", () => {
   assert.equal(readBrowseSettings({ engine: "chrome", version: "beta" }).settings.version, "beta");
   assert.equal(readBrowseSettings({ version: "153.0.6" }).settings.version, "153.0.6");
   assert.equal(readBrowseSettings({ version: "stable" }).rest, undefined, "a setting, not a vendor");
-  assert.match(readBrowseSettings({ version: "beta; rm -rf" }).error!, /web_browse\.version/);
-  assert.match(readBrowseSettings({ version: "../etc" }).error!, /web_browse\.version/);
+  assert.match(readBrowseSettings({ version: "beta; rm -rf" }).error!, /web\.browse\.version/);
+  assert.match(readBrowseSettings({ version: "../etc" }).error!, /web\.browse\.version/);
 });
 
 test("headless is true or false, and only false is carried", () => {
@@ -156,7 +156,7 @@ test("headless is true or false, and only false is carried", () => {
   assert.equal(readBrowseSettings({ headless: true }).settings.headless, true);
   assert.equal(readBrowseSettings({ engine: "chrome", headless: false }).settings.engine, "chrome");
   assert.equal(readBrowseSettings({ headless: false }).rest, undefined, "a setting, not a vendor");
-  assert.match(readBrowseSettings({ headless: "no" }).error!, /web_browse\.headless is true or false/);
+  assert.match(readBrowseSettings({ headless: "no" }).error!, /web\.browse\.headless is true or false/);
   assert.match(readBrowseSettings({ headless: 0 }).error!, /true or false/);
 });
 
@@ -176,7 +176,7 @@ test("allowed_domains: a list or a line of domains, lowercased, nothing else", (
 
 test("deny: only actions that exist — a misspelt denial would deny nothing", () => {
   assert.deepEqual(readBrowseSettings({ deny: ["eval", "Download", "js"] }).settings.deny, ["eval", "download", "js"]);
-  assert.match(readBrowseSettings({ deny: ["evall"] }).error!, /evall is not a web_browse action/);
+  assert.match(readBrowseSettings({ deny: ["evall"] }).error!, /evall is not a browse action/);
   assert.ok(WEB_BROWSE_ACTIONS.includes("login"), "the new verbs are deniable");
 });
 
@@ -185,7 +185,7 @@ test("boundaries, webgpu and ignore_https_errors are true or false, only true ca
     assert.equal(readBrowseSettings({ [k]: true }).settings[k], true);
     assert.equal(readBrowseSettings({ [k]: "true" }).settings[k], true);
     assert.equal(readBrowseSettings({ [k]: false }).settings[k], undefined);
-    assert.match(readBrowseSettings({ [k]: "maybe" }).error!, new RegExp(`web_browse\\.${k} is true or false`));
+    assert.match(readBrowseSettings({ [k]: "maybe" }).error!, new RegExp(`web\\.browse\\.${k} is true or false`));
   }
 });
 
@@ -207,6 +207,6 @@ test("obscura is an engine; video records every call; live_view carries only fal
   assert.equal(readBrowseSettings({ video: false }).settings.video, undefined);
   assert.equal(readBrowseSettings({ live_view: false }).settings.live_view, false);
   assert.equal(readBrowseSettings({ live_view: true }).settings.live_view, undefined, "on is the default, nothing to carry");
-  assert.match(readBrowseSettings({ live_view: "off" }).error!, /web_browse\.live_view is true or false/);
+  assert.match(readBrowseSettings({ live_view: "off" }).error!, /web\.browse\.live_view is true or false/);
   assert.match(readBrowseSettings({ state_key: "A".repeat(65) }).error!, /NAME of a vault secret/, "the tool's 64-character cap, checked here too");
 });

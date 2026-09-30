@@ -1,4 +1,4 @@
-// `web_search:` carries two things in one key, as `web_browse:` does: who
+// `web: {search: …}` carries two things in one key, as browse does: who
 // answers (a search API by name) and, for the account's own engine, what
 // SearXNG is asked — engines, categories, safesearch, plugins. These are the
 // rules that keep the two apart and the settings honest.
@@ -33,7 +33,7 @@ test("SearXNG settings beside a search API are refused — the API would ignore 
   const read = readSearchSettings({ name: "exa", engines: ["bing"] });
   assert.match(read.error!, /for the account's own engine/);
   assert.match(read.error!, /name: exa/);
-  assert.deepEqual(webProblems({ web_search: { name: "exa", engines: ["bing"] } }), [read.error]);
+  assert.deepEqual(webProblems({ web: { search: { name: "exa", engines: ["bing"] } } }), [read.error]);
 });
 
 test("every setting is read and shaped; only what was said travels as env", () => {
@@ -102,7 +102,7 @@ test("time_range, timeout and doi_resolver are bounded", () => {
 });
 
 test("check reports a bad block the way it reports a bad name", () => {
-  assert.deepEqual(webProblems({ web_search: { engines: ["bing", "google cse"] } }), []);
-  assert.match(webProblems({ web_search: { time_range: "never" } })[0], /web_search.time_range/);
-  assert.match(webProblems({ web_search: "nosuchapi" })[0], /no provider or search API by that name/);
+  assert.deepEqual(webProblems({ web: { search: { engines: ["bing", "google cse"] } } }), []);
+  assert.match(webProblems({ web: { search: { time_range: "never" } } })[0], /web\.search\.time_range/);
+  assert.match(webProblems({ web: { search: "nosuchapi" } })[0], /no provider or search API by that name/);
 });

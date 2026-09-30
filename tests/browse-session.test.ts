@@ -59,7 +59,7 @@ test("an always-on proxy cannot be switched off; true is fine", () => {
 });
 
 test("ZenRows refuses a changed user agent or device, whether or not a session block is written", () => {
-  assert.match(problems({ user_agent: "UA/1" }, "zenrows")[0], /web_browse\.user_agent: ZenRows Scraping Browser does not let a session change it/);
+  assert.match(problems({ user_agent: "UA/1" }, "zenrows")[0], /web\.browse\.user_agent: ZenRows Scraping Browser does not let a session change it/);
   assert.match(problems({ device: "Pixel 7" }, "zenrows")[0], /device/);
   assert.deepEqual(problems({ user_agent: "UA/1" }, "browserbase"), []);
 });

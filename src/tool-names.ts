@@ -17,11 +17,7 @@ export const TOOL_MAP: Record<string, string[]> = {
   // The web is one tool of ours, `web` — search, fetch, browse, crawl, map,
   // extract, answer, monitor, served from the gallery and on the run record
   // whichever model is driving. So `web` is deliberately NOT here: a name in
-  // TOOL_MAP shadows a real tool of the same name (see runner.ts). Until
-  // 2026-09-29 it was, granting Anthropic's WebSearch and WebFetch; an agent
-  // that says `web` now gets ours. `fetch` still grants the SDK's WebFetch so
-  // a deployed agent keeps running, but it is retired (RETIRED_TOOLS, below).
-  fetch: ["WebFetch"],
+  // TOOL_MAP shadows a real tool of the same name (see runner.ts).
   // `read` is deliberately separate from `write`: an agent that may inspect a
   // repository but must never modify it is a real and common design. The pair
   // says what it grants. `files` and `bash` were the old names for `write`
@@ -36,27 +32,21 @@ export const TOOL_MAP: Record<string, string[]> = {
 
 /** Names an author may no longer write, and what to write instead. They are
  *  still granted, so nothing deployed breaks; `check` and the run log say the
- *  rewrite. The SDK's WebSearch/WebFetch remain the runtime's to use — a
- *  model provider's own search (`web: {search: zai}`) swaps them in — just
- *  not the author's to name. web_search, web_fetch and web_browse are the
- *  gallery tools `web` replaced; they still run. */
+ *  rewrite. */
 export const RETIRED_TOOLS: Record<string, string> = {
   files: "write",
   bash: "code",
-  fetch: "web",
-  WebSearch: "web",
-  WebFetch: "web",
-  web_search: "web",
-  web_fetch: "web",
-  web_browse: "web",
 };
 
 /** Exact SDK tool names, accepted alongside the group aliases so a Claude Code
  *  subagent's `tools: Read, Grep` works unchanged. The aliases exist because
- *  vendors rename tools; `write` survives a rename that `Write` would not. */
+ *  vendors rename tools; `write` survives a rename that `Write` would not.
+ *  The SDK's WebSearch and WebFetch are not here: the web is our `web` tool,
+ *  and a model provider's own search (`web: {search: zai}`) is the runtime's
+ *  to swap in, not the author's to name. */
 export const BUILTIN_TOOLS = new Set([
   "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash",
-  "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite",
+  "NotebookEdit", "TodoWrite",
 ]);
 
 /** The platform's own groups, served in-process rather than by the SDK. */
@@ -121,11 +111,7 @@ export function retiredToolNames(front: ToolFrontmatter): string[] {
 
 /** The one sentence every reader of a retired name says. */
 export function retiredToolError(name: string): string {
-  const why =
-    name === "files" || name === "bash" ? "the same grant, under the name that says what it does"
-    : name.startsWith("web_") ? `one tool for every web action — action=${name.slice(4)}, and its provider under web:`
-    : "ours: every web action, on the run record, each swappable with a provider";
-  return `tools: "${name}" is retired — use ${RETIRED_TOOLS[name]} instead: ${why}. It is still granted for now.`;
+  return `tools: "${name}" is retired — use ${RETIRED_TOOLS[name]} instead: the same grant, under the name that says what it does. It is still granted for now.`;
 }
 
 /** The one sentence every reader of a `use:` key says. */

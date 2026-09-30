@@ -45,7 +45,7 @@ import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts"
 import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
-import { webProblems, webConfig, legacyWebKeyError } from "./providers.ts";
+import { webProblems } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
@@ -902,8 +902,8 @@ export interface AgentInfo {
   /** Names still written under the removed `use:` key. Nothing is granted
    *  for them; `foldrun check` and the run log say what to write instead. */
   legacyUse: string[];
-  /** Retired built-in names still in `tools:` (files, bash, web, fetch,
-   *  WebSearch, WebFetch) — granted, but `check` says what to write instead. */
+  /** Retired built-in names still in `tools:` (files, bash) — granted, but
+   *  `check` says what to write instead. */
   retiredTools: string[];
   /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
    *  consult_<name> tool. The team's edges, as the author drew them. */
@@ -930,7 +930,7 @@ export interface AgentInfo {
   languageProblem: string | null;
   /** region:/currency:/units:/calendar: values that cannot be read. */
   localeProblems: string[];
-  /** web_search:/web_fetch:/web_browse: values that cannot work. The run says
+  /** `web:` values that cannot work. The run says
    *  so in its trail and carries on; check and deploy say so first. */
   webProblems: string[];
   /** `schedule:` written on an agent, which nothing runs — only a flow has
@@ -1479,9 +1479,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         timezoneProblem: timezoneProblem(data.timezone),
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
-        // Retired per-action keys are named here for `check`, not at deploy:
-        // they still work, so a desk that has not been rewritten still ships.
-        webProblems: [...webProblems(data), ...actionProblems(data), ...webConfig(data).legacy.map(legacyWebKeyError)],
+        webProblems: [...webProblems(data), ...actionProblems(data)],
         scheduleProblem: agentScheduleProblem(data),
       };
     });
@@ -2706,9 +2704,11 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
   }
   // Whole-folder units: an agent, a skill, a folder tool. Each is one thing
   // to its reader, so each is one thing to delete.
-  if (/^agents\/[a-z0-9-]+$/.test(norm) ||
-      /^(skills|tools)\/[a-z0-9-]+$/.test(norm) ||
-      /^agents\/[a-z0-9-]+\/skills\/[a-z0-9-]+$/.test(norm)) {
+  // An underscore is allowed in the folder's name: a tool called
+  // `my_tool` is one thing too, and its tool.md is refused alone above.
+  if (/^agents\/[a-z0-9_-]+$/.test(norm) ||
+      /^(skills|tools)\/[a-z0-9_-]+$/.test(norm) ||
+      /^agents\/[a-z0-9_-]+\/skills\/[a-z0-9_-]+$/.test(norm)) {
     const gone = deletionsUnder(dir, norm);
     fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
     recordRevision(tenant, workspace, gone, { message: `deleted ${norm}/`, ...meta });

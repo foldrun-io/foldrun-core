@@ -83,10 +83,11 @@ test("a model provider's own search sits beside our tool, and the tool is told t
   assert.equal(args!.env.FOLDRUN_WEB_BUILTIN, "search=WebSearch");
 });
 
-test("the older keys still work, and the record asks for the rewrite", async () => {
-  const { args, events } = await runAgent("tools: [web_search]\nweb_search: brave\n");
-  assert.equal(args!.env.FOLDRUN_WEB_SEARCH_VIA, "brave");
-  assert.ok(events.some((e) => /web_search: is retired — write it under web:/.test(e)), events.join("\n"));
+test("the per-action keys and tools outside web are not read: an error each", async () => {
+  const { args, events } = await runAgent("tools: [web_browse]\nweb_search: brave\n");
+  assert.equal(args?.env.FOLDRUN_WEB_SEARCH_VIA, undefined, "web_search: is not read");
+  assert.ok(events.some((e) => /error: web_search: is not a key — write `web: \{search: …\}`/.test(e)), events.join("\n"));
+  assert.ok(events.some((e) => /error: .*web_browse/.test(e)), events.join("\n"));
 });
 
 test("a vendor's session block reaches the tool as JSON; your own proxy's secret is declared", async () => {

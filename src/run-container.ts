@@ -686,17 +686,17 @@ RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null && npm cache cle
 ${CORE_INSTALL}
 FROM base AS browsers
 # Real browsers, because directories and portals increasingly render with
-# JavaScript and WebFetch sees only the empty shell. Chromium is the one the
+# JavaScript and a plain fetch sees only the empty shell. Chromium is the one the
 # browser tool drives by default; Firefox and WebKit (Safari's engine) are
 # there for an agent asked to see a page the way those render it. Installed
 # to a fixed path the agent user can read (the default cache would be
 # root's HOME). The browsers' own sandboxes are disabled at launch time — in
 # this platform the container/gVisor IS the sandbox, and the two fight.
-# Pinned exactly, not @1: web_browse's numbered elements use ariaSnapshot's
+# Pinned exactly, not @1: web browse's numbered elements use ariaSnapshot's
 # "ai" mode (1.59+), and the per-account browser pod runs this same image, so
 # a floating version would move both under a working tool on any rebuild.
 # Raise it on purpose, with the gallery tests and one real call.
-# axe-core beside it is web_browse's mode=a11y: one file the tool injects
+# axe-core beside it is web browse's mode=a11y: one file the tool injects
 # into the page; without it the mode falls back to its own shorter checks.
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
@@ -705,7 +705,7 @@ RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && npm cache clean --force >/dev/null 2>&1
 # Lightpanda (engine: lightpanda): a browser that runs the JavaScript and
 # never draws — a fraction of Chromium's memory for reading and filling
-# pages. Its own program, which web_browse starts beside a call and drives
+# pages. Its own program, which web browse starts beside a call and drives
 # over the DevTools protocol; shipped unmodified (AGPL-3.0). Pinned by
 # checksum: 0.3.6 is the newest build this glibc (Debian 12, 2.36) runs —
 # 0.3.7 on wants 2.38. Raise it with the base image. An arch without a

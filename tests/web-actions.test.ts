@@ -9,7 +9,7 @@ import {
   WEB_ACTIONS, FOLDRUN, webProviders, providersFor, resolveWebAction, browseSupports, browsersFor,
   staleIntegrations, actionProblems, findWebProvider, resolveActionApi,
 } from "../src/web-actions.ts";
-import { webConfig, webProblems, legacyWebKeyError } from "../src/providers.ts";
+import { webConfig, webProblems } from "../src/providers.ts";
 
 test("unset is foldrun, for every action", () => {
   for (const action of WEB_ACTIONS) {
@@ -72,8 +72,9 @@ test("check catches a newer action whose provider cannot do it", () => {
   assert.match(actionProblems({ web: { monitor: "brave" } })[0], /web\.monitor: brave does not monitor here/);
   assert.match(actionProblems({ web: { crawl: { name: "exa" } } })[0], /exa does not crawl here/);
   assert.match(actionProblems({ web: { extract: 3 } })[0], /takes a provider name/);
-  // the older per-action key is still read
-  assert.match(actionProblems({ web_crawl: "brave" })[0], /brave does not crawl/);
+  // a per-action key outside web: is not read; webProblems names it
+  assert.deepEqual(actionProblems({ web_crawl: "brave" }), []);
+  assert.match(webProblems({ web_crawl: "brave" })[0], /^web_crawl: is not a key — write `web: \{crawl: …\}`/);
 });
 
 test("a newer action resolves to its key and the one host that key may reach", () => {
@@ -84,24 +85,22 @@ test("a newer action resolves to its key and the one host that key may reach", (
   assert.match(resolveActionApi("map", { name: "tavily", key: "tvly-123" }).error ?? "", /reference to a secret/);
 });
 
-test("the web: block: actions, a provider each, the older keys still read and named for rewrite", () => {
+test("the web: block: actions, a provider each; a per-action key outside it is not read", () => {
   const w = webConfig({ web: { actions: ["search", "fetch"], fetch: "jina" }, web_search: "brave" });
   assert.deepEqual(w.actions, ["search", "fetch"]);
   assert.equal(w.raw.fetch, "jina");
-  assert.equal(w.raw.search, "brave", "web_search: is still read");
-  assert.deepEqual(w.legacy, ["web_search"]);
-  assert.equal(webConfig({ web: { search: "exa" }, web_search: "brave" }).raw.search, "exa", "web: wins");
-  assert.match(legacyWebKeyError("web_search"), /web: \{search: …\}/);
+  assert.equal(w.raw.search, undefined, "web_search: is not read");
+  assert.deepEqual(w.problems, ["web_search: is not a key — write `web: {search: …}`."]);
+  assert.match(webProblems({ web_browse: { engine: "opera" } })[0], /^web_browse: is not a key/);
   assert.match(webConfig({ web: { actions: ["serch"] } }).problems[0], /serch is not an action/);
   assert.match(webConfig({ web: { crwal: "x" } }).problems[0], /web\.crwal: is not an action/);
   assert.match(webConfig({ web: "brave" }).problems[0], /web: is a block/);
-  // browse cascades from the workspace, as web_browse: did
+  // browse cascades from the workspace's web: block, and only from that
   assert.deepEqual(webConfig({}, { web: { browse: { engine: "firefox" } } }).raw.browse, { engine: "firefox" });
-  assert.equal(webConfig({}, { web_browse: "steel" }).raw.browse, "steel");
+  assert.equal(webConfig({}, { web_browse: "steel" }).raw.browse, undefined);
   // search, fetch and browse values are checked through the web: block too
   assert.match(webProblems({ web: { fetch: "brave" } })[0], /brave/);
   assert.deepEqual(webProblems({ web: { fetch: "jina", search: "exa" } }), []);
   // an error is worded the way the file is written
   assert.match(webProblems({ web: { browse: { engine: "opera" } } })[0], /^web\.browse\.engine: opera/);
-  assert.match(webProblems({ web_browse: { engine: "opera" } })[0], /^web_browse\.engine: opera/);
 });

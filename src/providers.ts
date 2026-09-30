@@ -59,7 +59,7 @@ export interface ProviderPreset {
   /** A tool loop was driven through this endpoint from this runtime. */
   verified?: boolean;
   /** Whether the endpoint runs a server-side web search, and in whose shape.
-   *  Absent means it does not — `web_search: <that name>` is then an error a
+   *  Absent means it does not — `web.search: <that name>` is then an error a
    *  person should see from `check`, not an empty result at 3am. */
   search?: SearchShape;
 }
@@ -84,14 +84,14 @@ export type SearchShape = "anthropic" | "plugin" | "openai" | "builtin_fn" | "di
 /** A search API the runtime calls itself, with the customer's own key.
  *
  *  These are not model providers — none of them serves a model — so they
- *  live apart from PROVIDERS. `web_search:` accepts either kind of name, and
+ *  live apart from PROVIDERS. `web.search:` accepts either kind of name, and
  *  the difference decides where the search runs: a provider's server-side
  *  tool runs on the provider's machines and is off the run record, while a
  *  direct API is called from the run's own sandbox through the egress proxy
  *  — the key never enters the pod, the call is on the record with its
  *  arguments, and it works whichever model is driving. Same switch, better
  *  audit trail. Shapes were read from each vendor's own API reference on
- *  2026-09-16; the wrapper in the gallery's web_search tool carries the
+ *  2026-09-16; the gallery's web tool carries the
  *  matching request and response mapping. */
 export interface SearchApi {
   /** The vendor's API reference the adapter was built from, the day it was
@@ -171,14 +171,14 @@ export const SEARCH_APIS: readonly SearchApi[] = [
 /** Names people will try that cannot work, and why — said at `check`
  *  rather than discovered at 3am. */
 export const REFUSED_WEB: Record<string, string> = {
-  bing: "Microsoft retired the Bing Search API on 11 Aug 2025. What remains is Grounding with Bing Search, usable only inside an Azure AI agent — not a search a tool can call. Bing's index still answers through ChatGPT (web_search: openai).",
+  bing: "Microsoft retired the Bing Search API on 11 Aug 2025. What remains is Grounding with Bing Search, usable only inside an Azure AI agent — not a search a tool can call. Bing's index still answers through ChatGPT (web.search: openai).",
   azure: "the Bing Search API is retired; Grounding with Bing Search runs only inside Azure AI agents. See bing.",
   google: "Google does not sell its index. The Custom Search JSON API is closed to new customers and retires 1 Jan 2027; Grounding with Google Search runs only inside Gemini. For Google's results page, use a SERP scraper: serper, serpapi or dataforseo.",
   apify: "Apify is an actor marketplace, not a search, fetch or browser endpoint. Reach a specific actor as an http tool file, the way blog-desk's apify-fallback does.",
 };
 
 /** Fetch APIs the runtime calls itself: a URL in, the page out, with the
- *  customer's own key. Same seam as the search APIs — `web_fetch: jina` —
+ *  customer's own key. Same seam as the search APIs — `web.fetch: jina` —
  *  and the same trade: our own fetch is free and on the record; these are
  *  for the failure modes ours cannot cover, chiefly a page that refuses a
  *  plain request. Three tiers, priced accordingly: a reader (Jina,
@@ -217,9 +217,9 @@ export const FETCH_APIS: readonly FetchApi[] = [
     tier: "unblocker", batch: 1, what: "the page rendered in a real browser (render_js) behind ScrapingBee's proxy pool; credits per call, more for JavaScript" },
 ];
 
-/** Remote browsers: a CDP endpoint our web_browse connects to instead of
+/** Remote browsers: a CDP endpoint our web browse connects to instead of
  *  the account's pod — the same tool, the same modes and actions, rendered
- *  on the vendor's machines. `web_browse: browserbase`. The one capability
+ *  on the vendor's machines. `web.browse: browserbase`. The one capability
  *  where the key cannot ride the egress proxy: CDP is a websocket, so the
  *  wrapper holds the real value the way it already holds a cookie secret,
  *  and creates the session itself where the vendor wants one. */
@@ -263,7 +263,7 @@ export interface BrowseSession {
 
 export interface BrowserApi {
   session?: SessionSupport;
-  /** Steps of web_browse this browser cannot do, per the vendor's own docs.
+  /** Steps of web browse this browser cannot do, per the vendor's own docs.
    *  Kept equal to the tool's VENDORS table by the platform's gallery test. */
   lacks?: string[];
   /** The vendor's API reference the adapter was built from, the day it was
@@ -477,7 +477,7 @@ export function looksOpenAiShaped(baseUrl: string): boolean {
 }
 
 
-/** What `web_search: <name>` in an agent's frontmatter resolves to.
+/** What `web.search: <name>` in an agent's frontmatter resolves to.
  *
  *  Unset means ours: the account's own search engine, free, on the run
  *  record. Naming a provider buys that provider's index instead — which is
@@ -500,22 +500,24 @@ export interface SearchChoice {
   error?: string;
 }
 
-/** `web_search: exa`, or the long form with the customer's own vault name:
+/** `web.search: exa`, or the long form with the customer's own vault name:
  *
- *    web_search:
- *      name: exa
- *      key: ${MY_EXA_KEY}
+ *    web:
+ *      search:
+ *        name: exa
+ *        key: ${MY_EXA_KEY}
  *
  *  The same two spellings `provider:` takes. `key` is a reference, never a
  *  value — a credential written into a markdown file is refused here, the
  *  way it is refused everywhere else in foldrun. */
 /**
- * `web_browse:` settings — how the browser presents itself, not what one call
+ * `web.browse:` settings — how the browser presents itself, not what one call
  * does.
  *
- *    web_browse:
- *      engine: firefox
- *      user_agent: "Mozilla/5.0 …"
+ *    web:
+ *      browse:
+ *        engine: firefox
+ *        user_agent: "Mozilla/5.0 …"
  *
  * The engine and the user agent belong in the file, not in every call. They
  * travel together: a Cloudflare clearance cookie is bound to the user agent
@@ -596,7 +598,7 @@ export interface BrowseSettings {
   session?: BrowseSession;
 }
 
-/** Every action web_browse takes, which is what `deny:` may name. The
+/** Every action web browse takes, which is what `deny:` may name. The
  *  gallery test holds this equal to the tool's own list, so a new action
  *  cannot be undeniable, and a misspelt denial — which would deny nothing —
  *  is refused at check time instead. */
@@ -653,8 +655,8 @@ const SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
 /** One named identity, checked the way the block is: text values, an
  *  engine that exists, secrets by NAME, a cookie with its domain. */
 function readIdentity(name: string, raw: unknown): { identity?: Record<string, string>; error?: string } {
-  const where = `web_browse.identities.${name}`;
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) return { error: `web_browse.identities: "${name}" is not a plain name (letters, digits, dot, dash, underscore).` };
+  const where = `web.browse.identities.${name}`;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) return { error: `web.browse.identities: "${name}" is not a plain name (letters, digits, dot, dash, underscore).` };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: `${where} must be a block of settings, like { device: "Pixel 7", locale: en-AU }.` };
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
@@ -682,7 +684,7 @@ function readIdentity(name: string, raw: unknown): { identity?: Record<string, s
   return { identity: out };
 }
 
-/** The settings in a `web_browse:` block, and the vendor part with them
+/** The settings in a `web.browse:` block, and the vendor part with them
  *  removed — so one key carries both without either learning about the
  *  other. A string, or a block with no settings, gives no settings at all. */
 const SESSION_KEYS = ["proxy", "captcha", "stealth", "region", "timeout", "keep", "record", "block", "options"] as const;
@@ -700,7 +702,7 @@ function seconds(v: unknown): number | null {
 /** The shape of `web.browse.session:`, before anyone knows the vendor. What
  *  the vendor can do is browseSessionProblems' question. */
 export function readBrowseSession(raw: unknown): { session?: BrowseSession; error?: string } {
-  const at = "web_browse.session";
+  const at = "web.browse.session";
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { error: `${at} is a block — what the vendor's own session is asked for: proxy, captcha, stealth, region, timeout, keep, record, block, options.` };
   }
@@ -769,10 +771,10 @@ export function browseSessionProblems(settings: BrowseSettings, vendor: string |
   const sup = api?.session ?? {};
   const who = (pred: (x: SessionSupport) => boolean | undefined) =>
     BROWSER_APIS.filter((b) => b.session && pred(b.session)).map((b) => b.name).join(", ") || "none";
-  const at = "web_browse.session";
+  const at = "web.browse.session";
   for (const key of api?.session?.refuses ?? []) {
     if ((settings as Record<string, unknown>)[key] !== undefined) {
-      out.push(`web_browse.${key}: ${api!.title} does not let a session change it (its docs) — drop it, or render elsewhere.`);
+      out.push(`web.browse.${key}: ${api!.title} does not let a session change it (its docs) — drop it, or render elsewhere.`);
     }
   }
   if (!s) return out;
@@ -805,7 +807,7 @@ export function browseSessionProblems(settings: BrowseSettings, vendor: string |
     // used as it is: a context made to measure would not be the saved one.
     for (const key of ["user_agent", "device", "locale", "timezone", "identities"] as const) {
       if ((settings as Record<string, unknown>)[key] !== undefined) {
-        out.push(`web_browse.${key}: with session.keep the vendor's saved browser is used as it stands, so ${key} cannot be applied — drop one of them.`);
+        out.push(`web.browse.${key}: with session.keep the vendor's saved browser is used as it stands, so ${key} cannot be applied — drop one of them.`);
       }
     }
   }
@@ -843,7 +845,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     if (v === undefined || v === null || v === "") continue;
     if (k === "identities") {
       if (!v || typeof v !== "object" || Array.isArray(v)) {
-        return { settings, rest: left(rest), error: "web_browse.identities must be a map of name to settings, like { au-mobile: { device: \"Pixel 7\", locale: en-AU } }." };
+        return { settings, rest: left(rest), error: "web.browse.identities must be a map of name to settings, like { au-mobile: { device: \"Pixel 7\", locale: en-AU } }." };
       }
       const identities: Record<string, Record<string, string>> = {};
       for (const [name, block] of Object.entries(v as Record<string, unknown>)) {
@@ -858,13 +860,13 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     // "false" is the same wish and is read as one.
     if (k === "headless") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
-      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.headless is true or false, not ${JSON.stringify(v)}.` };
+      if (b === undefined) return { settings, rest: left(rest), error: `web.browse.headless is true or false, not ${JSON.stringify(v)}.` };
       settings.headless = b;
       continue;
     }
     if (k === "live" || k === "boundaries" || k === "webgpu" || k === "ignore_https_errors" || k === "video") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
-      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.${k} is true or false, not ${JSON.stringify(v)}.` };
+      if (b === undefined) return { settings, rest: left(rest), error: `web.browse.${k} is true or false, not ${JSON.stringify(v)}.` };
       if (b) settings[k] = true;
       continue;
     }
@@ -877,53 +879,53 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     }
     if (k === "live_view") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
-      if (b === undefined) return { settings, rest: left(rest), error: `web_browse.live_view is true or false, not ${JSON.stringify(v)}.` };
+      if (b === undefined) return { settings, rest: left(rest), error: `web.browse.live_view is true or false, not ${JSON.stringify(v)}.` };
       if (!b) settings.live_view = false;
       continue;
     }
     if (k === "allowed_domains") {
       const list = browseList(v)?.map((d) => d.toLowerCase());
-      if (!list) return { settings, rest: left(rest), error: "web_browse.allowed_domains is a list of domains, like [example.com, \"*.example.com\"]." };
+      if (!list) return { settings, rest: left(rest), error: "web.browse.allowed_domains is a list of domains, like [example.com, \"*.example.com\"]." };
       const bad = list.find((d) => !BROWSE_DOMAIN.test(d));
-      if (bad) return { settings, rest: left(rest), error: `web_browse.allowed_domains: ${bad} is not a domain or *.domain — no scheme, no path.` };
+      if (bad) return { settings, rest: left(rest), error: `web.browse.allowed_domains: ${bad} is not a domain or *.domain — no scheme, no path.` };
       if (list.length) settings.allowed_domains = list;
       continue;
     }
     if (k === "deny") {
       const list = browseList(v)?.map((d) => d.toLowerCase());
-      if (!list) return { settings, rest: left(rest), error: "web_browse.deny is a list of actions, like [eval, download]." };
+      if (!list) return { settings, rest: left(rest), error: "web.browse.deny is a list of actions, like [eval, download]." };
       const known = new Set<string>([...WEB_BROWSE_ACTIONS, "js"]);
       const bad = list.find((a) => !known.has(a));
-      if (bad) return { settings, rest: left(rest), error: `web_browse.deny: ${bad} is not a web_browse action — a misspelt denial would deny nothing. The actions are ${[...known].join(", ")}.` };
+      if (bad) return { settings, rest: left(rest), error: `web.browse.deny: ${bad} is not a browse action — a misspelt denial would deny nothing. The actions are ${[...known].join(", ")}.` };
       if (list.length) settings.deny = list;
       continue;
     }
     if (k === "init" || k === "extensions") {
       const list = browseList(v);
-      if (!list) return { settings, rest: left(rest), error: `web_browse.${k} is a list of workspace paths, like [${k === "init" ? "scripts/stub.js" : "library/extensions/my-ext"}].` };
+      if (!list) return { settings, rest: left(rest), error: `web.browse.${k} is a list of workspace paths, like [${k === "init" ? "scripts/stub.js" : "library/extensions/my-ext"}].` };
       const bad = list.find((p) => p.startsWith("/") || p.split(/[\\/]/).includes("..") || p.includes(","));
-      if (bad) return { settings, rest: left(rest), error: `web_browse.${k}: ${bad} must be a path inside the workspace (no leading /, no .., no comma).` };
+      if (bad) return { settings, rest: left(rest), error: `web.browse.${k}: ${bad} must be a path inside the workspace (no leading /, no .., no comma).` };
       if (list.length) settings[k] = list;
       continue;
     }
     if (k === "state_key") {
-      if (typeof v !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(v)) return { settings, rest: left(rest), error: "web_browse.state_key must be the NAME of a vault secret (CAPITALS), never the key — store it with `foldrun secrets set NAME` and declare it under secrets:." };
+      if (typeof v !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(v)) return { settings, rest: left(rest), error: "web.browse.state_key must be the NAME of a vault secret (CAPITALS), never the key — store it with `foldrun secrets set NAME` and declare it under secrets:." };
       settings.state_key = v;
       continue;
     }
     if (k === "version") {
       const val = String(v).trim();
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(val)) return { settings, rest: left(rest), error: `web_browse.version: ${JSON.stringify(v)} — a plain label like stable, beta, dev, or a build name (letters, digits, dot, dash, underscore).` };
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(val)) return { settings, rest: left(rest), error: `web.browse.version: ${JSON.stringify(v)} — a plain label like stable, beta, dev, or a build name (letters, digits, dot, dash, underscore).` };
       settings.version = val;
       continue;
     }
     if (typeof v !== "string") {
-      return { settings, rest: left(rest), error: `web_browse.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
+      return { settings, rest: left(rest), error: `web.browse.${k} must be text, not ${Array.isArray(v) ? "a list" : typeof v}.` };
     }
     if (k === "engine") {
       const canonical = BROWSE_ENGINE_ALIASES[v.toLowerCase()];
       if (!canonical) {
-        return { settings, rest: left(rest), error: `web_browse.engine: ${v} — the browsers are ${BROWSE_ENGINES.join(", ")}.` };
+        return { settings, rest: left(rest), error: `web.browse.engine: ${v} — the browsers are ${BROWSE_ENGINES.join(", ")}.` };
       }
       settings.engine = canonical;
       continue;
@@ -936,7 +938,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
         settings,
         rest: left(rest),
         error:
-          `web_browse.storage must be the NAME of a vault secret (CAPITALS), not the storage itself — ` +
+          `web.browse.storage must be the NAME of a vault secret (CAPITALS), not the storage itself — ` +
           `store the JSON with \`foldrun secrets set NAME\` and write \`storage: NAME\`.`,
       };
     }
@@ -947,7 +949,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
         settings,
         rest: left(rest),
         error:
-          `web_browse.storage_origin must be an origin, scheme and host with no path — ` +
+          `web.browse.storage_origin must be an origin, scheme and host with no path — ` +
           `write \`storage_origin: https://www.example.com\`, not \`.example.com\`.`,
       };
     }
@@ -956,7 +958,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
         settings,
         rest: left(rest),
         error:
-          `web_browse.cookies must be the NAME of a vault secret (CAPITALS), not the cookies themselves — ` +
+          `web.browse.cookies must be the NAME of a vault secret (CAPITALS), not the cookies themselves — ` +
           `store them with \`foldrun secrets set NAME\` and write \`cookies: NAME\`.`,
       };
     }
@@ -970,7 +972,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       settings,
       rest: left(rest),
       error:
-        `web_browse.cookies needs web_browse.cookie_domain beside it — a cookie default with no domain ` +
+        `web.browse.cookies needs web.browse.cookie_domain beside it — a cookie default with no domain ` +
         `would be sent to whatever site the call opens. Write \`cookie_domain: .example.com\`.`,
     };
   }
@@ -983,7 +985,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       settings,
       rest: left(rest),
       error:
-        `web_browse.storage needs web_browse.storage_origin beside it — Web Storage and IndexedDB are ` +
+        `web.browse.storage needs web.browse.storage_origin beside it — Web Storage and IndexedDB are ` +
         `walled off per origin, so the tool has to be told which one. Write \`storage_origin: https://www.example.com\`.`,
     };
   }
@@ -997,13 +999,14 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
 }
 
 /**
- * `web_search:` settings — what the account's own engine (SearXNG) is asked,
+ * `web.search:` settings — what the account's own engine (SearXNG) is asked,
  * not who answers.
  *
- *    web_search:
- *      engines: [bing, google cse, duckduckgo]
- *      categories: [general, news]
- *      safesearch: moderate
+ *    web:
+ *      search:
+ *        engines: [bing, google cse, duckduckgo]
+ *        categories: [general, news]
+ *        safesearch: moderate
  *
  * Every SearXNG request option that changes what comes back has a key here;
  * the ones that only change its HTML page (theme, results_on_new_tab,
@@ -1015,7 +1018,7 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
  * rarely, so a misspelt one — which would enable nothing — is refused here.
  *
  * The settings speak SearXNG, so they are refused beside `name:` — with
- * `web_search: exa` they would be silently ignored.
+ * `web.search: exa` they would be silently ignored.
  */
 export interface SearchSettings {
   /** Ask only these engines. A default: a call's `engines=` or
@@ -1024,7 +1027,7 @@ export interface SearchSettings {
    *  to the list. */
   engines?: string[];
   /** Never ask these, whatever the call says. A lock, like
-   *  web_browse.allowed_domains: a call may not widen it. */
+   *  web.browse.allowed_domains: a call may not widen it. */
   exclude_engines?: string[];
   /** The SearXNG categories to search (general, news, science, it, …),
    *  when no engine list is in force. A default a call replaces. */
@@ -1058,7 +1061,7 @@ const SEARCH_ENGINE_NAME = /^[a-z0-9][a-z0-9 ._-]{0,63}$/i;
 const SEARCH_CATEGORY_NAME = /^[a-z][a-z0-9 _-]{0,31}$/i;
 const SAFESEARCH_WORDS: Record<string, 0 | 1 | 2> = { off: 0, none: 0, moderate: 1, strict: 2 };
 
-/** The settings in a `web_search:` block, and the provider part with them
+/** The settings in a `web.search:` block, and the provider part with them
  *  removed — the shape readBrowseSettings has, for the same reason. */
 export function readSearchSettings(raw: unknown): { settings: SearchSettings; rest: unknown; error?: string } {
   const left = (o: Record<string, unknown>) => (Object.keys(o).length ? o : undefined);
@@ -1074,73 +1077,73 @@ export function readSearchSettings(raw: unknown): { settings: SearchSettings; re
     if (v === undefined || v === null || v === "") continue;
     if (k === "engines" || k === "exclude_engines") {
       const list = browseList(v)?.map((e) => e.toLowerCase());
-      if (!list) return fail(`web_search.${k} is a list of SearXNG engine names, like [bing, google cse, duckduckgo].`);
+      if (!list) return fail(`web.search.${k} is a list of SearXNG engine names, like [bing, google cse, duckduckgo].`);
       const bad = list.find((e) => !SEARCH_ENGINE_NAME.test(e));
-      if (bad !== undefined) return fail(`web_search.${k}: ${JSON.stringify(bad)} is not an engine name — letters, digits, space, dot, dash.`);
+      if (bad !== undefined) return fail(`web.search.${k}: ${JSON.stringify(bad)} is not an engine name — letters, digits, space, dot, dash.`);
       if (list.length) settings[k] = [...new Set(list)];
       continue;
     }
     if (k === "categories") {
       const list = browseList(v)?.map((c) => c.toLowerCase());
-      if (!list) return fail("web_search.categories is a list of SearXNG categories, like [general, news].");
+      if (!list) return fail("web.search.categories is a list of SearXNG categories, like [general, news].");
       const bad = list.find((c) => !SEARCH_CATEGORY_NAME.test(c));
-      if (bad !== undefined) return fail(`web_search.categories: ${JSON.stringify(bad)} is not a category name.`);
+      if (bad !== undefined) return fail(`web.search.categories: ${JSON.stringify(bad)} is not a category name.`);
       if (list.length) settings.categories = [...new Set(list)];
       continue;
     }
     if (k === "plugins" || k === "exclude_plugins") {
       const list = browseList(v)?.map((p) => p.toLowerCase());
-      if (!list) return fail(`web_search.${k} is a list of SearXNG plugin ids, like [oa_doi_rewrite].`);
+      if (!list) return fail(`web.search.${k} is a list of SearXNG plugin ids, like [oa_doi_rewrite].`);
       // Matched without underscores: SearXNG has respelt ids between releases
       // (infiniteScroll → infinite_scroll), and the tool sends whichever
       // spelling the running instance uses.
       const bare = (p: string) => p.replace(/_/g, "");
       const bad = list.find((p) => !WEB_SEARCH_PLUGINS.some((id) => bare(id) === bare(p)));
       if (bad !== undefined) {
-        return fail(`web_search.${k}: ${bad} is not a SearXNG plugin — a misspelt one would switch nothing. The plugins are ${WEB_SEARCH_PLUGINS.join(", ")}.`);
+        return fail(`web.search.${k}: ${bad} is not a SearXNG plugin — a misspelt one would switch nothing. The plugins are ${WEB_SEARCH_PLUGINS.join(", ")}.`);
       }
       if (list.length) settings[k] = [...new Set(list)];
       continue;
     }
     if (k === "safesearch") {
       const n = typeof v === "number" ? v : typeof v === "string" ? (SAFESEARCH_WORDS[v.trim().toLowerCase()] ?? (/^[012]$/.test(v.trim()) ? Number(v) : NaN)) : NaN;
-      if (n !== 0 && n !== 1 && n !== 2) return fail(`web_search.safesearch is off, moderate or strict (or 0, 1, 2), not ${JSON.stringify(v)}.`);
+      if (n !== 0 && n !== 1 && n !== 2) return fail(`web.search.safesearch is off, moderate or strict (or 0, 1, 2), not ${JSON.stringify(v)}.`);
       settings.safesearch = n;
       continue;
     }
     if (k === "time_range") {
       const r = String(v).trim().toLowerCase();
-      if (r !== "day" && r !== "week" && r !== "month" && r !== "year") return fail(`web_search.time_range is day, week, month or year, not ${JSON.stringify(v)}.`);
+      if (r !== "day" && r !== "week" && r !== "month" && r !== "year") return fail(`web.search.time_range is day, week, month or year, not ${JSON.stringify(v)}.`);
       settings.time_range = r;
       continue;
     }
     if (k === "timeout") {
       const n = typeof v === "number" ? v : Number(String(v).replace(/s$/, ""));
-      if (!Number.isFinite(n) || n < 0.5 || n > 30) return fail(`web_search.timeout is seconds, 0.5 to 30, not ${JSON.stringify(v)}.`);
+      if (!Number.isFinite(n) || n < 0.5 || n > 30) return fail(`web.search.timeout is seconds, 0.5 to 30, not ${JSON.stringify(v)}.`);
       settings.timeout = n;
       continue;
     }
     // doi_resolver: a host SearXNG knows (oadoi.org, doi.org, …), checked
     // against the instance by the tool; here only that it is a host.
     if (typeof v !== "string" || !BROWSE_DOMAIN.test(v.trim().toLowerCase())) {
-      return fail(`web_search.doi_resolver is a resolver's host, like oadoi.org or doi.org, not ${JSON.stringify(v)}.`);
+      return fail(`web.search.doi_resolver is a resolver's host, like oadoi.org or doi.org, not ${JSON.stringify(v)}.`);
     }
     settings.doi_resolver = v.trim().toLowerCase();
   }
   const both = (settings.engines ?? []).find((e) => settings.exclude_engines?.includes(e));
-  if (both) return fail(`web_search: ${both} is in both engines and exclude_engines — say which.`);
+  if (both) return fail(`web.search: ${both} is in both engines and exclude_engines — say which.`);
   const bothP = (settings.plugins ?? []).find((p) => settings.exclude_plugins?.includes(p));
-  if (bothP) return fail(`web_search: ${bothP} is in both plugins and exclude_plugins — say which.`);
+  if (bothP) return fail(`web.search: ${bothP} is in both plugins and exclude_plugins — say which.`);
   if (Object.keys(settings).length && (rest.name !== undefined || rest.key !== undefined)) {
     return fail(
-      `web_search: ${Object.keys(settings).join(", ")} ${Object.keys(settings).length === 1 ? "is a setting" : "are settings"} for the account's own engine (SearXNG); ` +
+      `web.search: ${Object.keys(settings).join(", ")} ${Object.keys(settings).length === 1 ? "is a setting" : "are settings"} for the account's own engine (SearXNG); ` +
         `beside name: ${String(rest.name)} ${Object.keys(settings).length === 1 ? "it" : "they"} would do nothing. Drop name: to use them, or drop them to use ${String(rest.name)}.`,
     );
   }
   return { settings, rest: left(rest) };
 }
 
-/** The `web_search:` block's settings as the env the tool reads. Only what
+/** The `web.search:` block's settings as the env the tool reads. Only what
  *  was said travels — an unset key is SearXNG's own default. */
 export function searchSettingsEnv(s: SearchSettings): Record<string, string> {
   return {
@@ -1179,7 +1182,7 @@ function readChoice(raw: unknown, field: string): { name: string; secret?: strin
 }
 
 export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse" = "search"): SearchChoice {
-  const field = kind === "fetch" ? "web_fetch" : kind === "browse" ? "web_browse" : "web_search";
+  const field = kind === "fetch" ? "web.fetch" : kind === "browse" ? "web.browse" : "web.search";
   if (name === undefined || name === null || name === "" || name === "ours") {
     return { provider: null };
   }
@@ -1191,7 +1194,7 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
   if (kind === "browse") {
     const b = findBrowserApi(key);
     if (!b) {
-      return { provider: null, error: `web_browse: ${key} — no remote browser by that name. The ones this tool can connect to: ${BROWSER_APIS.map((a) => a.name).join(", ")}. Unset means the account's own browser.` };
+      return { provider: null, error: `web.browse: ${key} — no remote browser by that name. The ones this tool can connect to: ${BROWSER_APIS.map((a) => a.name).join(", ")}. Unset means the account's own browser.` };
     }
     return { provider: b.name, shape: "direct", index: b.what, secret: read.secret ?? b.secret, secretOptional: false, host: b.host };
   }
@@ -1210,15 +1213,15 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
   if (kind === "fetch") {
     const other = findSearchApi(key);
     if (other) {
-      return { provider: null, error: `web_fetch: ${key} — ${other.title} searches but has no fetch here. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.` };
+      return { provider: null, error: `web.fetch: ${key} — ${other.title} searches but has no fetch here. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.` };
     }
     if (key === "anthropic") return { provider: "anthropic", shape: "anthropic", index: "Anthropic's web_fetch — a small model's reading of the page, on Anthropic's servers" };
     const preset = PROVIDERS.find((p) => p.name === key);
     return {
       provider: null,
       error: preset
-        ? `web_fetch: ${key} — ${preset.title} has no fetch a tool can call. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`
-        : `web_fetch: ${key} — no fetch API or provider by that name. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`,
+        ? `web.fetch: ${key} — ${preset.title} has no fetch a tool can call. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`
+        : `web.fetch: ${key} — no fetch API or provider by that name. The fetch APIs: ${FETCH_APIS.map((a) => a.name).join(", ")}; or anthropic.`,
     };
   }
   if (read.secret) {
@@ -1234,26 +1237,18 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
     return {
       provider: null,
       error:
-        `web_search: ${key} — ${preset.title} has no server-side search. ` +
+        `web.search: ${key} — ${preset.title} has no server-side search. ` +
         `Its endpoint is ${preset.format}-shaped, but speaking a wire is not the same as running a tool on it. ` +
-        `Leave web_search: unset to use the account's own search engine.`,
+        `Leave web.search: unset to use the account's own search engine.`,
     };
   }
   return { provider: key, shape: preset.search, index: SEARCH_INDEX[key] };
 }
 
-/** Every web_search: / web_fetch: / web_browse: value in a frontmatter that
- *  cannot work, each as the sentence resolveSearch gives. Computed once in
- *  core so `check`, the deploy gate and the run all refuse the same thing
- *  in the same words — the timezone rule's shape. Empty when all three are
- *  unset or answerable. */
-/** An error the resolvers word for the older per-action keys, reworded for
- *  the file as written: `web_browse.engine` → `web.browse.engine` when the
- *  value came from the web: block, unchanged when it came from web_browse:. */
-export function webSpelling(msg: string, from?: Partial<Record<WebAction, "web" | "legacy" | "workspace">>): string {
-  return msg.replace(/\bweb_(search|fetch|browse)(?=[.:])/g, (whole, a: WebAction) => (!from || from[a] === "web" ? `web.${a}` : whole));
-}
-
+/** Every `web:` value in a frontmatter that cannot work, each as the
+ *  sentence resolveSearch gives. Computed once in core so `check`, the
+ *  deploy gate and the run all refuse the same thing in the same words —
+ *  the timezone rule's shape. Empty when all are unset or answerable. */
 export function webProblems(front: Record<string, unknown>): string[] {
   const web = webConfig(front);
   const out: string[] = [...web.problems];
@@ -1273,7 +1268,7 @@ export function webProblems(front: Record<string, unknown>): string[] {
     if (choice.error) out.push(choice.error);
     else if (browse) out.push(...browseSessionProblems(browse, choice.provider));
   }
-  return out.map((m) => webSpelling(m, web.from));
+  return out;
 }
 
 /**
@@ -1286,12 +1281,10 @@ export function webProblems(front: Record<string, unknown>): string[] {
  *      search: brave                     # who does each; absent is foldrun
  *      browse: { engine: firefox }       # search and browse also take their settings
  *
- * `raw` is each action's value as written. The older spelling — a key per
- * action, `web_search: brave` — is still read, so nothing deployed changes
- * what it does; `legacy` names those keys so `check` can ask for the
- * rewrite. `web:` wins where both say something. Browse alone cascades: the
- * workspace's (or account's) block applies when the agent's says nothing,
- * as `web_browse:` always did.
+ * `raw` is each action's value as written. Browse alone cascades: the
+ * workspace's (or account's) `web: {browse: …}` applies when the agent's
+ * says nothing. A per-action key outside the block (`web_search:`) is not
+ * read; it is a problem naming the block.
  */
 export function webConfig(
   front: Record<string, unknown>,
@@ -1299,8 +1292,6 @@ export function webConfig(
 ): {
   actions: WebAction[] | null;
   raw: Record<WebAction, unknown>;
-  from: Partial<Record<WebAction, "web" | "legacy" | "workspace">>;
-  legacy: string[];
   problems: string[];
 } {
   const problems: string[] = [];
@@ -1315,6 +1306,9 @@ export function webConfig(
       problems.push(`web.${k}: is not an action. The actions: ${WEB_ACTIONS.join(", ")}; and actions: for which of them the agent may use.`);
     }
   }
+  for (const a of WEB_ACTIONS) {
+    if (front[`web_${a}`] !== undefined) problems.push(`web_${a}: is not a key — write \`web: {${a}: …}\`.`);
+  }
   let actions: WebAction[] | null = null;
   if (web.actions !== undefined) {
     const list = Array.isArray(web.actions) ? web.actions.map((a) => String(a).trim().toLowerCase()) : null;
@@ -1323,24 +1317,12 @@ export function webConfig(
     else if (bad.length) problems.push(`web.actions: ${bad.join(", ")} ${bad.length === 1 ? "is not an action" : "are not actions"}. The actions: ${WEB_ACTIONS.join(", ")}.`);
     else actions = [...new Set(list)] as WebAction[];
   }
-  const legacy = WEB_ACTIONS.map((a) => `web_${a}`).filter((k) => front[k] !== undefined && front[k] !== null && front[k] !== "");
   const wsWeb = workspaceFront?.web && typeof workspaceFront.web === "object" && !Array.isArray(workspaceFront.web)
     ? (workspaceFront.web as Record<string, unknown>) : {};
-  const from: Partial<Record<WebAction, "web" | "legacy" | "workspace">> = {};
   const raw = Object.fromEntries(WEB_ACTIONS.map((a) => {
     let v = web[a];
-    if (v !== undefined) from[a] = "web";
-    else if ((v = front[`web_${a}`]) !== undefined) from[a] = "legacy";
-    else if (a === "browse" && (v = wsWeb.browse ?? workspaceFront?.web_browse) !== undefined) {
-      from[a] = wsWeb.browse !== undefined ? "web" : "workspace";
-    }
+    if (v === undefined && a === "browse") v = wsWeb.browse;
     return [a, v];
   })) as Record<WebAction, unknown>;
-  return { actions, raw, from, legacy, problems };
-}
-
-/** The sentence `check` and the run log give for a retired per-action key. */
-export function legacyWebKeyError(key: string): string {
-  const action = key.replace(/^web_/, "");
-  return `${key}: is retired — write it under web:, as \`web: {${action}: …}\`, with the same value. It is still read for now.`;
+  return { actions, raw, problems };
 }

@@ -132,6 +132,18 @@ test("deleting a folder tool records every file in it", () =>
     assert.match(readRevision("acme", "desk", rev.id)!.files.find((f) => f.path === "tools/x/run.py")!.before!, /print/);
   }));
 
+test("a folder with an underscore in its name is deleted whole, like any other", () =>
+  withData(() => {
+    saveWorkspace("acme", "desk", [{ path: "AGENTS.md", content: AGENTS }]);
+    writeWorkspaceFile("acme", "desk", "tools/old_tool/tool.md", "---\ntransport: script\nname: old_tool\nrun: run.mjs\n---\n");
+    writeWorkspaceFile("acme", "desk", "tools/old_tool/run.mjs", "console.log(1)\n");
+    assert.throws(() => deleteWorkspacePath("acme", "desk", "tools/old_tool/tool.md"), /its folder's identity/);
+    deleteWorkspacePath("acme", "desk", "tools/old_tool", { by: "matt@example.com" });
+    const [rev] = listRevisions("acme", "desk");
+    assert.equal(rev.message, "deleted tools/old_tool/");
+    assert.deepEqual(rev.paths.sort(), ["tools/old_tool/run.mjs", "tools/old_tool/tool.md"]);
+  }));
+
 // ----------------------------------------------------------- attribution
 
 test("an eval on a workspace that never saw git is attributed to its latest revision", () =>
