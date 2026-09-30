@@ -23,6 +23,7 @@ export * from "./src/model-probe.ts";
 export * from "./src/providers.ts";
 export * from "./src/translator.ts";
 export * from "./src/arrange.ts";
+export * from "./src/flow-patterns.ts";
 export * from "./src/completions.ts";
 export * from "./src/confine.ts";
 export * from "./src/platform.ts";
