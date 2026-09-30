@@ -2743,12 +2743,15 @@ async function runStep(
  * that is the one failure a retry must not answer: the email went, the post
  * is up, and the check failing says nothing about whether they happened. A
  * second attempt sends them again. Read off the attempt's own events, which
- * both executors write the same way (step-exec.ts).
+ * both executors write the same way (step-exec.ts): every event a failed
+ * check writes carries `check: true`. It used to read only the LAST error's
+ * wording, and a failed shell verify or judge writes its detail after its
+ * headline — so the step was retried and the email went twice. The wording
+ * is still honoured, for a driver image older than the tag.
  */
-export function actedThenFailedCheck(events: { type: string; text: string }[]): boolean {
+export function actedThenFailedCheck(events: { type: string; text: string; check?: boolean }[]): boolean {
   if (!events.some((e) => e.type === "tool")) return false;
-  const last = events.filter((e) => e.type === "error").at(-1)?.text ?? "";
-  return /^(verify `|output: json — |schema: the value does not fit)/.test(last);
+  return events.some((e) => e.type === "error" && (e.check === true || /^(verify `|output: json — |schema: the value does not fit)/.test(e.text)));
 }
 
 // Block until a human approves or rejects the pending steps. Polls the run

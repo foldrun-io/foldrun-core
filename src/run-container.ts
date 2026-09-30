@@ -866,7 +866,7 @@ export function ensureRunnerImage(
 
 export function parseDriverLine(
   line: string,
-): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; operator?: OperatorEvent; subagent?: string } | { e: "done" } & ContainerStepOutcome | null {
+): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; operator?: OperatorEvent; subagent?: string; check?: boolean } | { e: "done" } & ContainerStepOutcome | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
@@ -881,6 +881,7 @@ export function parseDriverLine(
         ...(parsed.err === true ? { err: true } : {}),
         ...(isOperatorEvent(parsed.operator) ? { operator: parsed.operator } : {}),
         ...(typeof parsed.subagent === "string" && /^[a-z0-9-]{1,64}$/.test(parsed.subagent) ? { subagent: parsed.subagent } : {}),
+        ...(parsed.check === true ? { check: true } : {}),
       };
     }
     if (parsed.e === "done") {

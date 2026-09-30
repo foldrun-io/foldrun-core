@@ -62,3 +62,48 @@ test("the runner declines a retry only when the tools ran and then the check fai
 });
 
 import { actedThenFailedCheck } from "../src/runner.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { executeStep, type QueryFn } from "../src/step-exec.ts";
+
+test("a failed shell verify or judge writes its detail after the headline — still no retry", () => {
+  const tool = { type: "tool", text: "mcp__scripts__send" };
+  // As executeStep writes them: the headline, then the detail, both tagged.
+  const shell = [tool, { type: "error", text: "verify `test -s sent.md` → exit 1", check: true }, { type: "error", text: "test: sent.md: no such file", check: true }];
+  assert.equal(actedThenFailedCheck(shell), true, "shell verify: the detail is the last error event");
+  const judge = [tool, { type: "error", text: "verify `judge: the email went` → FAIL", check: true }, { type: "error", text: "FAIL — the reply never names a recipient", check: true }];
+  assert.equal(actedThenFailedCheck(judge), true, "judge: the reasoning is the last error event");
+  // A check failed, then something else failed after: the check is still what
+  // failed after the tools ran.
+  assert.equal(actedThenFailedCheck([tool, { type: "error", text: "free text", check: true }]), true, "the tag decides, not the wording");
+  assert.equal(actedThenFailedCheck([tool, { type: "error", text: "the model stream ended without a result" }]), false);
+});
+
+test("executeStep tags every event of a failed check, detail included", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-outward-"));
+  const agentDir = path.join(root, "agents", "sender");
+  fs.mkdirSync(agentDir, { recursive: true });
+  try {
+    const query: QueryFn = () => Object.assign((async function* () {
+      yield { type: "assistant", message: { id: "m1", content: [{ type: "tool_use", id: "c1", name: "mcp__scripts__send", input: {} }] } };
+      yield { type: "assistant", message: { id: "m2", content: [{ type: "text", text: "Sent." }] } };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    })(), { async interrupt() {} });
+    const events: { type: string; text: string; check?: boolean }[] = [];
+    const out = await executeStep({
+      agentDir, workspaceRoot: root, libraryRoot: path.join(root, "library"),
+      prompt: "send", model: "haiku", systemPrompt: "you send", allowed: [], mcpNames: [], mcpServers: {}, env: {},
+      verify: "echo nothing was written >&2; exit 1",
+      emit: (type, text, extra) => events.push({ type, text, ...(extra as { check?: boolean }) }),
+    }, query);
+    assert.equal(out.status, "failed");
+    const errors = events.filter((e) => e.type === "error");
+    assert.ok(errors.length >= 2, "headline and detail");
+    assert.ok(errors.every((e) => e.check === true), "both carry the tag");
+    assert.equal(actedThenFailedCheck(events), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+

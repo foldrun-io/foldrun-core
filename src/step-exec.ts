@@ -133,7 +133,13 @@ export type QueryLike = AsyncIterable<unknown> & { interrupt(): Promise<unknown>
 export type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => QueryLike;
 
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
-export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect; operator?: OperatorEvent; subagent?: string };
+export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect; operator?: OperatorEvent; subagent?: string; check?: boolean };
+
+/** The tag on every event a failed check writes — `verify:`, `output: json`,
+ *  a schema — headline and detail alike. The runner's no-retry rule for
+ *  outward steps reads it (actedThenFailedCheck); reading the wording of the
+ *  last error missed a check whose detail line came after its headline. */
+const CHECK = { check: true } as const;
 
 
 /** Conservative per-token rates for a model nothing else can price — an
@@ -570,11 +576,11 @@ export async function executeStep(
       // failure as no value, and the message names the field.
       const errors = opts.schema !== undefined && looksLikeSchema(opts.schema) ? validateSchema(data, opts.schema) : [];
       if (errors.length) {
-        emit("error", `schema: the value does not fit — ${describeSchemaErrors(errors)}`);
+        emit("error", `schema: the value does not fit — ${describeSchemaErrors(errors)}`, CHECK);
         status = "failed";
       }
     } else {
-      emit("error", `output: json — ${extracted.reason}`);
+      emit("error", `output: json — ${extracted.reason}`, CHECK);
       status = "failed";
     }
   }
@@ -623,14 +629,14 @@ export async function executeStep(
       for (const t of clocks) clearTimeout(t);
     }
     if (cut === "timeout") {
-      emit("error", `verify \`${opts.verify}\` → timed out after ${Math.round(verifyMs! / 1000)}s (what was left of timeout: in the flow file) — it was stopped`);
+      emit("error", `verify \`${opts.verify}\` → timed out after ${Math.round(verifyMs! / 1000)}s (what was left of timeout: in the flow file) — it was stopped`, CHECK);
       status = "failed";
     } else if (cut === "stopped") {
-      emit("error", `verify \`${opts.verify}\` → stopped by a person mid-check`);
+      emit("error", `verify \`${opts.verify}\` → stopped by a person mid-check`, CHECK);
       status = "failed";
     } else {
-      emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`);
-      if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000));
+      emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`, verdict.ok ? undefined : CHECK);
+      if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000), verdict.ok ? undefined : CHECK);
       if (!verdict.ok) status = "failed";
     }
   }

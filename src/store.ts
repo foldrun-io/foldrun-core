@@ -2884,6 +2884,10 @@ export interface RunEvent {
   /** Set on a tool event a SUB-AGENT made (`subagents:`): its name. The
    *  trace labels the call with it; cost stays the step's. */
   subagent?: string;
+  /** Set on an error a failed check wrote — `verify:` (its headline and its
+   *  detail), `output: json`, a schema. What the runner reads to decline a
+   *  retry of an outward step whose tools already ran. */
+  check?: boolean;
 }
 
 /** A question an agent asked a person while its step ran (tools: [ask]). */
