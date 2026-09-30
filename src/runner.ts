@@ -714,7 +714,15 @@ function agentContext(
       `\`../../storage/\` is the workspace file store: anything you leave there is kept ` +
       `after the run and shown on the Storage page for people to download. Write ` +
       `deliverables people asked for — CSVs, reports, PDFs, images — to \`../../storage/\`; ` +
-      `use \`outputs/\` for working text the next step reads.`,
+      `use \`outputs/\` for working text the next step reads. ` +
+      // A Glob PATTERN that climbs (`../../storage/draft/*.md`) always answers
+      // "No files found", even when the file is there. On blog-desk that made
+      // every loop pass look like a first pass: the illustrator never saw the
+      // fact-check report, re-picked the cover, and 2 of 3 publish runs failed
+      // (run-munef2am-439a, 2026-09-30). The path belongs in Glob's `path`.
+      `To look for files there, open a known file with Read by its exact path, or ` +
+      `Glob with \`path: "../../storage/..."\` and a pattern like \`*.md\` — a Glob ` +
+      `pattern that itself starts with \`../\` finds nothing, even when the file exists.`,
   );
 
   // Shared context before anything derived — an account or workspace rule is
