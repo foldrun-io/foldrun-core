@@ -254,6 +254,11 @@ foldrun deploy --url <server> --token $FOLDRUN_TOKEN
 \`check\` is cheap and catches a broken flow before a schedule fires it at 3am.
 Run it after edits, the way you would run a typecheck.
 
+A deploy that would delete platform files (outputs under \`storage/\`, the
+trigger log, a file this folder no longer has) lists them and stops: with no
+terminal it is refused. Tell the person what it would delete; add \`--yes\`
+only when they asked for exactly that deletion.
+
 ## Where things go
 
 | Path | What |
