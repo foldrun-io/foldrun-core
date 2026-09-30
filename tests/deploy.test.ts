@@ -234,6 +234,52 @@ test("a deploy that does not check out changes nothing", () => {
   });
 });
 
+// A removal list a person confirmed is a promise about what the deploy will
+// delete. Between the dry run they read and the deploy that follows, a run
+// can write new storage/ outputs; without this, the deploy deletes those too.
+test("expectRemoved: a deploy that would remove anything unconfirmed is refused", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const ws = path.join(root, "acme/workspaces/desk");
+    const next = workspace();
+    const confirmed = planDeploy("acme", "desk", next).removed;
+    assert.deepEqual(confirmed, ["flows/old.md"]);
+
+    // a file appears after the confirmation
+    fs.mkdirSync(path.join(ws, "storage"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "storage/report.md"), "new output\n");
+
+    const out = deployWorkspace("acme", "desk", next, { expectRemoved: confirmed });
+    assert.equal(out.applied, false);
+    assert.deepEqual(out.unexpectedRemovals, ["storage/report.md"]);
+    assert.deepEqual(out.removed, ["flows/old.md", "storage/report.md"]);
+    assert.ok(fs.existsSync(path.join(ws, "storage/report.md")), "nothing deleted");
+    assert.ok(fs.existsSync(path.join(ws, "flows/old.md")), "nothing deleted");
+  });
+});
+
+test("expectRemoved: a subset of what was confirmed applies", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const out = deployWorkspace("acme", "desk", workspace(), {
+      expectRemoved: ["flows/old.md", "flows/gone-already.md"],
+    });
+    assert.equal(out.applied, true);
+    assert.deepEqual(out.unexpectedRemovals ?? [], []);
+    assert.ok(!fs.existsSync(path.join(root, "acme/workspaces/desk/flows/old.md")));
+  });
+});
+
+test("expectRemoved: [] refuses any removal; absent keeps the old behaviour", () => {
+  withData(() => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const refused = deployWorkspace("acme", "desk", workspace(), { expectRemoved: [] });
+    assert.equal(refused.applied, false);
+    assert.deepEqual(refused.unexpectedRemovals, ["flows/old.md"]);
+    assert.equal(deployWorkspace("acme", "desk", workspace()).applied, true);
+  });
+});
+
 // A flow reads its agents step by step. Replacing them mid-run means step 3
 // runs against a definition step 1 never saw, and the trace becomes a record of
 // two different workspaces.

@@ -91,6 +91,9 @@ export interface DeployPlan {
 
 export interface DeployResult extends DeployPlan {
   applied: boolean;
+  /** Set when `expectRemoved` was given and the deploy would have removed
+   *  paths outside it: those paths. The deploy was refused, nothing changed. */
+  unexpectedRemovals?: string[];
   /** The commit this workspace is now running, when the caller knows it. */
   commit: string | null;
   preserved: number;
@@ -435,6 +438,15 @@ export interface DeployOptions {
   message?: string;
   /** Apply even while runs are in flight. */
   force?: boolean;
+  /**
+   * The removals a person confirmed from a dry run. When given, the deploy
+   * is refused (applied: false, `unexpectedRemovals` set) if it would remove
+   * anything not in this list — a run can write new storage/ outputs between
+   * the question and the answer, and a yes to one list is not a yes to
+   * another. Checked in the same synchronous call that writes, so there is
+   * no window between the check and the swap. Absent: no check, as before.
+   */
+  expectRemoved?: string[];
 }
 
 /**
@@ -525,6 +537,13 @@ export function deployWorkspace(
   const blocked = plan.blockedBy.length > 0 && !opts.force;
   if (plan.issues.length > 0 || blocked) {
     return { ...plan, applied: false, commit: null, preserved: 0 };
+  }
+  if (opts.expectRemoved) {
+    const ok = new Set(opts.expectRemoved.map((p) => path.normalize(p).split(path.sep).join("/")));
+    const unexpectedRemovals = plan.removed.filter((p) => !ok.has(p));
+    if (unexpectedRemovals.length) {
+      return { ...plan, applied: false, commit: null, preserved: 0, unexpectedRemovals };
+    }
   }
 
   const { preserved } = saveWorkspace(tenant, workspace, files, { commit: opts.commit ?? null, by: opts.by ?? "deploy", message: opts.message });
