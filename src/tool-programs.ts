@@ -241,3 +241,39 @@ export function undeclaredImports(tenant: string, workspace: string): Undeclared
   scan(workspaceTools(tenant, workspace), "workspace");
   return out;
 }
+
+// ---------------------------------------------------------------- secrets
+
+export interface ToolSecretNeed {
+  name: string;
+  scope: "workspace" | "account";
+  /** The secret names the tool's file says its program reads. */
+  secrets: string[];
+}
+
+/**
+ * What a script tool says it reads. `secrets:` in a tool file is how its
+ * program gets them — `proxied` or `materialised` — but authors also list
+ * the NAMES there (`secrets: [RESEND_API_KEY, EMAIL_FROM]`), and the runtime
+ * never granted a secret from a tool file: only the agent's own `secrets:`
+ * reach the sandbox. So strata-desk's reporter granted desk_email, declared
+ * nothing, and failed at 7am with "RESEND_API_KEY is not set". The list is
+ * kept as what it is — the tool's statement of need — and `check` holds
+ * every agent that grants the tool to it. Nearest wins, as for the tool.
+ */
+export function toolSecretNeeds(tenant: string, workspace: string): Map<string, ToolSecretNeed> {
+  const out = new Map<string, ToolSecretNeed>();
+  const scan = (defs: Record<string, ToolDef>, scope: "workspace" | "account") => {
+    for (const [name, def] of Object.entries(defs)) {
+      out.delete(name); // a workspace tool replaces the library's of that name
+      if (def.kind !== "script") continue;
+      const raw = (def.spec as { secrets?: unknown }).secrets;
+      if (!Array.isArray(raw)) continue;
+      const secrets = raw.map(String).filter((s) => /^[A-Z][A-Z0-9_]*$/.test(s));
+      if (secrets.length) out.set(name, { name, scope, secrets });
+    }
+  };
+  scan(libraryTools(tenant), "account");
+  scan(workspaceTools(tenant, workspace), "workspace");
+  return out;
+}
