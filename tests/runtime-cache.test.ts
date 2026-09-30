@@ -319,3 +319,26 @@ test("a health check that times out is inconclusive — the entry is used, not r
     }
   });
 });
+
+test("an abandoned claim is taken over by exactly one of the steps that find it at once", () => {
+  // Every waiter that saw the stale lock used to remove it and take it: the
+  // second remover deleted the first taker's fresh lock, and two steps built
+  // into one directory. The seam pauses one claimer between "it is stale"
+  // and the takeover, and lets another claimer run the whole way through.
+  inTempData((root) => {
+    const dir = entry(root);
+    const lock = path.join(dir, ".building");
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner"), "dead");
+    const past = new Date(Date.now() - 60 * 60_000);
+    fs.utimesSync(lock, past, past);
+    let second: string | null = null;
+    let raced = false;
+    const first = claimBuild(dir, { beforeTakeover: () => { raced = true; second = claimBuild(dir); } });
+    assert.ok(raced, "the other claimer ran mid-takeover");
+    const winners = [first, second].filter(Boolean);
+    assert.equal(winners.length, 1, `exactly one holder (first=${first}, second=${second})`);
+    assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), winners[0], "the lock is the winner's");
+    assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith(".building")), [".building"], "nothing left behind");
+  });
+});

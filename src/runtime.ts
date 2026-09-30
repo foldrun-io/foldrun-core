@@ -278,7 +278,12 @@ function sleepSync(ms: number): void {
 // claim that is still its own: one whose claim was taken over as abandoned
 // used to remove the new holder's lock on its way out, and a third step then
 // built into the same directory beside the second.
-export function claimBuild(root: string): string | null {
+export function claimBuild(
+  root: string,
+  /** Test seam: runs once the claim is judged abandoned, before the
+   *  takeover — where a second claimer used to slip in. */
+  seam?: { beforeTakeover?: () => void },
+): string | null {
   const lock = path.join(root, ".building");
   const token = crypto.randomUUID();
   const take = () => {
@@ -295,13 +300,75 @@ export function claimBuild(root: string): string | null {
     // taken this way: it beats on the claim between installer runs (see
     // heartbeat), and no single run may outlast the timeout.
     try {
-      if (Date.now() - fs.statSync(lock).mtimeMs > buildTimeoutMs()) {
-        fs.rmSync(lock, { recursive: true, force: true });
-        return take();
+      if (!isAbandoned(lock)) return null;
+      seam?.beforeTakeover?.();
+      return takeOver(lock, token, take);
+    } catch {
+      // Someone else won the takeover. Wait for them like any other holder.
+      return null;
+    }
+  }
+}
+
+/** Quiet past the build timeout. */
+function isAbandoned(dir: string): boolean {
+  return Date.now() - fs.statSync(dir).mtimeMs > buildTimeoutMs();
+}
+
+/**
+ * Take over an abandoned claim — atomically. Remove-then-take was not: two
+ * waiters that both saw the stale lock both removed it, and the second
+ * removal deleted the lock the first had just taken, so both built. Now a
+ * takeover happens only under a second `mkdir` lock (one at a time), the
+ * staleness is re-read under it (a lock another takeover just made is fresh
+ * and is left alone), and the stale lock is renamed aside — then checked to
+ * be the same claim that was judged stale — before it is removed.
+ */
+function takeOver(lock: string, token: string, take: () => string): string | null {
+  const steal = `${lock}.steal`;
+  try {
+    fs.mkdirSync(steal);
+  } catch {
+    // Another takeover is in flight — or died in its few microseconds. A
+    // takeover lock that old is cleared (renamed first: one clearer wins)
+    // and the next poll tries again.
+    try {
+      if (isAbandoned(steal)) {
+        const aside = `${steal}.${token}`;
+        fs.renameSync(steal, aside);
+        fs.rmSync(aside, { recursive: true, force: true });
       }
     } catch {
-      // Someone else won the steal. Wait for them like any other holder.
+      // someone else cleared it
     }
+    return null;
+  }
+  try {
+    if (!isAbandoned(lock)) return null;
+    const judged = readOwner(lock);
+    const aside = `${lock}.stale-${token}`;
+    fs.renameSync(lock, aside);
+    if (readOwner(aside) !== judged) {
+      // Not the claim judged stale: its build released it and a new one took
+      // it in between. Hand it back and wait on it.
+      try {
+        fs.renameSync(aside, lock);
+      } catch {
+        fs.rmSync(aside, { recursive: true, force: true });
+      }
+      return null;
+    }
+    fs.rmSync(aside, { recursive: true, force: true });
+    return take();
+  } finally {
+    fs.rmSync(steal, { recursive: true, force: true });
+  }
+}
+
+function readOwner(dir: string): string | null {
+  try {
+    return fs.readFileSync(path.join(dir, "owner"), "utf8");
+  } catch {
     return null;
   }
 }
