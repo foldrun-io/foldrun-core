@@ -46,6 +46,9 @@ export interface OperatorChannel {
   /** Waits up to `maxMs` for this question's answer; null when none came. */
   poll(id: string, maxMs: number): Promise<{ answer: string; by?: string | null } | null>;
   inbox(): Promise<OperatorMessage[]>;
+  /** Nobody will read this question's answer now (the wait timed out):
+   *  stop offering it to people. Best effort; optional for fakes. */
+  close?(id: string): Promise<void>;
 }
 
 export const QUESTION_MAX = 2_000;
@@ -98,6 +101,14 @@ export function httpChannel(egress: string | undefined | null, fetchImpl: typeof
     async inbox() {
       const body = await json(await fetchImpl(`${ep.base}/inbox/${ep.token}`, { signal: AbortSignal.timeout(3_000) }));
       return Array.isArray(body.messages) ? (body.messages as OperatorMessage[]) : [];
+    },
+    async close(id) {
+      await json(
+        await fetchImpl(`${ep.base}/ask/${ep.token}/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          signal: AbortSignal.timeout(5_000),
+        }),
+      );
     },
   };
 }
@@ -179,6 +190,13 @@ export function buildAskTool(opts: {
           opts.emit("info", `answered${got.by ? ` by ${got.by}` : ""}: ${answer}`, { operator: { kind: "answered", id, answer, by: got.by ?? null } });
           return text(`The person answered: ${answer}`);
         }
+      }
+      // Close it on the proxy, so the dashboard stops offering a box whose
+      // answer nobody would read. Best effort: a failure changes nothing here.
+      try {
+        await opts.channel.close?.(id);
+      } catch {
+        /* the proxy's TTL clears it eventually */
       }
       opts.emit("info", `no answer after ${Math.round(opts.timeoutSec / 60)} min`, { operator: { kind: "unanswered", id } });
       return text(NO_ANSWER);

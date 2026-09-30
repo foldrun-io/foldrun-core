@@ -12,6 +12,7 @@ import {
   applyOperatorEvent,
   askTimeoutSec,
   buildAskTool,
+  httpChannel,
   inboxReader,
   isOperatorEvent,
   openQuestion,
@@ -90,6 +91,41 @@ test("ask_person: nobody answers in time — the step is told so, not failed", a
   assert.equal(textOf(out as never), NO_ANSWER);
   assert.equal((out as { isError?: boolean }).isError, undefined, "no answer is an answer, not an error");
   assert.deepEqual(r.events.map((e) => e.operator?.kind), ["asked", "unanswered"]);
+});
+
+test("ask_person: an unanswered question is closed on the proxy, best effort", async () => {
+  let clock = 0;
+  const closed: string[] = [];
+  const base = {
+    async ask() {
+      return { id: "q_3" };
+    },
+    async poll(_id: string, maxMs: number) {
+      clock += Math.min(maxMs, 25_000);
+      return null;
+    },
+    async inbox() {
+      return [];
+    },
+  };
+  const r = recorder();
+  const ok = buildAskTool({ channel: { ...base, async close(id) { closed.push(id); } }, timeoutSec: 60, emit: r.emit as never, now: () => clock });
+  assert.equal(textOf((await ok.call({ question: "Which list?" })) as never), NO_ANSWER);
+  assert.deepEqual(closed, ["q_3"], "the question no longer shows as waiting");
+  clock = 0;
+  const failing = buildAskTool({ channel: { ...base, async close() { throw new Error("proxy down"); } }, timeoutSec: 60, emit: r.emit as never, now: () => clock });
+  assert.equal(textOf((await failing.call({ question: "Which list?" })) as never), NO_ANSWER, "a failed close changes nothing for the agent");
+});
+
+test("httpChannel.close sends DELETE /ask/<lease>/<id>", async () => {
+  const calls: { url: string; method?: string }[] = [];
+  const fake = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const ch = httpChannel(`http://w:8090/e/${"t".repeat(24)}`, fake)!;
+  await ch.close!("q_9");
+  assert.deepEqual(calls, [{ url: `http://w:8090/ask/${"t".repeat(24)}/q_9`, method: "DELETE" }]);
 });
 
 test("ask_person with no proxy: the terminal answers when there is one, otherwise nobody", async () => {
