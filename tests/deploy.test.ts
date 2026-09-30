@@ -235,8 +235,9 @@ test("a deploy that does not check out changes nothing", () => {
 });
 
 // A removal list a person confirmed is a promise about what the deploy will
-// delete. Between the dry run they read and the deploy that follows, a run
-// can write new storage/ outputs; without this, the deploy deletes those too.
+// delete. Between the dry run they read and the deploy that follows,
+// someone else can add a source file (the editor, the source API, another
+// deploy); without this, the deploy deletes that too.
 test("expectRemoved: a deploy that would remove anything unconfirmed is refused", () => {
   withData((root) => {
     deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
@@ -246,14 +247,13 @@ test("expectRemoved: a deploy that would remove anything unconfirmed is refused"
     assert.deepEqual(confirmed, ["flows/old.md"]);
 
     // a file appears after the confirmation
-    fs.mkdirSync(path.join(ws, "storage"), { recursive: true });
-    fs.writeFileSync(path.join(ws, "storage/report.md"), "new output\n");
+    fs.writeFileSync(path.join(ws, "flows/added-meanwhile.md"), FLOW);
 
     const out = deployWorkspace("acme", "desk", next, { expectRemoved: confirmed });
     assert.equal(out.applied, false);
-    assert.deepEqual(out.unexpectedRemovals, ["storage/report.md"]);
-    assert.deepEqual(out.removed, ["flows/old.md", "storage/report.md"]);
-    assert.ok(fs.existsSync(path.join(ws, "storage/report.md")), "nothing deleted");
+    assert.deepEqual(out.unexpectedRemovals, ["flows/added-meanwhile.md"]);
+    assert.deepEqual(out.removed, ["flows/added-meanwhile.md", "flows/old.md"]);
+    assert.ok(fs.existsSync(path.join(ws, "flows/added-meanwhile.md")), "nothing deleted");
     assert.ok(fs.existsSync(path.join(ws, "flows/old.md")), "nothing deleted");
   });
 });
@@ -393,4 +393,27 @@ test("a gated outward step raises no deploy warning", () => {
     "flows/publish.md": "---\nname: publish\n---\n\n1! [[writer]] — send it\n",
   });
   assert.deepEqual(deployWarnings(files), []);
+});
+
+// The plan and the save share one rule (store.ts#keptOnDeploy): what a
+// deploy keeps is never reported as removed. storage/ outputs were always
+// kept but listed as deletions; the trigger log was listed AND erased.
+test("storage/ outputs and the trigger log are neither listed as removed nor deleted", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const ws = path.join(root, "acme/workspaces/desk");
+    fs.mkdirSync(path.join(ws, "storage/reports"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "storage/reports/out.md"), "a run wrote this\n");
+    fs.writeFileSync(path.join(ws, "trigger-log.jsonl"), '{"flow":"x"}\n');
+    fs.mkdirSync(path.join(ws, "state"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "state/seen.json"), "[]\n");
+
+    assert.deepEqual(planDeploy("acme", "desk", workspace()).removed, []);
+    const out = deployWorkspace("acme", "desk", workspace(), { expectRemoved: [] });
+    assert.equal(out.applied, true);
+    assert.deepEqual(out.removed, []);
+    assert.ok(fs.existsSync(path.join(ws, "storage/reports/out.md")));
+    assert.ok(fs.existsSync(path.join(ws, "trigger-log.jsonl")), "the trigger log survives a deploy");
+    assert.ok(fs.existsSync(path.join(ws, "state/seen.json")));
+  });
 });

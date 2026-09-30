@@ -254,9 +254,8 @@ foldrun deploy --url <server> --token $FOLDRUN_TOKEN
 \`check\` is cheap and catches a broken flow before a schedule fires it at 3am.
 Run it after edits, the way you would run a typecheck.
 
-A deploy that would delete platform files (outputs under \`storage/\`, the
-trigger log, a file this folder no longer has) lists them and stops: with no
-terminal it is refused. Tell the person what it would delete; add \`--yes\`
+A deploy that would delete files this folder no longer has lists them and
+stops: with no terminal it is refused. Tell the person what it would delete; add \`--yes\`
 only when they asked for exactly that deletion.
 
 ## Where things go
@@ -283,8 +282,8 @@ as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
 
 ## What a deploy does NOT touch
 
-\`runs/\`, \`state/\`, \`secrets.json\`, and any memory an agent wrote that your
-push does not mention. Those belong to the platform, not to git — a deploy that
+\`runs/\`, \`state/\`, \`storage/\`, \`secrets.json\`, the trigger log, and any
+memory an agent wrote that your push does not mention. Those belong to the platform, not to git — a deploy that
 reverted what an agent learned would make every run a little dumber.
 
 Secrets never go in these files. \`foldrun secrets\` puts them in the vault, and

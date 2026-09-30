@@ -23,6 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   saveWorkspace,
+  keptOnDeploy,
   workspaceDir,
   listRuns,
   parseFlow,
@@ -413,11 +414,11 @@ export function planDeploy(tenant: string, workspace: string, files: DeployFile[
     }
   }
 
-  // What saveWorkspace will keep regardless — reporting these as removals
-  // would be a lie, and the alarming kind.
-  const kept = (rel: string) =>
-    /(^|\/)state\//.test(rel) || /(^|\/)memory\/[^/]+\.md$/.test(rel);
-  const removed = [...present].filter((rel) => !shipped.has(rel) && !kept(rel));
+  // What saveWorkspace will keep regardless — storage/, state/, agent
+  // memory, the platform's own files. Reporting these as removals would be
+  // a lie, and the alarming kind; one predicate serves both.
+  const shippedPaths = new Set(shipped.keys());
+  const removed = [...present].filter((rel) => !shipped.has(rel) && !keptOnDeploy(rel, shippedPaths));
 
   return {
     files,

@@ -310,7 +310,9 @@ export function assertCanonicalCase(rel: string) {
  * next deploy or silently handed to every container — both invisible until
  * someone is bitten.
  */
-export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl", ".repo.json"];
+// trigger-log.jsonl: the scheduler's record of why a flow did or did not
+// fire (trigger-log.ts). Before it was listed here every deploy erased it.
+export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl", ".repo.json", "trigger-log.jsonl"];
 
 /** True for anything the platform, not the author or the agent, writes. */
 export function isPlatformPath(rel: string): boolean {
@@ -319,7 +321,25 @@ export function isPlatformPath(rel: string): boolean {
   // The vault's lock and in-flight temp files (secrets.ts#mutateVaultFile)
   // are the vault, as far as anything outside the platform is concerned.
   if (/(^|\/)secrets\.json\./.test(norm)) return true;
+  if (norm === "trigger-log.jsonl.tmp") return true;
   return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
+}
+
+/** What a deploy keeps whatever it ships — the rule above saveWorkspace's
+ *  body. planDeploy reports removals through the same test, so a plan never
+ *  lists a file the save would keep. */
+export function keptOnDeploy(rel: string, shipped: ReadonlySet<string>): boolean {
+  return (
+    // Platform bookkeeping (the vault, hook rotation state, the delivery
+    // log, the trigger log, run history) — losing any of it on deploy
+    // silently breaks something: agents lose secrets, a rotated hook
+    // un-rotates, the record of why a schedule skipped is gone.
+    isPlatformPath(rel) ||
+    /(^|\/)state\//.test(rel) ||
+    rel === STORAGE_DIR ||
+    rel.startsWith(`${STORAGE_DIR}/`) ||
+    (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel))
+  );
 }
 
 export function saveWorkspace(
@@ -383,15 +403,7 @@ export function saveWorkspace(
   // about it. Before this, every deploy silently erased everything the agents
   // had learned.
   const shipped = new Set(files.map((f) => path.normalize(f.path)));
-  const isAgentOwned = (rel: string) =>
-    // Platform bookkeeping (the vault, hook rotation state, the delivery
-    // log, run history) — losing any of it on deploy silently breaks
-    // something: agents lose secrets, a rotated hook un-rotates.
-    isPlatformPath(rel) ||
-    /(^|\/)state\//.test(rel) ||
-    rel === STORAGE_DIR ||
-    rel.startsWith(`${STORAGE_DIR}/`) ||
-    (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel));
+  const isAgentOwned = (rel: string) => keptOnDeploy(rel, shipped);
 
   // What is there now, for the revision: every editable file's content
   // before this save replaces the tree.
