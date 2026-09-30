@@ -979,6 +979,13 @@ function agentContext(
   // below. The tool is the unit of code, so its dependencies live in tool.md
   // and travel with it; the agent should not have to repeat them.
   const toolRuntimes: RuntimeSpec[] = [];
+  // The secrets a granted script tool's file lists (`secrets: [RESEND_API_KEY,
+  // EMAIL_FROM]`): granting the tool grants them, the way an API tool's
+  // referenced credentials always travelled with it. Before, only the
+  // agent's own `secrets:` counted, so an agent that granted desk_email and
+  // declared nothing failed with "RESEND_API_KEY is not set" (strata-desk,
+  // 1 Oct). `proxied` / `materialised` say how, not what, and add nothing.
+  const toolSecrets: string[] = [];
   // Does any granted tool act outside the workspace (`outward: true`)? The
   // retry policy reads it: see launchStep.
   let outward = false;
@@ -992,6 +999,8 @@ function agentContext(
     if (def.kind === "http") apis.push(def.spec);
     else if (def.kind === "script") {
       scriptSpecs.push(...parseScripts([def.spec]));
+      const listed = (def.spec as { secrets?: unknown }).secrets;
+      if (Array.isArray(listed)) toolSecrets.push(...listed.map(String).filter((n) => /^[A-Z][A-Z0-9_]*$/.test(n)));
       const rt = toolRuntime(def);
       if (rt) toolRuntimes.push(rt);
     }
@@ -1081,6 +1090,7 @@ function agentContext(
   // nothing and say so only at the provider.
   const declared: string[] = [
     ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
+    ...toolSecrets,
     ...actionChoices.flatMap((c) => (c.provider ? [c.secret] : [])),
     // Your own proxy for a vendor's session: its URL is a secret, declared by
     // naming it, like a provider's key.
@@ -1093,6 +1103,8 @@ function agentContext(
       return [c.secret];
     }),
   ];
+  // One name once, however many places asked for it.
+  declared.splice(0, declared.length, ...new Set(declared));
   const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
   const {
     env: secretEnv,
