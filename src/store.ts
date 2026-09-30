@@ -896,6 +896,9 @@ export interface AgentInfo {
   /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
    *  consult_<name> tool. The team's edges, as the author drew them. */
   consults: string[];
+  /** Colleagues this agent may DELEGATE to (`subagents:`) — each runs with
+   *  its own context and its own tools, no wider than this agent's. */
+  subagents: string[];
   /** The `skills:` allowlist, or null when the field is absent — which is
    *  not the same thing: absent inherits every skill in scope, an empty
    *  list withholds all of them. */
@@ -1455,6 +1458,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         legacyUse: legacyUseNames(data),
         retiredTools: retiredToolNames(data),
         consults: refNames(data.agents),
+        subagents: refNames(data.subagents),
         skills: data.skills === undefined ? null : refNames(data.skills),
         secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
         budget: runBudget(data.budget),
@@ -2877,6 +2881,9 @@ export interface RunEvent {
   /** Set when a person was involved mid-step: a question the agent asked
    *  (ask_person), its answer, or a message a person sent in (operator.ts). */
   operator?: OperatorEvent;
+  /** Set on a tool event a SUB-AGENT made (`subagents:`): its name. The
+   *  trace labels the call with it; cost stays the step's. */
+  subagent?: string;
 }
 
 /** A question an agent asked a person while its step ran (tools: [ask]). */

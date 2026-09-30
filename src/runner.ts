@@ -26,6 +26,7 @@ const isolatedRun = () => {
   return mode === "container" || (!!mode && mode in platform.isolation);
 };
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
+import { DELEGATE_TOOL, gatherSubagents, subagentPrompt, subagentTools, type SubagentSpec } from "./subagents.ts";
 import { ASK_TOOL, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
@@ -470,6 +471,65 @@ export function agentLocaleOverrides(agentDir: string, tenant: string, agentFron
  * template as "context every agent here shares" — and never read. Only the
  * frontmatter was, so the instructions people actually wrote reached no model.
  */
+/**
+ * The sub-agents a step may delegate to (`subagents:`), as the SDK will get
+ * them: each resolved through agentContext exactly as its own step would be
+ * (grants only — no runtime; it runs inside its parent's), then cut to what
+ * the parent holds. Problems are lines on the step, never a failed step.
+ */
+export function buildSubagentSpecs(o: {
+  names: unknown;
+  self: string;
+  workspaceRoot: string;
+  tenant: string;
+  tags?: string[];
+  runId?: string;
+  flowTimezone?: string | null;
+  parentAllowed: string[];
+  push: (type: "info" | "error", text: string) => void;
+}): SubagentSpec[] {
+  const out: SubagentSpec[] = [];
+  const { found, missing } = gatherSubagents(o.workspaceRoot, o.names);
+  for (const m of missing) o.push("error", `subagents: "${m}" is not an agent in this workspace — not delegated to`);
+  for (const sub of found) {
+    if (sub.name === o.self) {
+      o.push("error", `subagents: "${sub.name}" is this agent itself — an agent does not delegate to itself`);
+      continue;
+    }
+    try {
+      const tags = o.tags ?? [];
+      const own = agentContext(sub.dir, o.tenant, tags, { runId: o.runId, agent: sub.name }, o.flowTimezone, true);
+      const description = typeof own.front.description === "string" ? own.front.description.trim() : "";
+      if (!description) {
+        o.push("error", `subagents: "${sub.name}" has no description — the model picks a sub-agent by it; not delegated to`);
+        continue;
+      }
+      const tools = subagentTools(own.allowed, o.parentAllowed);
+      if (!tools.length) {
+        o.push("error", `subagents: "${sub.name}" holds none of its tools inside this step — it can only answer from its prompt (use agents: for that)`);
+      }
+      const body = withoutAgentRules(matter(fs.readFileSync(path.join(sub.dir, "agent.md"), "utf8")).content);
+      out.push({
+        name: sub.name,
+        description,
+        prompt: subagentPrompt({
+          body: resolveDocLinks(body, o.workspaceRoot),
+          name: sub.name,
+          parent: o.self,
+          workspace: path.basename(o.workspaceRoot),
+          shared: sharedInstructions(sub.dir, o.tenant),
+        }),
+        tools,
+        disallowedTools: refNames(own.front.disallowedTools),
+        model: own.front.model ? resolveModel(own.front.model) : "inherit",
+      });
+    } catch (err) {
+      o.push("error", `subagents: "${sub.name}" could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
+}
+
 export function sharedInstructions(agentDir: string, tenant: string): string | null {
   const sections = [
     ["Everyone in this account", readAgentsMd(accountDir(tenant))?.body],
@@ -650,6 +710,9 @@ function agentContext(
   /** The flow's own `timezone:`, when this step belongs to one. Between the
    *  agent's frontmatter and the workspace's AGENTS.md in the cascade. */
   flowTimezone?: string | null,
+  /** Only what the agent is granted — no runtime prepared. For a sub-agent,
+   *  whose tools are cut to its parent's and run in the parent's runtime. */
+  grantsOnly = false,
 ) {
   // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
   // workspace a secret should resolve against is two levels up.
@@ -1156,7 +1219,7 @@ function agentContext(
   let exec: ExecutionContext | null = null;
   let runtime: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
 
-  if (executor === "docker") {
+  if (executor === "docker" && !grantsOnly) {
     const image = ensureImage(runtimeSpec);
     runtimeLog.push(...image.log);
     runtimeError = image.error;
@@ -1173,7 +1236,9 @@ function agentContext(
         network: parseApis(front.apis).length > 0 || ownToolNames(front).length > 0,
       };
     }
-  } else if (isolatedRun()) {
+  } else if (isolatedRun() || grantsOnly) {
+    // (A sub-agent's grants are all that is asked of it: it runs inside its
+    // parent's step and runtime.)
     // The sandbox builds it (run-container.ts, beside pip's network and the
     // mounted cache); building it here as well was pure waste, and on a
     // worker image without python it was worse than waste — it logged
@@ -2085,6 +2150,20 @@ async function runStep(
       ...(ask ? ["foldrun_ask"] : []),
     ];
 
+    // Colleagues this agent may DELEGATE to: each with its own context and
+    // its own tools — resolved exactly as its own step's would be, then cut
+    // to what THIS step holds (subagents.ts). Built host-side, like consults.
+    const subagents = buildSubagentSpecs({
+      names: front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, flowTimezone,
+      parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], push,
+    });
+    if (subagents.length) {
+      // The delegation tool itself, granted only when there is someone to
+      // delegate to.
+      allowed.push(DELEGATE_TOOL);
+      for (const s of subagents) push("info", `subagent: ${s.name} — ${s.tools.length ? s.tools.join(", ") : "no tools"}`);
+    }
+
     // The last provider refusal this step saw, for the fallback decision —
     // watched on both paths, because a refusal reads the same from a pod
     // and from this process.
@@ -2293,6 +2372,7 @@ async function runStep(
           // field. A tool's own `runtime:` is part of what this step needs.
           runtime: runtime.spec,
           consults,
+          ...(subagents.length ? { subagents } : {}),
           timeoutSec: step.timeout,
           budgetUsd: stepBudgetUsd,
           budgetNote: stepBudgetNote,
@@ -2517,6 +2597,7 @@ async function runStep(
         agentDir,
         workspaceRoot,
         libraryRoot: libraryDir(tenant),
+        ...(subagents.length ? { subagents } : {}),
         prompt,
         model,
         effort,

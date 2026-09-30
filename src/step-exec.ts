@@ -18,6 +18,7 @@ import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import { spawn } from "node:child_process";
 import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
+import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 
@@ -100,6 +101,10 @@ export interface ExecOptions {
    *  in while the step runs, handed to the model after its next tool call.
    *  Absent where nobody can write in (no egress proxy). */
   inbox?: () => Promise<string | null>;
+  /** `subagents:` — colleagues the model may delegate to, each with its own
+   *  context and tools no wider than this step's (subagents.ts). Absent or
+   *  empty: no Agent tool, as before. */
+  subagents?: SubagentSpec[];
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
 
@@ -128,7 +133,7 @@ export type QueryLike = AsyncIterable<unknown> & { interrupt(): Promise<unknown>
 export type QueryFn = (args: { prompt: string; options: Record<string, unknown> }) => QueryLike;
 
 /** The pairing fields on a tool event — see RunEvent in store.ts. */
-export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect; operator?: OperatorEvent };
+export type EventExtra = { call?: string; ms?: number; err?: boolean; effect?: TestEffect; operator?: OperatorEvent; subagent?: string };
 
 
 /** Conservative per-token rates for a model nothing else can price — an
@@ -244,6 +249,8 @@ export async function executeStep(
   // stop both ask the query to interrupt, and abort it outright if it has
   // not wound down within the grace period.
   const abort = new AbortController();
+  const subagents = opts.subagents?.length ? opts.subagents : null;
+  const guardSubagent = subagents ? subagentGuard(subagents) : null;
 
   const q = runQuery({
     prompt: opts.prompt,
@@ -257,6 +264,9 @@ export async function executeStep(
       ...(opts.effort ? { effort: opts.effort } : {}),
       systemPrompt: opts.systemPrompt,
       ...(opts.maxTurns ? { maxTurns: opts.maxTurns } : {}),
+      // Sub-agents: the SDK's own delegation. Every definition carries an
+      // explicit tool list (an absent one inherits all of ours).
+      ...(subagents ? { agents: toAgentDefinitions(subagents) } : {}),
       // Restrict the toolset itself, not just approval: an agent that
       // declares no tools gets none, instead of seeing the full Claude
       // Code toolset and burning turns on denied calls.
@@ -295,7 +305,18 @@ export async function executeStep(
       hooks: {
         PreToolUse: [{
           hooks: [async (hookInput: HookInput) => {
-            if (hookInput.hook_event_name !== "PreToolUse" || !isFilesystemTool(hookInput.tool_name)) return {};
+            if (hookInput.hook_event_name !== "PreToolUse") return {};
+            // A sub-agent's calls come through here too, tagged with its
+            // name; anything outside its own list is refused before the
+            // shared checks below (which apply to it unchanged).
+            if (guardSubagent && "agent_id" in hookInput && hookInput.agent_id) {
+              const why = guardSubagent((hookInput as { agent_type?: string }).agent_type, hookInput.tool_name);
+              if (why) {
+                emit("error", why, { subagent: (hookInput as { agent_type?: string }).agent_type });
+                return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: why } };
+              }
+            }
+            if (!isFilesystemTool(hookInput.tool_name)) return {};
             const verdict = checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot });
             if (!verdict.ok) {
               emit("error", verdict.reason!);
@@ -393,7 +414,15 @@ export async function executeStep(
 
   // Open tool calls, by the provider's id, so the result can be paired with
   // its call and the trace can say how long each tool ran.
-  const openCalls = new Map<string, { name: string; at: number }>();
+  const openCalls = new Map<string, { name: string; at: number; subagent?: string }>();
+  // Delegations in flight: the parent's Agent call id → the sub-agent's name.
+  // The SDK tags every message a sub-agent produces with that call's id
+  // (parent_tool_use_id), which is how its tool calls are labelled here.
+  const delegations = new Map<string, string>();
+  const subagentOf = (message: unknown): string | undefined => {
+    const parent = (message as { parent_tool_use_id?: string | null }).parent_tool_use_id;
+    return parent ? (delegations.get(parent) ?? "subagent") : undefined;
+  };
 
   try {
   for await (const message of q as AsyncIterable<SDKMessage>) {
@@ -410,13 +439,25 @@ export async function executeStep(
           break;
         }
       }
+      const via = subagentOf(message);
       for (const block of message.message.content) {
         if (block.type === "text" && block.text.trim()) {
+          // A sub-agent's own words are its business; the parent's reply is
+          // the step's result. (The SDK forwards only tool blocks by default.)
+          if (via) continue;
           texts.push(block.text);
           emit("text", block.text);
         } else if (block.type === "tool_use") {
-          openCalls.set(block.id, { name: block.name, at: Date.now() });
-          emit("tool", block.name, { call: block.id });
+          if (!via && (DELEGATE_TOOLS as readonly string[]).includes(block.name)) {
+            const input = block.input as { subagent_type?: unknown; description?: unknown; prompt?: unknown } | undefined;
+            const to = String(input?.subagent_type ?? "subagent");
+            delegations.set(block.id, to);
+            // One line a person can read: who got the job, and what it was.
+            const job = String(input?.description ?? input?.prompt ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+            emit("info", `delegating to ${to}${job ? `: ${job}` : ""}`, { subagent: to });
+          }
+          openCalls.set(block.id, { name: block.name, at: Date.now(), ...(via ? { subagent: via } : {}) });
+          emit("tool", block.name, { call: block.id, ...(via ? { subagent: via } : {}) });
         }
       }
     } else if (message.type === "user") {
@@ -433,6 +474,7 @@ export async function executeStep(
             call: block.tool_use_id,
             ms: Date.now() - open.at,
             ...(block.is_error ? { err: true } : {}),
+            ...(open.subagent ? { subagent: open.subagent } : {}),
           });
         }
       }

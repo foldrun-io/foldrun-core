@@ -31,6 +31,7 @@ import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
+import type { SubagentSpec } from "./subagents.ts";
 import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
@@ -58,6 +59,8 @@ export interface ContainerStepInput {
    *  their agent.md files host-side. The driver rebuilds the consult tools
    *  in here; the callees run toolless, so nothing else need cross. */
   consults: ConsultSpec[];
+  /** `subagents:` — built host-side (runner.ts), plain JSON. */
+  subagents?: SubagentSpec[];
   timeoutSec?: number;
   /** The step's spend ceiling and the model's per-token price — see
    *  step-exec.ts. Values, so the driver can enforce them in the pod. */
@@ -575,6 +578,7 @@ try {
       ...input.mcpServers,
     },
     ...(inbox ? { inbox } : {}),
+    ...(input.subagents?.length ? { subagents: input.subagents } : {}),
     env,
     timeoutSec: input.timeoutSec,
     budgetUsd: input.budgetUsd,
@@ -862,7 +866,7 @@ export function ensureRunnerImage(
 
 export function parseDriverLine(
   line: string,
-): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; operator?: OperatorEvent } | { e: "done" } & ContainerStepOutcome | null {
+): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; operator?: OperatorEvent; subagent?: string } | { e: "done" } & ContainerStepOutcome | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return null;
   try {
@@ -876,6 +880,7 @@ export function parseDriverLine(
         ...(typeof parsed.ms === "number" ? { ms: parsed.ms } : {}),
         ...(parsed.err === true ? { err: true } : {}),
         ...(isOperatorEvent(parsed.operator) ? { operator: parsed.operator } : {}),
+        ...(typeof parsed.subagent === "string" && /^[a-z0-9-]{1,64}$/.test(parsed.subagent) ? { subagent: parsed.subagent } : {}),
       };
     }
     if (parsed.e === "done") {

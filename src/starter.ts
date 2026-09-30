@@ -416,7 +416,8 @@ skills: [house-style]       # from skills/
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool
 apis: [{ name: crm }]       # an HTTP API, as a tool
 mcpServers: {}              # an MCP server, as a tool
-agents: [writer]            # colleagues this one may consult
+agents: [writer]            # colleagues this one may consult (an answer, no tools)
+subagents: [researcher]     # colleagues it may delegate a job to (own context, own tools ≤ its own)
 secrets: [CRM_TOKEN]        # from the vault — never written in these files
 timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
 provider: {}                # BYOK: your own model credential

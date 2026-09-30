@@ -144,6 +144,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "ask", insert: "ask:\n  timeout: 30m", hint: "tools: [ask] — how long ask_person waits for a person (max 24h)" },
     { label: "permissionMode", insert: "permissionMode: plan", hint: "plan = read-only" },
     { label: "disallowedTools", insert: "disallowedTools:\n  - " },
+    { label: "subagents", insert: "subagents:\n  - ", hint: "colleagues it may delegate a job to — own context, own tools, no wider than its own" },
     {
       label: "provider",
       insert: "provider:\n  name: \n  token: ${PROVIDER_TOKEN}",
@@ -573,6 +574,9 @@ export function completionsAt(
       ],
       secrets: vocab.secrets.map((s) => ({ label: s, hint: "secret" })),
       skills: vocab.skills.map((s) => ({ label: s, hint: "skill" })),
+      // Colleagues: a consult (agents:) or a delegate (subagents:).
+      agents: vocab.agents.map((a) => ({ label: a, hint: "consult — answers, no tools" })),
+      subagents: vocab.agents.map((a) => ({ label: a, hint: "delegate — own context and tools" })),
       disallowedTools: [...TOOL_GROUPS, { label: "Bash" }, { label: "Write" }],
       when: [{ label: "schema" }, { label: "urgent" }],
       expect: ASSERTIONS.map((a) => ({ ...a, insert: `${a.label}: ` })),
