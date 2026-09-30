@@ -10,3 +10,6 @@ templates/*/runs/
 .env
 # scripts/ts-test.mjs compiles here when Node cannot strip types
 .ts-test-*
+# FOLDRUN_DATA falls back to ./data (src/paths.ts): a test or server run
+# started here without it leaves accounts and a secret key behind.
+/data/
