@@ -159,6 +159,30 @@ test("stream: a reply cut off by length says max_tokens; a plain reply says end_
   assert.equal((plain.find((e) => e.event === "message_delta")!.data.delta as Json).stop_reason, "end_turn");
 });
 
+test("stop reasons: content filter, a full context window and a matched stop sequence", () => {
+  const reply = (choice: Json, stops?: string[]) => fromChatCompletion({ choices: [{ message: { content: "x" }, ...choice }] }, "m", stops);
+  assert.equal(reply({ finish_reason: "content_filter" }).stop_reason, "refusal");
+  assert.equal(reply({ finish_reason: "model_length" }).stop_reason, "model_context_window_exceeded");
+  // vLLM names the matched stop string; SGLang calls it matched_stop.
+  const vllm = reply({ finish_reason: "stop", stop_reason: "###" }, ["###"]);
+  assert.equal(vllm.stop_reason, "stop_sequence");
+  assert.equal(vllm.stop_sequence, "###");
+  assert.equal(reply({ finish_reason: "stop", matched_stop: "END" }, ["END"]).stop_sequence, "END");
+  // Not one the request asked for (an EOS token id, a stray string): end_turn.
+  assert.equal(reply({ finish_reason: "stop", stop_reason: 2 }, ["###"]).stop_reason, "end_turn");
+  assert.equal(reply({ finish_reason: "stop", stop_reason: "eos" }, ["###"]).stop_reason, "end_turn");
+  // A tool call that finished as "stop" (Gemini does this) is still tool_use.
+  const tool = fromChatCompletion({ choices: [{ finish_reason: "stop", message: { tool_calls: [{ id: "c", function: { name: "f", arguments: "{}" } }] } }] }, "m");
+  assert.equal(tool.stop_reason, "tool_use");
+
+  const s = new StreamTranslator("m", ["###"]);
+  const ev = events([...s.feed({ choices: [{ delta: { content: "x" }, finish_reason: "stop", stop_reason: "###" }] }), ...s.finishStream()]);
+  assert.deepEqual(ev.find((e) => e.event === "message_delta")!.data.delta, { stop_reason: "stop_sequence", stop_sequence: "###" });
+  const f = new StreamTranslator("m");
+  const filtered = events([...f.feed({ choices: [{ delta: { content: "x" }, finish_reason: "content_filter" }] }), ...f.finishStream()]);
+  assert.equal((filtered.find((e) => e.event === "message_delta")!.data.delta as Json).stop_reason, "refusal");
+});
+
 // ------------------------------------------------------- end to end
 
 /** A fake Chat-Completions provider: records the request, answers by script. */

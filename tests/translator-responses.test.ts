@@ -194,6 +194,22 @@ test("stream: arguments that arrive whole on the done item, and a reply cut by l
   assert.equal((ev2.find((e) => e.event === "message_delta")!.data.delta as Json).stop_reason, "max_tokens");
 });
 
+test("stop reasons: a refusal part or a content filter is a refusal", () => {
+  const refused = fromResponses({ output: [{ type: "message", content: [{ type: "refusal", refusal: "I can't help with that." }] }] }, "m") as Json;
+  assert.equal(refused.stop_reason, "refusal");
+  assert.deepEqual(refused.content, [{ type: "text", text: "I can't help with that." }]);
+  const filtered = fromResponses({ output: [], incomplete_details: { reason: "content_filter" } }, "m") as Json;
+  assert.equal(filtered.stop_reason, "refusal");
+
+  const m = new ResponsesStreamTranslator("m");
+  const out: string[] = [];
+  out.push(...m.feed({ type: "response.output_item.added", output_index: 0, item: { type: "message" } }));
+  out.push(...m.feed({ type: "response.refusal.delta", output_index: 0, delta: "No." }));
+  out.push(...m.feed({ type: "response.completed", response: {} }));
+  out.push(...m.finishStream());
+  assert.equal((events(out).find((e) => e.event === "message_delta")!.data.delta as Json).stop_reason, "refusal");
+});
+
 // ---------------------------------------------------------- end to end
 
 function fakeUpstream(script: (body: Json) => { status?: number; json?: Json; chunks?: Json[] }) {

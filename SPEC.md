@@ -332,7 +332,17 @@ loop?" by running one: a single tool whose result is a per-run nonce the model
 must call for and echo back — unfakeable by a model that merely narrates tool
 use. It runs through the workspace's own provider block, so it exercises the
 exact path a run takes. The catalogue is the gateway's claim; the probe is the
-ground truth.
+ground truth. It also prints the stop reason the model's last turn ended on,
+so a probe that failed says whether it was cut off, refused or out of context.
+
+**Stop reasons across the translator.** A translated reply carries the
+closest Anthropic stop reason to what the provider said: `length` →
+`max_tokens`, `content_filter` or a Responses `refusal` part → `refusal`,
+Mistral's `model_length` → `model_context_window_exceeded`, a matched stop
+string (vLLM, SGLang) → `stop_sequence` with the string, a tool call →
+`tool_use`, anything else → `end_turn`. `pause_turn` never arises: the
+server-side tools that cause it are dropped. The full table is in
+`docs/providers.md`.
 
 See [okf/PROFILE.md](./okf/PROFILE.md) for exactly which parts of OKF are
 implemented. Agent frontmatter also accepts the subagent field names coding

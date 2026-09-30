@@ -36,6 +36,10 @@ export interface ExecOutcome {
    *  Anthropic's table, which is wrong for a routed model — these are the
    *  raw numbers a caller with a gateway's own prices can reprice from. */
   usage: { inputTokens: number; outputTokens: number } | null;
+  /** Why the model's last turn ended, as the SDK's result message says:
+   *  end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal or
+   *  model_context_window_exceeded. Null when no result arrived. */
+  stopReason?: string | null;
 }
 
 export interface ExecOptions {
@@ -225,6 +229,7 @@ export async function executeStep(
   let status: "running" | "completed" | "failed" = "running";
   let costUsd: number | null = null;
   let usage: ExecOutcome["usage"] = null;
+  let stopReason: string | null = null;
   const texts: string[] = [];
 
   fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
@@ -417,6 +422,7 @@ export async function executeStep(
         emit("error", `stopped after ${opts.maxTurns ?? "its"} turns (max_turns: in the flow file) — the step did not finish`);
       }
       costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
+      stopReason = "stop_reason" in message && typeof message.stop_reason === "string" ? message.stop_reason : null;
       if ("usage" in message && message.usage) {
         const u = message.usage as unknown as Record<string, number | undefined>;
         usage = {
@@ -559,7 +565,7 @@ export async function executeStep(
     }
   }
 
-  return { status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage };
+  return { status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage, stopReason };
 }
 
 // ------------------------------------------------------------ output: json

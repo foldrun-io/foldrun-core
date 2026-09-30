@@ -424,16 +424,38 @@ export function toResponses(
 
 // ------------------------------------------------------- response mapping
 
-function stopReason(finish: unknown): string {
-  switch (finish) {
-    case "tool_calls":
-    case "function_call":
-      return "tool_use";
-    case "length":
-      return "max_tokens";
-    default:
-      return "end_turn";
-  }
+type Stop = { reason: string; sequence: string | null };
+
+/**
+ * Why a Chat Completion stopped, in Anthropic's words. `content_filter`
+ * (OpenAI, Azure, Gemini's safety block) is a refusal; Mistral's
+ * `model_length` is the context window filling, not max_tokens. A stop
+ * sequence is named only where the provider says which one matched — vLLM
+ * as `stop_reason`, SGLang as `matched_stop` — and only when it is one the
+ * request asked for; plain OpenAI says `stop` either way, which reads as
+ * end_turn. pause_turn has no counterpart: server-side tools are dropped.
+ */
+function chatStop(choice: Json, sawTool: boolean, stops: readonly string[]): Stop {
+  const finish = choice.finish_reason;
+  if (finish === "content_filter") return { reason: "refusal", sequence: null };
+  if (finish === "length") return { reason: "max_tokens", sequence: null };
+  if (finish === "model_length") return { reason: "model_context_window_exceeded", sequence: null };
+  if (sawTool || finish === "tool_calls" || finish === "function_call") return { reason: "tool_use", sequence: null };
+  const matched = typeof choice.stop_reason === "string" ? choice.stop_reason : choice.matched_stop;
+  if (typeof matched === "string" && stops.includes(matched)) return { reason: "stop_sequence", sequence: matched };
+  return { reason: "end_turn", sequence: null };
+}
+
+/** Why a Response stopped: a refusal part or a content filter is a refusal. */
+function responsesStop(incomplete: unknown, sawTool: boolean, sawRefusal: boolean): string {
+  if (sawRefusal || incomplete === "content_filter") return "refusal";
+  if (incomplete === "max_output_tokens") return "max_tokens";
+  if (sawTool) return "tool_use";
+  return "end_turn";
+}
+
+function stopList(stops: unknown): string[] {
+  return Array.isArray(stops) ? stops.filter((s): s is string => typeof s === "string") : [];
 }
 
 function parseArgs(raw: unknown): unknown {
@@ -446,7 +468,7 @@ function parseArgs(raw: unknown): unknown {
 }
 
 /** A finished Chat Completion as an Anthropic message. Pure. */
-export function fromChatCompletion(res: Json, requestedModel: string): Json {
+export function fromChatCompletion(res: Json, requestedModel: string, stopSequences?: unknown): Json {
   const choice = ((res.choices as Json[] | undefined) ?? [])[0] ?? {};
   const msg = (choice.message as Json | undefined) ?? {};
   const content: Json[] = [];
@@ -462,14 +484,15 @@ export function fromChatCompletion(res: Json, requestedModel: string): Json {
     });
   }
   const usage = (res.usage as Json | undefined) ?? {};
+  const stop = chatStop(choice, content.some((c) => c.type === "tool_use"), stopList(stopSequences));
   return {
     id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
     type: "message",
     role: "assistant",
     model: String(res.model ?? requestedModel),
     content,
-    stop_reason: stopReason(choice.finish_reason),
-    stop_sequence: null,
+    stop_reason: stop.reason,
+    stop_sequence: stop.sequence,
     usage: {
       input_tokens: Number(usage.prompt_tokens ?? 0),
       output_tokens: Number(usage.completion_tokens ?? 0),
@@ -490,12 +513,15 @@ export class StreamTranslator {
   private textIndex: number | null = null;
   /** Chat-Completions tool index → Anthropic block index. */
   private tools = new Map<number, { block: number; argsSeen: boolean }>();
-  private finish: unknown = null;
+  /** The last choice's stop fields: finish_reason and any matched stop. */
+  private finish: Json = {};
   private usage: { input: number; output: number } | null = null;
   private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
   private readonly model: string;
-  constructor(model: string) {
+  private readonly stops: string[];
+  constructor(model: string, stopSequences?: unknown) {
     this.model = model;
+    this.stops = stopList(stopSequences);
   }
 
   private event(name: string, data: Json): string {
@@ -539,7 +565,7 @@ export class StreamTranslator {
     }
     const choice = ((chunk.choices as Json[] | undefined) ?? [])[0];
     if (!choice) return out;
-    if (choice.finish_reason) this.finish = choice.finish_reason;
+    if (choice.finish_reason) this.finish = { finish_reason: choice.finish_reason, stop_reason: choice.stop_reason, matched_stop: choice.matched_stop };
     const delta = (choice.delta as Json | undefined) ?? {};
 
     const text = typeof delta.content === "string" ? delta.content : "";
@@ -619,11 +645,11 @@ export class StreamTranslator {
       }
       out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
     }
-    const reason = this.tools.size && this.finish !== "length" ? "tool_use" : stopReason(this.finish);
+    const stop = chatStop(this.finish, this.tools.size > 0, this.stops);
     out.push(
       this.event("message_delta", {
         type: "message_delta",
-        delta: { stop_reason: reason, stop_sequence: null },
+        delta: { stop_reason: stop.reason, stop_sequence: stop.sequence },
         usage: { input_tokens: this.usage?.input ?? 0, output_tokens: this.usage?.output ?? 0 },
       }),
     );
@@ -653,7 +679,10 @@ export function fromResponses(res: Json, requestedModel: string): Json {
   }
   const usage = (res.usage as Json | undefined) ?? {};
   const incomplete = (res.incomplete_details as Json | undefined)?.reason;
-  const stop = content.some((c) => c.type === "tool_use") ? "tool_use" : incomplete === "max_output_tokens" ? "max_tokens" : "end_turn";
+  const refused = (Array.isArray(res.output) ? (res.output as Json[]) : []).some(
+    (item) => item.type === "message" && Array.isArray(item.content) && (item.content as Json[]).some((c) => c.type === "refusal"),
+  );
+  const stop = responsesStop(incomplete, content.some((c) => c.type === "tool_use"), refused);
   return {
     id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
     type: "message",
@@ -684,6 +713,7 @@ export class ResponsesStreamTranslator {
   private usage: { input: number; output: number } | null = null;
   private incomplete: string | null = null;
   private sawTool = false;
+  private sawRefusal = false;
   private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
   private readonly model: string;
   constructor(model: string) {
@@ -748,6 +778,7 @@ export class ResponsesStreamTranslator {
     if (type === "response.output_text.delta" || type === "response.refusal.delta") {
       const entry = this.blocks.get(Number(ev.output_index));
       const text = String(ev.delta ?? "");
+      if (type === "response.refusal.delta") this.sawRefusal = true;
       if (entry && entry.kind === "text" && text) {
         out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "text_delta", text } }));
       }
@@ -798,7 +829,7 @@ export class ResponsesStreamTranslator {
       }
       out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
     }
-    const reason = this.sawTool && this.incomplete !== "max_output_tokens" ? "tool_use" : this.incomplete === "max_output_tokens" ? "max_tokens" : "end_turn";
+    const reason = responsesStop(this.incomplete, this.sawTool, this.sawRefusal);
     out.push(
       this.event("message_delta", {
         type: "message_delta",
@@ -947,11 +978,11 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
           return send(502, errorBody(502, `translator: ${label} answered with something that is not JSON`));
         }
         log.push(`POST ${label} → 200 (${Date.now() - started}ms, ${model})`);
-        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model)));
+        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences)));
       }
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model);
+      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model, body.stop_sequences);
       const reader = upstream.body?.getReader();
       if (!reader) {
         for (const e of machine.finishStream()) res.write(e);

@@ -34,6 +34,9 @@ export interface ProbeReport {
   durationMs: number;
   /** The reply itself, for the human reading a failure. */
   reply: string | null;
+  /** Why the last turn ended — end_turn on a healthy probe; max_tokens,
+   *  refusal or model_context_window_exceeded say why one failed. */
+  stopReason: string | null;
 }
 
 const PROBE_TIMEOUT_SEC = 120;
@@ -105,6 +108,7 @@ export async function probeModel(
       costUsd: outcome.costUsd,
       durationMs: Date.now() - started,
       reply: outcome.result,
+      stopReason: outcome.stopReason ?? null,
     };
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
