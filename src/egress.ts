@@ -129,7 +129,8 @@ export interface EgressHooks {
    *  policy in test-mode.ts to every request on this lease. Carried on the
    *  lease, not the request, because the pod is the party not trusted to
    *  say so. */
-  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean }): Promise<EgressLease | null>;
+  /** `step` — the step's index in run.steps; keys that step's operator inbox. */
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number }): Promise<EgressLease | null>;
 }
 
 /** Strip a header set of the proxy's own and hop-by-hop headers. */

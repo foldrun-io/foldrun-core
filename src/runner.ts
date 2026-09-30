@@ -1767,6 +1767,10 @@ async function runStep(
   /** The flow's `timezone:`, for the clock cascade. Undefined for a step
    *  run outside any flow, which still gets agent → workspace → account. */
   flowTimezone?: string | null,
+  /** The step's index in run.steps, carried on its egress lease so a
+   *  person's message to this step reaches this step's own inbox and not a
+   *  sibling's running in the same group. Undefined outside a flow. */
+  stepIndex?: number,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -2276,7 +2280,7 @@ async function runStep(
           }
         }
       }
-      const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant, test: testRun });
+      const lease = await platform.egress.lease({ tenant, runId: runId ?? "adhoc", grant, test: testRun, ...(stepIndex !== undefined && stepIndex >= 0 ? { step: stepIndex } : {}) });
       // Which secrets must still be real inside the sandbox: a script tool
       // reads them from its environment, and unless it says `secrets:
       // proxied` it needs the value, not the name. bash is a script by
@@ -4120,6 +4124,7 @@ function driveRunInner(
                     return run.stopRequested === true;
                   },
                   flowTimezone,
+                  run.steps.indexOf(step),
                 ).finally(() => reserved.delete(step));
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
@@ -4252,7 +4257,7 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, undefined, flowTimezone);
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, undefined, flowTimezone, run.steps.indexOf(rescue));
           // runStep mutates rescue.status; widen past TS's "running" narrowing.
           const rescueOutcome: string = rescue.status;
           if (rescueOutcome === "completed") {
