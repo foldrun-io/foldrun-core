@@ -109,6 +109,20 @@ test("the parent's hooks judge a sub-agent's calls: its list, and the same file 
     const ok = await fromSub("Read", { file_path: "../../knowledge/a.md" });
     assert.notEqual(ok.hookSpecificOutput?.permissionDecision, "deny", "an in-workspace read passes");
     assert.ok(events.some((e) => e.type === "error" && e.extra?.subagent === "researcher"), "the refusal is on the trace, labelled");
+    // The path refusal itself names the sub-agent — not only its tool-list
+    // refusal (live run-munqdvda-vurd showed /etc/passwd refused unlabelled).
+    const passwd = events.filter((e) => e.type === "error" && /passwd|outside/i.test(e.text));
+    assert.ok(passwd.length, "the /etc/passwd refusal is on the trace");
+    assert.ok(passwd.every((e) => e.extra?.subagent === "researcher"), "and it says which agent tried");
+    // canUseTool sees only the id; the name the hook saw is carried over.
+    const can = seen.canUseTool as (t: string, i: Record<string, unknown>, o?: { agentID?: string }) => Promise<{ behavior: string }>;
+    const before = events.length;
+    const viaCan = await can("Read", { file_path: "/etc/shadow" }, { agentID: "a1" });
+    assert.equal(viaCan.behavior, "deny");
+    assert.equal(events.slice(before).find((e) => e.type === "error")?.extra?.subagent, "researcher", "canUseTool's refusal is labelled too");
+    const main = await can("Read", { file_path: "/etc/shadow" });
+    assert.equal(main.behavior, "deny");
+    assert.equal(events.at(-1)?.extra?.subagent, undefined, "the main thread's refusal is not labelled as a sub-agent's");
   }));
 
 test("a sub-agent's tool calls are labelled with its name; its words are not the step's result", () =>

@@ -251,6 +251,11 @@ export async function executeStep(
   const abort = new AbortController();
   const subagents = opts.subagents?.length ? opts.subagents : null;
   const guardSubagent = subagents ? subagentGuard(subagents) : null;
+  // A sub-agent's calls reach both the hook (which sees its id AND name) and
+  // canUseTool (which sees only the id). Remembered here so every refusal —
+  // its own list, a path outside the workspace, a shell command — names the
+  // agent that tried, not just the step.
+  const subagentNames = new Map<string, string>();
 
   const q = runQuery({
     prompt: opts.prompt,
@@ -309,17 +314,19 @@ export async function executeStep(
             // A sub-agent's calls come through here too, tagged with its
             // name; anything outside its own list is refused before the
             // shared checks below (which apply to it unchanged).
-            if (guardSubagent && "agent_id" in hookInput && hookInput.agent_id) {
-              const why = guardSubagent((hookInput as { agent_type?: string }).agent_type, hookInput.tool_name);
+            const via = "agent_id" in hookInput && hookInput.agent_id ? ((hookInput as { agent_type?: string }).agent_type ?? "subagent") : undefined;
+            if (via && "agent_id" in hookInput && hookInput.agent_id) subagentNames.set(String(hookInput.agent_id), via);
+            if (guardSubagent && via) {
+              const why = guardSubagent(via, hookInput.tool_name);
               if (why) {
-                emit("error", why, { subagent: (hookInput as { agent_type?: string }).agent_type });
+                emit("error", why, { subagent: via });
                 return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: why } };
               }
             }
             if (!isFilesystemTool(hookInput.tool_name)) return {};
             const verdict = checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot });
             if (!verdict.ok) {
-              emit("error", verdict.reason!);
+              emit("error", verdict.reason!, via ? { subagent: via } : undefined);
               return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: verdict.reason! } };
             }
             if (!verdict.updatedInput) return {};
@@ -342,7 +349,8 @@ export async function executeStep(
             }
           : {}),
       },
-      canUseTool: async (toolName: string, input: Record<string, unknown>) => {
+      canUseTool: async (toolName: string, input: Record<string, unknown>, options?: { agentID?: string }) => {
+        const via = options?.agentID ? (subagentNames.get(options.agentID) ?? "subagent") : undefined;
         // The toolset was already narrowed to what the agent declared, so
         // anything outside it is a denial with a reason the model can act on.
         const fromGrantedServer = opts.mcpNames.some((n) => toolName.startsWith(`mcp__${n}__`));
@@ -359,7 +367,7 @@ export async function executeStep(
               ? checkPaths(toolName, input, { agentDir, workspaceRoot, libraryRoot })
               : { ok: true as const };
         if (!verdict.ok) {
-          emit("error", verdict.reason!);
+          emit("error", verdict.reason!, via ? { subagent: via } : undefined);
           return { behavior: "deny" as const, message: verdict.reason! };
         }
         return { behavior: "allow" as const, updatedInput: verdict.updatedInput ?? input };
