@@ -344,6 +344,11 @@ git push endpoint.
 
 A numbered list of steps. The number is the GROUP: same number means those
 steps run in parallel, and the flow waits for all of them before the next.
+The dashboard's canvas and the CLI edit the same file: \`foldrun flow show
+<flow>\` draws it, \`foldrun flow add <flow> <pattern>\` inserts a pattern
+(chain, parallel, router, fan-out, loop, approval, ask, wait, rescue,
+subflow), \`foldrun flow rm-step\` removes a step, and \`foldrun agent link
+<agent> --subagent|--consult|--can-ask\` wires agents together.
 
 \`\`\`markdown
 ---
@@ -417,7 +422,7 @@ apis: [{ name: crm }]       # an HTTP API, as a tool
 mcpServers: {}              # an MCP server, as a tool
 agents: [writer]            # colleagues this one may consult (an answer, no tools)
 subagents: [researcher]     # colleagues it may delegate a job to (own context, own tools ≤ its own)
-secrets: [CRM_TOKEN]        # from the vault — never written in these files
+secrets: [CRM_TOKEN]        # keys the agent uses itself; a tool's own come with the tool
 timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
 provider: {}                # BYOK: your own model credential
 permissionMode: plan        # plan first, act once approved
