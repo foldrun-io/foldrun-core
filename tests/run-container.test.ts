@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  DOCKERFILE,
   allowedBack,
   applyContainerChanges,
   hashTree,
@@ -441,4 +442,12 @@ test("mtimeManifest + APPLY_MTIMES_JS put back the times a copy lost", async () 
   const r = spawnSync(process.execPath, ["-e", APPLY_MTIMES_JS, m, dst]);
   assert.equal(r.status, 0, String(r.stderr));
   assert.equal(Math.round(fs.statSync(f).mtimeMs / 1000), Math.round(old.getTime() / 1000));
+});
+
+test("the slim runner ships fonts — without them every non-browser render draws empty boxes", () => {
+  const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
+  assert.match(slim, /fonts-dejavu-core/);
+  assert.match(slim, /fontconfig/);
+  // Not in base: the full image's browser layers must stay cached.
+  assert.doesNotMatch(DOCKERFILE.split("FROM base AS slim")[0], /fonts-dejavu/);
 });

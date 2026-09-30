@@ -636,7 +636,7 @@ export const UV_VERSION = "0.11.25";
 //
 // The browsers sit BELOW the core install in `full`, as they always have,
 // so a core change rebuilds one thin layer and not 1.4 GB of Chromium.
-const DOCKERFILE = `FROM node:22-slim AS base
+export const DOCKERFILE = `FROM node:22-slim AS base
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
@@ -647,6 +647,17 @@ COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 
 FROM base AS slim
+# Fonts, because a step that draws text without a browser still needs them:
+# the full image gets 51 from Playwright's --with-deps, slim had none, so from
+# 2026-09-29 (when non-browsing steps moved to slim) every resvg/sharp diagram
+# rendered its labels as empty boxes — expert-witness-desk's validator failed
+# four passes on a post image that was "three empty boxes". DejaVu covers
+# Latin, Greek and Cyrillic in a few MB; fontconfig is how renderers find it.
+# Here, not in base, so the full image's browser layers stay cached.
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends fonts-dejavu-core fontconfig \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && fc-cache -f >/dev/null
 # The Playwright client only, the same pinned version as the browser pod's
 # server (the wire protocol is version-locked), so a tool that imports it
 # still loads; there is nothing here for it to launch.
