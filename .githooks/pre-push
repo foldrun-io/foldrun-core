@@ -51,6 +51,13 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   say "note: the working tree has uncommitted changes; the checks below include them."
 fi
 
+# git exports GIT_DIR (and friends) to hooks. A test that makes a throwaway
+# repo with `git init` / `git commit` would inherit it and act on THIS repo —
+# the infra changelog test did, setting core.bare=true on 1 Oct 2026. The
+# checks find their repo from the working directory instead.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 # shellcheck source=checks.sh
 . "$ROOT/.githooks/checks.sh"
 repo_checks
