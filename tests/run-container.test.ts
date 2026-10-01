@@ -444,10 +444,18 @@ test("mtimeManifest + APPLY_MTIMES_JS put back the times a copy lost", async () 
   assert.equal(Math.round(fs.statSync(f).mtimeMs / 1000), Math.round(old.getTime() / 1000));
 });
 
+test("the base image is pinned by digest — the same runner tag must always hold the same base", () => {
+  const from = DOCKERFILE.split("\n")[0];
+  assert.match(from, /^FROM node:\d+-[a-z]+-slim@sha256:[0-9a-f]{64} AS base$/);
+  assert.doesNotMatch(DOCKERFILE, /FROM node:[^@\s]+ /, "no floating node tag anywhere");
+});
+
 test("the slim runner ships fonts — without them every non-browser render draws empty boxes", () => {
   const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
   assert.match(slim, /fonts-dejavu-core/);
   assert.match(slim, /fontconfig/);
+  // Emoji, CJK, Devanagari and Thai drew as empty boxes with DejaVu alone.
+  for (const pkg of ["fonts-symbola", "fonts-wqy-microhei", "fonts-lohit-deva", "fonts-tlwg-loma-otf"]) assert.match(slim, new RegExp(pkg));
   // Not in base: the full image's browser layers must stay cached.
   assert.doesNotMatch(DOCKERFILE.split("FROM base AS slim")[0], /fonts-dejavu/);
 });

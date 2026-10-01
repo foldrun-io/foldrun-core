@@ -691,9 +691,17 @@ FROM base AS slim
 # rendered its labels as empty boxes — expert-witness-desk's validator failed
 # four passes on a post image that was "three empty boxes". DejaVu covers
 # Latin, Greek and Cyrillic in a few MB; fontconfig is how renderers find it.
+# DejaVu alone still drew emoji, Chinese, Japanese, Korean, Devanagari and
+# Thai as empty boxes (reproduced 2026-10-01 with resvg-js 2.6 and sharp
+# 0.34), so four more, the smallest set that drew all of them — 8 MB:
+#   Symbola     emoji and symbols, as outlines. NOT Noto Color Emoji (10 MB):
+#               resvg draws nothing from its bitmap glyphs, so a resvg
+#               diagram kept its empty boxes.
+#   WenQuanYi Micro Hei   Chinese, Japanese kana and Korean Hangul, one file.
+#   Lohit Devanagari, Loma   Hindi and Thai.
 # Here, not in base, so the full image's browser layers stay cached.
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends fonts-dejavu-core fontconfig \\
+ && apt-get install -y --no-install-recommends fonts-dejavu-core fontconfig fonts-symbola fonts-wqy-microhei fonts-lohit-deva fonts-tlwg-loma-otf \\
  && rm -rf /var/lib/apt/lists/* \\
  && fc-cache -f >/dev/null
 # The Playwright client only, the same pinned version as the browser pod's
