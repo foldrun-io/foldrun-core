@@ -84,6 +84,11 @@ export interface EvalInfo {
    *  unless the file says `live: true`. A flow eval that must really send
    *  to prove itself opts in; nothing opts in by accident. */
   live: boolean;
+  /** A file of saved inputs for a flow, not a test: `inputs: true`. Its
+   *  cases are named tasks the dashboard's "Run with…" and `foldrun invoke
+   *  --inputs` start the flow with; nothing is asserted, so no eval run,
+   *  deploy or `foldrun eval` ever runs them. */
+  inputs: boolean;
   cases: EvalCase[];
 }
 
@@ -192,6 +197,7 @@ export function parseEval(file: string, raw: string): EvalInfo {
     effort: resolveEffort(data.effort ?? "low"),
     trigger: data.trigger === "manual" ? "manual" : "deploy",
     live: data.live === true,
+    inputs: data.inputs === true,
     cases,
   };
 }
@@ -550,8 +556,11 @@ export async function runEval(
 ): Promise<EvalResult> {
   const startedAt = new Date().toISOString();
   const results: CaseResult[] = [];
+  // Saved inputs carry no assertions: running them would start and bill a
+  // run per case only to report every one failed. Nothing to grade.
+  const cases = info.inputs ? [] : info.cases;
 
-  for (const testCase of info.cases) {
+  for (const testCase of cases) {
     const target = info.flow ? null : info.agent;
     let runId: string | null = null;
     let output = "";
@@ -768,7 +777,7 @@ export async function evaluateDeployed(
   if (!stamp) return { ran: 0, skipped: "no revision to stamp the result with" };
   // Only the evals that asked to run on deploy — a `trigger: manual` eval is
   // one a person runs on purpose, because it costs a whole flow run.
-  const evals = listEvals(tenant, workspace).filter((e) => e.trigger !== "manual");
+  const evals = listEvals(tenant, workspace).filter((e) => e.trigger !== "manual" && !e.inputs);
   if (evals.length === 0) return { ran: 0, skipped: "no evals" };
   const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
   fs.mkdirSync(dir, { recursive: true });

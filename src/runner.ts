@@ -3038,7 +3038,7 @@ export function platformModelCredential(env: NodeJS.ProcessEnv = process.env): s
 }
 let credentialFileWarned = false;
 
-function platformModelEnv(): Record<string, string | undefined> {
+export function platformModelEnv(): Record<string, string | undefined> {
   const {
     ANTHROPIC_API_KEY,
     ANTHROPIC_AUTH_TOKEN,
