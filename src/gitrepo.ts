@@ -236,6 +236,54 @@ export function listRefs(tenant: string, scope: string, kind: "heads" | "tags"):
   });
 }
 
+/**
+ * The commit a restore means by `to`, on main's history:
+ *
+ *   a sha or a prefix of one      that commit
+ *   a branch or tag name          where it points
+ *   an ISO date or time           the last commit on main at or before it
+ *   "3d", "12h", "90m", "2w"      the same, that long ago
+ *
+ * Null when nothing matches — before the first commit, or a name that is
+ * not there. Throws on a `to` that cannot be any of these, so a typo is a
+ * 400 rather than a silent "nothing found".
+ */
+export function resolveRestorePoint(
+  tenant: string,
+  scope: string,
+  to: string,
+  now = Date.now(),
+): { sha: string; at: string; by: string; message: string } | null {
+  const t = to.trim();
+  if (!t || t.startsWith("-")) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
+  if (!headSha(tenant, scope)) return null;
+  const dir = repoDir(tenant, scope);
+  let sha: string | null = null;
+  const rel = /^(\d+)\s*(m|h|d|w)$/.exec(t);
+  const moment = rel
+    ? now - Number(rel[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[rel[2] as "m" | "h" | "d" | "w"]
+    : /^\d{4}-\d{2}-\d{2}/.test(t)
+      ? Date.parse(t)
+      : null;
+  if (moment !== null) {
+    if (Number.isNaN(moment)) throw Object.assign(new Error(`not a date: ${to}`), { status: 400 });
+    sha = git(dir, ["log", "-1", "--format=%H", `--until=@${Math.floor(moment / 1000)}`, "refs/heads/main"]).trim() || null;
+  } else {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$/.test(t)) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
+    for (const ref of [/^[0-9a-f]{4,40}$/.test(t) ? `${t}^{commit}` : null, `refs/heads/${t}^{commit}`, `refs/tags/${t}^{commit}`]) {
+      if (!ref) continue;
+      const r = spawnSync("git", ["--git-dir", dir, "rev-parse", "--verify", "--quiet", ref]);
+      if (r.status === 0) {
+        sha = r.stdout.toString().trim();
+        break;
+      }
+    }
+  }
+  if (!sha) return null;
+  const [at, by, ...msg] = git(dir, ["log", "-1", `--format=%cI${SEP}%ae${SEP}%s`, sha]).trim().split(SEP);
+  return { sha, at, by: by.endsWith("@foldrun") ? by.replace(/@foldrun$/, "") : by, message: msg.join(SEP) };
+}
+
 /** The files at a commit, for a browser or a deploy. */
 export function listTree(tenant: string, scope: string, ref = "refs/heads/main"): { path: string; mode: string }[] {
   if (!headSha(tenant, scope, ref)) return [];

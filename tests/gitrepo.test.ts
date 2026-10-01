@@ -114,3 +114,20 @@ test("ensureImported gives an untouched workspace a complete first commit, once"
     assert.deepEqual(listTree("acme", "desk").map((t) => t.path).sort(), ["AGENTS.md", "agents/w/agent.md"]);
     assert.equal(ensureImported("acme", "desk"), sha, "a second call changes nothing");
   }));
+
+test("resolveRestorePoint: a sha prefix, a date, a relative age; nothing before the first commit", { skip: !HAVE_GIT }, async () => {
+  const { resolveRestorePoint } = await import("../src/gitrepo.ts");
+  withData(() => {
+    const a = commitChanges("acme", "desk", [{ path: "AGENTS.md", before: null, after: "one\n" }], { by: "matt@example.com", message: "one", at: "2026-09-01T00:00:00Z" })!;
+    const b = commitChanges("acme", "desk", [{ path: "AGENTS.md", before: "one\n", after: "two\n" }], { message: "two", at: "2026-09-10T00:00:00Z" })!;
+    assert.equal(resolveRestorePoint("acme", "desk", a.slice(0, 7))?.sha, a);
+    assert.equal(resolveRestorePoint("acme", "desk", "2026-09-05")?.sha, a);
+    assert.equal(resolveRestorePoint("acme", "desk", "2026-09-10T00:00:00Z")?.sha, b);
+    assert.equal(resolveRestorePoint("acme", "desk", "2026-08-01"), null);
+    assert.equal(resolveRestorePoint("acme", "desk", "5d", Date.parse("2026-09-11T00:00:00Z"))?.sha, a);
+    assert.equal(resolveRestorePoint("acme", "desk", a)?.by, "matt@example.com");
+    assert.equal(resolveRestorePoint("acme", "desk", "nope"), null);
+    assert.throws(() => resolveRestorePoint("acme", "desk", "--all"), /not a revision/);
+    assert.throws(() => resolveRestorePoint("acme", "desk", "2026-13-45"), /not a date/);
+  });
+});
