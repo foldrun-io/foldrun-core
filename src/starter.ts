@@ -333,7 +333,8 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 
 Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/schedule\`,
 \`/api/approvals\`, \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
-\`/api/healthz\` (open) and \`/api/metrics\` (Prometheus).
+\`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
+and \`/api/metrics\` (Prometheus).
 
 Debugging a failed run is usually: \`runs\` to find it, \`runs/<id>\` to read which
 step failed and what it cost, fix the markdown, \`deploy\`, then \`rerun\`.
