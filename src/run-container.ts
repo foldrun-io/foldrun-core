@@ -646,18 +646,23 @@ ENTRYPOINT ["/opt/runner/entry.sh"]
 export const UV_VERSION = "0.11.25";
 
 /** The base both targets start from, pinned by digest. The tag alone floats:
- *  `node:22-slim` is re-pushed for every Node patch and Debian point release
- *  (and moved from bookworm to trixie without a word), so the same runner
- *  tag — a hash of this text — could hold different bytes on two rebuilds.
- *  With the digest in the text, new base bytes mean a new tag.
+ *  `node:22-slim` is re-pushed for every Node patch and Debian point release,
+ *  and will change Debian release when the Node image decides to, so the
+ *  same runner tag — a hash of this text — could hold different bytes on two
+ *  rebuilds. With the digest in the text, new base bytes mean a new tag.
  *
- *  Raise it on purpose: read the current digest of the tag, put it here,
- *  then build both targets and run one step on each (see the image notes in
- *  foldrun-infra/docs/runner-image.md):
- *    docker buildx imagetools inspect node:22-bookworm-slim --format '{{json .Manifest}}' | jq -r .digest
+ *  Debian 13 (trixie), not the 12 that `node:22-slim` still names: its glibc
+ *  (2.41) runs Lightpanda past 0.3.6, which wants 2.38; Debian 12 has 2.36.
+ *  Python is 3.13 here (3.11 on 12): runtime.ts checkEntry rebuilds a cached
+ *  venv whose interpreter moved, once per declaration.
+ *
+ *  Raise it on purpose (foldrun-infra/README.md, "Runner images"): read the
+ *  current digest of the tag, put it here, build both targets on both arches
+ *  and make one browse call per engine on the full image:
+ *    docker buildx imagetools inspect node:22-trixie-slim --format '{{json .Manifest}}' | jq -r .digest
  *  The digest names the multi-arch index, so the one pin serves amd64 and
  *  arm64 alike. */
-export const NODE_BASE = "node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c";
+export const NODE_BASE = "node:22-trixie-slim@sha256:b26b04c123d9ff8ab646ceb18b9d75a1173acf64b9a401094b906d27b29338d4";
 
 // Two images from one file, as build targets.
 //
@@ -742,18 +747,21 @@ RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
 # never draws — a fraction of Chromium's memory for reading and filling
 # pages. Its own program, which web browse starts beside a call and drives
 # over the DevTools protocol; shipped unmodified (AGPL-3.0). Pinned by
-# checksum: 0.3.6 is the newest build this glibc (Debian 12, 2.36) runs —
-# 0.3.7 on wants 2.38. Raise it with the base image. An arch without a
-# build leaves the engine out, and the tool says so when asked for it.
+# checksum (GitHub's own asset digests, checked again here). 0.4.1 since the
+# move to Debian 13: 0.3.7 on wants glibc 2.38, and Debian 12's 2.36 held it
+# at 0.3.6. An arch without a build leaves the engine out, and the tool says
+# so when asked for it.
+# Raise it on purpose: the new release's two sha256s, then one
+# engine=lightpanda call on each arch.
 RUN arch=$(uname -m) \\
  && case "$arch" in \\
-      x86_64) sum=e438c0ad44e0f6916c14cf13beb003512c60438d8fd200738d2e596e73f652d6 ;; \\
-      aarch64) sum=29c059cd0755a195350cc79dbcf7ee9580fd575ec3eaa31db755dbada417e616 ;; \\
+      x86_64) sum=1d40801e72c0bc61b2cbd3f3562bcfc46de7b79e0568f33f686b64f2e587610a ;; \\
+      aarch64) sum=664775c7f5ab69cc3189954c7f9345e25c167cb4dace016173e629f9a5e82c42 ;; \\
       *) sum= ;; \\
     esac \\
  && mkdir -p /opt/browser/lightpanda \\
  && if [ -n "$sum" ] \\
-      && curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.3.6/lightpanda-$arch-linux" \\
+      && curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.4.1/lightpanda-$arch-linux" \\
       && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; then \\
       chmod a+rx /opt/browser/lightpanda/lightpanda && /opt/browser/lightpanda/lightpanda version; \\
     else rm -f /opt/browser/lightpanda/lightpanda; echo "lightpanda not installed for $arch — engine: lightpanda says so when asked"; fi
@@ -762,7 +770,7 @@ RUN arch=$(uname -m) \\
 # Apache-2.0. The plain build, not -stealth: this platform does not help a
 # page not see automation. Two binaries, obscura and obscura-worker, which
 # must sit side by side. Pinned by checksum; glibc 2.35 is its floor, so
-# Debian 12 runs it. As above, a failed download leaves the engine out.
+# Debian 13 (2.41) runs it. As above, a failed download leaves the engine out.
 RUN arch=$(uname -m) \\
  && case "$arch" in \\
       x86_64) sum=1534d1e6ddaf3d080ec4091eb41d0a4d8cc042a48b607d3c410fc13b482a9eec ;; \\

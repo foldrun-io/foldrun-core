@@ -450,6 +450,14 @@ test("the base image is pinned by digest — the same runner tag must always hol
   assert.doesNotMatch(DOCKERFILE, /FROM node:[^@\s]+ /, "no floating node tag anywhere");
 });
 
+test("Lightpanda past 0.3.6 needs glibc 2.38 — the base must not be Debian 12", () => {
+  const lp = DOCKERFILE.match(/lightpanda-io\/browser\/releases\/download\/(\d+)\.(\d+)\.(\d+)\//);
+  assert.ok(lp, "Lightpanda is downloaded by an exact version");
+  const [maj, min, pat] = lp!.slice(1).map(Number);
+  const past036 = maj > 0 || min > 3 || (min === 3 && pat > 6);
+  if (past036) assert.doesNotMatch(DOCKERFILE.split("\n")[0], /bookworm/, "bookworm's glibc 2.36 cannot run it");
+});
+
 test("the slim runner ships fonts — without them every non-browser render draws empty boxes", () => {
   const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
   assert.match(slim, /fonts-dejavu-core/);
