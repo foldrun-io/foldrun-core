@@ -1513,7 +1513,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
         webProblems: [...webProblems(data), ...actionProblems(data)],
-        webWarnings: webWarnings(data, { chrome: runnerEngines()?.chrome }),
+        webWarnings: webWarnings(data, { chrome: runnerEngines()?.chrome, chromium: runnerEngines()?.chromium }),
         scheduleProblem: agentScheduleProblem(data),
         ...(() => { const l = readLimits(data.limits); return { limits: l.limits, limitProblems: l.problems }; })(),
         inlineTools: inlineToolNames(data),

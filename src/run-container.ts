@@ -812,8 +812,11 @@ RUN arch=$(uname -m) \\
  && rm -f /tmp/obscura.tgz
 # What this image actually has, written down: /opt/browser/engines.json, one
 # entry per engine (its path and version, or null when the install above
-# left it out) plus Xvfb. web browse reads it for its "built without" answer,
-# and the deploy reads it to report the engines beside the version.
+# left it out) plus Xvfb. Chromium's version is its own --version (dotted,
+# so FOLDRUN_RUNNER_ENGINES carries it: a pinned user_agent on engine
+# chromium is compared with it, not with Google Chrome's) then the build.
+# web browse reads it for its "built without" answer, and the deploy reads
+# it to report the engines beside the version.
 # On x86_64 a missing engine FAILS the build: every engine ships for that
 # arch, so a gap there is a failed download, and an image that quietly lacks
 # the Chrome or Lightpanda a desk names would fail those runs instead. A
@@ -826,9 +829,10 @@ RUN node -e ' \\
   const one = (p, v) => (p ? { path: p, version: v } : null); \\
   const pwBuild = (p) => (p ? (p.match(/(chromium|firefox|webkit)-(\\d+)/) || [])[0] || null : null); \\
   const lp = at("/opt/browser/lightpanda/lightpanda"); \\
+  const cr = at(pw.chromium.executablePath()); \\
   const ob = at("/opt/browser/obscura/obscura-worker") && at("/opt/browser/obscura/obscura"); \\
   const engines = { \\
-    chromium: one(at(pw.chromium.executablePath()), pwBuild(pw.chromium.executablePath())), \\
+    chromium: one(cr, cr && [ver(cr, ["--version"]), pwBuild(cr)].filter(Boolean).join(" ")), \\
     chrome: one(at("/opt/google/chrome/chrome"), ver("/opt/google/chrome/chrome", ["--version"])), \\
     "chrome-beta": one(at("/opt/google/chrome-beta/chrome"), ver("/opt/google/chrome-beta/chrome", ["--version"])), \\
     firefox: one(at(pw.firefox.executablePath()), pwBuild(pw.firefox.executablePath())), \\

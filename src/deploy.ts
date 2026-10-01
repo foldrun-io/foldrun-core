@@ -229,14 +229,14 @@ export function deployWarnings(files: DeployFile[]): DeployIssue[] {
   // The web: warnings check prints — the old session: key, and a pinned
   // user agent behind the runner image's Chrome, which the platform knows
   // from FOLDRUN_RUNNER_ENGINES (the deploy read it from the image).
-  const chrome = runnerEngines()?.chrome;
+  const { chrome, chromium } = runnerEngines() ?? {};
   for (const f of files) {
     const m = f.path.match(/^agents\/([^/]+)\/agent\.md$/);
     if (!m) continue;
     agentNames.push(m[1]);
     const data = front(f.content);
     if (refNames(data.tools).some((t: string) => outwardTools.has(t))) outwardAgents.push(m[1]);
-    for (const w of webWarnings(data, { chrome })) out.push({ where: f.path, message: w });
+    for (const w of webWarnings(data, { chrome, chromium })) out.push({ where: f.path, message: w });
   }
   if (!outwardAgents.length) return out;
   for (const f of files) {

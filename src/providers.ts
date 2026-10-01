@@ -1376,7 +1376,8 @@ export function webProblems(front: Record<string, unknown>): string[] {
  * FOLDRUN_RUNNER_ENGINES (foldrun-infra dev/ci/runner-engines.sh): a comma
  * list of names, each with `=<version>` where the image's manifest
  * (/opt/browser/engines.json) has a dotted version —
- * `chromium,chrome=154.0.8037.58,firefox,lightpanda=0.4.1`. Null when unset.
+ * `chromium=153.0.8010.12,chrome=154.0.8037.58,firefox,lightpanda=0.4.1`.
+ * Null when unset.
  */
 export function runnerEngines(raw: string | undefined = process.env.FOLDRUN_RUNNER_ENGINES): Record<string, string | null> | null {
   const out: Record<string, string | null> = {};
@@ -1403,25 +1404,27 @@ export function chromeMajorOf(ua: string): number | null {
  * four weeks). A site then sees `Chrome/153` in the User-Agent header beside
  * `"Google Chrome";v="154"` in the client hints the browser still sends, and
  * a JavaScript engine that is 154's: the mismatch bot checks look for.
- * `chrome` is the image's Chrome version (runnerEngines().chrome); null —
- * an image that did not say — warns about nothing.
+ * `chrome` is the image's version of that browser (runnerEngines().chrome,
+ * or .chromium for engine chromium); null — an image that did not say —
+ * warns about nothing.
  */
-export function userAgentDrift(ua: string | undefined, chrome: string | null | undefined, where: string): string | null {
+export function userAgentDrift(ua: string | undefined, chrome: string | null | undefined, where: string, browser = "Chrome"): string | null {
   if (!ua || !chrome) return null;
   const pinned = chromeMajorOf(ua);
   const have = Number(chrome.split(".")[0]);
   if (pinned === null || !Number.isFinite(have) || pinned === have) return null;
-  return `${where} pins Chrome ${pinned}, and the runner image's Chrome is ${have} — a site sees a user agent that disagrees with the browser's own client hints. Drop it (the default user agent follows the installed Chrome), or raise it to Chrome/${have}.`;
+  return `${where} pins Chrome ${pinned}, and the runner image's ${browser} is ${have} — a site sees a user agent that disagrees with the browser's own client hints. Drop it (the default user agent follows the installed ${browser}), or raise it to Chrome/${have}.`;
 }
 
 /**
  * What in a `web:` block works today but should change — never a refusal.
  * `check` prints these as warnings and the deploy reports them beside its
- * outward-gate warnings. `opts.chrome`: the runner image's Chrome version,
- * when known (FOLDRUN_RUNNER_ENGINES on the platform, /api/version from the
- * CLI); without it the user-agent comparison is skipped.
+ * outward-gate warnings. `opts.chrome` / `opts.chromium`: the runner image's
+ * Google Chrome and Playwright Chromium versions, when known
+ * (FOLDRUN_RUNNER_ENGINES on the platform, /api/version from the CLI); an
+ * engine whose version is unknown is not compared.
  */
-export function webWarnings(front: Record<string, unknown>, opts: { chrome?: string | null } = {}): string[] {
+export function webWarnings(front: Record<string, unknown>, opts: { chrome?: string | null; chromium?: string | null } = {}): string[] {
   const out: string[] = [];
   const browse = webConfig(front).raw.browse;
   if (!browse || typeof browse !== "object" || Array.isArray(browse)) return out;
@@ -1433,16 +1436,18 @@ export function webWarnings(front: Record<string, unknown>, opts: { chrome?: str
   if (read.error) return out;
   const engine = read.settings.engine ?? "chromium";
   // Only an engine that IS Chrome sends Chrome's client hints; a Chrome UA on
-  // Firefox is a different (deliberate) disguise this does not judge.
-  if (engine === "chrome" || engine === "chromium") {
-    const w = userAgentDrift(read.settings.user_agent, opts.chrome, "web.browse.user_agent");
-    if (w) out.push(w);
-  }
+  // Firefox is a different (deliberate) disguise this does not judge. Each
+  // engine against its own version: chromium is Playwright's build (1.63's is
+  // 153), not the image's Google Chrome (stable, often a major ahead).
+  const drift = (eng: string, ua: string | undefined, where: string) =>
+    eng === "chrome" ? userAgentDrift(ua, opts.chrome, where, "Chrome")
+      : eng === "chromium" ? userAgentDrift(ua, opts.chromium, where, "Chromium")
+      : null;
+  const w = drift(engine, read.settings.user_agent, "web.browse.user_agent");
+  if (w) out.push(w);
   for (const [name, id] of Object.entries(read.settings.identities ?? {})) {
-    const eng = id.engine ?? engine;
-    if (eng !== "chrome" && eng !== "chromium") continue;
-    const w = userAgentDrift(id.user_agent, opts.chrome, `web.browse.identities.${name}.user_agent`);
-    if (w) out.push(w);
+    const iw = drift(id.engine ?? engine, id.user_agent, `web.browse.identities.${name}.user_agent`);
+    if (iw) out.push(iw);
   }
   return out;
 }

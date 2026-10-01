@@ -66,3 +66,17 @@ test("the deploy reports them, with the image's Chrome from FOLDRUN_RUNNER_ENGIN
     else process.env.FOLDRUN_RUNNER_ENGINES = saved;
   }
 });
+
+test("engine chromium (the default) is compared with the image's Chromium, never Google Chrome's", () => {
+  // Playwright 1.63's Chromium is 153 while Chrome stable is 154: a UA pinned
+  // to Chrome/153 on chromium matches the browser that sends it.
+  const front = { web: { browse: { user_agent: UA153 } } };
+  assert.deepEqual(webWarnings(front, { chrome: "154.0.8037.58", chromium: "153.0.8010.12" }), [], "matches Chromium");
+  assert.deepEqual(webWarnings(front, { chrome: "154.0.8037.58" }), [], "Chromium's version unknown: nothing compared");
+  const w = webWarnings(front, { chrome: "153.0.8010.1", chromium: "154.0.8037.58" });
+  assert.equal(w.length, 1, w.join("\n"));
+  assert.match(w[0], /pins Chrome 153, and the runner image's Chromium is 154/);
+  const id = webWarnings({ web: { browse: { engine: "chrome", identities: { c: { engine: "chromium", user_agent: UA153 } } } } }, { chrome: "153.0.1.1", chromium: "154.0.1.1" });
+  assert.equal(id.length, 1);
+  assert.match(id[0], /^web\.browse\.identities\.c\.user_agent pins Chrome 153, and the runner image's Chromium is 154/);
+});
