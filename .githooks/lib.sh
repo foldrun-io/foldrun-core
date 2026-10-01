@@ -26,7 +26,7 @@ has() { command -v "$1" >/dev/null 2>&1; }
 
 # The one gitleaks config the box's deploy gate uses (dev/ci/scan.sh).
 gitleaks_config() {
-  if [ "$REPO" = foldrun-infra ]; then echo "$ROOT/.gitleaks.toml"
+  if [ -f "$ROOT/.gitleaks.toml" ]; then echo "$ROOT/.gitleaks.toml"   # foldrun-infra itself
   else echo "$PARENT/foldrun-infra/.gitleaks.toml"; fi
 }
 
