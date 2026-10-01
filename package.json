@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
+    "prepare": "npm run build && (test ! -f .githooks/install.sh || sh .githooks/install.sh)",
     "prepublishOnly": "npm run build",
     "test": "FOLDRUN_DATA=$(mktemp -d /tmp/foldrun-test-XXXXXX) node --test *.test.ts $(ls tests/*.test.ts | grep -v e2e)",
     "container": "FOLDRUN_CONTAINER_E2E=1 node scripts/ts-test.mjs tests/container-e2e.test.ts --test-timeout=600000",

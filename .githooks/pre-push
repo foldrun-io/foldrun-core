@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# pre-push: what CI and the box's deploy gate run, before the push leaves the
+# laptop — secrets in the commits being pushed and in the pushed tree, then
+# this repo's own checks (.githooks/checks.sh). Read only.
+# Bypass in an emergency with SKIP_HOOKS=1 (or --no-verify) and say why.
+set -u
+# shellcheck source=lib.sh
+. "$(git rev-parse --show-toplevel)/.githooks/lib.sh"
+
+zero=0000000000000000000000000000000000000000
+cfg=$(gitleaks_config)
+tips=()
+
+scan_tree() {
+  local d rc; d=$(mktemp -d)
+  git archive "$1" | tar -x -C "$d"
+  gitleaks dir "$d" --config "$2" --no-banner --redact=90 --exit-code 1 -v; rc=$?
+  rm -rf "$d"; return $rc
+}
+
+while read -r _lref lsha _rref rsha; do
+  [ "$lsha" = "$zero" ] && continue                # a branch delete: nothing to scan
+  if [ "$rsha" = "$zero" ] || ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    range="$lsha --not --remotes"                     # new branch: what no remote has yet
+  else
+    range="$rsha..$lsha"
+  fi
+  tips+=("$lsha")
+  if ! has gitleaks; then skipped gitleaks "not installed (brew install gitleaks)"
+  elif [ ! -f "$cfg" ]; then skipped gitleaks "no $cfg (foldrun-infra not checked out beside this repo)"
+  else
+    n=$(git rev-list --count $range)
+    step "gitleaks: $n commit(s) being pushed" \
+      gitleaks git --log-opts="$range" --config "$cfg" --no-banner --redact=90 --exit-code 1 -v .
+    # The tree as pushed — a fresh checkout, as the deploy gate sees it, so
+    # ignored local files (.env, data/) are not mistaken for the push.
+    step "gitleaks: tree at ${lsha:0:7}" scan_tree "$lsha" "$cfg"
+  fi
+done
+
+if [ ${#tips[@]} = 0 ]; then finish; fi
+
+# The repo checks below run on the working tree. Say so when it is not what
+# is being pushed: a failure may then come from uncommitted work (perhaps
+# another session's), which this hook never touches.
+head=$(git rev-parse HEAD)
+for t in "${tips[@]}"; do
+  [ "$t" = "$head" ] || say "note: pushing ${t:0:7} but HEAD is ${head:0:7}; the checks below run on HEAD's working tree."
+done
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  say "note: the working tree has uncommitted changes; the checks below include them."
+fi
+
+# shellcheck source=checks.sh
+. "$ROOT/.githooks/checks.sh"
+repo_checks
+
+finish

@@ -19,6 +19,20 @@ npx tsc --noEmit -p .
 Node 22 or newer. No model key is needed: every test that would call a model
 uses the stub executor.
 
+## Git hooks
+
+Problems are caught before the push, not in CI or the deploy. `.githooks/` is
+versioned here and `npm install` (its `prepare` runs `sh .githooks/install.sh`) points `core.hooksPath` at it.
+
+- **pre-commit** (seconds, staged files only): gitleaks with the deploy gate's
+  config (`../foldrun-infra/.gitleaks.toml`), `node --check` on `.mjs`,
+  `bash -n` + `shellcheck -S error` on `.sh`, YAML parse.
+- **pre-push** (what CI and the deploy gate run): gitleaks over the commits being
+  pushed and the pushed tree, then `npx tsc --noEmit -p .` and `npm test`.
+
+Hooks only read; they never format, stash or reset. Emergency bypass:
+`SKIP_HOOKS=1 git push` (or `--no-verify`) — and say why in the commit or PR.
+
 ## What a good change looks like
 
 - **A test that fails before it and passes after.** The tests here are the
