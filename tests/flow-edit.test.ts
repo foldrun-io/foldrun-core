@@ -79,6 +79,18 @@ test("fan-out options write and clear as a pair", () => {
   assert.equal(parseFlow("f.md", off).steps[0].max, undefined);
 });
 
+test("limits: written on one line, read back the same, cleared with null; a bad key refused", () => {
+  const on = updateFlowStep(FLOW, 0, { limits: "{web.search: 10, calls: 300}" });
+  assert.match(on, /^\s+limits: \{web\.search: 10, calls: 300\}$/m);
+  assert.deepEqual(parseFlow("f.md", on).steps[0].limits, { "web.search": 10, calls: 300 });
+  assert.deepEqual(parseFlow("f.md", on).steps[0].problems ?? [], []);
+  const off = updateFlowStep(on, 0, { limits: null });
+  assert.equal(parseFlow("f.md", off).steps[0].limits, undefined);
+  assert.doesNotMatch(off, /limits:/);
+  assert.throws(() => updateFlowStep(FLOW, 0, { limits: "{web.serch: 10}" }), /limits: .*web\.serch/);
+  assert.throws(() => updateFlowStep(FLOW, 0, { limits: "{calls: 0}" }), /limits: .*1 or more/);
+});
+
 test("an index off the end refuses rather than writing garbage", () => {
   assert.throws(() => updateFlowStep(FLOW, 9, { model: "fast" }), /no step 9/);
 });
@@ -119,6 +131,18 @@ test("parallel groups survive an instruction edit", () => {
   const groups = parseFlow("p.md", out).steps.map((s) => s.group);
   assert.deepEqual(groups, [1, 2, 2], "b and c still run in parallel");
   assert.equal(parseFlow("p.md", out).steps[2].instruction, "three");
+});
+
+test("limits: written on one line, read back the same, cleared with null; a bad key refused", () => {
+  const on = updateFlowStep(FLOW, 0, { limits: "{web.search: 10, calls: 300}" });
+  assert.match(on, /^\s+limits: \{web\.search: 10, calls: 300\}$/m);
+  assert.deepEqual(parseFlow("f.md", on).steps[0].limits, { "web.search": 10, calls: 300 });
+  assert.deepEqual(parseFlow("f.md", on).steps[0].problems ?? [], []);
+  const off = updateFlowStep(on, 0, { limits: null });
+  assert.equal(parseFlow("f.md", off).steps[0].limits, undefined);
+  assert.doesNotMatch(off, /limits:/);
+  assert.throws(() => updateFlowStep(FLOW, 0, { limits: "{web.serch: 10}" }), /limits: .*web\.serch/);
+  assert.throws(() => updateFlowStep(FLOW, 0, { limits: "{calls: 0}" }), /limits: .*1 or more/);
 });
 
 test("an index off the end refuses rather than writing garbage", () => {

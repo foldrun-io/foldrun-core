@@ -2149,7 +2149,7 @@ export function updateFlowStepInstruction(raw: string, index: number, instructio
 export function updateFlowStep(
   raw: string,
   index: number,
-  options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max", string | number | null>>,
+  options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max" | "limits", string | number | null>>,
 ): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
@@ -2169,6 +2169,15 @@ export function updateFlowStep(
     loop: (v) => (Number(v) > 0 ? String(Math.min(5, Math.max(1, Math.floor(Number(v))))) : null),
     max: (v) => (Number(v) > 0 ? String(Math.min(20, Math.max(1, Math.floor(Number(v))))) : null),
     each: (v) => (v === "lines" ? "lines" : null),
+    // `{web.search: 10, calls: 300}` — one line, read the way parseFlow
+    // reads it; a value it would flag is refused rather than written.
+    limits: (v) => {
+      if (!v || v === "{}") return null;
+      const read = parseStepLimits(v);
+      if (read.problems.length) throw new Error(`limits: ${read.problems[0]}`);
+      const pairs = Object.entries(read.limits);
+      return pairs.length ? `{${pairs.map(([k, n]) => `${k}: ${n}`).join(", ")}}` : null;
+    },
   };
 
   const block = blocks[index];
