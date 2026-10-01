@@ -295,6 +295,9 @@ workspace's own folders as \`workspace/…\` — \`workspace/storage/report.csv\
 script arguments. It resolves the same in the file tools, the shell, scripts
 and checks. The older \`../../storage/…\` reaches the same place and still
 works; \`foldrun check\` suggests the new spelling where it sees it.
+A Node script started as \`node workspace/tools/x/run.mjs\` is its own main
+module there, so its \`import.meta.url\` entry check runs (it did not before
+2 Oct 2026 and exited 0 doing nothing).
 
 ## What a deploy does NOT touch
 
