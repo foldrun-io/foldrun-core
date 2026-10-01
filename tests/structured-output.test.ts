@@ -160,7 +160,11 @@ test("each: items with no data before it is skipped with the reason on the recor
 // ----------------------------------------------------------------- verify:
 
 test("verify: borrows the eval vocabulary, and a shell check reads the data on stdin", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-verify-"));
+  // Shaped like a real step: <workspace>/agents/<name>. verify: file: is
+  // confined to the workspace, which it finds two levels above the agent.
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-verify-"));
+  const dir = path.join(ws, "agents", "checker");
+  fs.mkdirSync(dir, { recursive: true });
   try {
     const result = "The price is $34 for the RG-40.";
     const ok = await checkVerify(dir, "contains: $34", { env: {}, result });
@@ -174,13 +178,19 @@ test("verify: borrows the eval vocabulary, and a shell check reads the data on s
     fs.writeFileSync(path.join(dir, "outputs", "report.md"), "x");
     assert.equal((await checkVerify(dir, "file: outputs/report.md", { env: {}, result })).ok, true);
     assert.equal((await checkVerify(dir, "file: outputs/nope.md", { env: {}, result })).ok, false);
-    assert.equal((await checkVerify(dir, "file: ../../etc/passwd", { env: {}, result })).ok, false);
+    assert.equal((await checkVerify(dir, "file: ../../../etc/passwd", { env: {}, result })).ok, false);
+    assert.equal((await checkVerify(dir, "file: /etc/passwd", { env: {}, result })).ok, false);
+    assert.equal((await checkVerify(dir, "file: workspace/../../etc/passwd", { env: {}, result })).ok, false);
+    fs.mkdirSync(path.join(ws, "storage"));
+    fs.writeFileSync(path.join(ws, "storage", "out.md"), "x");
+    assert.equal((await checkVerify(dir, "file: workspace/storage/out.md", { env: {}, result })).ok, true);
+    assert.equal((await checkVerify(dir, "file: ../../storage/out.md", { env: {}, result })).ok, true);
     // A shell verify sees the step's data on stdin.
     const shell = await checkVerify(dir, "grep -q '\"total\":3' -", { env: {}, result, data: { total: 3 } });
     assert.equal(shell.ok, true, shell.detail);
     const none = await checkVerify(dir, "test -z \"$(cat)\"", { env: {}, result });
     assert.equal(none.ok, true, "no data → empty stdin");
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(ws, { recursive: true, force: true });
   }
 });
