@@ -101,6 +101,10 @@ export interface ApiToolResult {
   server: ReturnType<typeof createSdkMcpServer> | null;
   /** Tool names to allow, e.g. mcp__foldrun_apis__call_google_ads. */
   toolNames: string[];
+  /** SDK tool name → the API it was built for, recorded as each tool is
+   *  made: `crm`'s operation `admin_list` is `crm_admin_list` beside an API
+   *  named `crm_admin`, so the name alone cannot say whose it is. */
+  owners: Record<string, string>;
   /** Secrets referenced but not set — surfaced as run warnings. */
   missingSecrets: string[];
   /** Human-readable lines describing each API, appended to the system prompt. */
@@ -318,7 +322,7 @@ export function buildApiTools(
   resolved?: { env: Record<string, string | undefined>; missing: string[] },
 ): ApiToolResult {
   if (apis.length === 0) {
-    return { server: null, toolNames: [], missingSecrets: [], promptLines: [], drainLog: () => [] };
+    return { server: null, toolNames: [], owners: {}, missingSecrets: [], promptLines: [], drainLog: () => [] };
   }
 
   const neededSecrets = [...new Set(apis.flatMap(secretsUsedByApi))];
@@ -337,6 +341,7 @@ export function buildApiTools(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the SDK types its own list this way
   const tools: SdkMcpToolDefinition<any>[] = [];
   const toolNames: string[] = [];
+  const owners: Record<string, string> = {};
   const promptLines: string[] = [];
 
   for (const api of apis) {
@@ -367,7 +372,10 @@ export function buildApiTools(
     if (withGeneric) tools.push(genericTool(api, env, bucket, log));
 
     const names = [...typedNames, ...(withGeneric ? [`call_${api.name}`] : [])];
-    toolNames.push(...names.map((n) => `mcp__foldrun_apis__${n}`));
+    for (const n of names) {
+      toolNames.push(`mcp__foldrun_apis__${n}`);
+      owners[`mcp__foldrun_apis__${n}`] = api.name;
+    }
 
     const rateLine = api.rate ? ` Rate limit ${api.rate.count}/${Math.round(api.rate.count / api.rate.perSec)}s — over it, calls wait.` : "";
     if (ops.length) {
@@ -394,6 +402,7 @@ export function buildApiTools(
   return {
     server,
     toolNames,
+    owners,
     missingSecrets: missing,
     promptLines,
     drainLog: () => log.splice(0, log.length),

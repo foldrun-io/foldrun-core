@@ -14,15 +14,31 @@ import {
   CallCounter, cascadeLimits, limitKeyProblems, limitKeysFor, parseStepLimits, readLimits, toolOwners,
 } from "../src/limits.ts";
 import { executeStep, type QueryFn } from "../src/step-exec.ts";
+import { buildApiTools } from "../src/api-tools.ts";
 import { parseFlow } from "../src/store.ts";
 import { deployIssues } from "../src/deploy.ts";
 
 // ------------------------------------------------------------------ keys
 
+test("an operation counts under the API it was built for, not the longest name it starts with", () => {
+  // `crm`'s operation admin_list is the tool crm_admin_list, beside an API
+  // named crm_admin: only the builder knows whose it is.
+  const op = (id: string) => ({ id, method: "GET", path: `/${id}`, summary: id, params: [], body: null }) as never;
+  const base = { base: "https://x.test", description: "", headers: {}, query: {}, methods: ["GET"] };
+  const built = buildApiTools("t", [
+    { ...base, name: "crm", resolvedOperations: [op("admin_list")] },
+    { ...base, name: "crm_admin", resolvedOperations: [op("purge")] },
+  ], undefined, { env: {}, missing: [] });
+  const owners = toolOwners(built.owners, []);
+  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__crm_admin_list", {}, owners), ["calls", "crm"]);
+  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__crm_admin_purge", {}, owners), ["calls", "crm_admin"]);
+  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__call_crm_admin", {}, owners), ["calls", "crm_admin"]);
+  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__call_crm", {}, owners), ["calls", "crm"]);
+});
+
 test("each kind of tool counts under the name it is granted as", () => {
   const owners = toolOwners(
-    [{ name: "crm" }, { name: "crm_admin" }],
-    ["mcp__foldrun_apis__crm_list_contacts", "mcp__foldrun_apis__call_crm", "mcp__foldrun_apis__crm_admin_purge"],
+    { "mcp__foldrun_apis__crm_list_contacts": "crm", "mcp__foldrun_apis__call_crm": "crm", "mcp__foldrun_apis__crm_admin_purge": "crm_admin" },
     [{ name: "desk_email" }],
   );
   // the web tool: the aggregate and the action
@@ -34,7 +50,7 @@ test("each kind of tool counts under the name it is granted as", () => {
   // an http tool: every operation of an openapi tool, and the generic call, under the tool's name
   assert.deepEqual(limitKeysFor("mcp__foldrun_apis__crm_list_contacts", {}, owners), ["calls", "crm"]);
   assert.deepEqual(limitKeysFor("mcp__foldrun_apis__call_crm", {}, owners), ["calls", "crm"]);
-  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__crm_admin_purge", {}, owners), ["calls", "crm_admin"], "the longer name wins");
+  assert.deepEqual(limitKeysFor("mcp__foldrun_apis__crm_admin_purge", {}, owners), ["calls", "crm_admin"]);
   // a script tool
   assert.deepEqual(limitKeysFor("mcp__foldrun_scripts__desk_email", {}, owners), ["calls", "desk_email"]);
   // an MCP server, every one of its tools

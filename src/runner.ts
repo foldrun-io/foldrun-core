@@ -2242,7 +2242,7 @@ async function runStep(
       front.limits,
       step.limits,
     ]);
-    const limitOwners = toolOwners(apiSpecs, apiTools.toolNames, scriptSpecs);
+    const limitOwners = toolOwners(apiTools.owners, scriptSpecs);
     const limitOpts = Object.keys(stepLimits).length ? { limits: stepLimits, toolOwners: limitOwners } : {};
     if (limitOpts.limits) push("info", `limits: ${Object.entries(stepLimits).map(([k, n]) => `${k} ${n}`).join(", ")} — per step; a call past one is refused`);
 

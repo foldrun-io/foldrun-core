@@ -121,16 +121,12 @@ export function cascadeLimits(levels: unknown[]): Limits {
 
 /** SDK tool name → the foldrun name it is granted as, for the tools whose
  *  SDK name does not say (an openapi tool's operations, a script whose name
- *  was made safe). Built host-side; plain JSON so it crosses into a pod. */
-export function toolOwners(apis: { name: string }[], apiToolNames: string[], scripts: { name: string }[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  // Longest API name first, so `crm_admin`'s operations are not claimed by `crm`.
-  const byLength = [...apis].sort((a, b) => b.name.length - a.name.length);
-  for (const sdk of apiToolNames) {
-    const local = sdk.replace(/^mcp__foldrun_apis__/, "");
-    const owner = byLength.find((a) => local === `call_${a.name}` || local.startsWith(`${a.name}_`));
-    if (owner) out[sdk] = owner.name;
-  }
+ *  was made safe). `apiOwners` is api-tools' own record of which API each
+ *  tool was built for — not guessed from the name, which cannot tell `crm`'s
+ *  operation `admin_list` from `crm_admin`'s `list`. Built host-side; plain
+ *  JSON so it crosses into a pod. */
+export function toolOwners(apiOwners: Record<string, string>, scripts: { name: string }[]): Record<string, string> {
+  const out: Record<string, string> = { ...apiOwners };
   for (const s of scripts) out[`mcp__foldrun_scripts__${s.name}`] = s.name;
   return out;
 }
