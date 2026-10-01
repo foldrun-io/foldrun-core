@@ -634,7 +634,52 @@ const BROWSE_ENGINE_ALIASES: Record<string, "chrome" | "chromium" | "firefox" | 
   // raster PDF), light like Lightpanda; no request interception.
   obscura: "obscura",
 };
-const BROWSE_ENGINES = ["chrome", "firefox", "safari", "lightpanda", "obscura"] as const;
+// Six engines, chromium the default. The list a refusal prints, so a person
+// sees every spelling that works (webkit is safari's engine name and is
+// accepted too, as an alias, not a seventh browser).
+export const BROWSE_ENGINES = ["chromium", "chrome", "firefox", "safari", "lightpanda", "obscura"] as const;
+
+/**
+ * What each engine cannot do, and the words a refusal uses. ONE table: the
+ * tool (web/browse.mjs in the platform gallery) carries a copy that refuses a
+ * call, and `foldrun check` reads this one to refuse a `web.browse:` block
+ * that pairs an engine with something it cannot do — so the mistake is found
+ * at check time, not at 3am. The gallery test holds the tool's copy equal to
+ * this one, so neither can learn an option the other does not.
+ *
+ * An entry is what the tool prints for the option: a call argument (video,
+ * trace, block…), `mode=<mode>`, or `headless: false`. A refusal reads
+ * `<entry> <why>`. chromium and chrome can do all of it, so they have no row.
+ */
+export const BROWSE_ENGINE_LIMITS: Record<string, { why: string; cannot: readonly string[] }> = {
+  // Lightpanda never draws: no pixels, so nothing built on them.
+  lightpanda: {
+    why: "needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome",
+    cannot: [
+      "mode=screenshot", "mode=pdf", "mode=vitals", "mode=webmcp", "video", "trace", "har", "device", "live", "session",
+      "webgpu", "extensions", "annotate", "visual", "cpu_profile", "proxy", "headless: false",
+    ],
+  },
+  // Obscura draws but cannot intercept a request (a route hangs its page
+  // loads), record, or keep a profile — so nothing built on those, which
+  // includes the allowed_domains lock: a lock that did nothing would be
+  // worse than a refusal.
+  obscura: {
+    why: "is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome",
+    cannot: [
+      "mode=webmcp", "video", "trace", "har", "device", "live", "session", "webgpu", "extensions", "cpu_profile",
+      "block", "routes", "mock", "unmock", "proxy", "captcha", "allowed_domains", "headless: false",
+    ],
+  },
+  firefox: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
+  webkit: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
+};
+
+/** The refusal for one option on one engine, or null when the engine can. */
+export function browseEngineRefusal(engine: string, what: string): string | null {
+  const row = BROWSE_ENGINE_LIMITS[engine];
+  return row && row.cannot.includes(what) ? `${what} ${row.why}` : null;
+}
 const BROWSE_SETTING_KEYS = [
   "engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live",
   "allowed_domains", "deny", "boundaries", "init", "extensions", "webgpu", "ignore_https_errors", "state_key",
@@ -1245,6 +1290,47 @@ export function resolveSearch(name: unknown, kind: "search" | "fetch" | "browse"
   return { provider: key, shape: preset.search, index: SEARCH_INDEX[key] };
 }
 
+/** A `web.browse:` block that pairs an engine with something it cannot do,
+ *  in the tool's own words (BROWSE_ENGINE_LIMITS). The block's engine is
+ *  checked against the block's settings; each identity is checked with its
+ *  own engine (or the block's) against the block's settings and its own,
+ *  because a call that picks the identity gets both. What only a call can
+ *  ask for (a mode, a trace, mocks) is the tool's to refuse. */
+export function browseEngineProblems(settings: BrowseSettings): string[] {
+  const fromBlock: [string, string][] = [];
+  if (settings.video) fromBlock.push(["video", "video"]);
+  if (settings.device) fromBlock.push(["device", "device"]);
+  if (settings.live) fromBlock.push(["live", "live"]);
+  if (settings.webgpu) fromBlock.push(["webgpu", "webgpu"]);
+  if (settings.extensions?.length) fromBlock.push(["extensions", "extensions"]);
+  if (settings.allowed_domains?.length) fromBlock.push(["allowed_domains", "allowed_domains"]);
+  if (settings.headless === false) fromBlock.push(["headless", "headless: false"]);
+  const out: string[] = [];
+  const engine = settings.engine ?? "chromium";
+  for (const [key, what] of fromBlock) {
+    const no = browseEngineRefusal(engine, what);
+    if (no) out.push(`web.browse.${key}: ${no}.`);
+  }
+  for (const [name, id] of Object.entries(settings.identities ?? {})) {
+    const eng = id.engine ?? engine;
+    const own: [string, string][] = (["device", "proxy", "block"] as const).filter((k) => id[k]).map((k) => [k, k]);
+    for (const [key, what] of own) {
+      const no = browseEngineRefusal(eng, what);
+      if (no) out.push(`web.browse.identities.${name}.${key}: ${no}.`);
+    }
+    // The block's settings ride on every call, so an identity that changes
+    // the engine must be able to do them too.
+    if (id.engine && id.engine !== engine) {
+      for (const [key, what] of fromBlock) {
+        if (id[key]) continue;
+        const no = browseEngineRefusal(eng, what);
+        if (no) out.push(`web.browse.identities.${name}: engine ${eng} with web.browse.${key} — ${no}.`);
+      }
+    }
+  }
+  return out;
+}
+
 /** Every `web:` value in a frontmatter that cannot work, each as the
  *  sentence resolveSearch gives. Computed once in core so `check`, the
  *  deploy gate and the run all refuse the same thing in the same words —
@@ -1261,7 +1347,10 @@ export function webProblems(front: Record<string, unknown>): string[] {
         out.push(read.error);
         continue;
       }
-      if (kind === "browse") browse = read.settings as BrowseSettings;
+      if (kind === "browse") {
+        browse = read.settings as BrowseSettings;
+        out.push(...browseEngineProblems(browse));
+      }
       value = read.rest;
     }
     const choice = resolveSearch(value, kind);

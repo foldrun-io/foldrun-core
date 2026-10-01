@@ -3,7 +3,7 @@
 // the two from standing on each other.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readBrowseSettings, resolveSearch, webProblems, WEB_BROWSE_ACTIONS } from "../src/providers.ts";
+import { readBrowseSettings, resolveSearch, webProblems, WEB_BROWSE_ACTIONS, BROWSE_ENGINES, BROWSE_ENGINE_LIMITS } from "../src/providers.ts";
 
 test("a bare name still means a vendor, and carries no settings", () => {
   const read = readBrowseSettings("browserbase");
@@ -209,4 +209,40 @@ test("obscura is an engine; video records every call; live_view carries only fal
   assert.equal(readBrowseSettings({ live_view: true }).settings.live_view, undefined, "on is the default, nothing to carry");
   assert.match(readBrowseSettings({ live_view: "off" }).error!, /web\.browse\.live_view is true or false/);
   assert.match(readBrowseSettings({ state_key: "A".repeat(65) }).error!, /NAME of a vault secret/, "the tool's 64-character cap, checked here too");
+});
+
+// The tool refuses an engine/option pair when a call runs; check refuses the
+// same pair in a web.browse block, in the tool's words, before anything runs.
+test("check refuses an engine paired with what it cannot do, in the tool's words", () => {
+  const lp = webProblems({ web: { browse: { engine: "lightpanda", video: true, device: "Pixel 7", headless: false } } });
+  assert.deepEqual(lp, [
+    "web.browse.video: video needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.device: device needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.headless: headless: false needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+  ]);
+  const ob = webProblems({ web: { browse: { engine: "obscura", allowed_domains: ["example.com"], live: true } } });
+  assert.equal(ob.length, 2);
+  assert.match(ob[0], /^web\.browse\.live: live is not something obscura can do \(it has no request interception, recording or profiles\)/);
+  assert.match(ob[1], /^web\.browse\.allowed_domains: allowed_domains is not something obscura can do/);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "firefox", webgpu: true } } }), ["web.browse.webgpu: webgpu is a Chromium feature — use engine chrome or chromium."]);
+  // What each engine CAN do is not a problem.
+  assert.deepEqual(webProblems({ web: { browse: { engine: "chrome", video: true, live: true, headless: false, allowed_domains: ["a.com"] } } }), []);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "lightpanda", allowed_domains: ["a.com"] } } }), [], "lightpanda intercepts, so the lock holds");
+  assert.deepEqual(webProblems({ web: { browse: { engine: "obscura", device: undefined, init: ["s.js"] } } }), []);
+});
+
+test("an identity is checked with its own engine against the block it rides on", () => {
+  const p = webProblems({ web: { browse: { video: true, identities: { cheap: { engine: "lightpanda" }, ob: { engine: "obscura", proxy: "PROXY_AU" } } } } });
+  assert.deepEqual(p, [
+    "web.browse.identities.cheap: engine lightpanda with web.browse.video — video needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.identities.ob.proxy: proxy is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome.",
+    "web.browse.identities.ob: engine obscura with web.browse.video — video is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome.",
+  ]);
+  assert.match(webProblems({ web: { browse: { engine: "lightpanda", identities: { phone: { device: "Pixel 7" } } } } })[0], /^web\.browse\.identities\.phone\.device: device needs a browser that renders/);
+});
+
+test("six engines, chromium the default; every limited engine is one a file may name", () => {
+  assert.deepEqual([...BROWSE_ENGINES], ["chromium", "chrome", "firefox", "safari", "lightpanda", "obscura"]);
+  for (const e of Object.keys(BROWSE_ENGINE_LIMITS)) assert.equal(readBrowseSettings({ engine: e }).settings.engine, e);
+  for (const e of ["lightpanda", "obscura", "firefox", "webkit"]) assert.ok(BROWSE_ENGINE_LIMITS[e].cannot.includes("live"), `${e}: live is Chromium-only`);
 });
