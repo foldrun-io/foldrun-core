@@ -91,14 +91,16 @@ test("the per-action keys and tools outside web are not read: an error each", as
 });
 
 test("a vendor's session block reaches the tool as JSON; your own proxy's secret is declared", async () => {
-  const { args, events } = await runAgent("tools: [web]\nweb:\n  browse:\n    via: steel\n    session:\n      proxy: { own: MY_PROXY }\n      captcha: true\n      timeout: 10m\n");
+  const { args, events } = await runAgent("tools: [web]\nweb:\n  browse:\n    via: steel\n    vendor_session:\n      proxy: { own: MY_PROXY }\n      captcha: true\n      timeout: 10m\n");
   assert.equal(args!.env.FOLDRUN_BROWSER_VENDOR, "steel");
-  assert.deepEqual(JSON.parse(args!.env.FOLDRUN_BROWSER_SESSION), { proxy: { own: "MY_PROXY" }, captcha: true, timeout: 600 });
+  assert.deepEqual(JSON.parse(args!.env.FOLDRUN_BROWSER_VENDOR_SESSION), { proxy: { own: "MY_PROXY" }, captcha: true, timeout: 600 });
+  assert.equal(args!.env.FOLDRUN_BROWSER_SESSION, args!.env.FOLDRUN_BROWSER_VENDOR_SESSION, "the old env name too, for a web tool from before the rename");
   assert.ok(events.some((e) => /secret MY_PROXY is not set/.test(e)), events.join("\n"));
 });
 
 test("a session option the vendor has not got is on the record, and no session is sent", async () => {
   const { args, events } = await runAgent("tools: [web]\nweb:\n  browse:\n    via: steel\n    session:\n      region: eu\n");
+  assert.equal(args!.env.FOLDRUN_BROWSER_VENDOR_SESSION, undefined);
   assert.equal(args!.env.FOLDRUN_BROWSER_SESSION, undefined);
-  assert.ok(events.some((e) => /error: web\.browse\.session\.region: Steel has no such option/.test(e)), events.join("\n"));
+  assert.ok(events.some((e) => /error: web\.browse\.vendor_session\.region: Steel has no such option/.test(e)), events.join("\n"));
 });

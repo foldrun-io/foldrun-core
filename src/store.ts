@@ -46,7 +46,7 @@ import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
-import { webProblems } from "./providers.ts";
+import { webProblems, webWarnings, runnerEngines } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
@@ -934,6 +934,10 @@ export interface AgentInfo {
   /** `web:` values that cannot work. The run says
    *  so in its trail and carries on; check and deploy say so first. */
   webProblems: string[];
+  /** `web:` that works but should change — the old `session:` key, a pinned
+   *  user agent behind the runner image's Chrome (when this process knows
+   *  that Chrome: FOLDRUN_RUNNER_ENGINES). Warnings, never refusals. */
+  webWarnings: string[];
   /** `schedule:` written on an agent, which nothing runs — only a flow has
    *  a clock. The message, or null when there is no such line. */
   scheduleProblem: string | null;
@@ -1509,6 +1513,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         languageProblem: languageProblem(data.language),
         localeProblems: localeProblems(data),
         webProblems: [...webProblems(data), ...actionProblems(data)],
+        webWarnings: webWarnings(data, { chrome: runnerEngines()?.chrome }),
         scheduleProblem: agentScheduleProblem(data),
         ...(() => { const l = readLimits(data.limits); return { limits: l.limits, limitProblems: l.problems }; })(),
         inlineTools: inlineToolNames(data),

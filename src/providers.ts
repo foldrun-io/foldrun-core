@@ -224,7 +224,7 @@ export const FETCH_APIS: readonly FetchApi[] = [
  *  wrapper holds the real value the way it already holds a cookie secret,
  *  and creates the session itself where the vendor wants one. */
 /** What a vendor's own session can be asked for, per its docs — the keys of
- *  `web.browse.session:` it accepts. Absent means it has no such option;
+ *  `web.browse.vendor_session:` it accepts. Absent means it has no such option;
  *  naming one is an error in `check` that says which vendors do. */
 export interface SessionSupport {
   /** on: a proxy can be switched on; always: it is always on (true is a
@@ -247,7 +247,9 @@ export interface SessionSupport {
   refuses?: readonly string[];
 }
 
-/** `web.browse.session:` — what the vendor's session is asked for. */
+/** `web.browse.vendor_session:` — what the vendor's session is asked for.
+ *  Called `session:` until 2026-10-01, which a call's `session=` (a named
+ *  saved login) also is; the old key is still read, and check warns. */
 export interface BrowseSession {
   proxy?: boolean | { country?: string; state?: string; city?: string; own?: string };
   captcha?: boolean;
@@ -594,8 +596,9 @@ export interface BrowseSettings {
   /** false stops the tool streaming its page to the run page while the step
    *  runs. Unset is on wherever the platform can take the frames. */
   live_view?: boolean;
-  /** What the vendor's own session is asked for (only with a vendor). */
-  session?: BrowseSession;
+  /** What the vendor's own session is asked for (only with a vendor).
+   *  Written `vendor_session:`; `session:` is the deprecated spelling. */
+  vendor_session?: BrowseSession;
 }
 
 /** Every action web browse takes, which is what `deny:` may name. The
@@ -683,7 +686,9 @@ export function browseEngineRefusal(engine: string, what: string): string | null
 const BROWSE_SETTING_KEYS = [
   "engine", "user_agent", "device", "locale", "timezone", "cookies", "cookie_domain", "storage", "storage_origin", "identities", "headless", "version", "live",
   "allowed_domains", "deny", "boundaries", "init", "extensions", "webgpu", "ignore_https_errors", "state_key",
-  "video", "live_view", "session",
+  "video", "live_view", "vendor_session",
+  // Deprecated spelling of vendor_session (read, and warned about).
+  "session",
 ] as const;
 const BROWSE_DOMAIN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 /** A list setting: YAML's list, or one comma-separated line. */
@@ -744,10 +749,10 @@ function seconds(v: unknown): number | null {
   return Math.round(Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400 }[(m[2] ?? "s").toLowerCase() as "s"]);
 }
 
-/** The shape of `web.browse.session:`, before anyone knows the vendor. What
+/** The shape of `web.browse.vendor_session:`, before anyone knows the vendor. What
  *  the vendor can do is browseSessionProblems' question. */
-export function readBrowseSession(raw: unknown): { session?: BrowseSession; error?: string } {
-  const at = "web.browse.session";
+export function readBrowseSession(raw: unknown, key: "vendor_session" | "session" = "vendor_session"): { session?: BrowseSession; error?: string } {
+  const at = `web.browse.${key}`;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { error: `${at} is a block — what the vendor's own session is asked for: proxy, captcha, stealth, region, timeout, keep, record, block, options.` };
   }
@@ -810,13 +815,13 @@ export function readBrowseSession(raw: unknown): { session?: BrowseSession; erro
  * actions follow — the file is fixed, nothing is quietly dropped.
  */
 export function browseSessionProblems(settings: BrowseSettings, vendor: string | null): string[] {
-  const s = settings.session;
+  const s = settings.vendor_session;
   const out: string[] = [];
   const api = vendor ? findBrowserApi(vendor) : undefined;
   const sup = api?.session ?? {};
   const who = (pred: (x: SessionSupport) => boolean | undefined) =>
     BROWSER_APIS.filter((b) => b.session && pred(b.session)).map((b) => b.name).join(", ") || "none";
-  const at = "web.browse.session";
+  const at = "web.browse.vendor_session";
   for (const key of api?.session?.refuses ?? []) {
     if ((settings as Record<string, unknown>)[key] !== undefined) {
       out.push(`web.browse.${key}: ${api!.title} does not let a session change it (its docs) — drop it, or render elsewhere.`);
@@ -824,7 +829,7 @@ export function browseSessionProblems(settings: BrowseSettings, vendor: string |
   }
   if (!s) return out;
   if (!api) {
-    out.push(`${at}: is what a vendor's own session is asked for, and this browser is the account's own — name one with via:, or drop session:.`);
+    out.push(`${at}: is what a vendor's own session is asked for, and this browser is the account's own — name one with via:, or drop vendor_session:.`);
     return out;
   }
   const label = api.title;
@@ -852,7 +857,7 @@ export function browseSessionProblems(settings: BrowseSettings, vendor: string |
     // used as it is: a context made to measure would not be the saved one.
     for (const key of ["user_agent", "device", "locale", "timezone", "identities"] as const) {
       if ((settings as Record<string, unknown>)[key] !== undefined) {
-        out.push(`web.browse.${key}: with session.keep the vendor's saved browser is used as it stands, so ${key} cannot be applied — drop one of them.`);
+        out.push(`web.browse.${key}: with vendor_session.keep the vendor's saved browser is used as it stands, so ${key} cannot be applied — drop one of them.`);
       }
     }
   }
@@ -915,13 +920,19 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
       if (b) settings[k] = true;
       continue;
     }
-    // The one that is on by default: only false travels.
-    if (k === "session") {
-      const r = readBrowseSession(v);
+    // The vendor's own session. `session:` is the old spelling: a call's
+    // `session=` is a named saved login, a different thing under the same
+    // word, so the block key became vendor_session. Both read; one only.
+    if (k === "vendor_session" || k === "session") {
+      if (o.vendor_session !== undefined && o.session !== undefined && o.vendor_session !== null && o.session !== null) {
+        return { settings, rest: left(rest), error: "web.browse: vendor_session: and session: are the same block (session: is its old name) — keep vendor_session: only." };
+      }
+      const r = readBrowseSession(v, k);
       if (r.error) return { settings, rest: left(rest), error: r.error };
-      settings.session = r.session;
+      settings.vendor_session = r.session;
       continue;
     }
+    // The one that is on by default: only false travels.
     if (k === "live_view") {
       const b = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined;
       if (b === undefined) return { settings, rest: left(rest), error: `web.browse.live_view is true or false, not ${JSON.stringify(v)}.` };
@@ -1356,6 +1367,82 @@ export function webProblems(front: Record<string, unknown>): string[] {
     const choice = resolveSearch(value, kind);
     if (choice.error) out.push(choice.error);
     else if (browse) out.push(...browseSessionProblems(browse, choice.provider));
+  }
+  return out;
+}
+
+/**
+ * The engines the runner image was built with, as the deploy wrote them into
+ * FOLDRUN_RUNNER_ENGINES (foldrun-infra dev/ci/runner-engines.sh): a comma
+ * list of names, each with `=<version>` where the image's manifest
+ * (/opt/browser/engines.json) has a dotted version —
+ * `chromium,chrome=154.0.8037.58,firefox,lightpanda=0.4.1`. Null when unset.
+ */
+export function runnerEngines(raw: string | undefined = process.env.FOLDRUN_RUNNER_ENGINES): Record<string, string | null> | null {
+  const out: Record<string, string | null> = {};
+  for (const part of (raw ?? "").split(",")) {
+    const m = /^\s*([a-z][a-z0-9-]{0,31})(?:=(\d+(?:\.\d+)+))?\s*$/.exec(part);
+    if (m) out[m[1]] = m[2] ?? null;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** The Chrome major a user-agent string claims — `Chrome/153.0.0.0` → 153 —
+ *  or null for one that names no Chrome (Firefox, Safari, an iPhone). */
+export function chromeMajorOf(ua: string): number | null {
+  if (/\b(Firefox|FxiOS|CriOS|Edg)\//.test(ua)) return null;
+  const m = /Chrome\/(\d+)\./.exec(ua); // HeadlessChrome/ too
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * A pinned `user_agent:` that claims another Chrome than the one that will
+ * send it. The tool's own default follows the installed Chrome (its
+ * chromiumVersion()), so only a pinned string can drift — and it drifts
+ * every time the image's Chrome moves (stable is unpinned, a new major every
+ * four weeks). A site then sees `Chrome/153` in the User-Agent header beside
+ * `"Google Chrome";v="154"` in the client hints the browser still sends, and
+ * a JavaScript engine that is 154's: the mismatch bot checks look for.
+ * `chrome` is the image's Chrome version (runnerEngines().chrome); null —
+ * an image that did not say — warns about nothing.
+ */
+export function userAgentDrift(ua: string | undefined, chrome: string | null | undefined, where: string): string | null {
+  if (!ua || !chrome) return null;
+  const pinned = chromeMajorOf(ua);
+  const have = Number(chrome.split(".")[0]);
+  if (pinned === null || !Number.isFinite(have) || pinned === have) return null;
+  return `${where} pins Chrome ${pinned}, and the runner image's Chrome is ${have} — a site sees a user agent that disagrees with the browser's own client hints. Drop it (the default user agent follows the installed Chrome), or raise it to Chrome/${have}.`;
+}
+
+/**
+ * What in a `web:` block works today but should change — never a refusal.
+ * `check` prints these as warnings and the deploy reports them beside its
+ * outward-gate warnings. `opts.chrome`: the runner image's Chrome version,
+ * when known (FOLDRUN_RUNNER_ENGINES on the platform, /api/version from the
+ * CLI); without it the user-agent comparison is skipped.
+ */
+export function webWarnings(front: Record<string, unknown>, opts: { chrome?: string | null } = {}): string[] {
+  const out: string[] = [];
+  const browse = webConfig(front).raw.browse;
+  if (!browse || typeof browse !== "object" || Array.isArray(browse)) return out;
+  const raw = browse as Record<string, unknown>;
+  if (raw.session !== undefined && raw.session !== null && raw.vendor_session === undefined) {
+    out.push("web.browse.session: is now vendor_session: — the same block, renamed so it is not mistaken for a call's session= (a named saved login). Rename the key; session: is still read for now.");
+  }
+  const read = readBrowseSettings(browse);
+  if (read.error) return out;
+  const engine = read.settings.engine ?? "chromium";
+  // Only an engine that IS Chrome sends Chrome's client hints; a Chrome UA on
+  // Firefox is a different (deliberate) disguise this does not judge.
+  if (engine === "chrome" || engine === "chromium") {
+    const w = userAgentDrift(read.settings.user_agent, opts.chrome, "web.browse.user_agent");
+    if (w) out.push(w);
+  }
+  for (const [name, id] of Object.entries(read.settings.identities ?? {})) {
+    const eng = id.engine ?? engine;
+    if (eng !== "chrome" && eng !== "chromium") continue;
+    const w = userAgentDrift(id.user_agent, opts.chrome, `web.browse.identities.${name}.user_agent`);
+    if (w) out.push(w);
   }
   return out;
 }

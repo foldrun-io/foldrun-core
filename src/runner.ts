@@ -1074,7 +1074,7 @@ function agentContext(
   // What the vendor's own session is asked for, checked against what that
   // vendor offers; a problem is on the record and the session is not sent.
   const sessionProblems = browseChoice.error ? [] : browseSessionProblems(browseSettings, browseChoice.provider);
-  const browseSession = browseChoice.shape === "direct" && browseChoice.provider && !sessionProblems.length ? browseSettings.session : undefined;
+  const browseSession = browseChoice.shape === "direct" && browseChoice.provider && !sessionProblems.length ? browseSettings.vendor_session : undefined;
   // crawl, map, extract, answer, monitor: a provider each, or foldrun's own.
   // Same three consequences as a search API — the secret the step holds, the
   // env the web tool reads, the one host the key may reach.
@@ -1310,9 +1310,10 @@ function agentContext(
     ...(browseChoice.shape === "direct" && browseChoice.provider
       ? { FOLDRUN_BROWSER_VENDOR: browseChoice.provider, FOLDRUN_BROWSER_SECRET: browseChoice.secret ?? "" }
       : {}),
-    // The vendor session's settings (`web.browse.session:`), as JSON the
-    // tool maps onto that vendor's own option names.
-    ...(browseSession ? { FOLDRUN_BROWSER_SESSION: JSON.stringify(browseSession) } : {}),
+    // The vendor session's settings (`web.browse.vendor_session:`), as JSON
+    // the tool maps onto that vendor's own option names. Under both names
+    // for one release: a web tool from before the rename reads the old one.
+    ...(browseSession ? { FOLDRUN_BROWSER_VENDOR_SESSION: JSON.stringify(browseSession), FOLDRUN_BROWSER_SESSION: JSON.stringify(browseSession) } : {}),
     // The `web.browse` block, as defaults the tool reads when the call did
     // not say otherwise. Env rather than arguments because the tool is a
     // script the model calls: a default nobody typed should not have to be

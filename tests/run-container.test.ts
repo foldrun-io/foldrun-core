@@ -9,9 +9,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync as spawnSh } from "node:child_process";
 import {
   DOCKERFILE,
+  ENGINE_DOWNLOAD_ATTEMPTS,
+  RETRY_SH,
   allowedBack,
+  buildFailureSummary,
   applyContainerChanges,
   hashTree,
   parseDriverLine,
@@ -483,4 +487,69 @@ test("the full image writes down which engines it has, and an x86_64 build missi
   // The probe is one shell-quoted program: a single quote inside it would end it early.
   const probe = browsers.split("RUN node -e '")[1].split("\n '")[0];
   assert.doesNotMatch(probe, /'/);
+});
+
+test("every best-effort engine download retries before the build gives up on it", () => {
+  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  const runs = browsers.replace(/\\\n/g, "").split("\n").filter((l) => l.startsWith("RUN "));
+  for (const engine of ["chrome", "chrome-beta", "lightpanda", "obscura"]) {
+    const run = runs.find((r) => new RegExp(`retry ${engine} `).test(r));
+    assert.ok(run, `${engine}'s download goes through retry`);
+    assert.ok(run!.includes(RETRY_SH), `the RUN that retries ${engine} defines retry (a RUN is its own shell)`);
+  }
+  // The checksum is inside what is retried: a truncated download is a failed one.
+  for (const engine of ["lightpanda", "obscura"]) {
+    const run = runs.find((r) => r.includes(`retry ${engine} fetch`))!;
+    assert.match(run.split("fetch() {")[1].split("; }")[0], /sha256sum -c/);
+  }
+  assert.equal(ENGINE_DOWNLOAD_ATTEMPTS, 3);
+});
+
+test("retry: tries three times with a growing wait, says so on stderr, and gives up with a failure", () => {
+  // sleep is stubbed so the backoff is recorded, not waited.
+  const script = `${RETRY_SH}
+sleep() { echo "slept $1" >&2; }
+c=0; flaky() { c=$((c+1)); [ "$c" -ge 2 ]; }
+retry flaky flaky && echo "flaky ok after $c"
+retry broken false || echo "broken gave up"`;
+  const r = spawnSh("sh", ["-c", script], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /flaky ok after 2/);
+  assert.match(r.stdout, /broken gave up/);
+  assert.match(r.stderr, /runner image: broken - download failed \(attempt 1 of 3\), retrying in 15s/);
+  assert.match(r.stderr, /runner image: broken - download failed \(attempt 2 of 3\), retrying in 30s/);
+  assert.match(r.stderr, /runner image: broken - download failed 3 times, giving up/);
+  assert.equal((r.stderr.match(/slept/g) ?? []).length, 1 + 2, "one wait for flaky, two for broken");
+});
+
+test("a missing engine on x86_64 is named on a line of its own that leads the failure", () => {
+  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  assert.match(browsers, /"runner image: MISSING ENGINES on x86_64: " \+ missing\.join\(", "\)/);
+});
+
+test("buildFailureSummary keeps the engine lines from anywhere in the log, not just its last 2000 characters", () => {
+  const log = [
+    "#5 [browsers 3/6] RUN npm install -g playwright",
+    "#5 812.1 runner image: chrome - download failed (attempt 1 of 3), retrying in 15s",
+    "#5 845.9 runner image: chrome - download failed 3 times, giving up",
+    "#5 846.0 runner image: chrome not installed - engine: chrome would fall back to chromium",
+    "#5 DONE 900.2s",
+    "#9 [browsers 6/6] RUN node -e ' const fs = require(\"fs\") ...",
+    "#9 3.112 {\"arch\":\"x86_64\"}",
+    "#9 3.113 runner image: MISSING ENGINES on x86_64: chrome",
+    "#9 3.113 runner image: every engine ships for x86_64, so a missing one is a failed download - failing the build",
+    "#9 ERROR: process \"/bin/sh -c node -e '" + "x".repeat(4000) + "'\" did not complete successfully: exit code: 1",
+    "Dockerfile:91",
+    "x".repeat(5000),
+  ].join("\n");
+  assert.doesNotMatch(log.slice(-2000), /MISSING ENGINES/, "the fixture reproduces the lost line");
+  const s = buildFailureSummary(log);
+  const lines = s.split("\n");
+  assert.equal(lines[0], "  runner image: MISSING ENGINES on x86_64: chrome", "the missing engines lead");
+  assert.match(s, /runner image: chrome - download failed 3 times, giving up/);
+  assert.doesNotMatch(s, /#9 3\.113/, "BuildKit's step prefix is taken off");
+  const error = lines.find((l) => l.includes("ERROR:"))!;
+  assert.ok(error.length < 320, "an ERROR line quoting the whole instruction is cut short");
+  assert.ok(s.length < 1500 + 2000, "a summary, not the log");
+  assert.match(buildFailureSummary("nothing useful"), /no engine or ERROR line/);
 });

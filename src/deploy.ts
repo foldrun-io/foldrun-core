@@ -38,7 +38,7 @@ import { refNames } from "./refs.ts";
 import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
-import { webProblems } from "./providers.ts";
+import { webProblems, webWarnings, runnerEngines } from "./providers.ts";
 import { readLimits } from "./limits.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
@@ -201,7 +201,8 @@ export function readTree(dir: string): DeployFile[] {
  * not on disk yet. A deploy that would leave the workspace failing its own
  * checker should not be a deploy.
  */
-/** Best-effort outward-gate warnings for a deploy: a step whose agent grants
+/** Best-effort warnings for a deploy: an agent's `web:` warnings (see
+ *  webWarnings), and the outward gate — a step whose agent grants
  *  a workspace tool marked `outward: true` and has no `verify:`/gate. Reads
  *  only the deployed files, so a library or gallery outward tool is not seen
  *  here — `foldrun check`, which resolves every scope, remains the real gate.
@@ -224,14 +225,20 @@ export function deployWarnings(files: DeployFile[]): DeployIssue[] {
   // Agents that grant one of them.
   const outwardAgents: string[] = [];
   const agentNames: string[] = [];
+  const out: DeployIssue[] = [];
+  // The web: warnings check prints — the old session: key, and a pinned
+  // user agent behind the runner image's Chrome, which the platform knows
+  // from FOLDRUN_RUNNER_ENGINES (the deploy read it from the image).
+  const chrome = runnerEngines()?.chrome;
   for (const f of files) {
     const m = f.path.match(/^agents\/([^/]+)\/agent\.md$/);
     if (!m) continue;
     agentNames.push(m[1]);
-    if (refNames(front(f.content).tools).some((t: string) => outwardTools.has(t))) outwardAgents.push(m[1]);
+    const data = front(f.content);
+    if (refNames(data.tools).some((t: string) => outwardTools.has(t))) outwardAgents.push(m[1]);
+    for (const w of webWarnings(data, { chrome })) out.push({ where: f.path, message: w });
   }
-  if (!outwardAgents.length) return [];
-  const out: DeployIssue[] = [];
+  if (!outwardAgents.length) return out;
   for (const f of files) {
     if (!/^flows\/[^/]+\.md$/.test(f.path)) continue;
     let flow;

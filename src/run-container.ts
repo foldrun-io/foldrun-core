@@ -645,6 +645,20 @@ ENTRYPOINT ["/opt/runner/entry.sh"]
  *  resolver, and the runtime cache is keyed on the declaration, not on it. */
 export const UV_VERSION = "0.11.25";
 
+/** How many times a best-effort engine download is tried before the build
+ *  gives up on it, and the wait before the second and third (15s, then 30s).
+ *  A GitHub release or Google's apt mirror that blinks for a minute used to
+ *  cost the engine outright; on x86_64 that now fails the build, so a
+ *  transient blip would fail a deploy. */
+export const ENGINE_DOWNLOAD_ATTEMPTS = 3;
+
+/** `retry <engine> <command…>`: one shell function, defined at the top of each
+ *  RUN that downloads an engine (a RUN is its own shell). Its lines start
+ *  "runner image:" like every engine line, and go to stderr so a quiet
+ *  install (>/dev/null) still shows them — the deploy greps them into the
+ *  step summary (buildFailureSummary). */
+export const RETRY_SH = `retry() { what=$1; shift; n=1; until "$@"; do if [ "$n" -ge ${ENGINE_DOWNLOAD_ATTEMPTS} ]; then echo "runner image: $what - download failed $n times, giving up" >&2; return 1; fi; echo "runner image: $what - download failed (attempt $n of ${ENGINE_DOWNLOAD_ATTEMPTS}), retrying in $((n * 15))s" >&2; sleep $((n * 15)); n=$((n + 1)); done; }`;
+
 /** The base both targets start from, pinned by digest. The tag alone floats:
  *  `node:22-slim` is re-pushed for every Node patch and Debian point release,
  *  and will change Debian release when the Node image decides to, so the
@@ -738,9 +752,16 @@ FROM base AS browsers
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends xvfb \\
  && rm -rf /var/lib/apt/lists/*
+# Google Chrome and Chrome beta come from Google's apt repository, which
+# Playwright adds; each is tried ENGINE_DOWNLOAD_ATTEMPTS times. Only on
+# x86_64: Google ships no Linux Chrome for arm64, so there it is not tried.
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
- && (playwright install --with-deps chrome chrome-beta >/dev/null 2>&1 || echo "real Chrome unavailable on this arch — engine: chrome falls back to chromium") \\
+ && ${RETRY_SH} \\
+ && if [ "$(uname -m)" = x86_64 ]; then \\
+      retry chrome playwright install --with-deps chrome >/dev/null || echo "runner image: chrome not installed - engine: chrome would fall back to chromium" >&2; \\
+      retry chrome-beta playwright install --with-deps chrome-beta >/dev/null || echo "runner image: chrome-beta not installed" >&2; \\
+    else echo "runner image: no Google Chrome for $(uname -m) - engine: chrome falls back to chromium"; fi \\
  && chmod -R a+rX /opt/browser \\
  && npm cache clean --force >/dev/null 2>&1
 # Lightpanda (engine: lightpanda): a browser that runs the JavaScript and
@@ -750,7 +771,8 @@ RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
 # checksum (GitHub's own asset digests, checked again here). 0.4.1 since the
 # move to Debian 13: 0.3.7 on wants glibc 2.38, and Debian 12's 2.36 held it
 # at 0.3.6. An arch without a build leaves the engine out, and the tool says
-# so when asked for it.
+# so when asked for it. Each download (with its checksum) is tried
+# ENGINE_DOWNLOAD_ATTEMPTS times before the engine is left out.
 # Raise it on purpose: the new release's two sha256s, then one
 # engine=lightpanda call on each arch.
 RUN arch=$(uname -m) \\
@@ -760,17 +782,19 @@ RUN arch=$(uname -m) \\
       *) sum= ;; \\
     esac \\
  && mkdir -p /opt/browser/lightpanda \\
- && if [ -n "$sum" ] \\
-      && curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.4.1/lightpanda-$arch-linux" \\
-      && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; then \\
+ && ${RETRY_SH} \\
+ && fetch() { curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.4.1/lightpanda-$arch-linux" \\
+      && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; } \\
+ && if [ -n "$sum" ] && retry lightpanda fetch; then \\
       chmod a+rx /opt/browser/lightpanda/lightpanda && /opt/browser/lightpanda/lightpanda version; \\
-    else rm -f /opt/browser/lightpanda/lightpanda; echo "lightpanda not installed for $arch — engine: lightpanda says so when asked"; fi
+    else rm -f /opt/browser/lightpanda/lightpanda; echo "runner image: lightpanda not installed for $arch - engine: lightpanda says so when asked" >&2; fi
 # Obscura (engine: obscura): a headless browser in Rust around V8 that does
 # draw — screenshots, a raster PDF, a screencast — light like Lightpanda.
 # Apache-2.0. The plain build, not -stealth: this platform does not help a
 # page not see automation. Two binaries, obscura and obscura-worker, which
 # must sit side by side. Pinned by checksum; glibc 2.35 is its floor, so
-# Debian 13 (2.41) runs it. As above, a failed download leaves the engine out.
+# Debian 13 (2.41) runs it. As above, a download is tried
+# ENGINE_DOWNLOAD_ATTEMPTS times, then a failed one leaves the engine out.
 RUN arch=$(uname -m) \\
  && case "$arch" in \\
       x86_64) sum=1534d1e6ddaf3d080ec4091eb41d0a4d8cc042a48b607d3c410fc13b482a9eec ;; \\
@@ -778,12 +802,13 @@ RUN arch=$(uname -m) \\
       *) sum= ;; \\
     esac \\
  && mkdir -p /opt/browser/obscura \\
- && if [ -n "$sum" ] \\
-      && curl -fsSL -o /tmp/obscura.tgz "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.3/obscura-$arch-linux.tar.gz" \\
-      && echo "$sum  /tmp/obscura.tgz" | sha256sum -c - >/dev/null \\
+ && ${RETRY_SH} \\
+ && fetch() { curl -fsSL -o /tmp/obscura.tgz "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.3/obscura-$arch-linux.tar.gz" \\
+      && echo "$sum  /tmp/obscura.tgz" | sha256sum -c - >/dev/null; } \\
+ && if [ -n "$sum" ] && retry obscura fetch \\
       && tar -xzf /tmp/obscura.tgz -C /opt/browser/obscura obscura obscura-worker; then \\
       chmod a+rx /opt/browser/obscura/obscura /opt/browser/obscura/obscura-worker && /opt/browser/obscura/obscura --version; \\
-    else rm -rf /opt/browser/obscura/*; echo "obscura not installed for $arch — engine: obscura says so when asked"; fi \\
+    else rm -rf /opt/browser/obscura/*; echo "runner image: obscura not installed for $arch - engine: obscura says so when asked" >&2; fi \\
  && rm -f /tmp/obscura.tgz
 # What this image actually has, written down: /opt/browser/engines.json, one
 # entry per engine (its path and version, or null when the install above
@@ -817,7 +842,11 @@ RUN node -e ' \\
   fs.writeFileSync("/opt/browser/engines.json", JSON.stringify(manifest, null, 2) + "\\n"); \\
   console.log(JSON.stringify(manifest)); \\
   const missing = ["chromium", "chrome", "firefox", "webkit", "lightpanda", "obscura"].filter((e) => !engines[e]).concat(xvfb ? [] : ["Xvfb"]); \\
-  if (missing.length && arch === "x86_64") { console.error("runner image: " + missing.join(", ") + " missing on x86_64, where every engine ships - failing the build"); process.exit(1); } \\
+  if (missing.length && arch === "x86_64") { \\
+    console.error("runner image: MISSING ENGINES on x86_64: " + missing.join(", ")); \\
+    console.error("runner image: every engine ships for x86_64, so a missing one is a failed download (the retry lines above say which) - failing the build"); \\
+    process.exit(1); \\
+  } \\
   if (missing.length) console.error("runner image: built without " + missing.join(", ") + " on " + arch); \\
  ' \\
  && chmod a+r /opt/browser/engines.json
@@ -937,12 +966,49 @@ export function ensureRunnerImage(
     ];
     const out = spawnSync(cli(), args, { encoding: "utf8" });
     if (out.status !== 0) {
-      throw new Error(`runner image build failed:\n${(out.stderr || out.stdout).slice(-2000)}`);
+      const full = `${out.stdout ?? ""}\n${out.stderr ?? ""}`;
+      // The whole log beside the summary, for a person on the build machine:
+      // the error names the file; the summary is what CI shows.
+      const logFile = path.join(os.tmpdir(), "foldrun-runner-build.log");
+      try { fs.writeFileSync(logFile, full); } catch { /* the summary still says what failed */ }
+      throw new Error(`runner image build failed (full log: ${logFile}):\n${buildFailureSummary(full)}`);
     }
     return { tag, log };
   } finally {
     fs.rmSync(build, { recursive: true, force: true });
   }
+}
+
+/**
+ * What a failed runner build's error says: the lines that name the failure,
+ * then the end of the log. Only the last 2000 characters used to survive,
+ * and BuildKit ends a failed RUN by echoing the instruction — the engines
+ * probe is a long one — so "chrome missing" scrolled out of the very error
+ * that existed to say it. Every engine line the DOCKERFILE prints starts
+ * "runner image:" (the retries, the giving up, the MISSING ENGINES line);
+ * those are kept, from anywhere in the log, with BuildKit's "#12 3.456 "
+ * prefix taken off, and so are BuildKit's own ERROR lines (each cut short:
+ * they quote the whole instruction). Pure, so it is tested on fixtures.
+ */
+export function buildFailureSummary(log: string, opts: { tail?: number; maxLines?: number } = {}): string {
+  const tail = opts.tail ?? 1500;
+  const maxLines = opts.maxLines ?? 40;
+  const seen = new Set<string>();
+  const key: string[] = [];
+  for (const raw of log.split("\n")) {
+    const line = raw.replace(/^#\d+ \d+(\.\d+)? /, "").trim();
+    if (!/^runner image:|^ERROR\b|^error:/i.test(line) && !/did not complete successfully/.test(line)) continue;
+    const cut = line.length > 300 ? line.slice(0, 300) + " …" : line;
+    if (seen.has(cut)) continue;
+    seen.add(cut);
+    key.push(cut);
+  }
+  // The ones that say what is missing first: a reader stops at the top.
+  key.sort((a, b) => Number(/MISSING ENGINES/.test(b)) - Number(/MISSING ENGINES/.test(a)));
+  const head = key.length
+    ? key.slice(0, maxLines).map((l) => `  ${l}`).join("\n") + (key.length > maxLines ? `\n  … ${key.length - maxLines} more` : "")
+    : "  (no engine or ERROR line in the log)";
+  return `${head}\n--- the last ${tail} characters of the build log ---\n${log.slice(-tail)}`;
 }
 
 // ---------- running one step ----------
