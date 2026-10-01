@@ -9,7 +9,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { notifyConfig, sendRunNotification, isQuietFlow, notifyMail, platformMail } from "../src/notify.ts";
+import { notifyConfig, sendRunNotification, isQuietFlow, notifyMail, platformMail, attemptWebhook, nextAttemptAt, WEBHOOK_BACKOFF_MS, newDeliveryId } from "../src/notify.ts";
+import crypto from "node:crypto";
 import { setSecret } from "../src/secrets.ts";
 import type { RunRecord } from "../src/store.ts";
 
@@ -233,4 +234,66 @@ test("a completed run whose verdict is BLOCKED is sent as blocked — to whoever
     } finally {
       server.close();
     }
+  }));
+
+test("the retry schedule: at once, then 1m, 5m, 30m, 2h, 6h — and nothing after the sixth", () => {
+  assert.deepEqual([...WEBHOOK_BACKOFF_MS], [0, 60_000, 300_000, 1_800_000, 7_200_000, 21_600_000]);
+  const t = 1_000_000;
+  assert.equal(nextAttemptAt(1, t), t + 60_000);
+  assert.equal(nextAttemptAt(2, t), t + 300_000);
+  assert.equal(nextAttemptAt(3, t), t + 1_800_000);
+  assert.equal(nextAttemptAt(4, t), t + 7_200_000);
+  assert.equal(nextAttemptAt(5, t), t + 21_600_000);
+  assert.equal(nextAttemptAt(6, t), null, "six attempts, then given up");
+  assert.match(newDeliveryId(), /^dlv_[0-9a-f]{32}$/);
+});
+
+test("an attempt carries the delivery id, the event and a signature over timestamp.body that a receiver can verify", () =>
+  withWorkspace(null, async () => {
+    const got: { headers?: http.IncomingHttpHeaders; body?: string } = {};
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        got.headers = req.headers;
+        got.body = body;
+        res.writeHead(503).end("x".repeat(900));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/hook\n  signing_secret: HOOK_KEY\n---\n`);
+    setSecret("acme", "HOOK_KEY", "whsec-test", "desk");
+    try {
+      const body = JSON.stringify({ status: "failed", runId: "run-x" });
+      const a = await attemptWebhook("acme", "desk", { id: "dlv_abc", event: "failed", body, attempt: 3 });
+      assert.equal(a.ok, false);
+      assert.equal(a.statusCode, 503);
+      assert.equal(a.n, 3);
+      assert.equal(a.error, "HTTP 503");
+      assert.equal(a.response!.length, 500, "the answer is kept to 500 characters");
+      assert.ok(a.durationMs >= 0);
+      const h = got.headers!;
+      assert.equal(h["x-foldrun-delivery"], "dlv_abc");
+      assert.equal(h["x-foldrun-event"], "failed");
+      assert.equal(h["x-foldrun-attempt"], "3");
+      // The receiver's side, as the docs write it.
+      const ts = String(h["x-foldrun-timestamp"]);
+      assert.ok(Math.abs(Date.now() / 1000 - Number(ts)) < 60, "a fresh timestamp");
+      const want = crypto.createHmac("sha256", "whsec-test").update(`${ts}.${got.body}`).digest("hex");
+      assert.equal(h["x-foldrun-signature"], `sha256=${want}`);
+      const replayed = crypto.createHmac("sha256", "whsec-test").update(`${Number(ts) - 3600}.${got.body}`).digest("hex");
+      assert.notEqual(h["x-foldrun-signature"], `sha256=${replayed}`, "the timestamp is inside what is signed");
+    } finally {
+      server.close();
+    }
+  }));
+
+test("an attempt at a workspace whose notify: lost its url fails with the reason, not a throw", () =>
+  withWorkspace("---\nname: desk\n---\n", async () => {
+    const a = await attemptWebhook("acme", "desk", { id: "dlv_x", event: "failed", body: "{}", attempt: 2 });
+    assert.equal(a.ok, false);
+    assert.equal(a.statusCode, null);
+    assert.match(a.error!, /no url/);
   }));

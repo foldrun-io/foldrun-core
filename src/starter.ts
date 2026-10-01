@@ -329,11 +329,13 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
 | \`/assets\` | POST | upload an asset |
 | \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
+| \`/notify/deliveries\` · \`/notify/deliveries/<id>/redeliver\` | GET · POST | every notify: webhook sent and each attempt; send one again |
 | \`/restore\` | POST | the workspace's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
 | \`/vocabulary\` | GET | what this workspace's documents may say |
 
 Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/schedule\`,
 \`/api/approvals\`, \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
+\`/api/me/notifications\` (what mail you get; a key acts for whoever minted it),
 \`/api/account/backups\` (snapshots, restore requests), \`/api/me/onboarding\` (getting started),
 \`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
 and \`/api/metrics\` (Prometheus).

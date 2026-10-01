@@ -152,6 +152,37 @@ export interface PlatformHooks {
    * every redirect target is checked here like the first URL was.
    */
   fetchUntrusted(url: string, init?: RequestInit): Promise<Response>;
+  /**
+   * Hand a notify: webhook to whatever delivers it. The platform records
+   * the delivery, makes the first attempt now and retries on a backoff from
+   * the worker (`retry: true`); `retry: false` is one attempt, recorded —
+   * the test button. Default: one attempt now, recorded nowhere, which is a
+   * laptop: there is no worker to retry from and nobody to read the log.
+   */
+  deliverWebhook(
+    tenant: string,
+    workspace: string,
+    delivery: { event: string; body: string; retry: boolean },
+  ): Promise<WebhookDeliveryOutcome>;
+  /**
+   * Does this person take this optional category of mail — for this
+   * workspace, when the category is per workspace? Asked by mail.ts at send
+   * time, never for required mail. Default: yes; a laptop keeps no
+   * preferences and sends what it always sent.
+   */
+  mailPreference(tenant: string, email: string, category: string, workspace: string | null): Promise<boolean>;
+}
+
+/** What handing a webhook over came to: the delivery's id (the
+ *  X-Foldrun-Delivery header) and its first attempt, when one was made. */
+export interface WebhookDeliveryOutcome {
+  ok: boolean;
+  deliveryId: string;
+  statusCode: number | null;
+  /** The receiver's words or the error, trimmed — what the test reports. */
+  detail: string;
+  /** True when a failed first attempt has later ones scheduled. */
+  retrying?: boolean;
 }
 
 const local: PlatformHooks = {
@@ -176,6 +207,13 @@ const local: PlatformHooks = {
   galleryDir: () => null,
   noteOAuthRefresh: async () => undefined,
   fetchUntrusted: (url, init) => fetch(url, init),
+  async deliverWebhook(tenant, workspace, delivery) {
+    const { attemptWebhook, newDeliveryId } = await import("./notify.ts");
+    const deliveryId = newDeliveryId();
+    const a = await attemptWebhook(tenant, workspace, { id: deliveryId, event: delivery.event, body: delivery.body, attempt: 1 });
+    return { ok: a.ok, deliveryId, statusCode: a.statusCode, detail: a.error ?? a.response ?? "" };
+  },
+  mailPreference: async () => true,
 };
 
 // One object per PROCESS, not per module instance. A bundler that compiles

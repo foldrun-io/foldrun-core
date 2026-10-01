@@ -39,6 +39,8 @@ import { publicUrl } from "./webhook.ts";
 import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
 import { fetchUntrusted } from "./untrusted-fetch.ts";
+import { platform } from "./platform.ts";
+import { sendMail, type MailCategory } from "./mail.ts";
 
 /**
  * The platform's own mail: an invite, a password reset, a low balance.
@@ -172,6 +174,108 @@ export function signatureHeaders(
   return { "x-foldrun-timestamp": timestamp, "x-foldrun-signature": `sha256=${mac}`, "x-signature": plain };
 }
 
+// ------------------------------------------------------------ deliveries
+//
+// A webhook used to be one POST with a timeout: a receiver that was down
+// for the minute a run failed never heard about it, and nothing anywhere
+// said so. Now every send is a DELIVERY with an id, attempted here and —
+// on a platform — retried from the worker on the backoff below, each
+// attempt recorded (webhook-deliveries.ts in the platform).
+
+/** When each attempt is made, counted from the one before: at once, then
+ *  1m, 5m, 30m, 2h and 6h. Six attempts over about eight and a half hours,
+ *  then the delivery is given up and stays in the log to be redelivered. */
+export const WEBHOOK_BACKOFF_MS = [0, 60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600_000] as const;
+
+/** When attempt `n + 1` is due after attempt `n` (1-based) failed at
+ *  `at`, or null when `n` was the last. */
+export function nextAttemptAt(n: number, at: number): number | null {
+  return n < WEBHOOK_BACKOFF_MS.length ? at + WEBHOOK_BACKOFF_MS[n] : null;
+}
+
+/** The delivery id: sent as X-Foldrun-Delivery on every attempt of one
+ *  delivery, redeliveries included, so a receiver dedupes on it. */
+export function newDeliveryId(): string {
+  return `dlv_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+/** The URL with ${SECRET}s resolved, and how it may be shown: a Slack hook
+ *  URL is itself a credential, so it is never echoed resolved. */
+export function webhookTarget(tenant: string, workspace: string, config: NotifyConfig | null = notifyConfig(tenant, workspace)): { url: string | null; shown: string } {
+  const raw = config?.url ?? "";
+  const url = raw.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
+    const hit = getSecret(tenant, name, workspace);
+    return hit ? hit.value : whole;
+  });
+  const shown = raw.includes("${") ? raw : raw ? `${raw.slice(0, 40)}${raw.length > 40 ? "…" : ""}` : "none";
+  return { url: !url || url.includes("${") ? null : url, shown };
+}
+
+export interface WebhookAttempt {
+  /** 1-based. */
+  n: number;
+  at: string;
+  /** The receiver's status, or null when none came back (a timeout, DNS). */
+  statusCode: number | null;
+  durationMs: number;
+  /** The first 500 characters of what the receiver answered. */
+  response: string | null;
+  error: string | null;
+  /** A person pressed redeliver or test; not part of the backoff. */
+  manual?: boolean;
+}
+
+/**
+ * One attempt at one delivery, against the workspace's notify: as it reads
+ * NOW — a URL fixed between attempts is the one the retry goes to. Signed
+ * afresh each time (the timestamp is inside the signature, so a stale
+ * signature is one a receiver should refuse). Never throws.
+ */
+export async function attemptWebhook(
+  tenant: string,
+  workspace: string,
+  d: { id: string; event: string; body: string; attempt: number; manual?: boolean },
+): Promise<WebhookAttempt & { ok: boolean }> {
+  const at = new Date().toISOString();
+  const started = Date.now();
+  const config = notifyConfig(tenant, workspace);
+  const base = { n: d.attempt, at, ...(d.manual ? { manual: true } : {}) };
+  if (!config?.url) {
+    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "this workspace's notify: has no url any more" };
+  }
+  const { url } = webhookTarget(tenant, workspace, config);
+  if (!url) {
+    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "the secret named in notify.url is not in this account's vault" };
+  }
+  try {
+    const res = await fetchUntrusted(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "foldrun-webhooks/1",
+        "x-foldrun-delivery": d.id,
+        "x-foldrun-event": d.event,
+        "x-foldrun-attempt": String(d.attempt),
+        ...signatureHeaders(tenant, workspace, config, d.body),
+      },
+      body: d.body,
+      signal: AbortSignal.timeout(Number(process.env.FOLDRUN_WEBHOOK_TIMEOUT_MS) || 8000),
+    });
+    const text = (await res.text().catch(() => "")).slice(0, 500);
+    return {
+      ...base,
+      ok: res.ok,
+      statusCode: res.status,
+      durationMs: Date.now() - started,
+      response: text || null,
+      error: res.ok ? null : `HTTP ${res.status}`,
+    };
+  } catch (err) {
+    const why = err instanceof Error ? (err.name === "TimeoutError" ? "timed out" : err.message) : String(err);
+    return { ...base, ok: false, statusCode: null, durationMs: Date.now() - started, response: null, error: why.slice(0, 500) };
+  }
+}
+
 /** One waiting step's pair of links. */
 export interface StepLinks {
   /** Index into run.steps. */
@@ -279,32 +383,20 @@ export async function sendPlainNotification(
     if (config.email) {
       const mail = notifyMail(tenant);
       if (!mail) return false;
-      const res = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          from: mail.from,
-          to: config.email,
-          subject: `${msg.headline}`.slice(0, 160),
-          text: `${msg.headline}\n\n${msg.detail}\n\nworkspace: ${workspace}\n${msg.flow ? `flow: ${msg.flow}\n` : ""}${msg.runId ? `run: ${msg.runId}\n` : ""}`,
-        }),
-        signal: AbortSignal.timeout(8000),
+      const r = await sendMail({
+        tenant,
+        mail,
+        to: config.email,
+        category: "run-alerts",
+        workspace,
+        subject: `${msg.headline}`.slice(0, 160),
+        text: `${msg.headline}\n\n${msg.detail}\n\nworkspace: ${workspace}\n${msg.flow ? `flow: ${msg.flow}\n` : ""}${msg.runId ? `run: ${msg.runId}\n` : ""}`,
       });
-      return res.ok;
+      return r.ok;
     }
-    const url = (config.url ?? "").replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
-      const hit = getSecret(tenant, name, workspace);
-      return hit ? hit.value : whole;
-    });
-    if (!url || url.includes("${")) return false;
-    const payload = JSON.stringify(body);
-    const res = await fetchUntrusted(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
-      body: payload,
-      signal: AbortSignal.timeout(5000),
-    });
-    return res.ok;
+    if (!webhookTarget(tenant, workspace, config).url) return false;
+    const r = await platform.deliverWebhook(tenant, workspace, { event: msg.event, body: JSON.stringify(body), retry: true });
+    return r.ok;
   } catch (err) {
     console.error(`[foldrun] notify (${msg.event}): ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
     return false;
@@ -352,54 +444,39 @@ export async function sendTestNotification(
           "email is configured but there is no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account, or FOLDRUN_RESEND_API_KEY on the platform",
       };
     }
-    try {
-      const res = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
-        body: JSON.stringify({ from: mail.from, to: config.email, subject: headline, text: `${headline}\n\n${detail}\n` }),
-        signal: AbortSignal.timeout(8000),
-      });
-      noteMailUse(tenant, res.status);
-      const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
-      return res.ok
-        ? { ok: true, destination: `${config.email} (from ${mail.from})`, detail: "accepted by Resend for delivery" }
-        : { ok: false, destination: config.email, detail: `HTTP ${res.status} from Resend — ${body}` };
-    } catch (err) {
-      return { ok: false, destination: config.email, detail: err instanceof Error ? err.message : String(err) };
+    const r = await sendMail({ tenant, mail, to: config.email, category: "run-alerts", workspace, subject: headline, text: `${headline}\n\n${detail}\n` });
+    if (r.status !== undefined) noteMailUse(tenant, r.status);
+    if (r.suppressed.length && !r.sent.length && !r.error) {
+      return {
+        ok: false,
+        destination: config.email,
+        detail: `not sent: ${r.suppressed.join(", ")} turned run alerts off — turn them back on in Profile → Notifications (or by \`foldrun notifications set run-alerts on\`)`,
+      };
     }
+    return r.ok
+      ? { ok: true, destination: `${config.email} (from ${mail.from})`, detail: `accepted by Resend for delivery${r.suppressed.length ? ` — not to ${r.suppressed.join(", ")}, who turned run alerts off` : ""}` }
+      : { ok: false, destination: config.email, detail: `${r.status ? `HTTP ${r.status} from Resend — ` : ""}${r.error ?? "not sent"}` };
   }
 
-  const raw = config.url ?? "";
-  const url = raw.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
-    const hit = getSecret(tenant, name, workspace);
-    return hit ? hit.value : whole;
-  });
   // The destination is echoed back with the secret still unresolved: a
   // Slack webhook URL is itself a credential, and a page that prints it is
   // a page that leaks it into a screenshot.
-  const shown = raw.includes("${") ? raw : `${url.slice(0, 40)}…`;
-  if (!url || url.includes("${")) {
+  const { url, shown } = webhookTarget(tenant, workspace, config);
+  if (!url) {
     return { ok: false, destination: shown, detail: `the secret named in notify.url is not in this account's vault` };
   }
-  try {
-    const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
-    const res = await fetchUntrusted(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
-      body: payload,
-      signal: AbortSignal.timeout(8000),
-    });
-    const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 400);
-    return res.ok
-      ? {
-          ok: true,
-          destination: shown,
-          detail: config.signingSecret ? "accepted, signed with " + config.signingSecret : "accepted",
-        }
-      : { ok: false, destination: shown, detail: `HTTP ${res.status} — ${body}` };
-  } catch (err) {
-    return { ok: false, destination: shown, detail: err instanceof Error ? err.message : String(err) };
-  }
+  const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
+  // One attempt, recorded in the delivery log like any other — and the way
+  // back for an endpoint that was switched off after days of failures: a
+  // test that is accepted turns it on again.
+  const r = await platform.deliverWebhook(tenant, workspace, { event: "test", body: payload, retry: false });
+  return r.ok
+    ? {
+        ok: true,
+        destination: shown,
+        detail: `${config.signingSecret ? "accepted, signed with " + config.signingSecret : "accepted"} (delivery ${r.deliveryId})`,
+      }
+    : { ok: false, destination: shown, detail: `${r.statusCode ? `HTTP ${r.statusCode} — ` : ""}${r.detail.replace(/\s+/g, " ").slice(0, 400)}` };
 }
 
 export async function sendRunNotification(
@@ -493,12 +570,16 @@ export async function sendRunNotification(
         console.error(`[foldrun] notify: email configured but no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account ${tenant}, or FOLDRUN_RESEND_API_KEY on the platform`);
         return false;
       }
-      const res = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { authorization: `Bearer ${mail.key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          from: mail.from,
+      // A gate is its own category: a person may want failures and not
+      // the approval requests (they decide from the dashboard), or the
+      // other way round.
+      const category: MailCategory = run.status === "awaiting-approval" && !onEvent ? "approvals" : "run-alerts";
+      const r = await sendMail({
+          tenant,
+          mail,
           to: config.email,
+          category,
+          workspace,
           // The subject is the headline and what the run concluded, and
           // nothing else. Ids and costs belong in the body: a subject line is
           // read in a list, where the only useful question it can answer is
@@ -515,16 +596,13 @@ export async function sendRunNotification(
                 ? `\nApprove: ${links.approveUrl}\nReject: ${links.rejectUrl}\n`
                 : links.links.map((l) => `\nStep ${l.step + 1} (${l.agent})\nApprove: ${l.approveUrl}\nReject: ${l.rejectUrl}\n`).join("")
               : ""),
-        }),
-        signal: AbortSignal.timeout(8000),
       });
-      noteMailUse(tenant, res.status);
-      if (!res.ok) {
+      if (r.status !== undefined) noteMailUse(tenant, r.status);
+      if (!r.ok) {
         // Resend's body says WHY — "domain not verified", "can only send to
         // your own address" — and a status alone sent someone to the wrong
         // dashboard for twenty minutes on 2026-09-06.
-        const why = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 300);
-        console.error(`[foldrun] notify email: ${tenant}/${workspace} → HTTP ${res.status} ${why}`);
+        console.error(`[foldrun] notify email: ${tenant}/${workspace} → ${r.status ? `HTTP ${r.status} ` : ""}${r.error ?? ""}`);
         return false;
       }
       return true;
@@ -532,23 +610,14 @@ export async function sendRunNotification(
 
     // ${SECRET} so the Slack URL — itself a credential — can live in the
     // vault instead of in a file that gets committed.
-    const url = (config.url ?? "").replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
-      const hit = getSecret(tenant, name, workspace);
-      return hit ? hit.value : whole;
-    });
-    if (!url || url.includes("${")) {
+    if (!webhookTarget(tenant, workspace, config).url) {
       console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
       return false;
     }
-    const payload = JSON.stringify(body);
-    const res = await fetchUntrusted(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...signatureHeaders(tenant, workspace, config, payload) },
-      body: payload,
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) {
-      console.error(`[foldrun] notify: ${tenant}/${workspace} → HTTP ${res.status}`);
+    const event = blocked ? "blocked" : run.status;
+    const r = await platform.deliverWebhook(tenant, workspace, { event, body: JSON.stringify(body), retry: true });
+    if (!r.ok) {
+      console.error(`[foldrun] notify: ${tenant}/${workspace} → ${r.statusCode ? `HTTP ${r.statusCode}` : r.detail}${r.retrying ? " (will retry)" : ""}`);
       return false;
     }
     return true;
