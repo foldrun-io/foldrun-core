@@ -201,9 +201,13 @@ export function readPodEvents(text: string, offset: number): { events: PodEvent[
 
 /** What crosses back from a step that browsed through the pod. */
 export interface BrowserPodOutcome {
-  /** Reconnect tries the web tool made, and how many got through. */
+  /** Reconnect tries the web tool made, and how many got through: the pod
+   *  answered and the call went on, rather than dropping again at once. */
   reconnects: number;
   reconnected: number;
+  /** Reconnects that reached the pod, after which the call dropped again at
+   *  once — a pod still answering while it shut down. Never "got through". */
+  closedAgain?: number;
   /** Set when the step stopped because the pod was gone (or a call needed
    *  a browser in the step, which slim does not have). */
   lost?: { cause: "lost" | "needs-full"; detail: string };
@@ -252,6 +256,7 @@ export function parseBrowserPod(v: unknown): BrowserPodOutcome | null {
   const o = v as Record<string, unknown>;
   const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? Math.floor(x) : 0);
   const out: BrowserPodOutcome = { reconnects: n(o.reconnects), reconnected: n(o.reconnected) };
+  if (n(o.closedAgain)) out.closedAgain = n(o.closedAgain);
   const lost = o.lost as Record<string, unknown> | undefined;
   if (lost && typeof lost === "object" && (lost.cause === "lost" || lost.cause === "needs-full")) {
     out.lost = { cause: lost.cause, detail: String(lost.detail ?? "").slice(0, 300) };
@@ -262,11 +267,19 @@ export function parseBrowserPod(v: unknown): BrowserPodOutcome | null {
 
 /** One line for a person: "2 reconnects (2 got through)", "browser pod
  *  lost; re-ran on full", or the failure. What the run page, `foldrun
- *  report` and an attempt row say. */
+ *  report` and an attempt row say. A pod that was lost in the end is never
+ *  said to have let a reconnect through — "1 reconnect (1 got through); pod
+ *  lost" read live as a contradiction — and a reconnect that reached the pod
+ *  only for the call to drop again says that. */
 export function browserPodLine(p: BrowserPodOutcome & { fallback?: string; failure?: string }): string {
-  const tries = p.reconnects
-    ? `${p.reconnects} reconnect${p.reconnects === 1 ? "" : "s"} (${p.reconnected} got through)`
-    : "no reconnects";
+  const count = `${p.reconnects} reconnect${p.reconnects === 1 ? "" : "s"}`;
+  const tries = !p.reconnects
+    ? "no reconnects"
+    : !p.lost
+      ? `${count} (${p.reconnected} got through)`
+      : p.closedAgain
+        ? `${count}, ${p.reconnects === 1 ? "which" : "the last"} reached the pod but it closed again`
+        : count;
   if (p.failure) return `${tries}; ${p.failure}`;
   if (p.fallback) return `${tries}; ${p.fallback}${p.lost ? ` (${p.lost.detail})` : ""}`;
   if (p.lost) return `${tries}; ${p.lost.cause === "needs-full" ? "needed a browser in the step" : "pod lost"}: ${p.lost.detail}`;

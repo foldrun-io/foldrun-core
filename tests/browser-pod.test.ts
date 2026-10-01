@@ -128,7 +128,27 @@ test("the outcome crosses the sandbox boundary checked, and reads as one line", 
   assert.equal(parseBrowserPod("nope"), null);
   assert.deepEqual(parseBrowserPod({ reconnects: -4, lost: { cause: "other" } }), { reconnects: 0, reconnected: 0 });
   assert.equal(browserPodLine({ reconnects: 2, reconnected: 2 }), "2 reconnects (2 got through)");
-  assert.match(browserPodLine({ reconnects: 3, reconnected: 0, lost: { cause: "lost", detail: "gone" }, fallback: RERAN_ON_FULL }), /3 reconnects \(0 got through\); browser pod lost; re-ran on full \(gone\)/);
+  assert.equal(browserPodLine({ reconnects: 3, reconnected: 0, lost: { cause: "lost", detail: "gone" }, fallback: RERAN_ON_FULL }), "3 reconnects; browser pod lost; re-ran on full (gone)");
+  const crossed = parseBrowserPod({ reconnects: 1, reconnected: 0, closedAgain: 1, lost: { cause: "lost", detail: "x" } });
+  assert.equal(crossed?.closedAgain, 1, "closedAgain crosses too");
+});
+
+test("a lost pod's line never says a reconnect got through; one that reached the pod and closed again says so", () => {
+  // run-mupfupae-h2jj on dev, 2026-10-01: the reconnect reached the pod as
+  // it terminated and the call dropped again at once. The line read
+  // "1 reconnect (1 got through); pod lost: …".
+  assert.equal(
+    browserPodLine({ reconnects: 1, reconnected: 0, closedAgain: 1, lost: { cause: "lost", detail: "browser has been closed" } }),
+    "1 reconnect, which reached the pod but it closed again; pod lost: browser has been closed",
+  );
+  assert.equal(
+    browserPodLine({ reconnects: 2, reconnected: 0, closedAgain: 1, lost: { cause: "lost", detail: "gone" }, fallback: RERAN_ON_FULL }),
+    "2 reconnects, the last reached the pod but it closed again; browser pod lost; re-ran on full (gone)",
+  );
+  // An earlier reconnect a call did get through on — still not "got
+  // through" on a pod that was lost in the end.
+  assert.doesNotMatch(browserPodLine({ reconnects: 4, reconnected: 1, lost: { cause: "lost", detail: "ECONNREFUSED" } }), /got through/);
+  assert.equal(browserPodLine({ reconnects: 0, reconnected: 0, lost: { cause: "lost", detail: "gone" } }), "no reconnects; pod lost: gone");
 });
 
 // --------------------------------------------- the model loop, pod dying
@@ -224,6 +244,28 @@ test("a reconnect that gets through is counted and the step carries on", async (
   assert.ok(lines.some((l) => l === "browser pod: reconnected (try 2 of 3)"));
 });
 
+test("a reconnect that reaches a closing pod, then the call drops again: not counted as through, and the log says the pod closed again", async () => {
+  // run-mupfydqa-niso on dev, 2026-10-01: "browser pod: reconnected (try 1
+  // of 3)" then at once "lost after 1 reconnect try".
+  const { root, agentDir, events } = stepDirs();
+  const { out, lines } = await runScripted([
+    {
+      id: "t1", name: WEB, input: { action: "browse", url: "https://x", mode: "text" },
+      during: () => fs.appendFileSync(events,
+        line({ kind: "reconnect", attempt: 1, of: 3, ok: true, at: "2026-10-01T10:15:15.000Z" }) +
+        line({ kind: "lost", ran: true, error: "browser has been closed", at: "2026-10-01T10:15:16.000Z" })),
+    },
+  ], events, root, agentDir);
+  assert.equal(out.status, "failed");
+  assert.equal(out.browserPod?.reconnects, 1);
+  assert.equal(out.browserPod?.reconnected, 0, "a call never got through on it");
+  assert.equal(out.browserPod?.closedAgain, 1);
+  assert.ok(lines.includes("browser pod: reconnected (try 1 of 3, at 10:15:15Z), but the pod closed again"), lines.join("\n"));
+  assert.ok(lines.includes("browser pod: lost — the call dropped again after the reconnect (browser has been closed, at 10:15:16Z) — stopping the step"), lines.join("\n"));
+  assert.ok(!lines.some((l) => /lost after 1 reconnect try/.test(l)));
+  assert.equal(browserPodLine(out.browserPod!), "1 reconnect, which reached the pod but it closed again; pod lost: browser has been closed");
+});
+
 test("a call that needs a browser in the step stops a slim step the same way", async () => {
   const { root, agentDir, events } = stepDirs();
   const { out } = await runScripted([
@@ -315,11 +357,13 @@ test("runner: pod lost after reads only — the step runs again from the start o
     assert.ok(Math.abs((lost.costUsd ?? 0) - 0.01) < 1e-9, `the slim go's own cost: ${lost.costUsd}`);
     assert.deepEqual(lost.tokens, { input: 100, output: 10 });
     assert.equal(lost.computeSecs, 3);
-    assert.equal(lost.browserPod, "3 reconnects (0 got through); pod lost: ECONNREFUSED");
+    assert.equal(lost.browserPod, "3 reconnects; pod lost: ECONNREFUSED");
     assert.match(lost.error ?? "", /^browser pod lost; re-ran on full/);
     assert.equal(full.status, "completed");
     assert.equal(full.image, "full");
-    assert.equal(full.n, 1);
+    assert.equal(full.n, 2, "the full re-run is the second try");
+    assert.equal(full.attempt, 1, "of the step's first attempt");
+    assert.equal(lost.attempt, undefined, "n is the attempt; nothing more to say");
     assert.ok(Math.abs((full.costUsd ?? 0) - 0.02) < 1e-9, `the full go's own cost: ${full.costUsd}`);
     assert.equal(full.computeSecs, 5);
     assert.match(full.browserPod ?? "", /re-ran on full/);
@@ -348,7 +392,7 @@ test("runner: the live reader sequence — a reconnect that got through, then th
     const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
     const s = done!.steps[0];
     assert.deepEqual(s.tries?.map((t) => [t.image, t.status]), [["slim", "lost"], ["full", "completed"]]);
-    assert.equal(s.tries?.[0].browserPod, "4 reconnects (1 got through); pod lost: connect ECONNREFUSED 10.43.12.163:3000");
+    assert.equal(s.tries?.[0].browserPod, "4 reconnects; pod lost: connect ECONNREFUSED 10.43.12.163:3000");
     assert.ok(Math.abs((s.costUsd ?? 0) - 0.01) < 1e-9);
     assert.equal(s.computeSecs, 90);
   });
@@ -358,12 +402,27 @@ test("recordAttempt: a re-attached attempt replaces its rows, the lost one too",
   const s = { events: [], costUsd: 0.02, tokens: null, computeSecs: 5, finishedAt: "2026-10-01T10:13:00.000Z" } as unknown as StepRecord;
   s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };
   recordAttempt(s, 1, "completed", "2026-10-01T10:11:00.000Z", 0);
-  assert.deepEqual(s.tries?.map((t) => [t.n, t.status, t.startedAt]), [[1, "lost", "2026-10-01T10:11:00.000Z"], [1, "completed", "2026-10-01T10:12:30.000Z"]]);
+  assert.deepEqual(s.tries?.map((t) => [t.n, t.status, t.startedAt]), [[1, "lost", "2026-10-01T10:11:00.000Z"], [2, "completed", "2026-10-01T10:12:30.000Z"]]);
   assert.ok(Math.abs((s.costUsd ?? 0) - 0.03) < 1e-9);
   s.costUsd = 0.02; s.computeSecs = 5;
   s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };
   recordAttempt(s, 1, "completed", "2026-10-01T10:11:00.000Z", 0, true);
   assert.equal(s.tries?.length, 2, "replaced, not repeated");
+  assert.deepEqual(s.tries?.map((t) => t.n), [1, 2]);
+});
+
+test("recordAttempt: tries are numbered in order — a retry after a lost slim go and its full re-run is try 3, of attempt 2", () => {
+  const s = { events: [], costUsd: 0.02, tokens: null, computeSecs: 5, finishedAt: "2026-10-01T10:13:00.000Z" } as unknown as StepRecord;
+  s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };
+  recordAttempt(s, 1, "failed", "2026-10-01T10:11:00.000Z", 0);
+  s.costUsd = 0.03; s.computeSecs = 4; s.finishedAt = "2026-10-01T10:15:00.000Z";
+  recordAttempt(s, 2, "completed", "2026-10-01T10:14:00.000Z", 0);
+  assert.deepEqual(s.tries?.map((t) => [t.n, t.attempt ?? t.n, t.status]), [[1, 1, "lost"], [2, 1, "failed"], [3, 2, "completed"]]);
+  // A driver that re-attaches to attempt 2's sandbox replaces attempt 2's row only.
+  s.costUsd = 0.03; s.computeSecs = 4;
+  recordAttempt(s, 2, "completed", "2026-10-01T10:14:00.000Z", 0, true);
+  assert.deepEqual(s.tries?.map((t) => t.n), [1, 2, 3]);
+  assert.ok(Math.abs((s.costUsd ?? 0) - 0.06) < 1e-9, `${s.costUsd}`);
 });
 
 test("runner: pod lost after a write — no re-run; the step fails naming what was written", async () => {
@@ -435,12 +494,12 @@ test("the tries line: only when a try was lost; slim (lost) then full, with each
   assert.equal(podTriesLine(undefined), null);
   assert.equal(podTriesLine([{ n: 1, status: "completed", image: "full", costUsd: 0.02 }]), null);
   assert.equal(
-    podTriesLine([{ n: 1, status: "lost", image: "slim", costUsd: 0.004 }, { n: 1, status: "completed", image: "full", costUsd: 0.006 }]),
-    "slim · lost · $0.0040 → full · completed · $0.0060",
+    podTriesLine([{ n: 1, status: "lost", image: "slim", costUsd: 0.004 }, { n: 2, status: "completed", image: "full", costUsd: 0.006 }]),
+    "#1 slim · lost · $0.0040 → #2 full · completed · $0.0060",
   );
   assert.equal(
-    podTriesLine([{ n: 1, status: "failed", image: "full", costUsd: null }, { n: 2, status: "lost", image: "slim", costUsd: 0.01 }, { n: 2, status: "completed", image: "full", costUsd: 0.02 }]),
-    "#1 full · failed → #2 slim · lost · $0.0100 → #2 full · completed · $0.0200",
+    podTriesLine([{ n: 1, status: "failed", image: "full", costUsd: null }, { n: 2, status: "lost", image: "slim", costUsd: 0.01 }, { n: 3, status: "completed", image: "full", costUsd: 0.02 }]),
+    "#1 full · failed → #2 slim · lost · $0.0100 → #3 full · completed · $0.0200",
   );
 });
 

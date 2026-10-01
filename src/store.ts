@@ -2995,8 +2995,14 @@ export interface StepMessage {
 
 /** One attempt of a step — see StepRecord.tries. */
 export interface StepAttempt {
-  /** Which attempt, 1-based: `attempts` on the step at the time. */
+  /** Which try, 1-based, in the order they ran: a retry is the next try,
+   *  and so is the full re-run after a slim go the browser pod was lost
+   *  under. Equal to the step's attempt (`attempts` at the time) unless
+   *  `attempt` says otherwise. */
   n: number;
+  /** The step's attempt this try belongs to, written only when it is not
+   *  `n` — after a lost slim go, its full re-run is try 2 of attempt 1. */
+  attempt?: number;
   /** `lost`: a slim go the account's browser pod went away under, which
    *  the step ran again on the full image within the same attempt — a row
    *  of its own (image slim), before the full go's. */
@@ -3087,7 +3093,7 @@ export interface StepRecord {
   browserPod?: (BrowserPodOutcome & { fallback?: string; failure?: string }) | null;
   /** The slim go a lost browser pod ended, set aside while the step re-runs
    *  on full; recordAttempt makes it a `lost` row of `tries` and clears it. */
-  podLostTry?: Omit<StepAttempt, "n" | "startedAt"> | null;
+  podLostTry?: Omit<StepAttempt, "n" | "attempt" | "startedAt"> | null;
   /** When the step actually started and finished executing — not when the
    *  run reached it. A step's events approximate this (first and last), but
    *  a model can think for minutes before its first tool call, and a step

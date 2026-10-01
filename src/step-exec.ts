@@ -528,13 +528,21 @@ export async function executeStep(
     }
     const { events, next } = readPodEvents(text, podOffset);
     podOffset = next;
-    for (const e of events) {
+    let closedAgain = false;
+    for (const [i, e] of events.entries()) {
       if (e.kind === "reconnect") {
         podState.reconnects += 1;
-        if (e.ok) podState.reconnected += 1;
+        // A reconnect that reached the pod, and then the call dropped again
+        // at once (the web tool's next line is "lost"), did not get
+        // through: the pod answered while it shut down. Live, 2026-10-01,
+        // "reconnected (try 1 of 3)" was followed by "lost after 1
+        // reconnect try" and the step read "1 got through".
+        closedAgain = !!e.ok && events[i + 1]?.kind === "lost";
+        if (closedAgain) podState.closedAgain = (podState.closedAgain ?? 0) + 1;
+        else if (e.ok) podState.reconnected += 1;
         // `at` is when the try happened: these lines reach the run when the
         // call returns, so the run's own stamps on them are all the same.
-        emit("info", `browser pod: ${e.ok ? "reconnected" : "reconnect failed"} (try ${e.attempt ?? "?"} of ${e.of ?? "?"}${podAt(e.at)})${!e.ok && e.error ? ` — ${e.error}` : ""}`);
+        emit("info", `browser pod: ${e.ok ? "reconnected" : "reconnect failed"} (try ${e.attempt ?? "?"} of ${e.of ?? "?"}${podAt(e.at)})${!e.ok && e.error ? ` — ${e.error}` : ""}${closedAgain ? ", but the pod closed again" : ""}`);
       } else if (!podState.lost) {
         // A call that never reached the pod changed nothing, whatever its
         // arguments asked for.
@@ -542,7 +550,9 @@ export async function executeStep(
         podState.lost = { cause: e.kind, detail: (e.kind === "needs-full" ? e.why : e.error) ?? "connection closed" };
         emit("info", e.kind === "needs-full"
           ? `browser pod: this call needs a browser in the step, which the slim image has not (${podState.lost.detail}) — stopping the step`
-          : `browser pod: lost after ${podState.reconnects} reconnect tr${podState.reconnects === 1 ? "y" : "ies"} (${podState.lost.detail}${podAt(e.at)}) — stopping the step`);
+          : closedAgain
+            ? `browser pod: lost — the call dropped again after the reconnect (${podState.lost.detail}${podAt(e.at)}) — stopping the step`
+            : `browser pod: lost after ${podState.reconnects} reconnect tr${podState.reconnects === 1 ? "y" : "ies"} (${podState.lost.detail}${podAt(e.at)}) — stopping the step`);
         endWith("pod-lost");
       }
     }

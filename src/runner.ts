@@ -1685,7 +1685,8 @@ export function repriced(
  */
 export function recordAttempt(
   step: StepRecord,
-  n: number,
+  /** The step's attempt (`attempts`) these rows belong to. */
+  attempt: number,
   status: "completed" | "failed",
   startedAt: string,
   eventsBefore: number,
@@ -1698,11 +1699,28 @@ export function recordAttempt(
     .slice(eventsBefore)
     .filter((e) => e.type === "error")
     .at(-1)?.text;
+  // Re-attached: the same attempt, so its rows — the last one, and the lost
+  // slim go before it — are replaced, not repeated.
+  const kept = [...tries];
+  const attemptOf = (t: StepAttempt) => t.attempt ?? t.n;
+  if (reattach && kept.length && attemptOf(kept.at(-1)!) === attempt) {
+    kept.pop();
+    if (kept.length && attemptOf(kept.at(-1)!) === attempt && kept.at(-1)!.status === "lost") kept.pop();
+  }
+  // Tries are numbered in the order they ran: a full re-run after a lost
+  // slim go is the next try, not the same number again (live, 2026-10-01,
+  // both rows read n: 1). `attempt` says which attempt a row belongs to
+  // when its number no longer does.
+  let next = (kept.at(-1)?.n ?? 0) + 1;
+  const numbered = () => {
+    const n = next++;
+    return n === attempt ? { n } : { n, attempt };
+  };
   // A slim go the browser pod was lost under, before this attempt re-ran
   // on the full image: its own row, first (runStep set it aside).
-  const lost: StepAttempt[] = step.podLostTry ? [{ n, ...step.podLostTry, startedAt }] : [];
+  const lost: StepAttempt[] = step.podLostTry ? [{ ...numbered(), ...step.podLostTry, startedAt }] : [];
   const row: StepAttempt = {
-    n,
+    ...numbered(),
     status,
     costUsd: step.costUsd,
     tokens: step.tokens ?? null,
@@ -1713,8 +1731,6 @@ export function recordAttempt(
     ...(step.image?.variant ? { image: step.image.variant } : {}),
     ...(step.browserPod ? { browserPod: browserPodLine(step.browserPod) } : {}),
   };
-  // Re-attached: the same attempt, so its rows are replaced, not repeated.
-  const kept = reattach ? tries.filter((t) => t.n !== n) : tries;
   delete step.podLostTry;
   step.tries = [...kept, ...lost, row];
   const totals = sumAttempts(step.tries);
