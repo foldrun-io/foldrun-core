@@ -28,7 +28,10 @@ versioned here and `npm install` (its `prepare` runs `sh .githooks/install.sh`) 
   config (`../foldrun-infra/.gitleaks.toml`), `node --check` on `.mjs`,
   `bash -n` + `shellcheck -S error` on `.sh`, YAML parse.
 - **pre-push** (what CI and the deploy gate run): gitleaks over the commits being
-  pushed and the pushed tree, then `npx tsc --noEmit -p .` and `npm test`.
+  pushed and the pushed tree, then `npx tsc --noEmit -p .` and `npm test`. The checks run on a
+  detached worktree of the pushed commit beside this checkout (sharing its
+  `node_modules`), so uncommitted work here neither hides a failure nor
+  causes one.
 
 Hooks only read; they never format, stash or reset. Emergency bypass:
 `SKIP_HOOKS=1 git push` (or `--no-verify`) — and say why in the commit or PR.
