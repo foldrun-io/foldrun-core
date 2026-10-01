@@ -451,3 +451,20 @@ test("the slim runner ships fonts — without them every non-browser render draw
   // Not in base: the full image's browser layers must stay cached.
   assert.doesNotMatch(DOCKERFILE.split("FROM base AS slim")[0], /fonts-dejavu/);
 });
+
+test("the browsers stage installs Xvfb by name — headless: false must not hang on a Playwright dependency list", () => {
+  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  assert.match(browsers, /apt-get install -y --no-install-recommends xvfb\b/);
+  const commands = browsers.split("\n").filter((l) => !l.startsWith("#")).join("\n");
+  assert.doesNotMatch(commands, /xauth/, "nothing runs xvfb-run, so nothing needs xauth");
+});
+
+test("the full image writes down which engines it has, and an x86_64 build missing one fails", () => {
+  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  assert.match(browsers, /\/opt\/browser\/engines\.json/);
+  for (const e of ["chromium", "chrome", "firefox", "webkit", "lightpanda", "obscura"]) assert.match(browsers, new RegExp(`"${e}"|\\b${e}: one\\(`), `${e} is in the manifest`);
+  assert.match(browsers, /arch === "x86_64"\) \{[^}]*process\.exit\(1\)/);
+  // The probe is one shell-quoted program: a single quote inside it would end it early.
+  const probe = browsers.split("RUN node -e '")[1].split("\n '")[0];
+  assert.doesNotMatch(probe, /'/);
+});

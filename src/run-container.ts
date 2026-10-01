@@ -645,6 +645,20 @@ ENTRYPOINT ["/opt/runner/entry.sh"]
  *  resolver, and the runtime cache is keyed on the declaration, not on it. */
 export const UV_VERSION = "0.11.25";
 
+/** The base both targets start from, pinned by digest. The tag alone floats:
+ *  `node:22-slim` is re-pushed for every Node patch and Debian point release
+ *  (and moved from bookworm to trixie without a word), so the same runner
+ *  tag — a hash of this text — could hold different bytes on two rebuilds.
+ *  With the digest in the text, new base bytes mean a new tag.
+ *
+ *  Raise it on purpose: read the current digest of the tag, put it here,
+ *  then build both targets and run one step on each (see the image notes in
+ *  foldrun-infra/docs/runner-image.md):
+ *    docker buildx imagetools inspect node:22-bookworm-slim --format '{{json .Manifest}}' | jq -r .digest
+ *  The digest names the multi-arch index, so the one pin serves amd64 and
+ *  arm64 alike. */
+export const NODE_BASE = "node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c";
+
 // Two images from one file, as build targets.
 //
 //   full  (the default, the last stage) — everything, browsers included. The
@@ -660,7 +674,7 @@ export const UV_VERSION = "0.11.25";
 //
 // The browsers sit BELOW the core install in `full`, as they always have,
 // so a core change rebuilds one thin layer and not 1.4 GB of Chromium.
-export const DOCKERFILE = `FROM node:22-slim AS base
+export const DOCKERFILE = `FROM ${NODE_BASE} AS base
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
@@ -703,6 +717,14 @@ FROM base AS browsers
 # Raise it on purpose, with the gallery tests and one real call.
 # axe-core beside it is web browse's mode=a11y: one file the tool injects
 # into the page; without it the mode falls back to its own shorter checks.
+# Xvfb by name: the browser pod starts it at boot and web browse starts one
+# per call for headless: false. It used to arrive only as one of Playwright's
+# --with-deps packages, so a Playwright bump that dropped it would have
+# broken every windowed browser without a word. No xauth: nothing here runs
+# xvfb-run, and Xvfb started without -auth takes the local client as it is.
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends xvfb \\
+ && rm -rf /var/lib/apt/lists/*
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
  && playwright install --with-deps chromium firefox webkit >/dev/null \\
  && (playwright install --with-deps chrome chrome-beta >/dev/null 2>&1 || echo "real Chrome unavailable on this arch — engine: chrome falls back to chromium") \\
@@ -747,6 +769,42 @@ RUN arch=$(uname -m) \\
       chmod a+rx /opt/browser/obscura/obscura /opt/browser/obscura/obscura-worker && /opt/browser/obscura/obscura --version; \\
     else rm -rf /opt/browser/obscura/*; echo "obscura not installed for $arch — engine: obscura says so when asked"; fi \\
  && rm -f /tmp/obscura.tgz
+# What this image actually has, written down: /opt/browser/engines.json, one
+# entry per engine (its path and version, or null when the install above
+# left it out) plus Xvfb. web browse reads it for its "built without" answer,
+# and the deploy reads it to report the engines beside the version.
+# On x86_64 a missing engine FAILS the build: every engine ships for that
+# arch, so a gap there is a failed download, and an image that quietly lacks
+# the Chrome or Lightpanda a desk names would fail those runs instead. A
+# failed build leaves the previous image running and says why. Elsewhere
+# (arm64 has no Google Chrome) the gap is recorded and the image ships.
+RUN node -e ' \\
+  const fs = require("fs"), cp = require("child_process"), pw = require("playwright"); \\
+  const at = (p) => (p && fs.existsSync(p) ? p : null); \\
+  const ver = (bin, args) => { try { return cp.execFileSync(bin, args, { timeout: 30000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim().split("\\n")[0] || null; } catch { return null; } }; \\
+  const one = (p, v) => (p ? { path: p, version: v } : null); \\
+  const pwBuild = (p) => (p ? (p.match(/(chromium|firefox|webkit)-(\\d+)/) || [])[0] || null : null); \\
+  const lp = at("/opt/browser/lightpanda/lightpanda"); \\
+  const ob = at("/opt/browser/obscura/obscura-worker") && at("/opt/browser/obscura/obscura"); \\
+  const engines = { \\
+    chromium: one(at(pw.chromium.executablePath()), pwBuild(pw.chromium.executablePath())), \\
+    chrome: one(at("/opt/google/chrome/chrome"), ver("/opt/google/chrome/chrome", ["--version"])), \\
+    "chrome-beta": one(at("/opt/google/chrome-beta/chrome"), ver("/opt/google/chrome-beta/chrome", ["--version"])), \\
+    firefox: one(at(pw.firefox.executablePath()), pwBuild(pw.firefox.executablePath())), \\
+    webkit: one(at(pw.webkit.executablePath()), pwBuild(pw.webkit.executablePath())), \\
+    lightpanda: one(lp, lp && ver(lp, ["version"])), \\
+    obscura: one(ob, ob && ver(ob, ["--version"])), \\
+  }; \\
+  const xvfb = ver("sh", ["-c", "command -v Xvfb"]); \\
+  const arch = cp.execFileSync("uname", ["-m"]).toString().trim(); \\
+  const manifest = { arch, playwright: require("playwright/package.json").version, engines, xvfb }; \\
+  fs.writeFileSync("/opt/browser/engines.json", JSON.stringify(manifest, null, 2) + "\\n"); \\
+  console.log(JSON.stringify(manifest)); \\
+  const missing = ["chromium", "chrome", "firefox", "webkit", "lightpanda", "obscura"].filter((e) => !engines[e]).concat(xvfb ? [] : ["Xvfb"]); \\
+  if (missing.length && arch === "x86_64") { console.error("runner image: " + missing.join(", ") + " missing on x86_64, where every engine ships - failing the build"); process.exit(1); } \\
+  if (missing.length) console.error("runner image: built without " + missing.join(", ") + " on " + arch); \\
+ ' \\
+ && chmod a+r /opt/browser/engines.json
 
 FROM browsers AS full
 ${CORE_INSTALL}`;
