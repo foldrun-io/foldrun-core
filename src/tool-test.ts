@@ -27,6 +27,7 @@ import { attachOperations, prefetchOpenApi, type OperationSpec } from "./openapi
 import { commandFor, resolveRunPath } from "./script-tools.ts";
 import { parseRuntime, prepareRuntime } from "./runtime.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { linkWorkspace, workspaceLinkEnv } from "./confine.ts";
 
 export interface ToolTestResult {
   ok: boolean;
@@ -313,14 +314,20 @@ export async function testTool(
       file,
       toolRuntime.interpreters,
     );
+    // The `workspace` link a step holds, held for the test too — a tool
+    // whose code says `workspace/state/x` found nothing here while the same
+    // call worked in a flow. Only from an agent's folder: at the workspace
+    // root there is no depth for it to stand at (the note below says so).
+    const link = caller ? linkWorkspace(cwd, dir) : null;
     let ran: Awaited<ReturnType<typeof runOnce>>;
     try {
-      ran = await runOnce(cmd, [...args, ...flags], cwd, {
+      ran = await runOnce(cmd, [...args, ...flags], cwd, workspaceLinkEnv({
         ...hostSafeBaseEnv(),
         ...toolRuntime.env,
         ...env,
-      });
+      }, cwd));
     } finally {
+      link?.release();
       // A private build (a concurrent one was wedged) is this test's alone.
       toolRuntime.dispose?.();
     }
@@ -340,7 +347,7 @@ export async function testTool(
       detail: clip(
         (caller
           ? `ran from agents/${caller.name}/, where a run runs\n\n`
-          : `ran from the workspace root — there is no agent to stand in for, so a script that reaches ../../ will look one level too high\n\n`) +
+          : `ran from the workspace root — there is no agent to stand in for, so a script that reaches workspace/ or ../../ will not find the workspace there\n\n`) +
           (out || "(no output)"),
       ),
     });

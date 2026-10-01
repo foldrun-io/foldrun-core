@@ -21,6 +21,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { runInContainer } from "./container.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { workspaceLinkEnv } from "./confine.ts";
 import { platform } from "./platform.ts";
 
 // A script's only clock is the `timeout:` its own tool.md declares. There
@@ -269,7 +270,7 @@ export function runScript(
     // environment, which is the boundary, so nothing is lost there.
     const child = spawn(cmd, args, {
       cwd,
-      env: { ...hostSafeEnv(), ...env },
+      env: workspaceLinkEnv({ ...hostSafeEnv(), ...env }, cwd),
       timeout: timeoutFor(spec),
     });
     let out = "";

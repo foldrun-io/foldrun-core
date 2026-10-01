@@ -511,3 +511,60 @@ export function linkWorkspace(agentDir: string, workspaceRoot: string): { releas
     },
   };
 }
+
+/**
+ * A Node program started THROUGH the link is still its own main module.
+ *
+ * `node workspace/tools/x/run.mjs` loads the file by its real path —
+ * import.meta.url says `<ws>/tools/x/run.mjs` — while process.argv[1] keeps
+ * the path as typed, `<ws>/agents/a/workspace/tools/x/run.mjs`. The usual
+ * entry-point check, `import.meta.url === pathToFileURL(process.argv[1]).href`,
+ * was then false: the program did nothing, exited 0, and a `verify:` that
+ * ran it passed on every input.
+ *
+ * The fix rides NODE_OPTIONS into every child a step starts (the model's
+ * Bash, a shell `verify:`, a scripts: tool, the Test button): a preload that
+ * rewrites argv[1] to its real path, and only when it goes through this
+ * link. `--preserve-symlinks-main` was the obvious flag and the wrong one:
+ * it applies to EVERY linked entry point, and a `node_modules/.bin` shim
+ * then resolves `require("../lib/x.js")` beside the shim and fails.
+ *
+ * A data: URL rather than a file, so nothing has to be shipped to wherever
+ * the step runs (host, run container, pod, a runtime: venv). Node ≥ 20.6
+ * reads `--import` from NODE_OPTIONS; the runner image is Node 22. Python
+ * needs nothing: `python3 workspace/x.py` is `__main__` however it is
+ * reached.
+ */
+const MAIN_PRELOAD = [
+  `import{realpathSync}from"node:fs";`,
+  `import{resolve,sep,delimiter}from"node:path";`,
+  `const l=process.env.FOLDRUN_WORKSPACE_LINK,a=process.argv[1];`,
+  `if(l&&a){const f=resolve(a);`,
+  `if(l.split(delimiter).some(k=>k&&f.startsWith(k+sep))){`,
+  `try{process.argv[1]=realpathSync(f)}catch{}}}`,
+].join("");
+const MAIN_IMPORT = `--import=data:text/javascript,${encodeURIComponent(MAIN_PRELOAD)}`;
+
+/**
+ * `env` plus what makes `node workspace/…` its own main module (above):
+ * the link's path(s) in FOLDRUN_WORKSPACE_LINK, the preload appended to
+ * NODE_OPTIONS — after what it held, or the host's when it held nothing.
+ * Idempotent, and harmless where no link exists: the preload matches only
+ * a path under it.
+ */
+export function workspaceLinkEnv<T extends Record<string, string | undefined>>(env: T, agentDir: string): T {
+  const link = path.join(path.resolve(agentDir), "workspace");
+  let real = link;
+  try {
+    real = path.join(fs.realpathSync(agentDir), "workspace");
+  } catch {
+    // not there yet — the lexical path is the one a shell would type
+  }
+  const held = env.NODE_OPTIONS ?? process.env.NODE_OPTIONS ?? "";
+  const options = held.includes(MAIN_IMPORT) ? held : [held.trim(), MAIN_IMPORT].filter(Boolean).join(" ");
+  return {
+    ...env,
+    FOLDRUN_WORKSPACE_LINK: [...new Set([link, real])].join(path.delimiter),
+    NODE_OPTIONS: options,
+  };
+}

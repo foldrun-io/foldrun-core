@@ -17,7 +17,7 @@ import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import { spawn } from "node:child_process";
-import { checkPaths, checkBash, isFilesystemTool, linkWorkspace, resolveAgentPath, isWithin } from "./confine.ts";
+import { checkPaths, checkBash, isFilesystemTool, linkWorkspace, workspaceLinkEnv, resolveAgentPath, isWithin } from "./confine.ts";
 import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
@@ -274,7 +274,11 @@ export async function executeStep(
   const link = linkWorkspace(opts.agentDir, opts.workspaceRoot);
   if (link.note) opts.emit("info", `workspace/: ${link.note}`);
   try {
-    return await executeStepInner(opts, runQuery);
+    // And a Node program started through it is still its own main module
+    // (confine.ts#workspaceLinkEnv) — for the model's Bash, which inherits
+    // the SDK's env; the shell verify: and the scripts get it where they
+    // spawn.
+    return await executeStepInner({ ...opts, env: workspaceLinkEnv(opts.env, opts.agentDir) }, runQuery);
   } finally {
     link.release();
   }
@@ -1005,7 +1009,9 @@ function runVerify(
     // Never process.env whole — see host-env.ts.
     const child = spawn("bash", ["-lc", command], {
       cwd: agentDir,
-      env: { ...hostSafeEnv(), ...env },
+      // workspaceLinkEnv: `node workspace/tools/x/check.mjs` must run its
+      // check, not pass for having skipped it (confine.ts says how).
+      env: workspaceLinkEnv({ ...hostSafeEnv(), ...env }, agentDir),
       stdio: ["pipe", "pipe", "pipe"],
       // Its own process group, so an abort ends what the shell started
       // (`npm run build` and its children) and not only bash.
