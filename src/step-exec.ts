@@ -17,7 +17,7 @@ import type { Effort } from "./store.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import { spawn } from "node:child_process";
-import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
+import { checkPaths, checkBash, isFilesystemTool, linkWorkspace, resolveAgentPath, isWithin } from "./confine.ts";
 import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
@@ -266,6 +266,21 @@ export async function executeStep(
    *  without a model; production passes nothing and gets the SDK. */
   runQuery: QueryFn = query as unknown as QueryFn,
 ): Promise<ExecOutcome> {
+  // `workspace/…` for the shell, the scripts and a shell `verify:` — the
+  // file tools expand the prefix themselves. Held for the step, verify
+  // included, and gone before anyone reads the step's files back
+  // (confine.ts#linkWorkspace says why it is not permanent).
+  fs.mkdirSync(opts.agentDir, { recursive: true });
+  const link = linkWorkspace(opts.agentDir, opts.workspaceRoot);
+  if (link.note) opts.emit("info", `workspace/: ${link.note}`);
+  try {
+    return await executeStepInner(opts, runQuery);
+  } finally {
+    link.release();
+  }
+}
+
+async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
   let status: "running" | "completed" | "failed" = "running";
   let costUsd: number | null = null;
@@ -907,9 +922,14 @@ export async function checkVerify(
       }
     }
     case "file": {
-      const target = path.resolve(agentDir, value);
-      if (!target.startsWith(path.resolve(agentDir) + path.sep)) {
-        return { ok: false, headline: "path escapes the agent directory", detail: "" };
+      // Agent-relative like every path in a flow, or `workspace/…` from the
+      // workspace root; confined to the workspace. It was confined to the
+      // agent's own folder, so the one place a step's deliverable belongs —
+      // `workspace/storage/x`, or `../../storage/x` — was always "escapes".
+      const workspaceRoot = path.resolve(agentDir, "..", "..");
+      const target = resolveAgentPath(workspaceRoot, agentDir, value);
+      if (!isWithin(workspaceRoot, target) || target === workspaceRoot) {
+        return { ok: false, headline: "path escapes the workspace", detail: "" };
       }
       const ok = fs.existsSync(target) && fs.statSync(target).size > 0;
       return { ok, headline: ok ? "present and non-empty" : `${value} is missing or empty`, detail: "" };

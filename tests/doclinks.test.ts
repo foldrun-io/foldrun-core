@@ -45,13 +45,13 @@ test("filenames, titles and storage/ paths all resolve — spelling-blind", () =
       /`\.\.\/\.\.\/memory\/known-duds\.md`/,
       "the older `name:` frontmatter matches like title",
     );
-    assert.match(out, /write to `\.\.\/\.\.\/storage\/leads\.csv`/);
+    assert.match(out, /write to `workspace\/storage\/leads\.csv`/);
   }));
 
 test("a folder is a reference too — [[storage/]] and [[state]] resolve", () =>
   withWorkspace((root) => {
     const out = resolveDocLinks("Read what your instruction names in [[storage/]]; ledgers live in [[knowledge]].", root);
-    assert.match(out, /in `\.\.\/\.\.\/storage\/`/, "trailing slash form");
+    assert.match(out, /in `workspace\/storage\/`/, "trailing slash form");
     assert.match(out, /in `\.\.\/\.\.\/knowledge\/`/, "bare folder name");
     // A folder that does not exist stays prose, like any other miss.
     assert.match(resolveDocLinks("see [[outputs]]", root), /see \[\[outputs\]\]/);
@@ -91,9 +91,9 @@ test("state/ files resolve individually, not just the folder", () =>
       "Read [[index-cursor]], then [[state/dead-ends.csv]], and the rest of [[state]].",
       root,
     );
-    assert.match(out, /Read `\.\.\/\.\.\/state\/index-cursor\.md`/);
-    assert.match(out, /then `\.\.\/\.\.\/state\/dead-ends\.csv`/);
-    assert.match(out, /rest of `\.\.\/\.\.\/state\/`/, "the folder still resolves");
+    assert.match(out, /Read `workspace\/state\/index-cursor\.md`/);
+    assert.match(out, /then `workspace\/state\/dead-ends\.csv`/);
+    assert.match(out, /rest of `workspace\/state\/`/, "the folder still resolves");
     assert.doesNotMatch(out, /\[\[/);
   }));
 
@@ -103,6 +103,6 @@ test("a state file matches hyphen- and case-blind, like every other link", () =>
     fs.writeFileSync(path.join(root, "state", "index-cursor.md"), "position: 0\n");
     assert.match(
       resolveDocLinks("Read [[Index_Cursor]].", root),
-      /`\.\.\/\.\.\/state\/index-cursor\.md`/,
+      /`workspace\/state\/index-cursor\.md`/,
     );
   }));

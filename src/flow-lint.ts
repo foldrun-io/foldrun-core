@@ -288,6 +288,31 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       });
     }
 
+    // `../../storage/…` still works everywhere; `workspace/storage/…` is the
+    // spelling that also works in a shell, and the one the docs teach. Said
+    // once per step, advisory — never an error on a path that resolves.
+    {
+      const rowsOf = step.when ? whenRowsPath(step.when) : null;
+      const spots = [
+        step.eachPath ? ["each: rows of", step.eachPath] : null,
+        rowsOf ? ["when: rows of", rowsOf] : null,
+        step.verify ? ["verify:", step.verify] : null,
+        step.schemaPath ? ["schema:", step.schemaPath] : null,
+        step.instruction ? ["the instruction", step.instruction] : null,
+      ].filter((x): x is [string, string] => !!x && /\.\.\/\.\.\/(storage|state)\b/.test(x[1]));
+      if (spots.length) {
+        warnings.push({
+          step: i,
+          line: step.line,
+          kind: "spelling",
+          message: `"${step.subflow ?? step.agent}" writes ../../storage or ../../state in ${spots.map((x) => x[0]).join(", ")}`,
+          detail:
+            "It still works. The documented spelling is workspace/storage/… and workspace/state/… — " +
+            "the same place, and it also resolves in the shell and in scripts.",
+        });
+      }
+    }
+
     // A gate with no `preview:` shows only the previous step's reply and
     // whatever files that reply happens to name. The person deciding sees a
     // summary, not the thing — unless the agent remembered.

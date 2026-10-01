@@ -66,7 +66,7 @@ test("a person's words at a gate expand, like every other authored instruction",
     // What someone types answering `ask:` is an instruction aimed at this run.
     // It used to reach the model as two literal brackets.
     const answer = resolveDocLinks("read [[state]] and follow [[house-style]]", root);
-    assert.match(answer, /\.\.\/\.\.\/state\//);
+    assert.match(answer, /workspace\/state\//);
     assert.match(answer, /\.\.\/\.\.\/knowledge\/house-style\.md/);
     assert.doesNotMatch(answer, /\[\[/);
   }));

@@ -92,6 +92,9 @@ workspaces/*/runs/
 workspaces/*/outputs/
 state/
 storage/
+# The link a running step keeps in its agent folder (workspace/ for the
+# shell); removed when the step ends, ignored in case one is left behind.
+workspaces/*/agents/*/workspace
 
 .env
 .env.local
@@ -135,6 +138,9 @@ Context every agent here shares. Prices, rules, anything they should all know.
 # Written by runs, not by you.
 runs/
 outputs/
+# The link a running step keeps in its agent folder (workspace/ for the
+# shell); removed when the step ends, ignored in case one is left behind.
+agents/*/workspace
 
 .env
 .env.local
@@ -279,6 +285,16 @@ Regenerated every run means a file; accumulated across runs means \`state/\`.
 
 That last row is worth knowing: a subagent you write in Claude Code is imported
 as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
+
+## Paths inside a workspace
+
+An agent's working directory is \`agents/<name>/\`. Write every path to the
+workspace's own folders as \`workspace/…\` — \`workspace/storage/report.csv\`,
+\`workspace/state/cursor.json\` — in an agent's prose, in flow options
+(\`each: rows of\`, \`when: rows of\`, \`verify:\`, \`preview:\`, \`schema:\`) and in
+script arguments. It resolves the same in the file tools, the shell, scripts
+and checks. The older \`../../storage/…\` reaches the same place and still
+works; \`foldrun check\` suggests the new spelling where it sees it.
 
 ## What a deploy does NOT touch
 

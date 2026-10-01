@@ -172,6 +172,26 @@ export function suggestPath(raw: string): string {
   return `Use a path relative to your agent directory, or workspace/<dir>/… for the workspace root (workspace/storage/, workspace/state/).`;
 }
 
+/**
+ * A path an author wrote in a flow or an agent wrote in a tool call, as an
+ * absolute path: `workspace/…` from the workspace root, anything else from
+ * the agent's own folder (so the older `../../storage/x` lands in the same
+ * place as `workspace/storage/x`). Confinement is the caller's: this only
+ * says where the path points.
+ */
+export function resolveAgentPath(workspaceRoot: string, agentDir: string, raw: string): string {
+  const p = raw.trim();
+  if (p === "workspace" || p === "workspace/") return path.resolve(workspaceRoot);
+  if (p.startsWith("workspace/")) return path.resolve(workspaceRoot, p.slice("workspace/".length));
+  return path.resolve(agentDir, p);
+}
+
+/** True when `abs` is `root` or under it. */
+export function isWithin(root: string, abs: string): boolean {
+  const rel = path.relative(path.resolve(root), path.resolve(abs));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 /** Expand a virtual prefix to a real absolute path, or null if it has none. */
 export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnly: boolean } | null {
   // The SDK resolves a relative path against the cwd BEFORE canUseTool sees
@@ -296,6 +316,31 @@ export function checkPaths(
     if (virtual) rewritten = { ...(rewritten ?? input), [key]: abs };
   }
 
+  // Glob searches from `path` (the cwd when absent) and its PATTERN never
+  // climbs: `../../storage/draft/*.md` answered "No files found" with the
+  // files there (run-munef2am-439a), and an expanded `workspace/storage/*.md`
+  // is an absolute pattern the tool does not search by either. Split such a
+  // pattern at its first wildcard: the fixed directories become `path`, the
+  // rest stays the pattern — so both spellings find what is there.
+  if (toolName === "Glob") {
+    const cur = { ...input, ...(rewritten ?? {}) };
+    const pattern = typeof cur.pattern === "string" ? cur.pattern : "";
+    const climbs = pattern.startsWith("../");
+    if (pattern && (climbs || path.isAbsolute(pattern)) && (cur.path === undefined || cur.path === "")) {
+      const absPattern = climbs ? path.resolve(roots.agentDir, pattern) : pattern;
+      const segs = absPattern.split("/");
+      const wild = segs.findIndex((seg) => /[*?[{]/.test(seg));
+      if (wild > 0 && wild < segs.length) {
+        const base = segs.slice(0, wild).join("/") || "/";
+        const inWorkspace = !path.relative(workspace, real(base)).startsWith("..");
+        const inLibrary = !path.relative(library, real(base)).startsWith("..");
+        if (inWorkspace || inLibrary) {
+          rewritten = { ...(rewritten ?? input), path: base, pattern: segs.slice(wild).join("/") };
+        }
+      }
+    }
+  }
+
   return { ok: true, updatedInput: rewritten };
 }
 
@@ -385,4 +430,84 @@ export function checkBash(command: string): ConfineVerdict {
     }
   }
   return { ok: true };
+}
+
+// ------------------------------------------------------------ workspace link
+
+/**
+ * `workspace/…` for a shell. The file tools expand the prefix themselves
+ * (expandVirtual above), but Bash, a script an agent runs, a scripts: tool
+ * and a shell `verify:` see only the filesystem — and there `workspace/` was
+ * a folder that did not exist, so the one spelling the docs teach worked in
+ * Read and failed in `cat`. For the length of a step the agent's folder holds
+ * a `workspace` link to the workspace root (`../..`), and nothing else.
+ *
+ * Why only for a step: a permanent link inside the tree it points at is a
+ * cycle, and anything that walks the tree following links walks it forever
+ * (a `shared` link was tried that way and reverted). Every walker this
+ * platform runs over a workspace skips links (storage harvest, the source
+ * listing, tar, the container copy-back), and the link is gone before the
+ * step's files are read back.
+ *
+ * Counted, because the parallel instances of one agent (`each:`, a fan-out)
+ * share its folder in one process: the last one out removes it. A real
+ * folder already called `workspace` (a stray from before the prefix was
+ * expanded) is left alone and reported — linking over it would hide files.
+ */
+const workspaceLinks = new Map<string, number>();
+
+export function linkWorkspace(agentDir: string, workspaceRoot: string): { release: () => void; note: string | null } {
+  const link = path.join(agentDir, "workspace");
+  const target = path.relative(path.resolve(agentDir), path.resolve(workspaceRoot)) || ".";
+  const held = workspaceLinks.get(link) ?? 0;
+  let note: string | null = null;
+  let own = false;
+  if (held > 0) {
+    own = true;
+  } else {
+    try {
+      const st = fs.lstatSync(link);
+      if (st.isSymbolicLink()) {
+        // Left by a step that ended without its cleanup — adopt it when it
+        // points where ours would, replace it when it does not.
+        if (fs.readlinkSync(link) !== target) {
+          fs.unlinkSync(link);
+          fs.symlinkSync(target, link, "dir");
+        }
+        own = true;
+      } else {
+        note =
+          `agents/${path.basename(agentDir)}/workspace/ is a real folder, so a shell command's ` +
+          `workspace/… reaches it rather than the workspace root — move what it holds to the ` +
+          `workspace's own storage/ or state/ and delete it`;
+      }
+    } catch {
+      try {
+        fs.symlinkSync(target, link, "dir");
+        own = true;
+      } catch (err) {
+        note = `could not link workspace/ for the shell: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+  }
+  if (own) workspaceLinks.set(link, held + 1);
+  let released = false;
+  return {
+    note,
+    release: () => {
+      if (!own || released) return;
+      released = true;
+      const left = (workspaceLinks.get(link) ?? 1) - 1;
+      if (left > 0) {
+        workspaceLinks.set(link, left);
+        return;
+      }
+      workspaceLinks.delete(link);
+      try {
+        if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link);
+      } catch {
+        // already gone
+      }
+    },
+  };
 }

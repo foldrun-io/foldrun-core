@@ -18,7 +18,7 @@ Do exactly this, in order:
    again. Save the final text to `outputs/note.md`.
 3. Write one thing you learned to `../../memory/` as a new file — one fact,
    plain markdown, a sentence or two. The platform records who wrote it.
-4. Update `../../state/publishing.md`: increase the note count by one and set
+4. Update `workspace/state/publishing.md`: increase the note count by one and set
    the last topic to what you wrote about. Keep it as markdown.
 
 Then stop. Do not create anything else.

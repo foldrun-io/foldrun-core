@@ -133,3 +133,30 @@ export function trimChars(s: string, chars: string): string {
  *  library through the store: 512 KB. A folder tool's program is one file,
  *  and the gallery browser's passed 256 KB on 2026-09-29. */
 export const MAX_EDITABLE_FILE = 512 * 1024;
+
+/**
+ * Every entry under `dir`, relative, like `fs.readdirSync(dir, { recursive:
+ * true })` — except that a link to a directory is listed and NOT entered.
+ * Node's recursive readdir follows directory links, so a link back up the
+ * tree (the `workspace` link a step holds in its agent folder, confine.ts)
+ * is walked about forty levels deep before the kernel stops it, each level
+ * a full copy of the workspace.
+ */
+export function entriesNoFollow(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (abs: string, rel: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      out.push(r);
+      if (e.isDirectory()) walk(path.join(abs, e.name), r);
+    }
+  };
+  walk(dir, "");
+  return out;
+}

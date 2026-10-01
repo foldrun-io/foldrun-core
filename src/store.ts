@@ -24,7 +24,7 @@ import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
-import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
+import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
@@ -424,7 +424,7 @@ export function saveWorkspace(
   const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
   const preserved: string[] = [];
   if (snapshot) {
-    for (const entry of fs.readdirSync(dir, { recursive: true })) {
+    for (const entry of entriesNoFollow(dir)) {
       const rel = String(entry).split(path.sep).join("/");
       const from = path.join(dir, rel);
       try {
@@ -1613,7 +1613,7 @@ export function parseInstant(raw: unknown): string | null {
  * removed a leading OR a trailing quote independently, so a value that
  * merely *ended* with one lost it — and
  *
- *   verify: test "$(cat ../../storage/draft/published.run)" = "$FOLDRUN_RUN_ID"
+ *   verify: test "$(cat workspace/storage/draft/published.run)" = "$FOLDRUN_RUN_ID"
  *
  * reached bash unbalanced, which exited 2 with "unexpected EOF" on every
  * run. The step could never pass, whatever the agent did, and nothing said
@@ -1832,9 +1832,9 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         else if (value === "items") step.each = "items";
         else if (/^rows\b/.test(value)) {
           step.each = "rows";
-          // "rows of ../../storage/leads.csv" — the path is the part after "of".
+          // "rows of workspace/storage/leads.csv" — the path is the part after "of".
           step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
-          if (!step.eachPath) problem("rows needs a file: each: rows of ../../storage/leads.csv");
+          if (!step.eachPath) problem("rows needs a file: each: rows of workspace/storage/leads.csv");
         }
         else problem("lines, items, or rows of <path>");
       }
@@ -1848,7 +1848,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
       }
       else if (key === "ask") { step.ask = value; }
       else if (key === "preview") {
-        step.preview = value.split(",").map((p) => p.trim().replace(/^(\.\.\/\.\.\/)?storage\//, "")).filter(Boolean);
+        step.preview = value.split(",").map((p) => p.trim().replace(/^(\.\.\/\.\.\/|workspace\/)?storage\//, "")).filter(Boolean);
       }
       else if (key === "delegate") step.delegate = refNames(value).slice(0, 5);
       else if (key === "max") {
@@ -2545,7 +2545,7 @@ export function listWorkspaceFiles(tenant: string, workspace: string): string[] 
   const dir = workspaceDir(tenant, workspace);
   if (!fs.existsSync(dir)) return [];
   const out: string[] = [];
-  for (const entry of fs.readdirSync(dir, { recursive: true })) {
+  for (const entry of entriesNoFollow(dir)) {
     const rel = String(entry);
     if (/(^|\/)(runs|outputs)\//.test(rel)) continue;
     // Skip anything reached through a symlink — a stray link would otherwise

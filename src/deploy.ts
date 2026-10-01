@@ -44,6 +44,7 @@ import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
 import { repoDir } from "./gitrepo.ts";
+import { entriesNoFollow } from "./paths.ts";
 
 /** Directories a deploy never reads out of a source tree. */
 const NOT_SOURCE = new Set([".git", "node_modules", "runs", "outputs", ".foldrun", ".results"]);
@@ -397,7 +398,7 @@ export function planDeploy(tenant: string, workspace: string, files: DeployFile[
 
   const present = new Set<string>();
   if (fs.existsSync(dir)) {
-    for (const entry of fs.readdirSync(dir, { recursive: true })) {
+    for (const entry of entriesNoFollow(dir)) {
       const rel = String(entry).split(path.sep).join("/");
       if (NOT_SOURCE.has(rel.split("/")[0])) continue;
       if (/(^|\/)(runs|outputs|\.results)\//.test(rel)) continue;

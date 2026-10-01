@@ -24,7 +24,7 @@ Do exactly this:
    - A fact a later run or a knowledge file contradicts: correct it, and say
      in the file what changed and which run showed it.
    - A note that was only ever true for one day (a count, a cursor, "today"):
-     move it to `../../state/` if it is still useful, else delete it.
+     move it to `workspace/state/` if it is still useful, else delete it.
    - Anything you are not sure about: leave it, and list it in your report.
 3. Never write a fact you did not find in a file or a run. Never touch
    `knowledge/` — that is what people gave the agents, and it is theirs.

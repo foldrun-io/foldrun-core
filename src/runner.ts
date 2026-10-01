@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { cascadeLimits, toolOwners } from "./limits.ts";
+import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
@@ -620,7 +621,9 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
   // instruction names needs to say WHERE without naming a file. Added
   // first, so a document that happens to share a folder's name still wins.
   for (const dir of [STORAGE_DIR, "state", "knowledge", "memory", "skills", "outputs"]) {
-    if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), `../../${dir}/`);
+    // storage/ and state/ by the one spelling that works in every tool,
+    // the shell included; the rest as they always were.
+    if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), dir === STORAGE_DIR || dir === "state" ? `workspace/${dir}/` : `../../${dir}/`);
   }
   for (const kind of ["knowledge", "memory"] as const) {
     const dir = path.join(workspaceRoot, kind);
@@ -659,7 +662,7 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
         continue;
       }
       const fwd = entry.split(path.sep).join("/");
-      const rel = `../../state/${fwd}`;
+      const rel = `workspace/state/${fwd}`;
       map.set(norm(`state/${fwd}`), rel);
       map.set(norm(fwd), rel);
     }
@@ -675,7 +678,7 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
         "utf8",
       ),
     ) as { files?: { path: string }[] };
-    for (const f of index.files ?? []) map.set(norm(`${STORAGE_DIR}/${f.path}`), `../../${STORAGE_DIR}/${f.path}`);
+    for (const f of index.files ?? []) map.set(norm(`${STORAGE_DIR}/${f.path}`), `workspace/${STORAGE_DIR}/${f.path}`);
   } catch {
     // no file store index is normal
   }
@@ -690,8 +693,8 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
       }
       const fwd = entry.split(path.sep).join("/");
       if (fwd.startsWith(".store/")) continue;
-      map.set(norm(`${STORAGE_DIR}/${fwd}`), `../../${STORAGE_DIR}/${fwd}`);
-      map.set(norm(fwd), `../../${STORAGE_DIR}/${fwd}`);
+      map.set(norm(`${STORAGE_DIR}/${fwd}`), `workspace/${STORAGE_DIR}/${fwd}`);
+      map.set(norm(fwd), `workspace/${STORAGE_DIR}/${fwd}`);
     }
   }
   // `[` excluded from the name: with it allowed, a run of `[[` makes the
@@ -755,9 +758,11 @@ function agentContext(
     `# Where you are\n\n` +
       `Your working directory is \`agents/${path.basename(agentDir)}/\` inside the ` +
       `\`${workspace}\` workspace. Every path in this prompt is relative to it — ` +
-      `\`outputs/\` is yours, and \`../../\` is the workspace root, so the workspace's ` +
-      `own knowledge is at \`../../knowledge/\`. Absolute paths are outside the ` +
-      `workspace and will be refused.\n\n` +
+      `\`outputs/\` is yours, and \`workspace/\` is the workspace root, in every tool ` +
+      `and in the shell: the shared file store is \`workspace/storage/\`, what runs ` +
+      `carry forward is \`workspace/state/\`. (\`../../\` reaches the same root and ` +
+      `still works, so a path like \`../../knowledge/\` below is \`workspace/knowledge/\`.) ` +
+      `Absolute paths are outside the workspace and will be refused.\n\n` +
       // A flow's whole point is that a later step works on what an earlier one
       // produced, and each agent writes to its own outputs/. A run showed what
       // omitting this costs: the checker looked in its own empty outputs/ and
@@ -778,18 +783,18 @@ function agentContext(
       // adoptLegacyFilesDir's "move files/ to storage/" is a no-op by the time
       // the run ends — a deliverable written where this text pointed was
       // harvested from nowhere and silently never appeared.
-      `\`../../storage/\` is the workspace file store: anything you leave there is kept ` +
+      `\`workspace/storage/\` is the workspace file store: anything you leave there is kept ` +
       `after the run and shown on the Storage page for people to download. Write ` +
-      `deliverables people asked for — CSVs, reports, PDFs, images — to \`../../storage/\`; ` +
+      `deliverables people asked for — CSVs, reports, PDFs, images — to \`workspace/storage/\`; ` +
       `use \`outputs/\` for working text the next step reads. ` +
-      // A Glob PATTERN that climbs (`../../storage/draft/*.md`) always answers
-      // "No files found", even when the file is there. On blog-desk that made
+      // A Glob PATTERN that climbs (`../../storage/draft/*.md`) always answered
+      // "No files found", even when the file was there. On blog-desk that made
       // every loop pass look like a first pass: the illustrator never saw the
       // fact-check report, re-picked the cover, and 2 of 3 publish runs failed
-      // (run-munef2am-439a, 2026-09-30). The path belongs in Glob's `path`.
+      // (run-munef2am-439a, 2026-09-30). checkPaths now splits such a pattern
+      // into Glob's `path` and the rest; the advice stays, as the plain form.
       `To look for files there, open a known file with Read by its exact path, or ` +
-      `Glob with \`path: "../../storage/..."\` and a pattern like \`*.md\` — a Glob ` +
-      `pattern that itself starts with \`../\` finds nothing, even when the file exists.`,
+      `Glob with \`path: "workspace/storage/..."\` and a pattern like \`*.md\`.`,
   );
 
   // Shared context before anything derived — an account or workspace rule is
@@ -943,7 +948,7 @@ function agentContext(
   // for it. The difference is that state is small enough that inlining would
   // usually be free — that is a threshold worth adding once there is a real
   // file to size it against, not before.
-  const state = listDir(path.join(agentDir, "..", "..", "state"), "../../state/");
+  const state = listDir(path.join(agentDir, "..", "..", "state"), "workspace/state/");
   if (state.length) {
     parts.push(
       `# State — what you carry between runs\n\n` +
@@ -1389,7 +1394,7 @@ function agentContext(
   parts.push(
     "Write deliverables for people to workspace/storage/ (kept and downloadable); write working text for later steps to outputs/; " +
       "what the next run needs goes to workspace/state/. Paths are relative to your agent directory, or start with workspace/ " +
-      "for the workspace root (../../storage/ and workspace/storage/ are the same place). There is no /tmp for you: a " +
+      "for the workspace root (workspace/storage/ and the older ../../storage/ are the same place). There is no /tmp for you: a " +
       "directory a tool made outside the workspace, such as a checkout, is reached only through that tool.",
   );
 
@@ -1503,8 +1508,8 @@ function agentContext(
         { label: "memory/", dir: path.join(agentDir, "memory") },
         { label: "../../knowledge/", dir: path.join(wsRoot, "knowledge") },
         { label: "../../memory/", dir: path.join(wsRoot, "memory") },
-        { label: "../../state/", dir: path.join(wsRoot, "state") },
-        { label: `../../${STORAGE_DIR}/`, dir: path.join(wsRoot, STORAGE_DIR) },
+        { label: "workspace/state/", dir: path.join(wsRoot, "state") },
+        { label: `workspace/${STORAGE_DIR}/`, dir: path.join(wsRoot, STORAGE_DIR) },
         { label: "outputs/", dir: path.join(agentDir, "outputs") },
         { label: "[library] knowledge/", dir: libraryDir(tenant, "knowledge") },
         { label: "[library] memory/", dir: libraryDir(tenant, "memory") },
@@ -2093,9 +2098,11 @@ async function runStep(
 
     // Expose the workspace's shared scripts/ as ./shared so every agent reaches
     // them by the same path, without each one carrying a copy.
-    // No symlinks into the agent directory — they would recurse into the
-    // workspace's own file listing. Shared paths are resolved by the script
-    // tool layer and described to the agent below.
+    // No permanent symlinks into the agent directory — they would recurse
+    // into the workspace's own file listing. Shared paths are resolved by the
+    // script tool layer and described to the agent below; the one link there
+    // is, `workspace` → the root for the shell, lives only for the length of
+    // a step (executeStep, confine.ts#linkWorkspace).
 
     // The confinement boundary: agents in a workspace are one team, but the
     // workspace is where isolation is enforced.
@@ -3198,7 +3205,7 @@ function jsonItems(data: unknown, step: StepRecord, take: number): string[] {
 function csvItems(workspaceDir: string, step: StepRecord, take: number): string[] {
   const raw = step.eachPath ?? "";
   if (!raw) {
-    step.skipReason = "each: rows needs a path — `each: rows of ../../storage/x.csv`";
+    step.skipReason = "each: rows needs a path — `each: rows of workspace/storage/x.csv`";
     return [];
   }
   const read = csvDataRows(workspaceDir, step.agent, raw);
@@ -3219,7 +3226,9 @@ function csvDataRows(
   agent: string,
   raw: string,
 ): { header: string; data: string[] } | { problem: string } {
-  const resolved = path.resolve(workspaceDir, "agents", agent, raw);
+  // `workspace/storage/x.csv` from the workspace root, anything else from
+  // the agent's folder (`../../storage/x.csv` is the same file).
+  const resolved = resolveAgentPath(workspaceDir, path.join(workspaceDir, "agents", agent), raw);
   if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep)) {
     return { problem: `${raw} is outside this workspace` };
   }
@@ -3250,15 +3259,15 @@ function csvDataRows(
 
 /**
  * `schema: <path>` — the file, read and parsed, or null. Agent-relative like
- * every other path in a flow (`../../schemas/lead.json`), confined to the
+ * every other path in a flow (`workspace/schemas/lead.json`), confined to the
  * workspace: a schema is the author's document, never something a step
  * can point outside.
  */
 export function readSchemaFile(workspaceRoot: string, rel: string): Record<string, unknown> | boolean | null {
   const root = path.resolve(workspaceRoot);
-  // Written agent-relative (`../../schemas/x.json`) or workspace-relative
-  // (`schemas/x.json`); both land on the same file.
-  const candidates = [path.resolve(root, rel.replace(/^(\.\.\/){2}/, "")), path.resolve(root, "agents", "x", rel)];
+  // Written `workspace/schemas/x.json`, agent-relative (`../../schemas/x.json`)
+  // or workspace-relative (`schemas/x.json`); all land on the same file.
+  const candidates = [path.resolve(root, rel.replace(/^((\.\.\/){2}|workspace\/)/, "")), path.resolve(root, "agents", "x", rel)];
   for (const abs of candidates) {
     if (abs !== root && !abs.startsWith(root + path.sep)) continue;
     if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;

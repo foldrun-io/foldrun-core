@@ -550,7 +550,7 @@ export function completionsAt(
       each: [
         { label: "lines", hint: "one instance per line of the previous result" },
         { label: "items", hint: "one per element of the previous output: json array" },
-        { label: "rows of ../../storage/x.csv", hint: "one per CSV row" },
+        { label: "rows of workspace/storage/x.csv", hint: "one per CSV row" },
       ],
     };
     const items = byKey[key];
