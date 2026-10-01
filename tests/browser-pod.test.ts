@@ -14,14 +14,14 @@ import os from "node:os";
 import path from "node:path";
 import {
   BROWSE_WRITE_ACTIONS, RERAN_ON_FULL, browseActionNames, browserPodLine, classifyCall, describeWrites,
-  paidWebActions, parseBrowserPod, podLossDecision, readPodEvents, slimBrowseBlocker,
+  paidWebActions, parseBrowserPod, podAt, podLossDecision, podTriesLine, readPodEvents, slimBrowseBlocker,
 } from "../src/browser-pod.ts";
 import { WEB_BROWSE_ACTIONS } from "../src/providers.ts";
 import { executeStep, type QueryFn } from "../src/step-exec.ts";
 import { parseDriverLine, type RunInContainerArgs, type ContainerStepOutcome } from "../src/run-container.ts";
-import { startFlowRun, waitForRun } from "../src/runner.ts";
+import { startFlowRun, waitForRun, recordAttempt } from "../src/runner.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
-import type { FlowStep } from "../src/store.ts";
+import type { FlowStep, StepRecord } from "../src/store.ts";
 
 const WEB = "mcp__foldrun_scripts__web";
 
@@ -305,9 +305,65 @@ test("runner: pod lost after reads only — the step runs again from the start o
     assert.ok(s.events.some((e) => e.type === "info" && e.text.startsWith(RERAN_ON_FULL)), "the run says it");
     assert.ok(Math.abs((s.costUsd ?? 0) - 0.03) < 1e-6, `both attempts are paid for: ${s.costUsd}`);
     assert.equal(s.computeSecs, 8);
-    assert.equal(s.tries?.[0].image, "full");
-    assert.match(s.tries?.[0].browserPod ?? "", /re-ran on full/);
+    // Two tries on the record: the slim go the pod was lost under, then the
+    // full one (live, 2026-10-01, the record showed only the full one).
+    assert.equal(s.tries?.length, 2, JSON.stringify(s.tries));
+    const [lost, full] = s.tries!;
+    assert.equal(lost.status, "lost");
+    assert.equal(lost.image, "slim");
+    assert.equal(lost.n, 1);
+    assert.ok(Math.abs((lost.costUsd ?? 0) - 0.01) < 1e-9, `the slim go's own cost: ${lost.costUsd}`);
+    assert.deepEqual(lost.tokens, { input: 100, output: 10 });
+    assert.equal(lost.computeSecs, 3);
+    assert.equal(lost.browserPod, "3 reconnects (0 got through); pod lost: ECONNREFUSED");
+    assert.match(lost.error ?? "", /^browser pod lost; re-ran on full/);
+    assert.equal(full.status, "completed");
+    assert.equal(full.image, "full");
+    assert.equal(full.n, 1);
+    assert.ok(Math.abs((full.costUsd ?? 0) - 0.02) < 1e-9, `the full go's own cost: ${full.costUsd}`);
+    assert.equal(full.computeSecs, 5);
+    assert.match(full.browserPod ?? "", /re-ran on full/);
+    assert.ok(Date.parse(full.startedAt) >= Date.parse(lost.finishedAt), "the full go starts where the slim one was lost");
+    assert.equal(s.podLostTry, undefined, "nothing left set aside");
   });
+});
+
+test("runner: the live reader sequence — a reconnect that got through, then the pod gone — records slim (lost) then full", async () => {
+  // run-mupdjcjl-u2y9 on dev, 2026-10-01: call 2 met the closed browser and
+  // reconnected; call 5's three reconnects were refused; re-ran on full.
+  let n = 0;
+  const fake: Fake = async () => {
+    n += 1;
+    if (n === 1) {
+      return {
+        status: "failed", result: null, costUsd: 0.004, usage: { inputTokens: 40, outputTokens: 4 }, image: slim,
+        browserPod: { reconnects: 4, reconnected: 1, lost: { cause: "lost", detail: "connect ECONNREFUSED 10.43.12.163:3000" }, writes: [] },
+        timing: { sandboxMs: 100, firstOutputMs: null, totalMs: 40_000 },
+      };
+    }
+    return { status: "completed", result: "ok", costUsd: 0.006, usage: { inputTokens: 60, outputTokens: 6 }, image: { variant: "full", why: "re-run after the browser pod was lost" }, timing: { sandboxMs: 100, firstOutputMs: null, totalMs: 50_000 } };
+  };
+  await withFake(fake, AGENT, async () => {
+    const run = startFlowRun("acme", "desk", [step()], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    const s = done!.steps[0];
+    assert.deepEqual(s.tries?.map((t) => [t.image, t.status]), [["slim", "lost"], ["full", "completed"]]);
+    assert.equal(s.tries?.[0].browserPod, "4 reconnects (1 got through); pod lost: connect ECONNREFUSED 10.43.12.163:3000");
+    assert.ok(Math.abs((s.costUsd ?? 0) - 0.01) < 1e-9);
+    assert.equal(s.computeSecs, 90);
+  });
+});
+
+test("recordAttempt: a re-attached attempt replaces its rows, the lost one too", () => {
+  const s = { events: [], costUsd: 0.02, tokens: null, computeSecs: 5, finishedAt: "2026-10-01T10:13:00.000Z" } as unknown as StepRecord;
+  s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };
+  recordAttempt(s, 1, "completed", "2026-10-01T10:11:00.000Z", 0);
+  assert.deepEqual(s.tries?.map((t) => [t.n, t.status, t.startedAt]), [[1, "lost", "2026-10-01T10:11:00.000Z"], [1, "completed", "2026-10-01T10:12:30.000Z"]]);
+  assert.ok(Math.abs((s.costUsd ?? 0) - 0.03) < 1e-9);
+  s.costUsd = 0.02; s.computeSecs = 5;
+  s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };
+  recordAttempt(s, 1, "completed", "2026-10-01T10:11:00.000Z", 0, true);
+  assert.equal(s.tries?.length, 2, "replaced, not repeated");
 });
 
 test("runner: pod lost after a write — no re-run; the step fails naming what was written", async () => {
@@ -373,4 +429,23 @@ test("runner: a step granting an outward tool is marked outward, so the executor
     assert.equal(inputs[0].outward, true);
     assert.equal(inputs[1].outward, undefined);
   });
+});
+
+test("the tries line: only when a try was lost; slim (lost) then full, with each one's cost", () => {
+  assert.equal(podTriesLine(undefined), null);
+  assert.equal(podTriesLine([{ n: 1, status: "completed", image: "full", costUsd: 0.02 }]), null);
+  assert.equal(
+    podTriesLine([{ n: 1, status: "lost", image: "slim", costUsd: 0.004 }, { n: 1, status: "completed", image: "full", costUsd: 0.006 }]),
+    "slim · lost · $0.0040 → full · completed · $0.0060",
+  );
+  assert.equal(
+    podTriesLine([{ n: 1, status: "failed", image: "full", costUsd: null }, { n: 2, status: "lost", image: "slim", costUsd: 0.01 }, { n: 2, status: "completed", image: "full", costUsd: 0.02 }]),
+    "#1 full · failed → #2 slim · lost · $0.0100 → #2 full · completed · $0.0200",
+  );
+});
+
+test("a pod log line's time, for the run's reconnect lines", () => {
+  assert.equal(podAt("2026-10-01T10:15:15.123Z"), ", at 10:15:15Z");
+  assert.equal(podAt(undefined), "");
+  assert.equal(podAt("not a time"), "");
 });

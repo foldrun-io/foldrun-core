@@ -2997,7 +2997,10 @@ export interface StepMessage {
 export interface StepAttempt {
   /** Which attempt, 1-based: `attempts` on the step at the time. */
   n: number;
-  status: "completed" | "failed";
+  /** `lost`: a slim go the account's browser pod went away under, which
+   *  the step ran again on the full image within the same attempt — a row
+   *  of its own (image slim), before the full go's. */
+  status: "completed" | "failed" | "lost";
   costUsd: number | null;
   tokens: { input: number; output: number } | null;
   computeSecs: number | null;
@@ -3082,6 +3085,9 @@ export interface StepRecord {
    *  step had only read and ran again on the full image) or `failure` (it
    *  had written, so it was not re-run). */
   browserPod?: (BrowserPodOutcome & { fallback?: string; failure?: string }) | null;
+  /** The slim go a lost browser pod ended, set aside while the step re-runs
+   *  on full; recordAttempt makes it a `lost` row of `tries` and clears it. */
+  podLostTry?: Omit<StepAttempt, "n" | "startedAt"> | null;
   /** When the step actually started and finished executing — not when the
    *  run reached it. A step's events approximate this (first and last), but
    *  a model can think for minutes before its first tool call, and a step

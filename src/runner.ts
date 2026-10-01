@@ -1698,20 +1698,25 @@ export function recordAttempt(
     .slice(eventsBefore)
     .filter((e) => e.type === "error")
     .at(-1)?.text;
+  // A slim go the browser pod was lost under, before this attempt re-ran
+  // on the full image: its own row, first (runStep set it aside).
+  const lost: StepAttempt[] = step.podLostTry ? [{ n, ...step.podLostTry, startedAt }] : [];
   const row: StepAttempt = {
     n,
     status,
     costUsd: step.costUsd,
     tokens: step.tokens ?? null,
     computeSecs: step.computeSecs ?? null,
-    startedAt,
+    startedAt: step.podLostTry?.finishedAt ?? startedAt,
     finishedAt: step.finishedAt ?? new Date().toISOString(),
     ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
     ...(step.image?.variant ? { image: step.image.variant } : {}),
     ...(step.browserPod ? { browserPod: browserPodLine(step.browserPod) } : {}),
   };
-  const kept = reattach && tries.at(-1)?.n === n ? tries.slice(0, -1) : tries;
-  step.tries = [...kept, row];
+  // Re-attached: the same attempt, so its rows are replaced, not repeated.
+  const kept = reattach ? tries.filter((t) => t.n !== n) : tries;
+  delete step.podLostTry;
+  step.tries = [...kept, ...lost, row];
   const totals = sumAttempts(step.tries);
   step.costUsd = totals.costUsd;
   step.tokens = totals.tokens;
@@ -2571,20 +2576,25 @@ async function runStep(
         if (decision.rerun) {
           push("info", decision.note);
           const first = outcome;
+          // The slim go is a try of its own on the record — image slim,
+          // status lost, its own cost, tokens and sandbox seconds — so the
+          // run page and `foldrun report` show two tries, slim (lost) then
+          // full, and the step's totals are the sum of both rows
+          // (recordAttempt). Live, 2026-10-01, the step showed only the
+          // full re-run.
+          step.podLostTry = {
+            status: "lost",
+            costUsd: repriced(catalog, wireModel, first.usage ?? null, first.costUsd, push, first.turnsCostUsd),
+            tokens: first.usage ? { input: first.usage.inputTokens, output: first.usage.outputTokens } : null,
+            computeSecs: first.timing ? Math.round(first.timing.totalMs) / 1000 : null,
+            finishedAt: new Date().toISOString(),
+            error: decision.note.slice(0, 500),
+            image: "slim",
+            browserPod: browserPodLine(first.browserPod!),
+          };
           const again = { ...lastArgs, input: { ...lastArgs.input, image: "full" as const }, resume: null };
           await lease?.commit();
-          outcome = withEarlierTiming(await runTracked(again), first.timing);
-          // Both attempts ran a model; the step owes both.
-          outcome = {
-            ...outcome,
-            costUsd: first.costUsd === null && outcome.costUsd === null ? null : (first.costUsd ?? 0) + (outcome.costUsd ?? 0),
-            usage: first.usage && outcome.usage
-              ? { inputTokens: first.usage.inputTokens + outcome.usage.inputTokens, outputTokens: first.usage.outputTokens + outcome.usage.outputTokens }
-              : (outcome.usage ?? first.usage ?? null),
-            ...(typeof first.turnsCostUsd === "number" || typeof outcome.turnsCostUsd === "number"
-              ? { turnsCostUsd: (first.turnsCostUsd ?? first.costUsd ?? 0) + (outcome.turnsCostUsd ?? outcome.costUsd ?? 0) }
-              : {}),
-          };
+          outcome = await runTracked(again);
           step.image = outcome.image ?? { variant: "full", why: "re-run after the browser pod was lost" };
           step.browserPod = { ...first.browserPod!, fallback: RERAN_ON_FULL };
         } else {

@@ -170,6 +170,15 @@ export interface PodEvent {
   ran?: boolean;
   error?: string;
   why?: string;
+  /** When the web tool wrote the line (ISO). */
+  at?: string;
+}
+
+/** ", at 10:15:15Z" from a pod log line's `at`; empty when it has none. */
+export function podAt(at: unknown): string {
+  if (typeof at !== "string") return "";
+  const t = Date.parse(at);
+  return Number.isNaN(t) ? "" : `, at ${new Date(t).toISOString().slice(11, 19)}Z`;
 }
 
 /** Lines of the pod log from byte `offset` on, and where the next read
@@ -262,4 +271,30 @@ export function browserPodLine(p: BrowserPodOutcome & { fallback?: string; failu
   if (p.fallback) return `${tries}; ${p.fallback}${p.lost ? ` (${p.lost.detail})` : ""}`;
   if (p.lost) return `${tries}; ${p.lost.cause === "needs-full" ? "needed a browser in the step" : "pod lost"}: ${p.lost.detail}`;
   return tries;
+}
+
+/** What podTriesLine reads of a StepAttempt (store.ts) — structural, so
+ *  this module stays free of the store's imports for the CLI and the web. */
+export interface TryRow {
+  n: number;
+  status: string;
+  image?: string;
+  costUsd: number | null;
+}
+
+/** A step's tries in one line when the browser pod was lost under one of
+ *  them — "slim · lost · $0.0040 → full · completed · $0.0060" — so the run
+ *  page and `foldrun report` show the slim go and the full re-run apart.
+ *  `#n` leads each try when the step had more than one attempt. Null when
+ *  no try was lost. */
+export function podTriesLine(tries: readonly TryRow[] | null | undefined): string | null {
+  if (!tries?.some((t) => t.status === "lost")) return null;
+  const many = new Set(tries.map((t) => t.n)).size > 1;
+  return tries
+    .map((t) => [
+      `${many ? `#${t.n} ` : ""}${t.image ?? "?"}`,
+      t.status,
+      typeof t.costUsd === "number" ? `$${t.costUsd.toFixed(4)}` : null,
+    ].filter(Boolean).join(" · "))
+    .join(" → ");
 }

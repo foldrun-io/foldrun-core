@@ -22,7 +22,7 @@ import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } 
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { CallCounter, limitKeysFor, type Limits } from "./limits.ts";
-import { classifyCall, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
+import { classifyCall, podAt, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
 
 export interface ExecOutcome {
   status: "completed" | "failed";
@@ -532,7 +532,9 @@ export async function executeStep(
       if (e.kind === "reconnect") {
         podState.reconnects += 1;
         if (e.ok) podState.reconnected += 1;
-        emit("info", `browser pod: ${e.ok ? "reconnected" : "reconnect failed"} (try ${e.attempt ?? "?"} of ${e.of ?? "?"})${!e.ok && e.error ? ` — ${e.error}` : ""}`);
+        // `at` is when the try happened: these lines reach the run when the
+        // call returns, so the run's own stamps on them are all the same.
+        emit("info", `browser pod: ${e.ok ? "reconnected" : "reconnect failed"} (try ${e.attempt ?? "?"} of ${e.of ?? "?"}${podAt(e.at)})${!e.ok && e.error ? ` — ${e.error}` : ""}`);
       } else if (!podState.lost) {
         // A call that never reached the pod changed nothing, whatever its
         // arguments asked for.
@@ -540,7 +542,7 @@ export async function executeStep(
         podState.lost = { cause: e.kind, detail: (e.kind === "needs-full" ? e.why : e.error) ?? "connection closed" };
         emit("info", e.kind === "needs-full"
           ? `browser pod: this call needs a browser in the step, which the slim image has not (${podState.lost.detail}) — stopping the step`
-          : `browser pod: lost after ${podState.reconnects} reconnect tr${podState.reconnects === 1 ? "y" : "ies"} (${podState.lost.detail}) — stopping the step`);
+          : `browser pod: lost after ${podState.reconnects} reconnect tr${podState.reconnects === 1 ? "y" : "ies"} (${podState.lost.detail}${podAt(e.at)}) — stopping the step`);
         endWith("pod-lost");
       }
     }
