@@ -129,7 +129,7 @@ function checkOption(key: PatternOptionKey, value: string) {
  * step's run of indented lines, at the indent its siblings use — never after
  * prose below the step.
  */
-export function setStepOptions(raw: string, index: number, set: PatternOptions): string {
+function setStepOptionsLF(raw: string, index: number, set: PatternOptions): string {
   const before = stepAt(raw, index).problems?.length ?? 0;
   const { lines, first, end } = stepSpan(raw, index);
   const block = lines.slice(first, end);
@@ -165,14 +165,14 @@ export function setStepOptions(raw: string, index: number, set: PatternOptions):
 /** Turn the approval gate on or off: `!` on the step line where it can go;
  *  an optional step (`?`) already has its one marker, so it gets
  *  `approve: true` instead. Off removes either spelling. */
-export function setStepApprove(raw: string, index: number, on: boolean): string {
+function setStepApproveLF(raw: string, index: number, on: boolean): string {
   const { lines, first } = stepSpan(raw, index);
   const m = lines[first].match(MARKER_RE);
   if (!m) throw new Error(`step ${index} is not a step line`);
   const marker = m[2] ?? "";
   if (on) {
     if (stepAt(raw, index).approve) return raw;
-    if (marker === "?") return setStepOptions(raw, index, { approve: "true" });
+    if (marker === "?") return setStepOptionsLF(raw, index, { approve: "true" });
     lines[first] = lines[first].replace(MARKER_RE, "$1!$3");
     return lines.join("\n");
   }
@@ -181,11 +181,11 @@ export function setStepApprove(raw: string, index: number, on: boolean): string 
     lines[first] = lines[first].replace(MARKER_RE, "$1$3");
     out = lines.join("\n");
   }
-  return setStepOptions(out, index, { approve: null });
+  return setStepOptionsLF(out, index, { approve: null });
 }
 
 /** A new step, placed; the file, the new step's index and its column. */
-export function insertFlowStep(
+function insertFlowStepLF(
   raw: string,
   o: { target: string; subflow?: boolean; instruction?: string; at: { rail: number } | { column: number }; options?: PatternOptions },
 ): { text: string; index: number; column: number } {
@@ -203,7 +203,7 @@ export function insertFlowStep(
   text = reorderFlowSteps(text, groups);
   const index = groups.flat().indexOf(added);
   const column = groups.findIndex((g) => g.includes(added));
-  if (o.options && Object.keys(o.options).length) text = setStepOptions(text, index, o.options);
+  if (o.options && Object.keys(o.options).length) text = setStepOptionsLF(text, index, o.options);
   return { text, index, column };
 }
 
@@ -222,7 +222,7 @@ function errorsOf(raw: string): string[] {
  * lives in step-removal.ts, which imports no parser, so the canvas can say
  * it in the browser from the steps it already has.
  */
-export function removeStepImpact(raw: string, index: number): RemovalImpact {
+function removeStepImpactLF(raw: string, index: number): RemovalImpact {
   return removalImpact(parseFlow("flow.md", raw).steps, index);
 }
 
@@ -234,14 +234,13 @@ export function removeStepImpact(raw: string, index: number): RemovalImpact {
  * `check` an error it did not have (a `case:` step left first, with nothing
  * to route on).
  */
-export function removeStep(raw: string, index: number): string {
+function removeStepLF(raw: string, index: number): string {
   const steps = parseFlow("flow.md", raw).steps;
   if (!Number.isInteger(index) || !steps[index]) throw new Error(`no step ${index + 1}`);
   const emptied = flowGroups(steps).some((g) => g.length === 1 && g[0] === index);
-  const { lines, first } = stepSpan(raw, index);
-  let end = first + 1;
-  while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
-  let out = [...lines.slice(0, first), ...lines.slice(end)].join("\n");
+  const { lines, owned } = stepBlockLines(raw, index);
+  const drop = new Set(owned);
+  let out = lines.filter((_, i) => !drop.has(i)).join("\n");
   if (emptied && steps.length > 1) out = reorderFlowSteps(out, flowGroups(parseFlow("flow.md", out).steps));
 
   assertNoNewErrors(raw, out, `removing ${stepLabel(steps, index)}`);
@@ -260,21 +259,32 @@ function assertNoNewErrors(raw: string, out: string, what: string) {
   }
 }
 
-/** The lines of step `index`: its step line and the indented lines directly
- *  under it (removeStep's rule) — never the prose or blank lines after. */
-function stepBlockLines(raw: string, index: number): { lines: string[]; first: number; end: number } {
-  const { lines, first } = stepSpan(raw, index);
-  let end = first + 1;
-  while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
-  return { lines, first, end };
+/** The lines of step `index`, by index into raw.split("\n"): its step line,
+ *  the indented lines directly under it, and every later option line the
+ *  parser still gives this step — an option after a blank line or a note
+ *  is the step's too (with the deeper-indented lines of a `schema:` block
+ *  under it). Never the prose or blank lines around them. */
+function stepBlockLines(raw: string, index: number): { lines: string[]; owned: number[] } {
+  const { lines, first, end } = stepSpan(raw, index);
+  const owned = [first];
+  let i = first + 1;
+  while (i < end && /^\s+\S/.test(lines[i])) owned.push(i++);
+  for (; i < end; i++) {
+    const opt = lines[i].match(OPTION_RE);
+    if (!opt) continue;
+    owned.push(i);
+    const depth = opt[1].length;
+    while (i + 1 < end && (lines[i + 1].match(/^(\s*)\S/)?.[1].length ?? 0) > depth) owned.push(++i);
+  }
+  return { lines, owned };
 }
 
 /** Step `index` as markdown — what the canvas copies to the clipboard and
  *  pasteSteps reads back: the step line (group number, `?`/`!` marker,
  *  link, instruction) and its indented options. */
-export function stepSource(raw: string, index: number): string {
-  const { lines, first, end } = stepBlockLines(raw, index);
-  return lines.slice(first, end).map((l) => l.replace(/\r$/, "")).join("\n");
+function stepSourceLF(raw: string, index: number): string {
+  const { lines, owned } = stepBlockLines(raw, index);
+  return owned.map((i) => lines[i].replace(/\r$/, "")).join("\n");
 }
 
 /**
@@ -283,11 +293,12 @@ export function stepSource(raw: string, index: number): string {
  * number, so it runs in parallel with it. Nothing else moves. Refused when
  * `check` would gain an error.
  */
-export function duplicateStep(raw: string, index: number): string {
+function duplicateStepLF(raw: string, index: number): string {
   const steps = parseFlow("flow.md", raw).steps;
   if (!Number.isInteger(index) || !steps[index]) throw new Error(`no step ${index + 1}`);
-  const { lines, first, end } = stepBlockLines(raw, index);
-  const out = [...lines.slice(0, end), ...lines.slice(first, end), ...lines.slice(end)].join("\n");
+  const { lines, owned } = stepBlockLines(raw, index);
+  const end = owned[owned.length - 1] + 1;
+  const out = [...lines.slice(0, end), ...owned.map((i) => lines[i]), ...lines.slice(end)].join("\n");
   assertNoNewErrors(raw, out, `duplicating ${stepLabel(steps, index)}`);
   return out;
 }
@@ -324,14 +335,13 @@ function pastedBlocks(text: string): { group: number; lines: string[] }[] {
  * file and the pasted steps' indices in it. Refused when the paste does not
  * parse as those steps, or when `check` would gain an error.
  */
-export function pasteSteps(
+function pasteStepsLF(
   raw: string,
   text: string,
   at: { rail: number } | { column: number },
 ): { text: string; indices: number[] } {
   const blocks = pastedBlocks(text);
   const before = parseFlow("flow.md", raw).steps;
-  const eol = eolOf(raw);
   const top = before.reduce((m, s) => Math.max(m, s.group), 0);
   // Pasted groups get numbers above every existing one, so they sort last
   // and their indices are the tail of the parse; reorderFlowSteps then puts
@@ -341,8 +351,7 @@ export function pasteSteps(
     const g = top + 1 + order.indexOf(b.group);
     return [b.lines[0].replace(/^\d+/, String(g)), ...b.lines.slice(1)];
   });
-  const cr = eol === "\r\n" ? "\r" : "";
-  const added = renumbered.flat().map((l) => l + cr);
+  const added = renumbered.flat();
   let merged: string;
   if (before.length) {
     // Above the first step line: whatever prose trails the last step stays
@@ -351,7 +360,7 @@ export function pasteSteps(
     const first = Math.min(...before.map((s) => (s.line ?? 1) - 1));
     merged = [...lines.slice(0, first), ...added, ...lines.slice(first)].join("\n");
   } else {
-    merged = `${raw.replace(/\s+$/, "")}${eol}${eol}${added.map((l) => l.replace(/\r$/, "")).join(eol)}${eol}`;
+    merged = `${raw.replace(/\s+$/, "")}\n\n${added.join("\n")}\n`;
   }
 
   const steps = parseFlow("flow.md", merged).steps;
@@ -377,21 +386,21 @@ export function pasteSteps(
 }
 
 /** One pattern, applied to a flow file. */
-export function applyPatternEdit(raw: string, edit: PatternEdit): string {
+function applyPatternEditLF(raw: string, edit: PatternEdit): string {
   switch (edit.op) {
     case "insert":
-      return insertFlowStep(raw, edit).text;
+      return insertFlowStepLF(raw, edit).text;
     case "router": {
       const cases = (edit.cases ?? []).filter((c) => oneLine(c.value ?? "") && c.target);
       if (!cases.length) throw new Error("a router needs at least one case: and its agent");
-      const head = insertFlowStep(raw, { target: edit.router, instruction: edit.instruction, at: { rail: edit.rail } });
+      const head = insertFlowStepLF(raw, { target: edit.router, instruction: edit.instruction, at: { rail: edit.rail } });
       let text = head.text;
       const branches: { target: string; options: PatternOptions }[] = [
         ...cases.map((c) => ({ target: c.target, options: { case: oneLine(c.value) } })),
         ...(edit.else ? [{ target: edit.else, options: { else: "true" } }] : []),
       ];
       branches.forEach((b, k) => {
-        text = insertFlowStep(text, {
+        text = insertFlowStepLF(text, {
           target: b.target,
           at: k === 0 ? { rail: head.column + 1 } : { column: head.column + 1 },
           options: b.options,
@@ -400,19 +409,44 @@ export function applyPatternEdit(raw: string, edit: PatternEdit): string {
       return text;
     }
     case "options":
-      return setStepOptions(raw, edit.step, edit.set);
+      return setStepOptionsLF(raw, edit.step, edit.set);
     case "approve":
-      return setStepApprove(raw, edit.step, edit.on);
+      return setStepApproveLF(raw, edit.step, edit.on);
     case "remove":
-      return removeStep(raw, edit.step);
+      return removeStepLF(raw, edit.step);
     case "duplicate":
-      return duplicateStep(raw, edit.step);
+      return duplicateStepLF(raw, edit.step);
     case "paste":
-      return pasteSteps(raw, edit.text, edit.at).text;
+      return pasteStepsLF(raw, edit.text, edit.at).text;
     default:
       throw new Error(`unknown pattern edit ${(edit as { op?: unknown }).op}`);
   }
 }
+
+// The flow edits work on LF text: the parser and every line rule here read
+// "\n"-separated lines, and a CRLF line's trailing "\r" defeats them (an
+// option line never matched, so setting it again added a second copy). So
+// each edit takes a CRLF file as LF and gives it back as CRLF.
+const toLF = (raw: string) => raw.replace(/\r\n/g, "\n");
+const asRaw = (raw: string, out: string) => (raw.includes("\r\n") ? out.replace(/\r?\n/g, "\r\n") : out);
+
+export const setStepOptions = (raw: string, index: number, set: PatternOptions): string =>
+  asRaw(raw, setStepOptionsLF(toLF(raw), index, set));
+export const setStepApprove = (raw: string, index: number, on: boolean): string =>
+  asRaw(raw, setStepApproveLF(toLF(raw), index, on));
+export function insertFlowStep(...[raw, o]: Parameters<typeof insertFlowStepLF>): ReturnType<typeof insertFlowStepLF> {
+  const r = insertFlowStepLF(toLF(raw), o);
+  return { ...r, text: asRaw(raw, r.text) };
+}
+export const removeStepImpact = (raw: string, index: number): RemovalImpact => removeStepImpactLF(toLF(raw), index);
+export const removeStep = (raw: string, index: number): string => asRaw(raw, removeStepLF(toLF(raw), index));
+export const stepSource = (raw: string, index: number): string => stepSourceLF(toLF(raw), index);
+export const duplicateStep = (raw: string, index: number): string => asRaw(raw, duplicateStepLF(toLF(raw), index));
+export function pasteSteps(...[raw, text, at]: Parameters<typeof pasteStepsLF>): ReturnType<typeof pasteStepsLF> {
+  const r = pasteStepsLF(toLF(raw), text, at);
+  return { ...r, text: asRaw(raw, r.text) };
+}
+export const applyPatternEdit = (raw: string, edit: PatternEdit): string => asRaw(raw, applyPatternEditLF(toLF(raw), edit));
 
 // ---------- agent files ----------
 

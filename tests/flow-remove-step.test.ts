@@ -116,3 +116,23 @@ test("the only step can go; the flow is left with none", () => {
   assert.ok(removeStepImpact(one, 0).notes.some((n) => /only step/.test(n)));
   assert.deepEqual(shape(removeStep(one, 0)), []);
 });
+
+// The parser gives a step every option line below it until the next step,
+// blank lines and notes between or not. Deleting it stopped at the blank
+// line, so the options landed on the step above (audit, 2026-10-01).
+test("options after a blank line go with their step, not to the step above", () => {
+  const f = "1. [[x]]\n2. [[a]]\n\n   approve: true\n   verify: contains: done\n3. [[b]]\n";
+  const out = removeStep(f, 1);
+  const s = parseFlow("t.md", out).steps;
+  assert.deepEqual(s.map((x) => [x.group, x.agent, x.approve ?? false, x.verify ?? null]), [[1, "x", false, null], [2, "b", false, null]]);
+  // A note between the step and its option is prose: it stays.
+  const noted = "1. [[x]]\n2. [[a]]\n\nA note.\n   retry: 2\n2. [[b]]\n";
+  assert.equal(removeStep(noted, 1), "1. [[x]]\n\nA note.\n2. [[b]]\n");
+});
+
+test("a CRLF flow: its steps parse, a delete finds its options, and CRLF stays", () => {
+  const crlf = FLOW.replace(/\n/g, "\r\n");
+  assert.deepEqual(shape(crlf), shape(FLOW));
+  const out = removeStep(crlf, 1);
+  assert.equal(out, removeStep(FLOW, 1).replace(/\n/g, "\r\n"));
+});

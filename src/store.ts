@@ -1682,6 +1682,10 @@ export function markerPresent(text: string | null | undefined, marker: string): 
 }
 
 export function parseFlow(file: string, raw: string): FlowInfo {
+  // A flow saved with CRLF (Windows, some editors) read as no steps at all:
+  // every line kept its "\r", which STEP_RE's `.` will not match. Read it as
+  // LF; the line count, and so every step's `line`, is the same.
+  raw = raw.replace(/\r\n/g, "\n");
   const { data, content } = matter(raw);
   const steps: FlowStep[] = [];
   // Flow-level problems: a malformed step target (below) and unreadable

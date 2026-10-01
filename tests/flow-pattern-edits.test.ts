@@ -358,3 +358,21 @@ test("Paste refuses what is not copied steps, and what would add a check error",
   // A bad option inside the paste is the parser's problem, and refused.
   assert.throws(() => pasteSteps(FLOW, "1. [[writer]]\n   loop: 9", { rail: 6 }), /error/);
 });
+
+// Options the parser gives a step after a blank line (audit, 2026-10-01):
+// Duplicate copied only the step line, so the options moved to the copy;
+// Copy dropped them.
+test("Duplicate and Copy take the options after a blank line too", () => {
+  const f = "1. [[x]]\n2. [[a]]\n\n   approve: true\n   verify: contains: done\n3. [[b]]\n";
+  assert.equal(stepSource(f, 1), "2. [[a]]\n   approve: true\n   verify: contains: done");
+  const s = parse(duplicateStep(f, 1)).steps.filter((x) => x.agent === "a");
+  assert.deepEqual(s.map((x) => [x.approve, x.verify]), [[true, "contains: done"], [true, "contains: done"]]);
+});
+
+test("CRLF: setting an option already there rewrites it, once, and the file stays CRLF", () => {
+  const crlf = "1. [[x]] — go\r\n   retry: 1\r\n2. [[a]] — then\r\n";
+  const out = setStepOptions(crlf, 0, { retry: "2" });
+  assert.equal(out, "1. [[x]] — go\r\n   retry: 2\r\n2. [[a]] — then\r\n");
+  assert.equal(parse(crlf).steps.length, 2);
+  assert.equal(parse(out).steps[0].retry, 2);
+});
