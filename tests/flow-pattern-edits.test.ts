@@ -19,7 +19,11 @@ import {
   setFrontmatterScalar,
   newAgentFile,
   yamlScalar,
+  stepSource,
+  duplicateStep,
+  pasteSteps,
 } from "../src/flow-patterns.ts";
+import { lintFlow } from "../src/flow-lint.ts";
 
 const FLOW = `---
 name: desk
@@ -258,4 +262,99 @@ test("CRLF files keep CRLF", () => {
   const out = editFrontmatterList(crlf, "subagents", "w", "add");
   assert.ok(!/[^\r]\n/.test(out), "a bare LF crept in");
   assert.deepEqual(matter(out).data.subagents, ["researcher", "w"]);
+});
+
+// ---------- duplicate, copy, paste ----------
+
+/** What `check` would call an error: the parser's per-step problems and
+ *  the lint's errors. A copy or a paste may never add one. */
+const errorCount = (raw: string) => {
+  const f = parse(raw);
+  return f.steps.flatMap((s) => s.problems ?? []).length + lintFlow(f).filter((w) => w.level === "error").length;
+};
+const shape = (raw: string) => {
+  const s = parse(raw).steps;
+  return flowGroups(s).map((g) => g.map((i) => s[i].agent));
+};
+
+test("stepSource: the step line and its indented options, never the prose after", () => {
+  assert.equal(stepSource(FLOW, 6), "5. [[publisher]] — one post per line\n   each: lines\n   max: 5\n   on-fail: [[fixer]]");
+  assert.equal(stepSource(FLOW, 7), "6!. [[sender]] — send it\n   ask: Which list?");
+  assert.equal(stepSource(FLOW, 0), "1. [[triage]] — sort the inbox");
+  assert.throws(() => stepSource(FLOW, 99), /no step/);
+});
+
+test("Duplicate: the copy runs beside the original, options and marker kept, nothing else moves", () => {
+  const out = duplicateStep(FLOW, 6);
+  assert.match(out, /(5\. \[\[publisher\]\] — one post per line\n   each: lines\n   max: 5\n   on-fail: \[\[fixer\]\]\n){2}6!\./);
+  assert.deepEqual(shape(out)[4], ["publisher", "publisher"]);
+  assert.deepEqual(frame(out), frame(FLOW));
+  const s = parse(out).steps.filter((x) => x.agent === "publisher");
+  assert.deepEqual(s.map((x) => [x.each, x.max, x.onFail]), [["lines", 5, "fixer"], ["lines", 5, "fixer"]]);
+  // A case: branch copies into its own group, so it still routes.
+  const c = duplicateStep(FLOW, 1);
+  assert.deepEqual(shape(c)[1], ["bugs", "bugs", "docs", "general"]);
+  const gate = duplicateStep(FLOW, 7);
+  assert.equal(parse(gate).steps.filter((x) => x.agent === "sender" && x.approve && x.ask === "Which list?").length, 2);
+  assert.ok(errorCount(out) <= errorCount(FLOW));
+  assert.equal(applyPatternEdit(FLOW, { op: "duplicate", step: 6 }), out);
+  assert.throws(() => duplicateStep(FLOW, 42), /no step 43/);
+});
+
+test("Paste: a copied step round-trips into the same flow at a rail, a column, first and last", () => {
+  const src = stepSource(FLOW, 7);
+  const first = pasteSteps(FLOW, src, { rail: 0 });
+  assert.deepEqual(shape(first.text)[0], ["sender"]);
+  assert.deepEqual(first.indices, [0]);
+  const s0 = parse(first.text).steps[0];
+  assert.equal(s0.approve, true);
+  assert.equal(s0.ask, "Which list?");
+  assert.match(first.text, /^1!\. \[\[sender\]\] — send it\n   ask: Which list\?$/m);
+  assert.ok(errorCount(first.text) <= errorCount(FLOW));
+
+  const last = pasteSteps(FLOW, src, { rail: 6 });
+  assert.deepEqual(shape(last.text).at(-1), ["sender"]);
+  assert.equal(shape(last.text).length, 7);
+  assert.deepEqual(last.indices, [8]);
+
+  const beside = pasteSteps(FLOW, stepSource(FLOW, 4), { column: 2 });
+  assert.deepEqual(shape(beside.text)[2], ["writer", "writer"]);
+  assert.deepEqual(beside.indices, [5]);
+  assert.equal(applyPatternEdit(FLOW, { op: "paste", text: stepSource(FLOW, 4), at: { column: 2 } }), beside.text);
+
+  // The prose above the steps and below the last one stays put.
+  for (const t of [first.text, beside.text]) {
+    assert.match(t, /Prose above the steps stays\.\n\n1/);
+    assert.match(t, /   ask: Which list\?\n\nNotes below the last step are prose\.\n$/);
+  }
+});
+
+test("Paste: several blocks keep their parallel groups, into a different flow", () => {
+  const copied = [stepSource(FLOW, 1), stepSource(FLOW, 2), stepSource(FLOW, 3), stepSource(FLOW, 4)].join("\n");
+  const other = "---\nname: other\n---\n\n1. [[intake]] — read it\n2. [[closer]] — wrap up\n\nTrailing prose.\n";
+  const out = pasteSteps(other, `\n${copied}\n\n`, { rail: 1 });
+  assert.deepEqual(shape(out.text), [["intake"], ["bugs", "docs", "general"], ["writer"], ["closer"]]);
+  assert.deepEqual(out.indices, [1, 2, 3, 4]);
+  const s = parse(out.text).steps;
+  assert.deepEqual(s.slice(1, 4).map((x) => x.case ?? (x.else ? "else" : "")), ["BUG", "DOCS", "else"]);
+  assert.match(out.text, /4\. \[\[closer\]\] — wrap up\n\nTrailing prose\.\n$/);
+  assert.ok(errorCount(out.text) <= errorCount(other));
+  // Into an empty flow.
+  const empty = pasteSteps("---\nname: e\n---\n", copied, { rail: 0 });
+  assert.deepEqual(shape(empty.text), [["bugs", "docs", "general"], ["writer"]]);
+  // Indented copies (from a code block) are fine.
+  const indented = pasteSteps(other, "  3. [[writer]] — x\n     retry: 2", { column: 0 });
+  assert.equal(parse(indented.text).steps.find((x) => x.agent === "writer")!.retry, 2);
+});
+
+test("Paste refuses what is not copied steps, and what would add a check error", () => {
+  assert.throws(() => pasteSteps(FLOW, "", { rail: 0 }), /nothing to paste/);
+  assert.throws(() => pasteSteps(FLOW, "just some prose", { rail: 0 }), /not a copied step/);
+  assert.throws(() => pasteSteps(FLOW, "1. [[writer]]\nloose prose", { rail: 0 }), /not a copied step/);
+  assert.throws(() => pasteSteps(FLOW, stepSource(FLOW, 0), { column: 9 }), /no step 10/);
+  assert.throws(() => pasteSteps(FLOW, stepSource(FLOW, 0), { rail: 99 }), /no place/);
+  // A verify: written as a sentence is a check error the flow did not have.
+  assert.throws(() => pasteSteps(FLOW, "1. [[writer]]\n   verify: the reply names the file", { rail: 6 }), /would leave the flow with an error/);
+  // A bad option inside the paste is the parser's problem, and refused.
+  assert.throws(() => pasteSteps(FLOW, "1. [[writer]]\n   loop: 9", { rail: 6 }), /error/);
 });
