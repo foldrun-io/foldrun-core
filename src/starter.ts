@@ -336,6 +336,12 @@ Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/
 \`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
 and \`/api/metrics\` (Prometheus).
 
+Every call answers — and the CLI sends — \`Foldrun-Version: YYYY-MM-DD\` (dated API
+versions; an account pin in Settings → API), \`X-RateLimit-*\` headers (a \`429\`
+carries \`Retry-After\`), and writes that start work take an \`Idempotency-Key\`
+(a retry with the same key replays the first answer). The whole surface as
+OpenAPI 3.1: \`/api/openapi.json\` (open), or \`foldrun api spec --out openapi.json\`.
+
 Debugging a failed run is usually: \`runs\` to find it, \`runs/<id>\` to read which
 step failed and what it cost, fix the markdown, \`deploy\`, then \`rerun\`.
 
