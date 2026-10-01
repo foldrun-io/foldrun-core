@@ -20,6 +20,7 @@
 //
 // An account is a named directory (per OKF: tenancy is a hosting concern).
 
+import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
@@ -3004,6 +3005,11 @@ export interface StepAttempt {
   finishedAt: string;
   /** The last error event this attempt wrote, when it failed. */
   error?: string;
+  /** The runner image this attempt ended on, and — when it browsed through
+   *  the account's pod from slim — what happened to the pod: reconnects,
+   *  the re-run on full, or why it was not re-run. */
+  image?: "full" | "slim";
+  browserPod?: string;
 }
 
 /** The step's totals across its attempts, from the rows. Null where no
@@ -3065,6 +3071,17 @@ export interface StepRecord {
   /** A size class a retry moved the step up to (an evicted or OOM-killed
    *  attempt), overriding the agent's own `size:` for the attempts after. */
   sizeUp?: "large" | "heavy";
+  /** Which runner image the step's sandbox ran: `full` (browsers in it) or
+   *  `slim`, why, and `pod` when a browsing step ran slim and browsed
+   *  through the account's browser pod. The last attempt's; absent where
+   *  the executor has one image (docker, in-process). */
+  image?: { variant: "full" | "slim"; why?: string; pod?: boolean } | null;
+  /** Slim browsing through the account's pod (browser-pod.ts): reconnect
+   *  tries and how many got through; when the pod was lost, why and what
+   *  the step had written by then; and what happened — `fallback` (the
+   *  step had only read and ran again on the full image) or `failure` (it
+   *  had written, so it was not re-run). */
+  browserPod?: (BrowserPodOutcome & { fallback?: string; failure?: string }) | null;
   /** When the step actually started and finished executing — not when the
    *  run reached it. A step's events approximate this (first and last), but
    *  a model can think for minutes before its first tool call, and a step

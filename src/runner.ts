@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { cascadeLimits, toolOwners } from "./limits.ts";
+import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { hostSafeEnv } from "./host-env.ts";
@@ -1706,6 +1707,8 @@ export function recordAttempt(
     startedAt,
     finishedAt: step.finishedAt ?? new Date().toISOString(),
     ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
+    ...(step.image?.variant ? { image: step.image.variant } : {}),
+    ...(step.browserPod ? { browserPod: browserPodLine(step.browserPod) } : {}),
   };
   const kept = reattach && tries.at(-1)?.n === n ? tries.slice(0, -1) : tries;
   step.tries = [...kept, row];
@@ -2412,6 +2415,10 @@ async function runStep(
           maxTurns: step.maxTurns,
           ...limitOpts,
           translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
+          // Outward steps keep a browser of their own: an executor that
+          // could browse from the slim image through the account's pod
+          // leaves them on the full one (browser-pod.ts).
+          ...(outward ? { outward: true } : {}),
           // The container sees the workspace at /workspace and the library
           // at /library; the roots are named host-side and moved here.
           search: searchRoots.map((r) => ({
@@ -2475,7 +2482,14 @@ async function runStep(
       const firstArgs = isolatedArgs(platformModelEnv());
       await lease?.commit();
       let credentialUsed = platformModelCredential();
-      let outcome = await runIsolated(firstArgs);
+      // The arguments of the attempt whose outcome is current — what a
+      // re-run on the full image repeats, on the same model supply.
+      let lastArgs: typeof firstArgs = firstArgs;
+      const runTracked = (a: typeof firstArgs) => {
+        lastArgs = a;
+        return runIsolated(a);
+      };
+      let outcome = await runTracked(firstArgs);
       step.sandbox = null; // whatever happens next starts its own
       // A 401 from a token that rotated mid-step is not a broken key: the
       // replacement is already on its way to the mounted file. Wait for it
@@ -2494,7 +2508,7 @@ async function runStep(
           // rotation retry on 2026-09-22/23 401'd this way.
           const retry = isolatedArgs(platformModelEnv());
           await lease?.commit();
-          outcome = withEarlierTiming(await runIsolated(retry), previous);
+          outcome = withEarlierTiming(await runTracked(retry), previous);
         } else {
           push("info", "the credential did not change — this is the key itself, not a rotation");
         }
@@ -2509,7 +2523,7 @@ async function runStep(
         const previous = outcome.timing;
         const again = isolatedArgs(platformModelEnv());
         await lease?.commit();
-        outcome = await runIsolated(again);
+        outcome = await runTracked(again);
         outcome = withEarlierTiming(outcome, previous);
       }
       // The second supply, tried exactly once, and only when the primary
@@ -2538,11 +2552,45 @@ async function runStep(
         };
         await lease?.commit();
         supplyState = "exhausted";
-        outcome = await runIsolated(fallbackArgs);
+        outcome = await runTracked(fallbackArgs);
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
         outcome = withEarlierTiming(outcome, first);
+      }
+      // Slim browsing (browser-pod.ts): the step ran on the slim image and
+      // the account's browser pod went away under it, past the web tool's
+      // reconnects. Reads only — run it again from the start on the full
+      // image, where a browser in the step is always there. Anything
+      // written — fail it, naming what, and leave retry:/on-fail:/a person
+      // to decide; a second go could send or charge twice.
+      step.image = outcome.image ?? null;
+      step.browserPod = outcome.browserPod ? { ...outcome.browserPod } : null;
+      if (outcome.status === "failed" && outcome.browserPod?.lost) {
+        const decision = podLossDecision(outcome.browserPod);
+        if (decision.rerun) {
+          push("info", decision.note);
+          const first = outcome;
+          const again = { ...lastArgs, input: { ...lastArgs.input, image: "full" as const }, resume: null };
+          await lease?.commit();
+          outcome = withEarlierTiming(await runTracked(again), first.timing);
+          // Both attempts ran a model; the step owes both.
+          outcome = {
+            ...outcome,
+            costUsd: first.costUsd === null && outcome.costUsd === null ? null : (first.costUsd ?? 0) + (outcome.costUsd ?? 0),
+            usage: first.usage && outcome.usage
+              ? { inputTokens: first.usage.inputTokens + outcome.usage.inputTokens, outputTokens: first.usage.outputTokens + outcome.usage.outputTokens }
+              : (outcome.usage ?? first.usage ?? null),
+            ...(typeof first.turnsCostUsd === "number" || typeof outcome.turnsCostUsd === "number"
+              ? { turnsCostUsd: (first.turnsCostUsd ?? first.costUsd ?? 0) + (outcome.turnsCostUsd ?? outcome.costUsd ?? 0) }
+              : {}),
+          };
+          step.image = outcome.image ?? { variant: "full", why: "re-run after the browser pod was lost" };
+          step.browserPod = { ...first.browserPod!, fallback: RERAN_ON_FULL };
+        } else {
+          push("error", decision.message);
+          step.browserPod = { ...outcome.browserPod, failure: decision.message };
+        }
       }
       if (lease) {
         for (const line of await lease.drainLog()) {

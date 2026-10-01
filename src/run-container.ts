@@ -35,6 +35,7 @@ import type { SubagentSpec } from "./subagents.ts";
 import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
+import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -90,6 +91,13 @@ export interface ContainerStepInput {
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
   translator?: TranslatorSpec | null;
+  /** A granted tool acts outward (`outward: true`): an executor that could
+   *  put a browsing step on the slim image keeps this one on the full image,
+   *  where a browser in the step is always there (browser-pod.ts). */
+  outward?: boolean;
+  /** "full" — this attempt must have the full image: the re-run after the
+   *  browser pod was lost. Absent lets the executor choose. */
+  image?: "full";
 }
 
 /**
@@ -139,6 +147,13 @@ export interface ContainerStepOutcome {
   /** Set by the isolated executors only — an in-process step rents no
    *  sandbox, so it has no compute seconds to bill. */
   timing?: StepTiming | null;
+  /** Which runner image the sandbox ran, as the executor chose it: `pod`
+   *  when a browsing step ran on slim and browsed through the account's
+   *  browser pod. Absent from an executor with one image. */
+  image?: { variant: "full" | "slim"; why?: string; pod?: boolean } | null;
+  /** The pod's reconnects and, when it was lost, what the step had written —
+   *  see ExecOutcome.browserPod. */
+  browserPod?: BrowserPodOutcome;
 }
 
 /**
@@ -506,6 +521,7 @@ try {
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
+  const { paidWebActions } = await import("@foldrun/core/browser-pod");
 
   const agentDir = "/workspace/" + input.agentRel;
   // HOME is where a bare relative path lands when anything resolves one
@@ -597,6 +613,11 @@ try {
     schema: input.schema,
     maxTurns: input.maxTurns,
     ...(input.limits && Object.keys(input.limits).length ? { limits: input.limits, toolOwners: input.toolOwners ?? {} } : {}),
+    // Slim browsing: the platform put this step on the slim image to browse
+    // through the account's pod, and named the file the web tool logs its
+    // reconnects to. A lost pod stops the step; what it wrote decides what
+    // the runner does next (browser-pod.ts).
+    ...(env.FOLDRUN_BROWSER_POD_EVENTS ? { browserPod: { events: env.FOLDRUN_BROWSER_POD_EVENTS, methods: api.methods ?? {}, paidWeb: paidWebActions(env) } } : {}),
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.
     sandboxBash: false,
@@ -1046,6 +1067,7 @@ export function parseDriverLine(
         ...("data" in parsed ? { data: parsed.data } : {}),
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
         ...(typeof parsed.turnsCostUsd === "number" ? { turnsCostUsd: parsed.turnsCostUsd } : {}),
+        ...(parseBrowserPod(parsed.browserPod) ? { browserPod: parseBrowserPod(parsed.browserPod)! } : {}),
         usage:
           parsed.usage &&
           typeof parsed.usage.inputTokens === "number" &&

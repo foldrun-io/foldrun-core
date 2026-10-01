@@ -22,6 +22,7 @@ import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } 
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { CallCounter, limitKeysFor, type Limits } from "./limits.ts";
+import { classifyCall, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
 
 export interface ExecOutcome {
   status: "completed" | "failed";
@@ -49,6 +50,10 @@ export interface ExecOutcome {
    *  end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal or
    *  model_context_window_exceeded. Null when no result arrived. */
   stopReason?: string | null;
+  /** Set when the step browsed through the account's browser pod from the
+   *  slim image (ExecOptions.browserPod): its reconnects, and — when the pod
+   *  was lost — why, and what the step had written by then. */
+  browserPod?: BrowserPodOutcome;
 }
 
 export interface ExecOptions {
@@ -119,6 +124,12 @@ export interface ExecOptions {
   /** SDK tool name → the foldrun name it counts under, for the tools whose
    *  SDK name does not say (limits.ts toolOwners). */
   toolOwners?: Record<string, string>;
+  /** The step runs on the slim image and browses through the account's
+   *  browser pod (browser-pod.ts). `events` is the file the web tool writes
+   *  its reconnects to; the classify context says which API operations and
+   *  web actions are writes. A lost pod stops the step, and the outcome
+   *  says what it had written, so the runner can re-run it or fail it. */
+  browserPod?: { events: string } & ClassifyContext;
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
 
@@ -431,10 +442,10 @@ export async function executeStep(
   // call — a crawl, a build — sailed past its timeout: with no message there
   // was nothing to check it against. The backstop timer fires regardless,
   // and a stop is read on a clock rather than between groups.
-  let ended: "timeout" | "stopped" | null = null;
+  let ended: "timeout" | "stopped" | "pod-lost" | null = null;
   const startedAt = Date.now();
   const timers: NodeJS.Timeout[] = [];
-  const endWith = (why: "timeout" | "stopped") => {
+  const endWith = (why: "timeout" | "stopped" | "pod-lost") => {
     if (ended) return;
     ended = why;
     void q.interrupt().catch(() => {});
@@ -498,6 +509,43 @@ export async function executeStep(
     return parent ? (delegations.get(parent) ?? "subagent") : undefined;
   };
 
+  // Slim browsing (browser-pod.ts): every call the step makes, read or
+  // write, in the order the model asked for them — the step's own and its
+  // sub-agents'. Classified when asked for, not when answered: a call in
+  // flight when the pod goes is counted as made. And the web tool's pod log,
+  // read after every tool result.
+  const pod = opts.browserPod ?? null;
+  const ledger = new Map<string, CallKind>();
+  const podState: BrowserPodOutcome = { reconnects: 0, reconnected: 0 };
+  let podOffset = 0;
+  const readPod = (callId: string) => {
+    if (!pod) return;
+    let text: string;
+    try {
+      text = fs.readFileSync(pod.events, "utf8");
+    } catch {
+      return; // nothing written yet
+    }
+    const { events, next } = readPodEvents(text, podOffset);
+    podOffset = next;
+    for (const e of events) {
+      if (e.kind === "reconnect") {
+        podState.reconnects += 1;
+        if (e.ok) podState.reconnected += 1;
+        emit("info", `browser pod: ${e.ok ? "reconnected" : "reconnect failed"} (try ${e.attempt ?? "?"} of ${e.of ?? "?"})${!e.ok && e.error ? ` — ${e.error}` : ""}`);
+      } else if (!podState.lost) {
+        // A call that never reached the pod changed nothing, whatever its
+        // arguments asked for.
+        if (e.ran === false) ledger.delete(callId);
+        podState.lost = { cause: e.kind, detail: (e.kind === "needs-full" ? e.why : e.error) ?? "connection closed" };
+        emit("info", e.kind === "needs-full"
+          ? `browser pod: this call needs a browser in the step, which the slim image has not (${podState.lost.detail}) — stopping the step`
+          : `browser pod: lost after ${podState.reconnects} reconnect tr${podState.reconnects === 1 ? "y" : "ies"} (${podState.lost.detail}) — stopping the step`);
+        endWith("pod-lost");
+      }
+    }
+  };
+
   try {
   for await (const message of q as AsyncIterable<SDKMessage>) {
     if (ended) break;
@@ -531,6 +579,7 @@ export async function executeStep(
             emit("info", `delegating to ${to}${job ? `: ${job}` : ""}`, { subagent: to });
           }
           openCalls.set(block.id, { name: block.name, at: Date.now(), ...(via ? { subagent: via } : {}) });
+          if (pod) ledger.set(block.id, classifyCall(block.name, block.input as Record<string, unknown> | undefined, pod));
           emit("tool", block.name, { call: block.id, ...(via ? { subagent: via } : {}) });
         }
       }
@@ -550,6 +599,7 @@ export async function executeStep(
             ...(block.is_error ? { err: true } : {}),
             ...(open.subagent ? { subagent: open.subagent } : {}),
           });
+          readPod(block.tool_use_id);
         }
       }
     } else if (message.type === "result") {
@@ -606,6 +656,16 @@ export async function executeStep(
   } else if (ended === "stopped") {
     emit("error", "stopped by a person mid-step");
     status = "failed";
+  } else if (ended === "pod-lost") {
+    // The runner says what happens next — a re-run on the full image, or a
+    // failure naming what was written. Not an error of the step's own.
+    status = "failed";
+  }
+  if (pod) {
+    readPod("");
+    if (podState.lost) {
+      podState.writes = [...ledger.values()].flatMap((k) => (k.write ? [k.what] : []));
+    }
   }
   // The SDK ends a healthy run with a `result` message. A stream that just
   // stops — subprocess OOM-killed, crashed, or torn down — used to fall
@@ -709,6 +769,7 @@ export async function executeStep(
     status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage,
     ...(mixedModels() ? { turnsCostUsd: turnsTotal() } : {}),
     stopReason,
+    ...(pod ? { browserPod: podState } : {}),
   };
 }
 

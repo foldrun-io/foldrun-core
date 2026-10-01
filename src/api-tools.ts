@@ -105,6 +105,10 @@ export interface ApiToolResult {
    *  made: `crm`'s operation `admin_list` is `crm_admin_list` beside an API
    *  named `crm_admin`, so the name alone cannot say whose it is. */
   owners: Record<string, string>;
+  /** SDK tool name → the HTTP method of a typed operation. A generic
+   *  call_<api> carries its method in each call's input instead. Read by the
+   *  browser-pod fallback (browser-pod.ts) to tell a GET from a write. */
+  methods: Record<string, string>;
   /** Secrets referenced but not set — surfaced as run warnings. */
   missingSecrets: string[];
   /** Human-readable lines describing each API, appended to the system prompt. */
@@ -322,7 +326,7 @@ export function buildApiTools(
   resolved?: { env: Record<string, string | undefined>; missing: string[] },
 ): ApiToolResult {
   if (apis.length === 0) {
-    return { server: null, toolNames: [], owners: {}, missingSecrets: [], promptLines: [], drainLog: () => [] };
+    return { server: null, toolNames: [], owners: {}, methods: {}, missingSecrets: [], promptLines: [], drainLog: () => [] };
   }
 
   const neededSecrets = [...new Set(apis.flatMap(secretsUsedByApi))];
@@ -342,6 +346,7 @@ export function buildApiTools(
   const tools: SdkMcpToolDefinition<any>[] = [];
   const toolNames: string[] = [];
   const owners: Record<string, string> = {};
+  const methods: Record<string, string> = {};
   const promptLines: string[] = [];
 
   for (const api of apis) {
@@ -368,6 +373,7 @@ export function buildApiTools(
     for (const op of ops) {
       tools.push(typedTool(api, op, env, bucket, log));
       typedNames.push(typedToolName(api.name, op.id));
+      methods[`mcp__foldrun_apis__${typedToolName(api.name, op.id)}`] = String(op.method ?? "").toUpperCase();
     }
     if (withGeneric) tools.push(genericTool(api, env, bucket, log));
 
@@ -403,6 +409,7 @@ export function buildApiTools(
     server,
     toolNames,
     owners,
+    methods,
     missingSecrets: missing,
     promptLines,
     drainLog: () => log.splice(0, log.length),
