@@ -25,6 +25,7 @@ import path from "node:path";
 import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
+import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import matter from "gray-matter";
@@ -2071,7 +2072,7 @@ function emitFlow(head: string, preamble: string[], groups: FlowBlock[][]): stri
  * and the diff is exactly the lines that changed. A flow with no
  * frontmatter gains the smallest one that can carry the trigger.
  */
-export function setFlowTrigger(
+function setFlowTriggerLF(
   raw: string,
   opts: { trigger: FlowTrigger; schedule?: string; timezone?: string },
 ): string {
@@ -2131,7 +2132,7 @@ export function setFlowTrigger(
  * the prefix is taken verbatim from the file and only the tail replaced. A
  * flow's markdown stays the author's.
  */
-export function updateFlowStepInstruction(raw: string, index: number, instruction: string): string {
+function updateFlowStepInstructionLF(raw: string, index: number, instruction: string): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
     throw new Error(`no step ${index}`);
@@ -2155,7 +2156,7 @@ export function updateFlowStepInstruction(raw: string, index: number, instructio
   return emitFlow(head, preamble, groups);
 }
 
-export function updateFlowStep(
+function updateFlowStepLF(
   raw: string,
   index: number,
   options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max" | "limits", string | number | null>>,
@@ -2214,7 +2215,7 @@ export function updateFlowStep(
   return emitFlow(head, preamble, groups);
 }
 
-export function reorderFlowSteps(raw: string, groups: number[][]): string {
+function reorderFlowStepsLF(raw: string, groups: number[][]): string {
   const { head, preamble, blocks: ordered } = splitFlowBlocks(raw);
 
   const seen = new Set<number>();
@@ -2234,7 +2235,7 @@ export function reorderFlowSteps(raw: string, groups: number[][]): string {
 }
 
 /** Append a step as its own group at the end of the flow. */
-export function addFlowStep(
+function addFlowStepLF(
   raw: string,
   step: { target: string; subflow?: boolean; instruction?: string },
 ): string {
@@ -2249,7 +2250,7 @@ export function addFlowStep(
 }
 
 /** Drop one step, by its index in the flow's parsed steps. */
-export function removeFlowStep(raw: string, index: number): string {
+function removeFlowStepLF(raw: string, index: number): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
     throw new Error(`no step ${index}`);
@@ -2257,6 +2258,20 @@ export function removeFlowStep(raw: string, index: number): string {
   const kept = blocks.filter((_, i) => i !== index);
   return emitFlow(head, preamble, groupBlocks(kept));
 }
+
+// The rewriters above work on LF (eol.ts); the web route calls these with
+// the file as saved, so a CRLF flow is read as LF and written back as CRLF.
+export const setFlowTrigger = (raw: string, opts: Parameters<typeof setFlowTriggerLF>[1]): string =>
+  asRaw(raw, setFlowTriggerLF(toLF(raw), opts));
+export const updateFlowStepInstruction = (raw: string, index: number, instruction: string): string =>
+  asRaw(raw, updateFlowStepInstructionLF(toLF(raw), index, instruction));
+export const updateFlowStep = (raw: string, index: number, options: Parameters<typeof updateFlowStepLF>[2]): string =>
+  asRaw(raw, updateFlowStepLF(toLF(raw), index, options));
+export const reorderFlowSteps = (raw: string, groups: number[][]): string =>
+  asRaw(raw, reorderFlowStepsLF(toLF(raw), groups));
+export const addFlowStep = (raw: string, step: Parameters<typeof addFlowStepLF>[1]): string =>
+  asRaw(raw, addFlowStepLF(toLF(raw), step));
+export const removeFlowStep = (raw: string, index: number): string => asRaw(raw, removeFlowStepLF(toLF(raw), index));
 
 /** Blocks → the group structure they currently describe. */
 function groupBlocks(blocks: FlowBlock[]): FlowBlock[][] {

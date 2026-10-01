@@ -23,6 +23,7 @@
 import { parseFlow, addFlowStep, reorderFlowSteps, parseWait, assertSafeName, type FlowStep } from "./store.ts";
 import { joinGroup, splitToRail, type Groups } from "./arrange.ts";
 import { lintFlow } from "./flow-lint.ts";
+import { toLF, asRaw } from "./eol.ts";
 import { removalImpact, stepLabel, type RemovalImpact } from "./step-removal.ts";
 
 // ---------- flow files ----------
@@ -427,8 +428,6 @@ function applyPatternEditLF(raw: string, edit: PatternEdit): string {
 // "\n"-separated lines, and a CRLF line's trailing "\r" defeats them (an
 // option line never matched, so setting it again added a second copy). So
 // each edit takes a CRLF file as LF and gives it back as CRLF.
-const toLF = (raw: string) => raw.replace(/\r\n/g, "\n");
-const asRaw = (raw: string, out: string) => (raw.includes("\r\n") ? out.replace(/\r?\n/g, "\r\n") : out);
 
 export const setStepOptions = (raw: string, index: number, set: PatternOptions): string =>
   asRaw(raw, setStepOptionsLF(toLF(raw), index, set));
