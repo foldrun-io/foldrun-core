@@ -23,7 +23,7 @@ const SUBFLOW_DROPPED: [keyof FlowStep, string][] = [
   ["effort", "effort:"], ["onFail", "on-fail:"], ["waitSecs", "wait:"], ["waitFor", "wait:"],
   ["ask", "ask:"], ["preview", "preview:"], ["delegate", "delegate:"], ["loop", "loop:"],
   ["until", "until:"], ["each", "each:"], ["max", "max:"], ["output", "output:"],
-  ["schema", "schema:"], ["parallel", "parallel:"], ["maxTurns", "max_turns:"],
+  ["schema", "schema:"], ["parallel", "parallel:"], ["maxTurns", "max_turns:"], ["limits", "limits:"],
 ];
 
 export interface FlowWarning {

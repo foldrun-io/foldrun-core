@@ -73,6 +73,10 @@ export interface ContainerStepInput {
   /** `schema:` and `max_turns:`, resolved host-side — see ExecOptions. */
   schema?: Record<string, unknown> | boolean;
   maxTurns?: number;
+  /** `limits:` resolved host-side, and the SDK-name → foldrun-name map the
+   *  count reads (limits.ts) — enforced in the pod by the same hook. */
+  limits?: Record<string, number>;
+  toolOwners?: Record<string, string>;
   /** tools: [search] — the directories to search, as paths INSIDE the
    *  container (/workspace/…, /library/…). */
   search?: SearchRoot[];
@@ -592,6 +596,7 @@ try {
     output: input.output,
     schema: input.schema,
     maxTurns: input.maxTurns,
+    ...(input.limits && Object.keys(input.limits).length ? { limits: input.limits, toolOwners: input.toolOwners ?? {} } : {}),
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.
     sandboxBash: false,

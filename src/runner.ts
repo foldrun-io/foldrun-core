@@ -9,6 +9,7 @@ import matter from "gray-matter";
 import { spawn } from "node:child_process";
 import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
+import { cascadeLimits, toolOwners } from "./limits.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { hostSafeEnv } from "./host-env.ts";
@@ -2231,6 +2232,18 @@ async function runStep(
       throw new Error(`schema: ${step.schemaPath} — not a readable JSON or YAML schema under the workspace`);
     }
     if (step.maxTurns) push("info", `max_turns: ${step.maxTurns}`);
+    // `limits:` — account, workspace, agent, then this step's option;
+    // nearest wins per key. Enforced in the model loop's hook, on either
+    // path (step-exec.ts), so it is resolved here as plain values.
+    const stepLimits = cascadeLimits([
+      readAgentsMd(accountDir(tenant))?.data?.limits,
+      readAgentsMd(workspaceRootOf(agentDir))?.data?.limits,
+      front.limits,
+      step.limits,
+    ]);
+    const limitOwners = toolOwners(apiSpecs, apiTools.toolNames, scriptSpecs);
+    const limitOpts = Object.keys(stepLimits).length ? { limits: stepLimits, toolOwners: limitOwners } : {};
+    if (limitOpts.limits) push("info", `limits: ${Object.entries(stepLimits).map(([k, n]) => `${k} ${n}`).join(", ")} — per step; a call past one is refused`);
 
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
     if (isolatedRun()) {
@@ -2396,6 +2409,7 @@ async function runStep(
           output: step.output,
           schema: resolvedSchema ?? undefined,
           maxTurns: step.maxTurns,
+          ...limitOpts,
           translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
           // The container sees the workspace at /workspace and the library
           // at /library; the roots are named host-side and moved here.
@@ -2643,6 +2657,7 @@ async function runStep(
         output: step.output,
         schema: resolvedSchema ?? undefined,
         maxTurns: step.maxTurns,
+        ...limitOpts,
         stopRequested,
         // What the scripts saw, the verify sees: a flow can then check that
         // the proof a step left names THIS run, not one that came before —
@@ -3228,6 +3243,7 @@ export function createFlowRun(
       schemaPath: s.schemaPath,
       parallel: s.parallel,
       maxTurns: s.maxTurns,
+      limits: s.limits,
       attempts: 0,
       status: "pending",
       events: [],

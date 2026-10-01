@@ -39,6 +39,7 @@ import matter from "gray-matter";
 import { conformanceIssues } from "./okf.ts";
 import { timezoneProblem } from "./clock.ts";
 import { webProblems } from "./providers.ts";
+import { readLimits } from "./limits.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
@@ -290,6 +291,9 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     }
     // The same refusal check gives: a web key that cannot work never ships.
     for (const w of [...webProblems(front), ...actionProblems(front)]) at(f.path, w);
+    // `limits:` that cannot be read — a count of 0, a word, web.<not an
+    // action> — would run uncapped where the author meant a cap.
+    for (const w of readLimits(front.limits).problems) at(f.path, w);
     const lang = languageProblem(front.language);
     if (lang) at(f.path, lang);
     for (const w of localeProblems(front)) at(f.path, w);

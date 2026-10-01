@@ -145,6 +145,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "permissionMode", insert: "permissionMode: plan", hint: "plan = read-only" },
     { label: "disallowedTools", insert: "disallowedTools:\n  - " },
     { label: "subagents", insert: "subagents:\n  - ", hint: "colleagues it may delegate a job to — own context, own tools, no wider than its own" },
+    { label: "limits", insert: "limits:\n  web.search: 40\n  calls: 300", hint: "per step: a call past a limit is refused, never run" },
     {
       label: "provider",
       insert: "provider:\n  name: \n  token: ${PROVIDER_TOKEN}",

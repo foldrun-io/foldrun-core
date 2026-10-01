@@ -45,6 +45,7 @@ import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts"
 import { refNames } from "./refs.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
+import { parseStepLimits, readLimits } from "./limits.ts";
 import { webProblems } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
@@ -936,6 +937,14 @@ export interface AgentInfo {
   /** `schedule:` written on an agent, which nothing runs — only a flow has
    *  a clock. The message, or null when there is no such line. */
   scheduleProblem: string | null;
+  /** `limits:` — the agent's own per-step call limits, as readable. */
+  limits: Record<string, number>;
+  /** What is wrong with the `limits:` block's shape; key-vs-grant problems
+   *  need the tool lists, and `check` adds them (limits.ts limitKeyProblems). */
+  limitProblems: string[];
+  /** Tools this agent declares inline rather than in `tools:` — `apis:`,
+   *  `scripts:` and `mcpServers:` names — which a limit may also name. */
+  inlineTools: string[];
 }
 
 // Recognised HTTP verbs a tool may declare. Deliberately NOT named
@@ -1238,6 +1247,9 @@ export interface FlowStep {
   /** `max_turns:` — the most model turns this step may take before it is
    *  stopped, beside `budget:` (money) and `timeout:` (time). */
   maxTurns?: number;
+  /** `limits: {web.search: 10}` — this step's call limits, over the agent's
+   *  (nearest wins per key). See limits.ts. */
+  limits?: Record<string, number>;
   /** 1-indexed line in the flow file. Diagnostics without a line make you
    *  search; every real linter emits file:line. */
   line?: number;
@@ -1449,6 +1461,23 @@ function runBudget(raw: unknown): number | null {
   return b && b.period === "run" ? b.usd : null;
 }
 
+/** The names an agent's inline tool fields grant: `apis:`, `scripts:` (an
+ *  object's name, or a file's base name) and `mcpServers:`. */
+function inlineToolNames(data: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  if (Array.isArray(data.apis)) {
+    for (const a of data.apis) if (a && typeof a === "object" && typeof (a as { name?: unknown }).name === "string") out.push((a as { name: string }).name);
+  }
+  if (Array.isArray(data.scripts)) {
+    for (const sc of data.scripts) {
+      if (typeof sc === "string") out.push(path.basename(sc).replace(/\.[^.]+$/, ""));
+      else if (sc && typeof sc === "object" && typeof (sc as { name?: unknown }).name === "string") out.push((sc as { name: string }).name);
+    }
+  }
+  if (data.mcpServers && typeof data.mcpServers === "object") out.push(...Object.keys(data.mcpServers));
+  return out;
+}
+
 export function listAgents(tenant: string, workspace: string): AgentInfo[] {
   const dir = path.join(workspaceDir(tenant, workspace), "agents");
   if (!fs.existsSync(dir)) return [];
@@ -1481,6 +1510,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         localeProblems: localeProblems(data),
         webProblems: [...webProblems(data), ...actionProblems(data)],
         scheduleProblem: agentScheduleProblem(data),
+        ...(() => { const l = readLimits(data.limits); return { limits: l.limits, limitProblems: l.problems }; })(),
+        inlineTools: inlineToolNames(data),
       };
     });
 }
@@ -1504,7 +1535,7 @@ const OPTION_RE = /^(\s+)([a-z_-]+):(.*)$/;
  *  swallowed as an unknown option, silently, along with any typo of a real
  *  key. The consistency suite reads this list against the docs. */
 const STEP_OPTION_KEYS = new Set([
-  "approve", "ask", "case", "delegate", "each", "effort", "else", "loop", "max", "max_turns", "model",
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "limits", "loop", "max", "max_turns", "model",
   "on-fail", "onfail", "output", "parallel", "preview", "retry", "schema", "timeout", "until", "verify", "wait", "when",
 ]);
 
@@ -1823,6 +1854,11 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         const n = parseCount(value, 1, MAX_TURNS_CAP);
         if (n === undefined) problem(`a whole number of turns, 1 to ${MAX_TURNS_CAP}`);
         else step.maxTurns = n;
+      }
+      else if (key === "limits") {
+        const read = parseStepLimits(value);
+        for (const p of read.problems) problem(p);
+        if (Object.keys(read.limits).length) step.limits = read.limits;
       }
       else if (key === "schema") {
         if (!value) block = { step, indent: indentText.length, lines: [] };
@@ -3022,6 +3058,7 @@ export interface StepRecord {
   schemaPath?: string;
   parallel?: number;
   maxTurns?: number;
+  limits?: Record<string, number>;
   /** The parsed JSON an `output: json` step returned. Kept beside the prose
    *  result rather than instead of it: the reply is still what a person
    *  reads on the run page, and the data is what the next step computes on. */

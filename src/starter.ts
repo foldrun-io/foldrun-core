@@ -403,6 +403,7 @@ Indented under a step, any of:
 | \`each: items\` | run once per element of the previous step's JSON array |
 | \`parallel: 3\` | how many \`each:\` instances run at once — default all |
 | \`max_turns: 20\` | the most model turns before the step is stopped, beside \`budget:\` and \`timeout:\` |
+| \`limits: {web.search: 10}\` | this step's call limits, over the agent's key by key |
 
 ## Writing an agent
 
@@ -425,6 +426,7 @@ mcpServers: {}              # an MCP server, as a tool
 agents: [writer]            # colleagues this one may consult (an answer, no tools)
 subagents: [researcher]     # colleagues it may delegate a job to (own context, own tools ≤ its own)
 secrets: [CRM_TOKEN]        # keys the agent uses itself; a tool's own come with the tool
+limits: {web.search: 40, crm: 20, calls: 300}  # per step; a call past a limit is refused, never run
 timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
 provider: {}                # BYOK: your own model credential
 permissionMode: plan        # plan first, act once approved

@@ -21,6 +21,7 @@ import { checkPaths, checkBash, isFilesystemTool } from "./confine.ts";
 import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
+import { CallCounter, limitKeysFor, type Limits } from "./limits.ts";
 
 export interface ExecOutcome {
   status: "completed" | "failed";
@@ -111,6 +112,13 @@ export interface ExecOptions {
    *  context and tools no wider than this step's (subagents.ts). Absent or
    *  empty: no Agent tool, as before. */
   subagents?: SubagentSpec[];
+  /** `limits:` — the most calls this step may make, per tool and in all,
+   *  resolved host-side (account, workspace, agent, step: nearest wins per
+   *  key). Counted in the PreToolUse hook below; see limits.ts. */
+  limits?: Limits;
+  /** SDK tool name → the foldrun name it counts under, for the tools whose
+   *  SDK name does not say (limits.ts toolOwners). */
+  toolOwners?: Record<string, string>;
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
 }
 
@@ -268,6 +276,9 @@ export async function executeStep(
   // its own list, a path outside the workspace, a shell command — names the
   // agent that tried, not just the step.
   const subagentNames = new Map<string, string>();
+  // `limits:` — this step's counts. A new step, a retry of one, or a
+  // fan-out instance each start from zero.
+  const counter = new CallCounter(opts.limits);
 
   const q = runQuery({
     prompt: opts.prompt,
@@ -342,13 +353,26 @@ export async function executeStep(
                 return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: why } };
               }
             }
-            if (!isFilesystemTool(hookInput.tool_name)) return {};
-            const verdict = checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot });
-            if (!verdict.ok) {
+            const verdict = isFilesystemTool(hookInput.tool_name)
+              ? checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot })
+              : null;
+            if (verdict && !verdict.ok) {
               emit("error", verdict.reason!, via ? { subagent: via } : undefined);
               return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: verdict.reason! } };
             }
-            if (!verdict.updatedInput) return {};
+            // `limits:` — last, so a call another check refused counts
+            // toward nothing. Every call passes here, the step's own and its
+            // sub-agents', so one count covers both. A call past a limit is
+            // refused before it runs: the tool, and any paid API behind it,
+            // never sees it.
+            if (counter.active) {
+              const refusal = counter.take(limitKeysFor(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, opts.toolOwners));
+              if (refusal) {
+                emit("info", `${refusal.message} (${hookInput.tool_name} refused)`, via ? { subagent: via } : undefined);
+                return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: refusal.message } };
+              }
+            }
+            if (!verdict?.updatedInput) return {};
             return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const, updatedInput: verdict.updatedInput } };
           }],
         }],
@@ -377,7 +401,10 @@ export async function executeStep(
         // The toolset was already narrowed to what the agent declared, so
         // anything outside it is a denial with a reason the model can act on.
         const fromGrantedServer = opts.mcpNames.some((n) => toolName.startsWith(`mcp__${n}__`));
+        // A call the hook counted and this refuses never ran: give it back.
+        const refund = () => { if (counter.active) counter.refund(limitKeysFor(toolName, input, opts.toolOwners)); };
         if (!opts.allowed.includes(toolName) && !fromGrantedServer) {
+          refund();
           return {
             behavior: "deny" as const,
             message: `Tool ${toolName} is not enabled for this agent.`,
@@ -390,6 +417,7 @@ export async function executeStep(
               ? checkPaths(toolName, input, { agentDir, workspaceRoot, libraryRoot })
               : { ok: true as const };
         if (!verdict.ok) {
+          refund();
           emit("error", verdict.reason!, via ? { subagent: via } : undefined);
           return { behavior: "deny" as const, message: verdict.reason! };
         }
@@ -552,6 +580,10 @@ export async function executeStep(
   } finally {
     for (const t of timers) clearTimeout(t);
   }
+  // What the step used of each limit, on the trace whenever any is set —
+  // so "it stopped searching at 40" is read off the run, not guessed.
+  const limitLine = counter.summary();
+  if (limitLine) emit("info", limitLine);
   // No result message — a timeout, a stop, a budget stop, a stream that
   // died — means no total from the SDK. The turns it did take were billed by
   // the provider all the same, so the step's cost is their sum.
