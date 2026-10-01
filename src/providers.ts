@@ -656,23 +656,23 @@ export const BROWSE_ENGINE_LIMITS: Record<string, { why: string; cannot: readonl
   lightpanda: {
     why: "needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome",
     cannot: [
-      "mode=screenshot", "mode=pdf", "mode=vitals", "mode=webmcp", "video", "trace", "har", "device", "live", "session",
+      "mode=screenshot", "mode=pdf", "mode=vitals", "mode=webmcp", "pdf", "webmcp", "video", "trace", "har", "device", "live", "session",
       "webgpu", "extensions", "annotate", "visual", "cpu_profile", "proxy", "headless: false",
     ],
   },
-  // Obscura draws but cannot intercept a request (a route hangs its page
-  // loads), record, or keep a profile — so nothing built on those, which
+  // Obscura draws — screenshots, a raster pdf — but cannot intercept a
+  // request (a route hangs its page loads), record, or keep a profile — so nothing built on those, which
   // includes the allowed_domains lock: a lock that did nothing would be
   // worse than a refusal.
   obscura: {
     why: "is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome",
     cannot: [
-      "mode=webmcp", "video", "trace", "har", "device", "live", "session", "webgpu", "extensions", "cpu_profile",
+      "mode=webmcp", "webmcp", "video", "trace", "har", "device", "live", "session", "webgpu", "extensions", "cpu_profile",
       "block", "routes", "mock", "unmock", "proxy", "captcha", "allowed_domains", "headless: false",
     ],
   },
-  firefox: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
-  webkit: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
+  firefox: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=pdf", "mode=webmcp", "pdf", "webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
+  webkit: { why: "is a Chromium feature — use engine chrome or chromium", cannot: ["mode=pdf", "mode=webmcp", "pdf", "webmcp", "live", "webgpu", "extensions", "cpu_profile"] },
 };
 
 /** The refusal for one option on one engine, or null when the engine can. */
