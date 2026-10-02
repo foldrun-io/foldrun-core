@@ -11,6 +11,355 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [0.5.0] — 2026-10-02
+
+- workspace/ is the one spelling for the workspace root, in every tool and the shell ([6d8e15e](https://github.com/foldrun-io/foldrun-core/commit/6d8e15e))
+- a person in the loop mid-step: tools: [ask] (ask_person) and messages into a running step ([f68b72c](https://github.com/foldrun-io/foldrun-core/commit/f68b72c))
+- a step cut off before its closing result is charged for the turns it took ([cfa7c51](https://github.com/foldrun-io/foldrun-core/commit/cfa7c51))
+- Mount the runtime cache from a per-tenant Docker volume (#18) ([e959449](https://github.com/foldrun-io/foldrun-core/commit/e959449))
+- a subscription's weekly limit is a refusal the second supply answers ([e0b594d](https://github.com/foldrun-io/foldrun-core/commit/e0b594d))
+- a 401 from a rotated token is waited out, not a failed run ([d8d2ce8](https://github.com/foldrun-io/foldrun-core/commit/d8d2ce8))
+- Let an empty FOLDRUN_RUNNER_IMAGE or FOLDRUN_EGRESS_URL mean what the comments say it means (#17) ([6a02cb1](https://github.com/foldrun-io/foldrun-core/commit/6a02cb1))
+- the model credential is read per step, not held from boot ([6dd28e4](https://github.com/foldrun-io/foldrun-core/commit/6dd28e4))
+- A web key that cannot work is refused at check and at deploy, not only in the trail ([60ac110](https://github.com/foldrun-io/foldrun-core/commit/60ac110))
+- A test fixture that looks like a credential stops the box deploying ([5fddc68](https://github.com/foldrun-io/foldrun-core/commit/5fddc68))
+- Provider search shapes, and the files a folder entry is made of ([cee3fc3](https://github.com/foldrun-io/foldrun-core/commit/cee3fc3))
+- Say why the model supply refused, in the run's own words ([4634b65](https://github.com/foldrun-io/foldrun-core/commit/4634b65))
+- A step's instruction ends where the step ends ([6fcb4c8](https://github.com/foldrun-io/foldrun-core/commit/6fcb4c8))
+- The scaffolded CLAUDE.md knows an agent has a calendar ([0d1f838](https://github.com/foldrun-io/foldrun-core/commit/0d1f838))
+- Tests for the clock cascade, offsets and the date rolling over ([c48ae7e](https://github.com/foldrun-io/foldrun-core/commit/c48ae7e))
+- A timezone nobody can read is refused where it was written ([2b0484a](https://github.com/foldrun-io/foldrun-core/commit/2b0484a))
+- The clock an agent works to is resolvable at every level ([91689b6](https://github.com/foldrun-io/foldrun-core/commit/91689b6))
+- readTree's rule, asked of a path that is not on this machine ([2f4a39c](https://github.com/foldrun-io/foldrun-core/commit/2f4a39c))
+- One helper decides whether a folder is an account or a lone workspace ([92c0bd7](https://github.com/foldrun-io/foldrun-core/commit/92c0bd7))
+
+### AGENTS.md
+
+- the coding-agent block is stripped before the prose reaches an agent ([ae7fe1e](https://github.com/foldrun-io/foldrun-core/commit/ae7fe1e))
+
+### budget
+
+- an agent's cap is shared across its fan-out copies, not handed whole to each ([dd0eabf](https://github.com/foldrun-io/foldrun-core/commit/dd0eabf))
+
+### check
+
+- refuse a web.browse engine paired with what it cannot do, in the tool's words ([9e23642](https://github.com/foldrun-io/foldrun-core/commit/9e23642))
+- a gate sharing its number with another step, and a gap in the step numbers ([2281309](https://github.com/foldrun-io/foldrun-core/commit/2281309))
+- punctuation is not a shell operator ([ed52184](https://github.com/foldrun-io/foldrun-core/commit/ed52184))
+- a prose verify: and a step whose agent does not exist are errors ([d63b64f](https://github.com/foldrun-io/foldrun-core/commit/d63b64f))
+- a step that can act outward needs a verify or a gate ([9070dee](https://github.com/foldrun-io/foldrun-core/commit/9070dee))
+
+### CLAUDE.md template
+
+- a Node script started through workspace/ is its own main module ([797fcc8](https://github.com/foldrun-io/foldrun-core/commit/797fcc8))
+
+### completions
+
+- region: ([c017396](https://github.com/foldrun-io/foldrun-core/commit/c017396))
+
+### confine
+
+- refuse a write that would grow storage/, state/ or workspace/ inside an agent's own folder ([b27c27c](https://github.com/foldrun-io/foldrun-core/commit/b27c27c))
+- workspace/ still resolves after the SDK makes the path absolute; staging keeps file times ([20c3394](https://github.com/foldrun-io/foldrun-core/commit/20c3394))
+
+### deploy
+
+- the plan and the save share one keep rule; the trigger log survives ([bd5a28e](https://github.com/foldrun-io/foldrun-core/commit/bd5a28e))
+- expectRemoved refuses removals nobody confirmed ([1865d0e](https://github.com/foldrun-io/foldrun-core/commit/1865d0e))
+
+### deps
+
+- patch fast-uri and ip-address (transitive via the MCP SDK) ([78fd139](https://github.com/foldrun-io/foldrun-core/commit/78fd139))
+- claude-agent-sdk ^0.3.285 (latest) ([6631aff](https://github.com/foldrun-io/foldrun-core/commit/6631aff))
+
+### egress
+
+- a re-granted secret takes the new value — the rotation retry sent the revoked token ([b9594d5](https://github.com/foldrun-io/foldrun-core/commit/b9594d5))
+
+### engine limits
+
+- pdf and webmcp in the one table; obscura prints its raster pdf ([a62743d](https://github.com/foldrun-io/foldrun-core/commit/a62743d))
+
+### evals
+
+- `inputs: true` marks a flow's saved inputs, never run as an eval ([4bcac51](https://github.com/foldrun-io/foldrun-core/commit/4bcac51))
+
+### fetch
+
+- a tenant's URL follows its redirects one hop at a time, each back through the seam ([df35dc5](https://github.com/foldrun-io/foldrun-core/commit/df35dc5))
+
+### flow edits
+
+- a step's options after a blank line go with it; CRLF flows parse ([6232bd0](https://github.com/foldrun-io/foldrun-core/commit/6232bd0))
+
+### flow patterns
+
+- duplicateStep, stepSource and pasteSteps — copy a step beside itself, copy and paste steps as markdown ([959667e](https://github.com/foldrun-io/foldrun-core/commit/959667e))
+
+### flow rewriters
+
+- a CRLF flow is edited as LF and stays CRLF ([b2ac9f0](https://github.com/foldrun-io/foldrun-core/commit/b2ac9f0))
+
+### flow-patterns
+
+- removeStep — delete one step, its options, renumber groups ([e742f9e](https://github.com/foldrun-io/foldrun-core/commit/e742f9e))
+- orchestration patterns and team changes as line-level markdown edits ([90efddf](https://github.com/foldrun-io/foldrun-core/commit/90efddf))
+
+### flows
+
+- pause_when — a flow whose work is finished stops itself ([04965ec](https://github.com/foldrun-io/foldrun-core/commit/04965ec))
+
+### flows/agents
+
+- name what silently defaulted; deploy warns on an ungated outward step ([d5cf901](https://github.com/foldrun-io/foldrun-core/commit/d5cf901))
+
+### git hooks
+
+- pre-push checks the pushed commit in a worktree, not the working tree; a failed archive is not a clean scan ([358610c](https://github.com/foldrun-io/foldrun-core/commit/358610c))
+- run pre-push checks without git's GIT_DIR ([894a34f](https://github.com/foldrun-io/foldrun-core/commit/894a34f))
+- take the repo's own .gitleaks.toml when it has one ([2c6c63e](https://github.com/foldrun-io/foldrun-core/commit/2c6c63e))
+- secrets, typecheck and tests before the push, not in CI ([5d4a022](https://github.com/foldrun-io/foldrun-core/commit/5d4a022))
+
+### gitignore
+
+- the ./data fallback, which holds a secret key ([4ffd2ee](https://github.com/foldrun-io/foldrun-core/commit/4ffd2ee))
+
+### gitrepo
+
+- resolveRestorePoint — a sha, ref, date or age to the commit on main a restore means ([20f20d7](https://github.com/foldrun-io/foldrun-core/commit/20f20d7))
+
+### language
+
+- — the language an agent works in, cascading like its clock ([aa54582](https://github.com/foldrun-io/foldrun-core/commit/aa54582))
+
+### layout
+
+- .foldrun-install marks an installation's data root ([de4a3be](https://github.com/foldrun-io/foldrun-core/commit/de4a3be))
+
+### limits
+
+- an API operation counts under the API it was built for, not the longest name it starts with ([bfcd09b](https://github.com/foldrun-io/foldrun-core/commit/bfcd09b))
+- per-step call limits for every kind of tool, refused in the PreToolUse hook ([9674eb1](https://github.com/foldrun-io/foldrun-core/commit/9674eb1))
+
+### notify
+
+- durable webhook deliveries and one mail door with preferences and one-click unsubscribe ([8038fe4](https://github.com/foldrun-io/foldrun-core/commit/8038fe4))
+- the test notification no longer names the platform in its subject ([c1eac69](https://github.com/foldrun-io/foldrun-core/commit/c1eac69))
+- an account with its own sender gets all its mail from it — invites, resets, low balance too ([4aaf990](https://github.com/foldrun-io/foldrun-core/commit/4aaf990))
+
+### operations
+
+- allowlist fails closed ([25d4db6](https://github.com/foldrun-io/foldrun-core/commit/25d4db6))
+
+### operator
+
+- close an unanswered question on the proxy when ask_person times out ([2a8d91d](https://github.com/foldrun-io/foldrun-core/commit/2a8d91d))
+
+### outward steps
+
+- a failed verify's detail line no longer lets the step retry ([1cf315b](https://github.com/foldrun-io/foldrun-core/commit/1cf315b))
+
+### platform hook
+
+- syncPublicShares is asynchronous — share links are rows now, not a manifest ([fa522bf](https://github.com/foldrun-io/foldrun-core/commit/fa522bf))
+
+### prompt
+
+- find storage files by Read or Glob's path, never a climbing pattern ([ed684be](https://github.com/foldrun-io/foldrun-core/commit/ed684be))
+
+### providers
+
+- scrapingbee fetch, zenrows browser; exa description matches the fresh fetch ([da2b9a8](https://github.com/foldrun-io/foldrun-core/commit/da2b9a8))
+
+### region
+
+- — the country an agent works for, with everything it implies derived ([37a1474](https://github.com/foldrun-io/foldrun-core/commit/37a1474))
+
+### retry
+
+- an outward step whose tools ran and whose check then failed is not run again ([1f2d7be](https://github.com/foldrun-io/foldrun-core/commit/1f2d7be))
+
+### Run verdicts
+
+- a completed run that refused itself reads BLOCKED, not success ([a9fe528](https://github.com/foldrun-io/foldrun-core/commit/a9fe528))
+
+### runner
+
+- carry the step's index on its egress lease ([cea36e1](https://github.com/foldrun-io/foldrun-core/commit/cea36e1))
+- the slim image ships fonts ([ed6d289](https://github.com/foldrun-io/foldrun-core/commit/ed6d289))
+- a person's stop mid-step is said on the step ([a263e9c](https://github.com/foldrun-io/foldrun-core/commit/a263e9c))
+- the rotation retry re-grants the model key before it commits the lease ([d88cb15](https://github.com/foldrun-io/foldrun-core/commit/d88cb15))
+
+### runner image
+
+- engine downloads retry; a missing engine leads the error; web.browse vendor_session; pinned UA drift warns ([905246f](https://github.com/foldrun-io/foldrun-core/commit/905246f))
+- Debian 13 base, Lightpanda 0.4.1 ([dd5e1c8](https://github.com/foldrun-io/foldrun-core/commit/dd5e1c8))
+- slim draws emoji, CJK, Devanagari and Thai; base pin under test ([91867ee](https://github.com/foldrun-io/foldrun-core/commit/91867ee))
+- Xvfb by name, and /opt/browser/engines.json says which engines it has ([ecec5a0](https://github.com/foldrun-io/foldrun-core/commit/ecec5a0))
+- pin Playwright to 1.63.0 ([ba074c5](https://github.com/foldrun-io/foldrun-core/commit/ba074c5))
+
+### runtime
+
+- take over an abandoned build claim atomically ([0da0fdd](https://github.com/foldrun-io/foldrun-core/commit/0da0fdd))
+- a hash-pinned requirements.txt installs its pins, and the log says the hashes were not ([3b20788](https://github.com/foldrun-io/foldrun-core/commit/3b20788))
+- a build claim names its holder and beats while it builds; failures end the wait ([6b429ac](https://github.com/foldrun-io/foldrun-core/commit/6b429ac))
+- uv, checked cache hits, a slim image, and a shared layer ([7746263](https://github.com/foldrun-io/foldrun-core/commit/7746263))
+
+### script tools
+
+- a gallery program runs on the host when the library has no copy ([dd4eb1f](https://github.com/foldrun-io/foldrun-core/commit/dd4eb1f))
+
+### secret-files
+
+- one directory per step, so a fan-out's first finisher keeps its hands off the rest ([5aff799](https://github.com/foldrun-io/foldrun-core/commit/5aff799))
+
+### secret-health
+
+- a pluggable store; reads are async ([27c779d](https://github.com/foldrun-io/foldrun-core/commit/27c779d))
+
+### secrets
+
+- granting a script tool grants the secrets its file lists ([8bc2964](https://github.com/foldrun-io/foldrun-core/commit/8bc2964))
+
+### Security
+
+- SSRF guard and tenant isolation (foldrun-core) (#16) ([972b6a4](https://github.com/foldrun-io/foldrun-core/commit/972b6a4))
+
+### self-hosting
+
+- the runner image is built when the value is empty, not absent (#19) ([6ded4e4](https://github.com/foldrun-io/foldrun-core/commit/6ded4e4))
+
+### slim browsing
+
+- a full re-run after a lost slim go is the next try; a reconnect that met a closing pod is not "got through" ([96b437e](https://github.com/foldrun-io/foldrun-core/commit/96b437e))
+- the slim go a lost browser pod ended is its own try; reconnect lines say when ([5324447](https://github.com/foldrun-io/foldrun-core/commit/5324447))
+- a browsing step may run slim through the account's browser pod, with a safe fallback ([c32fc9c](https://github.com/foldrun-io/foldrun-core/commit/c32fc9c))
+
+### SPEC
+
+- a gate holds its group; check warns on a shared number or a gap ([ab41a16](https://github.com/foldrun-io/foldrun-core/commit/ab41a16))
+
+### starter
+
+- /api/version and /api/changelog in the shipped CLAUDE.md's route list ([083f312](https://github.com/foldrun-io/foldrun-core/commit/083f312))
+- answer/message routes and the ask tool in the shipped CLAUDE.md ([6daa3b6](https://github.com/foldrun-io/foldrun-core/commit/6daa3b6))
+- the canvas and CLI pattern verbs, and where a secret is declared, in every new account's CLAUDE.md ([5f775f0](https://github.com/foldrun-io/foldrun-core/commit/5f775f0))
+
+### starter CLAUDE.md
+
+- /restore, /api/account/backups and /api/me/onboarding in the route tables ([1f2da4c](https://github.com/foldrun-io/foldrun-core/commit/1f2da4c))
+- the API conventions every call shares — Foldrun-Version, X-RateLimit-*, Idempotency-Key, /api/openapi.json ([3b84005](https://github.com/foldrun-io/foldrun-core/commit/3b84005))
+- a deploy that would delete stops; a coding agent tells the person, never adds --yes on its own ([13b1a41](https://github.com/foldrun-io/foldrun-core/commit/13b1a41))
+
+### step-exec
+
+- rewrite workspace/ in a PreToolUse hook, so reads reach the workspace too ([db54a46](https://github.com/foldrun-io/foldrun-core/commit/db54a46))
+
+### storage
+
+- a signed download's filename survives any alphabet ([dc5270b](https://github.com/foldrun-io/foldrun-core/commit/dc5270b))
+- inline-safe types for more media and fonts; scaffold lists /storage/preview ([d41fc50](https://github.com/foldrun-io/foldrun-core/commit/d41fc50))
+- preview types, and signed links that may say inline for them ([6da90b4](https://github.com/foldrun-io/foldrun-core/commit/6da90b4))
+- the S3 driver signs with the pod's role when no static key is set ([c54c4fa](https://github.com/foldrun-io/foldrun-core/commit/c54c4fa))
+
+### store
+
+- seal what a move into the database leaves behind ([44385bd](https://github.com/foldrun-io/foldrun-core/commit/44385bd))
+- seal billing.json, oauth-connections.json, secret-health.json and once/ in the account browser ([7b81016](https://github.com/foldrun-io/foldrun-core/commit/7b81016))
+
+### subagents
+
+- guard undeclared agents, keep the inbox off them, price at their model ([baa56ca](https://github.com/foldrun-io/foldrun-core/commit/baa56ca))
+- every refusal names the agent that tried — path and shell checks too ([e5163d1](https://github.com/foldrun-io/foldrun-core/commit/e5163d1))
+- delegate a job to a colleague with its own context and tools ([8a123b7](https://github.com/foldrun-io/foldrun-core/commit/8a123b7))
+
+### The whole list
+
+- SERP scrapers, Perplexity, Linkup, and web_browse: for a remote browser ([80f9b7b](https://github.com/foldrun-io/foldrun-core/commit/80f9b7b))
+
+### tool test
+
+- an oauth2 secret reaches the tool as a live token, as it does in a run ([afd37b9](https://github.com/foldrun-io/foldrun-core/commit/afd37b9))
+- an operations: allowlist binds the tester too ([8be251c](https://github.com/foldrun-io/foldrun-core/commit/8be251c))
+
+### tool-programs
+
+- toolSecretNeeds — the secret names a script tool's file says it reads ([d06ce0b](https://github.com/foldrun-io/foldrun-core/commit/d06ce0b))
+
+### tools
+
+- retire files and bash too — write and code are the only names ([789a311](https://github.com/foldrun-io/foldrun-core/commit/789a311))
+- write and code name the file and shell groups; web, fetch, WebSearch, WebFetch retired ([2d92d86](https://github.com/foldrun-io/foldrun-core/commit/2d92d86))
+
+### translator
+
+- every stop reason a provider can report ([8993cb0](https://github.com/foldrun-io/foldrun-core/commit/8993cb0))
+
+### updateFlowStep
+
+- limits — the step options panel writes {web.search: 10, calls: 300} on one line ([e4d1974](https://github.com/foldrun-io/foldrun-core/commit/e4d1974))
+
+### vault
+
+- every change under a cross-process lock, written atomically ([5974e66](https://github.com/foldrun-io/foldrun-core/commit/5974e66))
+
+### verify
+
+- no timeout: on the step, no clock on its check ([ba0c460](https://github.com/foldrun-io/foldrun-core/commit/ba0c460))
+- a check gets what is left of the step's timeout, and a stop ends it ([67d6942](https://github.com/foldrun-io/foldrun-core/commit/67d6942))
+
+### verify test
+
+- run in a real workspace shape; escapes (../../../, absolute, workspace/../..) refused, both spellings of storage accepted ([65e9b83](https://github.com/foldrun-io/foldrun-core/commit/65e9b83))
+
+### web
+
+- remove web_search, web_fetch, web_browse and the SDK web aliases completely ([be223c0](https://github.com/foldrun-io/foldrun-core/commit/be223c0))
+- one tool, eight actions, a web: block for who does each ([45533ae](https://github.com/foldrun-io/foldrun-core/commit/45533ae))
+
+### web actions
+
+- one registry of which provider does which action ([b68b8ff](https://github.com/foldrun-io/foldrun-core/commit/b68b8ff))
+
+### web browse
+
+- a pinned user_agent on engine chromium is compared with Chromium, not Google Chrome ([5b9d4ac](https://github.com/foldrun-io/foldrun-core/commit/5b9d4ac))
+
+### web_browse
+
+- live: true in the block keeps the page open between calls ([9ad07cc](https://github.com/foldrun-io/foldrun-core/commit/9ad07cc))
+- version: — pick a specific build of the engine ([5e40d3e](https://github.com/foldrun-io/foldrun-core/commit/5e40d3e))
+- engine: chrome is real Google Chrome, a fourth browser ([bc7534c](https://github.com/foldrun-io/foldrun-core/commit/bc7534c))
+- accept headless: true|false in the agent's block ([ccaa6a7](https://github.com/foldrun-io/foldrun-core/commit/ccaa6a7))
+- named identities in the browse settings, and axe-core in the runner image ([9116843](https://github.com/foldrun-io/foldrun-core/commit/9116843))
+- chrome and safari, the names people use ([bdea4ce](https://github.com/foldrun-io/foldrun-core/commit/bdea4ce))
+- seed localStorage, sessionStorage and IndexedDB from a secret ([617d6c3](https://github.com/foldrun-io/foldrun-core/commit/617d6c3))
+- a cookie default must name its site ([95832f2](https://github.com/foldrun-io/foldrun-core/commit/95832f2))
+- cookies: and cookie_domain: in the block, refused unless cookies: is a vault name ([b66fedb](https://github.com/foldrun-io/foldrun-core/commit/b66fedb))
+- takes a settings block, not only a vendor name ([8c198dc](https://github.com/foldrun-io/foldrun-core/commit/8c198dc))
+
+### web_browse block
+
+- obscura engine, video, live_view; cdp vendor; editable file cap 512 KB ([8b30a94](https://github.com/foldrun-io/foldrun-core/commit/8b30a94))
+- allowed_domains, deny, boundaries, init, extensions, webgpu, ignore_https_errors, state_key; engine lightpanda ([8884b62](https://github.com/foldrun-io/foldrun-core/commit/8884b62))
+
+### web_search
+
+- a settings block for the account's own engine ([e3f72f6](https://github.com/foldrun-io/foldrun-core/commit/e3f72f6))
+- and web_fetch: take a search or fetch API, with your own key ([381dec7](https://github.com/foldrun-io/foldrun-core/commit/381dec7))
+
+### web.browse.session
+
+- what a vendor's own session is asked for, checked per vendor ([9b9b6a9](https://github.com/foldrun-io/foldrun-core/commit/9b9b6a9))
+
+### when
+
+- rows of <csv>, the reply for a shell verify:, and options a nested flow drops ([a2ddc55](https://github.com/foldrun-io/foldrun-core/commit/a2ddc55))
+
+### workspace/
+
+- a Node program started through the link is its own main module ([7535fe6](https://github.com/foldrun-io/foldrun-core/commit/7535fe6))
+
 ## [0.4.0] — 2026-09-15
 
 - The step clocks stay referenced: a hanging tool call must not let the loop exit around them ([66be8f1](https://github.com/foldrun-io/foldrun-core/commit/66be8f1))
