@@ -20,6 +20,11 @@
 const EXACT = new Set([
   "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE",
   "TZ", "TERM", "SHELL", "USER", "LOGNAME",
+  // Where Claude Code / the Agent SDK keeps its config and session
+  // transcripts — the same kind of thing as HOME (a path, not a secret), and
+  // without it an operator cannot keep them out of the host user's
+  // ~/.claude: the box's deploy tests set it to the job's temp (2026-10-02).
+  "CLAUDE_CONFIG_DIR",
   // The host's way to the network is the child's way to the network.
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
   "SSL_CERT_FILE", "SSL_CERT_DIR",

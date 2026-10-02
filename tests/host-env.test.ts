@@ -50,7 +50,7 @@ function planted<T>(body: () => Promise<T> | T): Promise<T> | T {
 }
 
 test("the rule: an interpreter's needs, the locale, the clock, proxies, and the run's own identifiers", () => {
-  for (const k of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "NODE_ENV", "NODE_OPTIONS", "HTTPS_PROXY", "FOLDRUN_RUN_ID", "FOLDRUN_STEP_INDEX"]) {
+  for (const k of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "NODE_ENV", "NODE_OPTIONS", "HTTPS_PROXY", "FOLDRUN_RUN_ID", "FOLDRUN_STEP_INDEX", "CLAUDE_CONFIG_DIR"]) {
     assert.ok(hostEnvAllowed(k), `${k} passes`);
   }
   for (const k of [...Object.keys(PLANTED), "FOLDRUN_DATA", "FOLDRUN_FALLBACK_TOKEN", "FOLDRUN_RUNNER_IMAGE", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "KUBECONFIG"]) {
