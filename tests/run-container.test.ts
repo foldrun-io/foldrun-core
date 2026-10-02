@@ -472,6 +472,18 @@ test("the slim runner ships fonts — without them every non-browser render draw
   assert.doesNotMatch(DOCKERFILE.split("FROM base AS slim")[0], /fonts-dejavu/);
 });
 
+test("core is installed in its own stage — the tarball and core's README never become a layer of slim or full", () => {
+  const core = DOCKERFILE.split("FROM base AS core")[1].split("FROM base AS slim")[0];
+  assert.match(core, /COPY foldrun-core\.tgz/);
+  assert.match(core, /rm -f foldrun-core\.tgz node_modules\/@foldrun\/core\/README\.md/);
+  const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
+  const full = DOCKERFILE.split("FROM browsers AS full")[1];
+  for (const stage of [slim, full]) {
+    assert.match(stage, /COPY --from=core --chown=agent:agent \/opt\/runner\/ \.\//);
+    assert.doesNotMatch(stage, /foldrun-core\.tgz/);
+  }
+});
+
 test("the browsers stage installs Xvfb by name — headless: false must not hang on a Playwright dependency list", () => {
   const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
   assert.match(browsers, /apt-get install -y --no-install-recommends xvfb\b/);

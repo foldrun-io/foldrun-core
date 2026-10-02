@@ -647,17 +647,30 @@ try {
 }
 `;
 
+// Core itself is installed in a stage of its own (CORE_STAGE) and only the
+// result is copied in: the tarball and the package README — which explains
+// foldrun to a person reading the repo, and which no step reads — stay in
+// that stage and never become a layer of the image. Owner rule, 2026-10-02:
+// foldrun's own docs live in git, not in containers.
+const CORE_STAGE = `FROM base AS core
+WORKDIR /opt/runner
+COPY foldrun-core.tgz ./
+RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
+ && npm cache clean --force >/dev/null 2>&1 \\
+ && rm -f foldrun-core.tgz node_modules/@foldrun/core/README.md
+`;
+
 // docker cp writes root-owned files, so the entrypoint starts as root for
 // exactly two commands — chown the copied-in trees, drop to the agent user —
 // and the run flags grant only the three capabilities those two commands
 // need. By the time any model-directed code executes, the process is uid
 // 10001 with no capabilities at all.
 const CORE_INSTALL = `WORKDIR /opt/runner
-COPY foldrun-core.tgz driver.mjs entry.sh ./
-RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
- && npm cache clean --force >/dev/null 2>&1 \\
- && mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} ${SHARED_RUNTIMES} \\
- && chown -R agent:agent /workspace /library /opt/runner /home/agent/.foldrun /opt/foldrun-runtimes \\
+COPY --from=core --chown=agent:agent /opt/runner/ ./
+COPY --chown=agent:agent driver.mjs entry.sh ./
+RUN mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} ${SHARED_RUNTIMES} \\
+ && chown agent:agent /opt/runner \\
+ && chown -R agent:agent /workspace /library /opt/runner/job /home/agent/.foldrun /opt/foldrun-runtimes \\
  && chmod +x /opt/runner/entry.sh
 ENTRYPOINT ["/opt/runner/entry.sh"]
 `;
@@ -724,6 +737,7 @@ RUN apt-get update \\
 COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 
+${CORE_STAGE}
 FROM base AS slim
 # Fonts, because a step that draws text without a browser still needs them:
 # the full image gets 51 from Playwright's --with-deps, slim had none, so from
