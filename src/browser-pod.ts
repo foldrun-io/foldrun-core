@@ -78,22 +78,54 @@ export interface ClassifyContext {
   browseInit?: string;
 }
 
-/** The browse actions a call asked for, nested `if` branches included. */
+/**
+ * The browse actions a call asked for, nested `if` branches included.
+ *
+ * Read the way the web tool reads them (platform gallery.ts, browse.mjs
+ * checkSteps): `actions` is an array of steps, a step's action is one of its
+ * OWN keys (the first the tool knows), and the only steps inside a step are
+ * an `if`'s `then` and `else`. Every own key of a step is returned — the
+ * caller keeps the ones it cares about, and a step holding a write key beside
+ * a read key counts as the write. What sits inside an option's value — an
+ * extract's `fields` (column names), a mock's `json` body, a webmcp `input` —
+ * is data, not an action: `{"fields": {"type": "td.kind"}}` is no typing.
+ *
+ * A shape the tool would refuse (an object where the array belongs, a step
+ * that is not an object, `then` that is not a list) is walked key by key at
+ * every depth, as before; nesting past MAX_DEPTH is unreadable, so a write
+ * buried deep is never taken for a read.
+ */
 export function browseActionNames(actions: unknown): string[] {
+  const UNREADABLE = "(unreadable actions)";
+  const MAX_DEPTH = 32;
   let steps: unknown = actions;
   if (typeof steps === "string") {
-    try { steps = JSON.parse(steps); } catch { return ["(unreadable actions)"]; }
+    try { steps = JSON.parse(steps); } catch { return [UNREADABLE]; }
   }
   const out: string[] = [];
-  const walk = (v: unknown, depth: number) => {
-    if (depth > 8 || v === null || typeof v !== "object") return;
-    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+  // Unknown shapes: every key anywhere is a candidate action.
+  const walkAny = (v: unknown, depth: number) => {
+    if (v === null || typeof v !== "object") return;
+    if (depth > MAX_DEPTH) { out.push(UNREADABLE); return; }
+    if (Array.isArray(v)) { for (const x of v) walkAny(x, depth + 1); return; }
     for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
       out.push(k);
-      walk(x, depth + 1);
+      walkAny(x, depth + 1);
     }
   };
-  walk(steps, 0);
+  const walkSteps = (v: unknown, depth: number) => {
+    if (v === null || v === undefined) return;
+    if (depth > MAX_DEPTH) { out.push(UNREADABLE); return; }
+    if (!Array.isArray(v)) { walkAny(v, depth); return; }
+    for (const step of v) {
+      if (step === null || typeof step !== "object" || Array.isArray(step)) { walkAny(step, depth + 1); continue; }
+      for (const [k, x] of Object.entries(step as Record<string, unknown>)) {
+        out.push(k);
+        if (k === "then" || k === "else") walkSteps(x, depth + 1);
+      }
+    }
+  };
+  walkSteps(steps, 0);
   return out;
 }
 

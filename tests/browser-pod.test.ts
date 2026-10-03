@@ -520,3 +520,42 @@ test("a pod log line's time, for the run's reconnect lines", () => {
   assert.equal(podAt(undefined), "");
   assert.equal(podAt("not a time"), "");
 });
+
+test("an option object's keys are not actions — only a step's own keys and its then/else steps are", () => {
+  // The web tool reads a step's action from the step's own keys (the first
+  // it knows) and recurses only into an `if`'s then/else. Keys inside an
+  // option's value — extract's fields, a mock's json body, a webmcp input —
+  // are column names, data and arguments, never something done to the page.
+  for (const actions of [
+    [{ extract: ".row", fields: { type: "td.kind", select: "td.choice", check: "td.ok" } }],
+    [{ mock: "**/api/prices", json: { type: "png", clear: true, press: 1 } }],
+    [{ localstorage: "prefs", value: { select: "all" } }],
+    [{ if: "url", contains: "/p/", then: [{ extract: "h1", fields: { type: "h2" } }] }],
+  ]) {
+    assert.deepEqual(classifyCall(WEB, { action: "browse", url: "https://x", actions: JSON.stringify(actions) }), { write: false }, JSON.stringify(actions));
+  }
+});
+
+test("every real write still reads as one: a step's own key, then/else at any depth, unknown shapes", () => {
+  const w = (actions: unknown) => {
+    const k = classifyCall(WEB, { action: "browse", url: "https://x", actions });
+    assert.equal(k.write, true, JSON.stringify(actions));
+    return k.write ? k.what : "";
+  };
+  for (const a of BROWSE_WRITE_ACTIONS) assert.match(w([{ [a]: "x" }]), new RegExp(a));
+  // A write key beside a read key: the tool may take either, so it is a write.
+  assert.match(w([{ screenshot: "a.png", type: "hello" }]), /type/);
+  assert.match(w([{ extract: ".row", fields: { name: "h3" }, click: "a" }]), /click/);
+  assert.match(w([{ if: "url", contains: "x", then: [{ hover: "a" }], else: [{ if: "title", equals: "y", then: [{ fill: "#q", value: "v" }] }] }]), /fill/);
+  // Shapes the tool would refuse are still read the old way: any key counts.
+  assert.match(w({ click: "a" }), /click/, "an object where an array belongs");
+  assert.match(w([{ if: "url", then: { click: "a" } }]), /click/, "then as an object");
+  assert.match(w([[{ click: "a" }]]), /click/, "a step that is an array");
+  // A click twelve ifs down is still a click (the old walk stopped at 8
+  // levels of JSON, about four ifs, and read it as a read).
+  const nest = (inner: unknown, n: number) => { let v = inner; for (let i = 0; i < n; i++) v = [{ if: "url", then: v }]; return v; };
+  assert.match(w(nest([{ click: "#buy" }], 12)), /click/);
+  // Nested past what is read: unreadable, so a write, not a silent read.
+  assert.match(w(nest([{ hover: "a" }], 40)), /could not read/);
+  assert.deepEqual(classifyCall(WEB, { action: "browse", url: "https://x", actions: nest([{ hover: "a" }], 12) }), { write: false });
+});
