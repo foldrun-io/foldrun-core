@@ -3085,6 +3085,10 @@ export interface StepRecord {
    *  through the account's browser pod. The last attempt's; absent where
    *  the executor has one image (docker, in-process). */
   image?: { variant: "full" | "slim"; why?: string; pod?: boolean } | null;
+  /** Which model credential the step ran on, by its variable — "API key
+   *  (ANTHROPIC_API_KEY)", "Claude login token (CLAUDE_CODE_OAUTH_TOKEN)",
+   *  "provider: …" — or "none set" (model-credential.ts). */
+  credential?: string;
   /** Slim browsing through the account's pod (browser-pod.ts): reconnect
    *  tries and how many got through; when the pod was lost, why and what
    *  the step had written by then; and what happened — `fallback` (the

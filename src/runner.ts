@@ -15,6 +15,7 @@ import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { hostSafeEnv } from "./host-env.ts";
+import { resolveModelCredential, credentialLine } from "./model-credential.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
@@ -1952,6 +1953,16 @@ async function runStep(
     // And one more only when something written could not be read as a zone.
     for (const problem of clock.problems) push("error", problem);
     if (providerLabel) push("info", `provider: ${providerLabel}`);
+    // Which credential the model is called with, on the record: an agent
+    // that names a provider uses its own; otherwise the platform's (in a
+    // run container) or this process's — never a login that just happens
+    // to be on the machine (model-credential.ts).
+    const credential = providerLabel ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
+    step.credential = credential ? credential.label : `provider: ${providerLabel}`;
+    if (credential) {
+      const line = credentialLine(credential);
+      push(line.type, line.text);
+    }
     for (const w of providerWarnings) push("error", w);
     // A level that wrote a language nobody can read was skipped, not obeyed.
     for (const l of language.lines) push("info", l);
@@ -2679,9 +2690,13 @@ async function runStep(
         push("info", `test: ${name} withheld from scripts — TEST_MODE_WITHHELD`, { effect: { kind: "withheld", summary: `${name} withheld from scripts` } });
       }
       const stepSecrets = held.env;
+      // The model credential for this machine's Claude Code — the agent's
+      // own provider when it names one. The host allowlist drops it, so
+      // without this every in-process step ran on the machine's login.
+      const localModelEnv: Record<string, string> = Object.keys(providerEnv).length ? providerEnv : resolveModelCredential().env;
       const consultTools = buildConsultTools(
         consults,
-        { ...hostSafeEnv(), ...stepSecrets, ...providerEnv },
+        { ...hostSafeEnv(), ...stepSecrets, ...localModelEnv },
         (type, text) => push(type, text),
       );
       // On this machine nobody can write in and there is no proxy: the
@@ -2765,7 +2780,7 @@ async function runStep(
         }
       };
       let credentialUsed = platformModelCredential();
-      let outcome = await attemptThrough(providerEnv, translator);
+      let outcome = await attemptThrough(localModelEnv, translator);
       // Same rule as the isolated path: a credential that rotated under the
       // step is waited out and retried before anything else is considered.
       if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
@@ -2775,7 +2790,7 @@ async function runStep(
           push("info", "the credential rotated under this step; retrying on the new one");
           credentialUsed = rotated;
           lastRefusal = "";
-          outcome = await attemptThrough(providerEnv, translator);
+          outcome = await attemptThrough(localModelEnv, translator);
         } else {
           push("info", "the credential did not change — this is the key itself, not a rotation");
         }
@@ -2787,7 +2802,7 @@ async function runStep(
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
         await sleep(wait);
         lastRefusal = "";
-        outcome = await attemptThrough(providerEnv, translator);
+        outcome = await attemptThrough(localModelEnv, translator);
       }
       // Same rule as the isolated path: one retry, on a refusal, on the
       // declared or platform second supply.

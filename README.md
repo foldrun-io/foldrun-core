@@ -208,16 +208,19 @@ To *run* an agent you need one of:
 
 - **`ANTHROPIC_API_KEY`** — an API key from
   [console.anthropic.com](https://console.anthropic.com).
+- **`CLAUDE_CODE_OAUTH_TOKEN`** — a Claude login token, from
+  `claude setup-token`. Used when no API key is set.
 - **Your own provider.** An agent that names a `provider:` needs no
   Anthropic key: 29 endpoints are known by name, including `ollama`,
   `lmstudio` and `vllm`, so a local model is a complete answer. Anything
   not in that list works by spelling out `base_url:`, `format:` and
   `auth:`. See [providers](https://docs.foldrun.io/providers).
 
-A **Claude Code or claude.ai subscription login is not one of them**, and
-the CLI will not look for one. Anthropic does not permit products built on
-its Agent SDK to run on consumer subscriptions, so using that login here
-would put you outside their terms — an API key is the supported path.
+The first one set is used, and every step records which. The login Claude
+Code keeps on the machine is never picked up by itself. Anthropic does not
+allow products built on its Agent SDK to offer claude.ai login unless
+Anthropic has approved them, so check that the terms cover your use before
+you rely on a login token.
 
 ## Status
 

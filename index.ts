@@ -13,6 +13,7 @@
 export * from "./src/layout.ts";
 export * from "./src/paths.ts";
 export * from "./src/store.ts";
+export * from "./src/model-credential.ts";
 export * from "./src/starter.ts";
 export * from "./src/runner.ts";
 export * from "./src/okf.ts";
