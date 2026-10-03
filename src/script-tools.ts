@@ -234,13 +234,7 @@ export function runScript(
     // Container path: same command, executed inside an isolated container
     // with only the agent's directory (plus declared shared dirs) mounted.
     if (exec && exec.executor === "docker") {
-      const inContainer = (p: string) => {
-        if (p.startsWith(path.resolve(cwd))) return p.replace(path.resolve(cwd), "/workspace");
-        for (const [host, mount] of Object.entries(exec.mounts)) {
-          if (p.startsWith(host)) return p.replace(host, mount);
-        }
-        return p;
-      };
+      const inContainer = (p: string) => containerPath(p, cwd, exec.mounts);
       const argv = [
         // The interpreter inside the image, not the host's venv path.
         spec.interpreter ?? containerInterpreter(abs),
@@ -290,6 +284,28 @@ export function runScript(
       }),
     );
   });
+}
+
+/**
+ * A host path as the script's container sees it: under the agent's own
+ * directory it is /workspace, under a mounted folder it is that mount, and
+ * anything else (an argument that only looks like a path) is left alone.
+ * Containment, not a text prefix: `<ws>/scripts-old/x.py` is not under
+ * `<ws>/scripts`. The longest mount wins, so a nested one is not shadowed.
+ */
+export function containerPath(p: string, agentDir: string, mounts: Record<string, string>): string {
+  if (!path.isAbsolute(p)) return p;
+  const under = (root: string) => {
+    const rel = path.relative(root, p);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel)) ? rel : null;
+  };
+  const own = under(path.resolve(agentDir));
+  if (own !== null) return path.posix.join("/workspace", own.split(path.sep).join("/"));
+  const hit = Object.entries(mounts)
+    .map(([host, mount]) => ({ mount, rel: under(path.resolve(host)), len: host.length }))
+    .filter((m) => m.rel !== null)
+    .sort((a, b) => b.len - a.len)[0];
+  return hit ? path.posix.join(hit.mount, hit.rel!.split(path.sep).join("/")) : p;
 }
 
 export interface ExecutionContext {

@@ -119,3 +119,35 @@ test("a real model call runs isolated, and only owned paths come back", paid, as
     fs.rmSync(ws, { recursive: true, force: true });
   }
 });
+
+// The local executor's other container: one per script call. A folder tool's
+// code sits in the workspace's tools/<name>/, which was never mounted, so the
+// hello template's wordcount failed on every call with "can't open file".
+test("a folder tool runs in its script container, while the step holds its workspace link: tools/ is mounted", opts, async () => {
+  const { runScript } = await import("../src/script-tools.ts");
+  const { ensureImage } = await import("../src/container.ts");
+  const { scriptMounts } = await import("../src/runner.ts");
+  const ws = stageWorkspace();
+  try {
+    fs.mkdirSync(path.join(ws, "tools/count"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "tools/count/run.py"), "import sys\nprint('words', len(sys.argv[2].split()))\n");
+    const agentDir = path.join(ws, "agents/writer");
+    // The link every step holds while it runs: `docker cp` refused it.
+    fs.symlinkSync("../..", path.join(agentDir, "workspace"), "dir");
+    const image = ensureImage(null);
+    assert.equal(image.error, null, image.log.join("\n"));
+    const got = await runScript(
+      agentDir,
+      { name: "count", run: "workspace/tools/count/run.py", args: { text: "the text" }, description: "" } as never,
+      { text: "two words" },
+      {},
+      "",
+      {},
+      { executor: "docker", image: image.tag, mounts: scriptMounts(agentDir, "default"), network: false },
+    );
+    assert.equal(got.code, 0, got.out);
+    assert.match(got.out, /words 2/);
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});

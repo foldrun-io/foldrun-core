@@ -181,10 +181,31 @@ export async function runInContainer(
   const cid = (created.stdout ?? "").trim();
 
   try {
-    // The agent's own directory becomes /workspace…
-    const copied = docker(["cp", `${opts.agentDir}/.`, `${cid}:/workspace`], 120_000);
-    if (copied.status !== 0) {
-      return { code: null, out: `copy in failed: ${(copied.stderr ?? "").slice(-300)}` };
+    // The agent's own directory becomes /workspace… — streamed as a tar of
+    // its entries, minus the step's `workspace` link. A step holds that link
+    // (→ ../..) so the shell can say workspace/…, and `docker cp` refuses a
+    // link that climbs out of what it copies ("invalid symlink"), so every
+    // script run in Docker failed before it started. The root it points at
+    // is not the script's to see here: what it may read is mounted below.
+    const entries = fs.readdirSync(opts.agentDir).filter((name) => {
+      if (name !== "workspace") return true;
+      try {
+        return !fs.lstatSync(path.join(opts.agentDir, name)).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    });
+    if (entries.length) {
+      const copied = spawnSync(
+        "sh",
+        ["-c", 'dir="$1"; cli="$2"; dest="$3"; shift 3; tar --no-xattrs -C "$dir" -cf - -- "$@" | "$cli" cp - "$dest"', "sh", opts.agentDir, CLI, `${cid}:/workspace`, ...entries],
+        // No extended attributes: macOS tags files (com.apple.provenance) and
+        // the daemon cannot set them on its side, so the copy failed.
+        { encoding: "utf8", timeout: 120_000, env: { ...process.env, COPYFILE_DISABLE: "1" } },
+      );
+      if (copied.status !== 0) {
+        return { code: null, out: `copy in failed: ${(copied.stderr ?? "").slice(-300)}` };
+      }
     }
     // …and any shared directories land at their declared paths.
     for (const [host, mount] of Object.entries(opts.readOnly ?? {})) {

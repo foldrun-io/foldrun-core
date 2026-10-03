@@ -1244,10 +1244,7 @@ function agentContext(
       exec = {
         executor: "docker",
         image: image.tag,
-        mounts: {
-          [path.resolve(agentDir, "..", "..", "scripts")]: "/workspace-scripts",
-          [libraryDir(tenant, "scripts")]: "/library-scripts",
-        },
+        mounts: scriptMounts(agentDir, tenant),
         // Only agents that granted something reaching out — an `apis:` entry
         // or one of their own tools — get egress.
         network: parseApis(front.apis).length > 0 || ownToolNames(front).length > 0,
@@ -4827,4 +4824,26 @@ export function runResult(run: RunRecord): string | null {
     if (r && r.trim()) return r;
   }
   return null;
+}
+
+/**
+ * What a Docker-run script sees of the workspace and the account: their
+ * scripts/ and their tools/, read-only. A folder tool's code lives in its
+ * tools/<name>/ folder, not in scripts/ — without those two mounts every
+ * folder tool (the hello template's wordcount among them) was handed a host
+ * path the container did not have, and failed on every call. A gallery tool
+ * nobody installed runs from the gallery's own shelf, so that is mounted too
+ * when there is one. A folder that does not exist is skipped by the copy.
+ */
+export function scriptMounts(agentDir: string, tenant: string): Record<string, string> {
+  const workspaceRoot = path.resolve(agentDir, "..", "..");
+  const mounts: Record<string, string> = {
+    [path.join(workspaceRoot, "scripts")]: "/workspace-scripts",
+    [path.join(workspaceRoot, "tools")]: "/workspace-tools",
+    [libraryDir(tenant, "scripts")]: "/library-scripts",
+    [libraryDir(tenant, "tools")]: "/library-tools",
+  };
+  const gallery = platform.galleryDir();
+  if (gallery) mounts[path.join(gallery, "tools")] = "/gallery-tools";
+  return mounts;
 }
