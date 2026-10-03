@@ -1,0 +1,41 @@
+name: deploy
+
+# A push to main asks the box to deploy (foldrun-infra box-deploy.yml,
+# `repository_dispatch: deploy`). The box deploy is the gate: it builds the
+# version from the five repos' main, runs the deploy checks, waits for runs
+# in flight, rolls out, and tags the version (vYYYY.MM.DD.N). Its 30-minute
+# schedule stays as the safety net — GitHub fires schedules late or not at
+# all when busy (3 Oct: nothing between 18:26Z and 23:30Z).
+#
+# Dispatching to another repository needs a token that can write to
+# foldrun-infra: secret DEPLOY_DISPATCH_TOKEN (a fine-grained token, or a
+# GitHub App's, with Contents: read and write on foldrun-io/foldrun-infra
+# only). Without it this says so and the schedule still deploys.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dispatch
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ask the box to deploy
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::DEPLOY_DISPATCH_TOKEN is not set — the box picks this up on its schedule instead"
+            exit 0
+          fi
+          gh api -X POST repos/foldrun-io/foldrun-infra/dispatches \
+            -f event_type=deploy \
+            -f "client_payload[repo]=$GITHUB_REPOSITORY" \
+            -f "client_payload[sha]=$GITHUB_SHA"
+          echo "deploy requested for $GITHUB_REPOSITORY@${GITHUB_SHA:0:7}"
