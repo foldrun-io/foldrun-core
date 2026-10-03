@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release-pr.yml starts it on release/next: its own push starts nothing.
+  workflow_dispatch:
 
 permissions:
   contents: read

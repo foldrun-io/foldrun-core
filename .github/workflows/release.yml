@@ -1,8 +1,16 @@
 name: release
 
-# Publishing is what pushing a version tag means. `npm run release` writes
-# the changelog, bumps the version and makes the tag; `git push --follow-tags`
-# is the irreversible step, taken by a person.
+# Publishes a version that main carries and npm does not have yet.
+#
+#   - The usual way: merge the "release X.Y.Z" pull request release-pr.yml
+#     keeps open. That push to main lands here with a version that has no
+#     tag: test, publish, then tag it and make the GitHub release.
+#   - By hand: `npm run release -- --yes` and `git push --follow-tags`. The
+#     tag push lands here too; whichever of the two runs comes second finds
+#     the version on npm and publishes nothing.
+#
+# Any other push to main finds its version already tagged and stops after
+# one step. Runs are serial (concurrency), never cancelled mid-publish.
 #
 # The build runs here rather than on a laptop so what reaches npm is what is
 # in the tag, and `--provenance` signs that link: npm shows the workflow,
@@ -22,49 +30,96 @@ name: release
 # failure, because the alternative is a token nobody remembers renewing.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # What this run would release: the tag's version, or main's when main
+      # carries one with no tag yet. The tag and the manifest must agree —
+      # they can disagree only when a tag is pushed by hand, and then the
+      # failure would be a version on npm that no tag points at.
+      - name: what to release
+        id: what
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            [ "$v" = "$pkg" ] || { echo "tag $v != package.json $pkg"; exit 1; }
+          elif git rev-parse -q --verify "refs/tags/v$pkg" >/dev/null; then
+            echo "v$pkg is already tagged — nothing to release"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            v="$pkg"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "go=true" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$v" version >/dev/null 2>&1; then
+            echo "$name@$v is already on npm — tag only"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v7
+        if: steps.what.outputs.go == 'true'
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
           cache: npm
 
       - run: npm ci
+        if: steps.what.outputs.go == 'true'
       - run: npx tsc --noEmit -p .
+        if: steps.what.outputs.go == 'true'
       - run: npm test
-
-      # The tag and the manifest must agree. They can disagree exactly once
-      # — a tag pushed by hand — and the failure that follows is a version
-      # on npm that no tag points at.
-      - name: the tag matches package.json
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          [ "$tag" = "$pkg" ] || { echo "tag $tag != package.json $pkg"; exit 1; }
+        if: steps.what.outputs.go == 'true'
 
       # Trusted publishing needs npm 11.5.1 or newer; the one bundled with
       # Node 22 is older than that.
       - run: npm install -g npm@latest
+        if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
 
       - run: npm publish --provenance --access public
+        if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
+
+      # Tagged after the publish, not before: a tag is the record that the
+      # version shipped. If the tag push fails, the next run finds the
+      # version on npm and only tags.
+      - name: tag it
+        if: steps.what.outputs.go == 'true' && github.ref_type == 'branch'
+        env:
+          V: ${{ steps.what.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "$(node -p "require('./package.json').name") $V"
+          git push origin "v$V"
 
       # The release notes are the changelog section for this version, taken
       # verbatim: one description of the change, not two that drift.
       - name: notes for this version
-        id: notes
+        if: steps.what.outputs.go == 'true'
+        env:
+          V: ${{ steps.what.outputs.version }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          awk -v v="$v" '
+          awk -v v="$V" '
             $0 ~ "^## \\[" v "\\]" { on = 1; next }
             on && /^## \[/ { exit }
             on { print }
@@ -72,6 +127,8 @@ jobs:
           [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md." > RELEASE_NOTES.md
 
       - uses: softprops/action-gh-release@v3
+        if: steps.what.outputs.go == 'true'
         with:
+          tag_name: v${{ steps.what.outputs.version }}
+          name: v${{ steps.what.outputs.version }}
           body_path: RELEASE_NOTES.md
-          name: ${{ github.ref_name }}

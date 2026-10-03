@@ -1,0 +1,89 @@
+name: release-pr
+
+# Every push to main keeps one pull request open: "release X.Y.Z", made by
+# scripts/release.mjs on the release/next branch — the bump inferred from
+# the commit subjects, the changelog entry drafted from them and shown as
+# the body. Merging it is the decision to publish: release.yml sees a
+# version on main with no tag yet, tests, publishes to npm and tags it.
+#
+# Nothing is drafted while a release is in flight (main's version has no
+# tag yet): that is the merged pull request on its way out, and drafting
+# then would fold its commits into a second release.
+#
+# A push made with this workflow's token starts no other workflow, so the
+# required checks would never run on the pull request; ci.yml is started
+# on release/next explicitly instead (workflow_dispatch is the exception).
+# Opening the pull request needs the repository setting "Allow GitHub
+# Actions to create and approve pull requests" (foldrun-infra
+# github/repo-settings.sh).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: true
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: a release in flight?
+        id: flight
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$v is merged and not tagged yet — release.yml is publishing it; nothing to draft"
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: draft on release/next
+        id: draft
+        if: steps.flight.outputs.pending == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B release/next
+          node scripts/release.mjs --yes --no-tag --notes "$RUNNER_TEMP/notes.md"
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "nothing since the last release"
+            exit 0
+          fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          git push --force origin release/next
+
+      - name: open or update the pull request
+        if: steps.draft.outputs.version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.draft.outputs.version }}
+        run: |
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Merging this publishes **$VERSION** to npm (release.yml), then tags it."
+            echo
+            echo "Redrafted on every push to main. To reword a line, edit CHANGELOG.md on this branch just before merging."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$body"
+          n="$(gh pr list --head release/next --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh pr edit "$n" --title "release $VERSION" --body-file "$body"
+          else
+            gh pr create --base main --head release/next --title "release $VERSION" --body-file "$body"
+          fi
+          gh workflow run ci.yml --ref release/next

@@ -4,10 +4,17 @@
 //   npm run release            what would happen, and nothing else
 //   npm run release -- --yes   do it: bump, changelog, commit, tag
 //   npm run release -- --minor --yes      override the inferred bump
+//   --no-tag          commit the bump and changelog, make no tag
+//   --notes <file>    also write this version's changelog entry to <file>
 //
-// Pushing the tag is what publishes (.github/workflows/release.yml). That
-// separation is deliberate: this script is safe to run and read, and the
-// irreversible step is one `git push --follow-tags` you type yourself.
+// Two ways to publish, both through .github/workflows/release.yml:
+//   - automatic: every push to main makes .github/workflows/release-pr.yml
+//     run this with --yes --no-tag on release/next and keep one pull request
+//     open, "release X.Y.Z", the changelog entry as its body. Merging it is
+//     the decision: release.yml sees a version on main that has no tag yet,
+//     tests, publishes, and tags it.
+//   - by hand: `npm run release -- --yes`, then `git push --follow-tags`.
+// Either way a person reads the entry before it becomes permanent.
 //
 // WHY NOT semantic-release / conventional commits: the commit messages in
 // this repository are prose, and they are the best description of a change
@@ -27,6 +34,11 @@ const git = (...args) =>
 const argv = process.argv.slice(2);
 const has = (flag) => argv.includes(flag);
 const apply = has("--yes");
+const noTag = has("--no-tag");
+const notesAt = (() => {
+  const i = argv.indexOf("--notes");
+  return i >= 0 ? argv[i + 1] : null;
+})();
 
 // ---------------------------------------------------------------- the commits
 
@@ -132,6 +144,7 @@ const entry = lines.join("\n").trimEnd() + "\n";
 
 // ---------------------------------------------------------------- do it
 
+if (notesAt) fs.writeFileSync(notesAt, entry);
 console.log(`${pkg.name}  ${pkg.version} → ${next}   (${bump}, ${commits.length} commit${commits.length === 1 ? "" : "s"} since ${since ?? "the beginning"})\n`);
 console.log(entry);
 
@@ -181,5 +194,9 @@ if (lockTracked) {
 
 git("add", "CHANGELOG.md", "package.json", ...(lockTracked ? ["package-lock.json"] : []));
 git("commit", "-m", `release ${next}`);
-git("tag", "-a", `v${next}`, "-m", `${pkg.name} ${next}`);
-console.log(`\ntagged v${next} — \`git push --follow-tags\` publishes it`);
+if (noTag) {
+  console.log(`\ncommitted release ${next}, no tag — merged to main, release.yml publishes and tags it`);
+} else {
+  git("tag", "-a", `v${next}`, "-m", `${pkg.name} ${next}`);
+  console.log(`\ntagged v${next} — \`git push --follow-tags\` publishes it`);
+}
