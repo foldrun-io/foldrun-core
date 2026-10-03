@@ -76,6 +76,18 @@ test("writes: files, shell, scripts, non-GET API calls, paid web, clicks and fil
   assert.equal(w("SomethingNew", {}), "SomethingNew");
 });
 
+test("a page script is a write, whether the call names it or the agent's web.browse block does", () => {
+  const browse = { action: "browse", url: "https://x" };
+  const k = classifyCall(WEB, { ...browse, init: "scripts/stub.js" });
+  assert.equal(k.write, true, "init= runs a script in every page, as js= does");
+  assert.match(k.write ? k.what : "", /init=/);
+  const fromBlock = classifyCall(WEB, browse, { browseInit: "scripts/stub.js" });
+  assert.equal(fromBlock.write, true, "FOLDRUN_BROWSER_INIT runs it in every browse call of the step");
+  assert.match(fromBlock.write ? fromBlock.what : "", /init/);
+  assert.deepEqual(classifyCall(WEB, { action: "fetch", url: "https://x" }, { browseInit: "scripts/stub.js" }), { write: false }, "only a browse opens pages");
+  assert.deepEqual(classifyCall(WEB, browse, { browseInit: "" }), { write: false });
+});
+
 test("every write action is a browse action the tool knows", () => {
   for (const a of BROWSE_WRITE_ACTIONS) assert.ok((WEB_BROWSE_ACTIONS as readonly string[]).includes(a), a);
   assert.deepEqual(browseActionNames([{ click: "a" }, { if: { url: "x" }, then: [{ fill: "b" }] }]).filter((n) => ["click", "fill"].includes(n)), ["click", "fill"]);

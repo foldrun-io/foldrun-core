@@ -48,8 +48,9 @@ export const BROWSE_WRITE_ACTIONS = [
 ] as const;
 
 /** Call arguments of web action=browse that are writes whatever the actions:
- *  page script, a paid captcha solver, a confirmation of a credential step. */
-const BROWSE_WRITE_ARGS = ["js", "captcha", "captcha_solver", "confirm"];
+ *  page script (js=, or init= scripts run in every page), a paid captcha
+ *  solver, a confirmation of a credential step. */
+const BROWSE_WRITE_ARGS = ["js", "init", "captcha", "captcha_solver", "confirm"];
 
 /** Web actions that only read — when foldrun's own answers them. A paid
  *  provider answering one (FOLDRUN_WEB_<ACTION>_VIA) makes it a write: doing
@@ -72,6 +73,9 @@ export interface ClassifyContext {
   /** Web actions a paid provider answers this step — from the env's
    *  FOLDRUN_WEB_<ACTION>_VIA. */
   paidWeb?: Record<string, string>;
+  /** Page scripts the agent's web.browse block runs in every page — the
+   *  env's FOLDRUN_BROWSER_INIT. They make every browse call a write. */
+  browseInit?: string;
 }
 
 /** The browse actions a call asked for, nested `if` branches included. */
@@ -132,6 +136,7 @@ export function classifyCall(tool: string, input: Record<string, unknown> | unde
     if (action === "browse") {
       const w = browseWrites(args);
       if (w) return write(w);
+      if (ctx.browseInit) return write(`browse init scripts (${ctx.browseInit})`);
     }
     return { write: false };
   }

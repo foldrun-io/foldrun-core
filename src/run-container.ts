@@ -617,7 +617,7 @@ try {
     // through the account's pod, and named the file the web tool logs its
     // reconnects to. A lost pod stops the step; what it wrote decides what
     // the runner does next (browser-pod.ts).
-    ...(env.FOLDRUN_BROWSER_POD_EVENTS ? { browserPod: { events: env.FOLDRUN_BROWSER_POD_EVENTS, methods: api.methods ?? {}, paidWeb: paidWebActions(env) } } : {}),
+    ...(env.FOLDRUN_BROWSER_POD_EVENTS ? { browserPod: { events: env.FOLDRUN_BROWSER_POD_EVENTS, methods: api.methods ?? {}, paidWeb: paidWebActions(env), ...(env.FOLDRUN_BROWSER_INIT ? { browseInit: env.FOLDRUN_BROWSER_INIT } : {}) } } : {}),
     // The container is the boundary; the SDK's own bash sandbox here would
     // only block declared network use (SSH, curl) for no added safety.
     sandboxBash: false,
