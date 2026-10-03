@@ -11,6 +11,59 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [0.6.0] — 2026-10-03
+
+### docker scripts
+
+- workspace/… arguments work, outputs/ is writable, and a JavaScript tool gets node ([9cced0b](https://github.com/foldrun-io/foldrun-core/commit/9cced0b))
+- a folder tool's tools/ is mounted, and the step's workspace link no longer breaks the copy ([a3e7a11](https://github.com/foldrun-io/foldrun-core/commit/a3e7a11))
+
+### host env
+
+- pass CLAUDE_CONFIG_DIR to a step's children ([c4ec796](https://github.com/foldrun-io/foldrun-core/commit/c4ec796))
+
+### model credential
+
+- an API key, a gateway bearer or a Claude login token — named, used, and on the record ([2f80284](https://github.com/foldrun-io/foldrun-core/commit/2f80284))
+
+### prompts
+
+- workspace/… for every workspace path an agent is told — skills, knowledge, memory, shared scripts, sub-agents ([c832b6a](https://github.com/foldrun-io/foldrun-core/commit/c832b6a))
+
+### release automation
+
+- every push to main keeps a "release X.Y.Z" pull request open; merging it publishes and tags ([46c29ae](https://github.com/foldrun-io/foldrun-core/commit/46c29ae))
+
+### runner image
+
+- install core in its own stage — no tarball or README in slim/full ([63ef907](https://github.com/foldrun-io/foldrun-core/commit/63ef907))
+
+### SDK sessions
+
+- no claude.ai connectors and no on-disk MCP config — an agent gets what foldrun grants, nothing of the person's account ([634216f](https://github.com/foldrun-io/foldrun-core/commit/634216f))
+
+### slim browsing
+
+- a full re-run that throws records its failed try as full, not slim ([7702e7d](https://github.com/foldrun-io/foldrun-core/commit/7702e7d))
+- browse actions are read from action positions — a step's own keys and its then/else, not option values ([960ecfd](https://github.com/foldrun-io/foldrun-core/commit/960ecfd))
+- a page script is a write — init= on the call, or FOLDRUN_BROWSER_INIT from the agent's web.browse block ([89cdf98](https://github.com/foldrun-io/foldrun-core/commit/89cdf98))
+
+### templates
+
+- write, not the retired files; workspace/memory/ and workspace/knowledge/ ([1e826fe](https://github.com/foldrun-io/foldrun-core/commit/1e826fe))
+
+### test runs
+
+- a later step sees what earlier steps of the run wrote ([9492016](https://github.com/foldrun-io/foldrun-core/commit/9492016))
+
+### ts-test
+
+- test paths are the caller's — platform's `npm run k8s` could not find its own test ([a872917](https://github.com/foldrun-io/foldrun-core/commit/a872917))
+
+### unsubscribe
+
+- a signature with a multibyte character is refused (401), not thrown ([0e2c62e](https://github.com/foldrun-io/foldrun-core/commit/0e2c62e))
+
 ## [0.5.0] — 2026-10-02
 
 - workspace/ is the one spelling for the workspace root, in every tool and the shell ([6d8e15e](https://github.com/foldrun-io/foldrun-core/commit/6d8e15e))
