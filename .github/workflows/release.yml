@@ -70,7 +70,7 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "go=true" >> "$GITHUB_OUTPUT"
-          if npm view "$name@$v" version >/dev/null 2>&1; then
+          if npm view "$name@$v" version --prefer-online >/dev/null 2>&1; then
             echo "$name@$v is already on npm — tag only"
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
@@ -96,8 +96,22 @@ jobs:
       - run: npm install -g npm@latest
         if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
 
-      - run: npm publish --provenance --access public
+      # Idempotent: the registry can answer "not found" for a few minutes
+      # after a version lands, so the check above may miss one this repo just
+      # published. npm then refuses to publish over it, and that refusal
+      # means the version is out: carry on and tag it.
+      - name: publish
         if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
+        run: |
+          if npm publish --provenance --access public 2> publish.err; then
+            cat publish.err >&2
+          elif grep -q "cannot publish over the previously published versions" publish.err; then
+            cat publish.err >&2
+            echo "already on npm — tagging it"
+          else
+            cat publish.err >&2
+            exit 1
+          fi
 
       # Tagged after the publish, not before: a tag is the record that the
       # version shipped. If the tag push fails, the next run finds the
