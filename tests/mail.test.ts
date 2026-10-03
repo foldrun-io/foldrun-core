@@ -63,6 +63,15 @@ test("a forged, altered or missing token is refused; an expired one says so", ()
   assert.match((r as { error: string }).error, /expired/);
 });
 
+test("a signature of the right length in characters but not in bytes is refused, not thrown", () => {
+  const t = unsubscribeToken({ tenant: "acme", email: "a@example.test", category: "low-balance", workspace: null });
+  const [payload, sig] = t.split(".");
+  // "é" is two bytes: as many characters as the real signature, twice the bytes.
+  assert.deepEqual(readUnsubscribeToken(`${payload}.${"é".repeat(sig.length)}`), { error: "invalid token", status: 401 });
+  assert.deepEqual(readUnsubscribeToken(`${payload}.${"A".repeat(sig.length - 1)}é`), { error: "invalid token", status: 401 });
+  assert.deepEqual(readUnsubscribeToken(`${payload}.${"+".repeat(sig.length)}`), { error: "invalid token", status: 401 }, "not base64url");
+});
+
 test("the RFC 8058 pair, only when the install knows its address", () => {
   const prev = process.env.FOLDRUN_PUBLIC_URL;
   try {

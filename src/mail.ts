@@ -168,7 +168,9 @@ export function readUnsubscribeToken(
   const [payload, sig, extra] = token.split(".");
   if (!payload || !sig || extra !== undefined) return { error: "invalid token", status: 401 };
   const want = sign(payload);
-  if (sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) {
+  // Only base64url reaches the compare: a multibyte character would make the
+  // byte buffers differ in length, and timingSafeEqual throws on that.
+  if (!/^[A-Za-z0-9_-]+$/.test(sig) || sig.length !== want.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want))) {
     return { error: "invalid token", status: 401 };
   }
   let raw: { t?: unknown; e?: unknown; c?: unknown; w?: unknown; x?: unknown };
