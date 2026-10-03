@@ -354,8 +354,10 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       // With sub-agents, the SDK would also offer its built-in ones
       // (general-purpose has every tool the session has). Only the declared
       // ones may run; the guard in the hook below refuses the rest as well.
-      env: subagents ? { ...(opts.env ?? process.env), CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1" } : opts.env,
+      env: sdkEnv(opts.env, subagents ? { CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1" } : {}),
       mcpServers: opts.mcpServers,
+      // Only the servers foldrun passes. See sdkEnv for the claude.ai half.
+      strictMcpConfig: true,
       // canUseTool is only asked when the SDK wants permission, and it never
       // asks for a read inside the cwd — so `Read workspace/storage/x` went
       // to `<agentDir>/workspace/storage/x` unchecked and unrewritten. On
@@ -973,7 +975,8 @@ async function judgeReply(
         systemPrompt: "You grade text against a stated requirement. Be strict and literal.",
         tools: [],
         settingSources: [],
-        env,
+        env: sdkEnv(env),
+        strictMcpConfig: true,
         maxTurns: 1,
         abortController,
       },
@@ -1042,4 +1045,18 @@ function runVerify(
     child.on("error", (e) => resolve({ code: null, out: e.message }));
     child.on("close", (code) => resolve({ code, out }));
   });
+}
+
+/**
+ * The environment an Agent SDK session starts with: the step's, minus the
+ * connectors of whoever is signed in to claude.ai on this machine. Claude
+ * Code loads an account's claude.ai MCP servers (Docs, Drive, …) unless told
+ * not to, and `settingSources: []` does not reach them — they come with the
+ * login, not from a settings file. A local `foldrun run` handed every agent
+ * the person's own connectors: the hello template's agents reported that
+ * "the only tools I have are the Claude Docs ones". `strictMcpConfig` keeps
+ * the rest of the on-disk MCP configuration out; this keeps the account's.
+ */
+export function sdkEnv(base: Record<string, string | undefined> | undefined, extra: Record<string, string> = {}): Record<string, string | undefined> {
+  return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
 }

@@ -31,6 +31,7 @@
 // they pass — no point paying a model to grade output already known to be
 // wrong.
 
+import { sdkEnv } from "./step-exec.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { deployedCommit } from "./deploy.ts";
@@ -491,6 +492,8 @@ async function judge(
       tools: [],
       allowedTools: [],
       settingSources: [],
+      strictMcpConfig: true,
+      env: sdkEnv(undefined),
       maxTurns: 1,
     },
   });
