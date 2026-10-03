@@ -234,7 +234,17 @@ export function runScript(
     // Container path: same command, executed inside an isolated container
     // with only the agent's directory (plus declared shared dirs) mounted.
     if (exec && exec.executor === "docker") {
-      const inContainer = (p: string) => containerPath(p, cwd, exec.mounts);
+      // `workspace/…` is the workspace root on the host (the step's link)
+      // and in a run container; here there is no link, so each such
+      // argument is staged: copied in, pointed at, and copied back after.
+      const workspaceRoot = path.resolve(cwd, "..", "..");
+      const staged: { host: string; container: string }[] = [];
+      const inContainer = (p: string) => {
+        const w = stageWorkspaceArg(p, workspaceRoot);
+        if (!w) return containerPath(p, cwd, exec.mounts);
+        if (!staged.some((s) => s.host === w.host)) staged.push(w);
+        return w.container;
+      };
       const argv = [
         // The interpreter inside the image, not the host's venv path.
         spec.interpreter ?? containerInterpreter(abs),
@@ -245,6 +255,7 @@ export function runScript(
       runInContainer({
         agentDir: path.resolve(cwd),
         readOnly: exec.mounts,
+        staged,
         image: exec.image,
         argv,
         env,
@@ -306,6 +317,17 @@ export function containerPath(p: string, agentDir: string, mounts: Record<string
     .filter((m) => m.rel !== null)
     .sort((a, b) => b.len - a.len)[0];
   return hit ? path.posix.join(hit.mount, hit.rel!.split(path.sep).join("/")) : p;
+}
+
+/** Where a `workspace/…` script argument is staged in a script container,
+ *  or null when it is not one (or climbs out of the workspace). */
+export function stageWorkspaceArg(arg: string, workspaceRoot: string): { host: string; container: string } | null {
+  if (arg !== "workspace" && !arg.startsWith("workspace/")) return null;
+  const rel = arg.slice("workspace".length).replace(/^\/+/, "");
+  const host = path.resolve(workspaceRoot, rel);
+  const within = path.relative(workspaceRoot, host);
+  if (within.startsWith("..") || path.isAbsolute(within)) return null;
+  return { host, container: path.posix.join("/workspace-root", within.split(path.sep).join("/")) };
 }
 
 export interface ExecutionContext {

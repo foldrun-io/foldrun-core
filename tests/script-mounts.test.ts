@@ -39,3 +39,43 @@ test("the longest mount wins, so a nested one is not shadowed", () => {
   assert.equal(containerPath("/a/b/c.py", "/agent", mounts), "/m2/c.py");
   assert.equal(containerPath("/a/c.py", "/agent", mounts), "/m1/c.py");
 });
+
+test("a workspace/… argument is staged under /workspace-root; one that climbs out is not", async () => {
+  const { stageWorkspaceArg } = await import("../src/script-tools.ts");
+  assert.deepEqual(stageWorkspaceArg("workspace/storage/a.csv", ws), { host: path.join(ws, "storage/a.csv"), container: "/workspace-root/storage/a.csv" });
+  assert.equal(stageWorkspaceArg("workspace/../../etc/passwd", ws), null);
+  assert.equal(stageWorkspaceArg("workspaces/x", ws), null);
+  assert.equal(stageWorkspaceArg("storage/a.csv", ws), null);
+});
+
+test("copy-back writes what changed and leaves an unchanged input's mtime alone", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const { syncChanged } = await import("../src/container.ts");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sync-"));
+  try {
+    const from = path.join(root, "from"), to = path.join(root, "to");
+    fs.mkdirSync(from); fs.mkdirSync(to);
+    fs.writeFileSync(path.join(from, "same.csv"), "a\n"); fs.writeFileSync(path.join(to, "same.csv"), "a\n");
+    fs.writeFileSync(path.join(from, "new.txt"), "new\n");
+    fs.writeFileSync(path.join(from, "changed.txt"), "2\n"); fs.writeFileSync(path.join(to, "changed.txt"), "1\n");
+    const old = new Date("2026-01-01T00:00:00Z");
+    fs.utimesSync(path.join(to, "same.csv"), old, old);
+    syncChanged(from, to);
+    assert.equal(fs.statSync(path.join(to, "same.csv")).mtime.getTime(), old.getTime(), "unchanged input untouched");
+    assert.equal(fs.readFileSync(path.join(to, "new.txt"), "utf8"), "new\n");
+    assert.equal(fs.readFileSync(path.join(to, "changed.txt"), "utf8"), "2\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the script image is told the languages its scripts are written in", async () => {
+  const { scriptLanguages } = await import("../src/runner.ts");
+  const spec = (run: string, extra = {}) => ({ name: "x", run, args: {}, description: "", ...extra }) as never;
+  assert.equal(scriptLanguages([spec("tools/a/run.py")]), null, "python alone is the base image");
+  assert.deepEqual(scriptLanguages([spec("tools/a/run.mjs")]), { node: true, packages: [], npm: [] });
+  assert.deepEqual(scriptLanguages([spec("a.py"), spec("b.js")]), { node: true, python: true, packages: [], npm: [] }, "python kept beside node");
+  assert.deepEqual(scriptLanguages([spec("", { code: "x", codeExt: ".mjs" })]), { node: true, packages: [], npm: [] }, "inline JS code");
+  assert.deepEqual(scriptLanguages([spec("tools/a/run", { interpreter: "/usr/bin/node" })]), { node: true, packages: [], npm: [] });
+});

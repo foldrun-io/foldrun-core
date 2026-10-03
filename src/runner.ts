@@ -85,7 +85,7 @@ import { attachOperations, prefetchOpenApi } from "./openapi.ts";
 import { buildSearchTools, buildHistoryTools, buildDeskTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
 import { providerPreset } from "./providers.ts";
-import { buildScriptTools, parseScripts, type ExecutionContext } from "./script-tools.ts";
+import { buildScriptTools, parseScripts, type ExecutionContext, type ScriptSpec } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, type PreparedRuntime, type RuntimeSpec } from "./runtime.ts";
 import { materializeFiles, harvestFiles } from "./storage.ts";
@@ -1219,7 +1219,11 @@ function agentContext(
   let runtime: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
 
   if (executor === "docker" && !grantsOnly) {
-    const image = ensureImage(runtimeSpec);
+    // The script image also carries what the scripts' own languages need: a
+    // .mjs tool with no runtime: block still needs node in its container.
+    // Here only — the run container and the host have node already, and a
+    // spec there sets off the runtime build for nothing.
+    const image = ensureImage(mergeRuntimes(runtimeSpec, scriptLanguages(scriptSpecs)));
     runtimeLog.push(...image.log);
     runtimeError = image.error;
     if (!image.error) {
@@ -4860,4 +4864,29 @@ export function skillsInScope(agentDir: string, tenant: string): DiscoveredSkill
   // the file tools only, and a skill's bundled scripts are run from the shell.
   add(path.join(libraryDir(tenant)), "../../../../library/");
   return skills;
+}
+
+/**
+ * The interpreters a set of scripts needs, read from what they are: the
+ * extension of `run:` (or of inline code), or an explicit `interpreter:`.
+ * Docker's script image is built from the runtime spec, and the base one is
+ * Python only, so a JavaScript tool that declared no `runtime:` (the demo's
+ * inline crm-upload, any folder tool's run.mjs) failed with no node to run
+ * it. Python is named too whenever a .py script is present, because asking
+ * for node alone builds on node:22-slim, which has no python3. Null when
+ * nothing beyond the default is needed.
+ */
+export function scriptLanguages(scripts: ScriptSpec[]): RuntimeSpec | null {
+  const kind = (sc: ScriptSpec) => {
+    const via = (sc.interpreter ?? "").split(/[\\/]/).pop() ?? "";
+    if (/^node/.test(via)) return "node";
+    if (/^python/.test(via)) return "python";
+    const ext = (sc.run ? path.extname(sc.run) : sc.codeExt ?? "").toLowerCase();
+    if ([".js", ".mjs", ".cjs", ".ts"].includes(ext)) return "node";
+    if (ext === ".py") return "python";
+    return null;
+  };
+  const kinds = new Set(scripts.map(kind));
+  if (!kinds.has("node")) return null;
+  return { node: true, ...(kinds.has("python") ? { python: true } : {}), packages: [], npm: [] };
 }

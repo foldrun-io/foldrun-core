@@ -123,17 +123,22 @@ test("a real model call runs isolated, and only owned paths come back", paid, as
 // The local executor's other container: one per script call. A folder tool's
 // code sits in the workspace's tools/<name>/, which was never mounted, so the
 // hello template's wordcount failed on every call with "can't open file".
-test("a folder tool runs in its script container, while the step holds its workspace link: tools/ is mounted", opts, async () => {
+test("a folder tool runs in its script container, while the step holds its workspace link: tools/ is mounted, outputs/ is writable", opts, async () => {
   const { runScript } = await import("../src/script-tools.ts");
   const { ensureImage } = await import("../src/container.ts");
   const { scriptMounts } = await import("../src/runner.ts");
   const ws = stageWorkspace();
   try {
     fs.mkdirSync(path.join(ws, "tools/count"), { recursive: true });
-    fs.writeFileSync(path.join(ws, "tools/count/run.py"), "import sys\nprint('words', len(sys.argv[2].split()))\n");
+    fs.writeFileSync(
+      path.join(ws, "tools/count/run.py"),
+      "import sys\nn=len(sys.argv[2].split())\nopen('outputs/count.txt','w').write(str(n))\nprint('words', n)\n",
+    );
     const agentDir = path.join(ws, "agents/writer");
-    // The link every step holds while it runs: `docker cp` refused it.
+    // The link every step holds while it runs (`docker cp` refused it), and
+    // the outputs/ every step makes before it starts.
     fs.symlinkSync("../..", path.join(agentDir, "workspace"), "dir");
+    fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
     const image = ensureImage(null);
     assert.equal(image.error, null, image.log.join("\n"));
     const got = await runScript(
@@ -147,6 +152,47 @@ test("a folder tool runs in its script container, while the step holds its works
     );
     assert.equal(got.code, 0, got.out);
     assert.match(got.out, /words 2/);
+    // docker cp lands files as root and scripts run as `agent`: outputs/
+    // was never writable, and the copy-back after the run had nothing to bring.
+    assert.equal(fs.readFileSync(path.join(agentDir, "outputs/count.txt"), "utf8"), "2");
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+// workspace/… is the workspace root on the host (the step's link) and in a
+// run container. A script container has no link, so each such argument is
+// staged in and what the script wrote is copied back.
+test("a script handed workspace/… paths reads one and writes another, as on the host", opts, async () => {
+  const { runScript } = await import("../src/script-tools.ts");
+  const { ensureImage } = await import("../src/container.ts");
+  const { scriptMounts } = await import("../src/runner.ts");
+  const ws = stageWorkspace();
+  try {
+    fs.mkdirSync(path.join(ws, "storage"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "storage/in.csv"), "a,b\n1,2\n3,4\n");
+    const old = new Date("2026-01-01T00:00:00Z");
+    fs.utimesSync(path.join(ws, "storage/in.csv"), old, old);
+    fs.mkdirSync(path.join(ws, "tools/rows"), { recursive: true });
+    fs.writeFileSync(
+      path.join(ws, "tools/rows/run.py"),
+      "import argparse\np=argparse.ArgumentParser();p.add_argument('--src');p.add_argument('--dst');a=p.parse_args()\n" +
+        "n=len(open(a.src).read().strip().splitlines())-1\nopen(a.dst,'w').write(f'rows {n}\\n');print('rows',n)\n",
+    );
+    const agentDir = path.join(ws, "agents/writer");
+    fs.symlinkSync("../..", path.join(agentDir, "workspace"), "dir");
+    const image = ensureImage(null);
+    const got = await runScript(
+      agentDir,
+      { name: "rows", run: "workspace/tools/rows/run.py", args: { src: "in", dst: "out" }, description: "" } as never,
+      { src: "workspace/storage/in.csv", dst: "workspace/storage/report/rows.txt" },
+      {}, "", {},
+      { executor: "docker", image: image.tag, mounts: scriptMounts(agentDir, "default"), network: false },
+    );
+    assert.equal(got.code, 0, got.out);
+    assert.match(got.out, /rows 2/);
+    assert.equal(fs.readFileSync(path.join(ws, "storage/report/rows.txt"), "utf8"), "rows 2\n", "the write came back");
+    assert.equal(fs.statSync(path.join(ws, "storage/in.csv")).mtime.getTime(), old.getTime(), "the input kept its mtime");
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

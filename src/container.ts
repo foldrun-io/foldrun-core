@@ -10,6 +10,7 @@
 // development keeps working with zero configuration.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { spawnSync, spawn } from "node:child_process";
@@ -131,6 +132,10 @@ export interface ContainerRunOptions {
   agentDir: string;
   /** Extra read-only mounts: host path → container path. */
   readOnly?: Record<string, string>;
+  /** Workspace paths a script was handed as `workspace/…`: copied in at
+   *  `container` before it runs, and what it created or changed under them
+   *  copied back to `host` after — the host's workspace link, as a copy. */
+  staged?: { host: string; container: string }[];
   image: string;
   argv: string[]; // command inside the container
   env: Record<string, string>;
@@ -181,35 +186,35 @@ export async function runInContainer(
   const cid = (created.stdout ?? "").trim();
 
   try {
-    // The agent's own directory becomes /workspace… — streamed as a tar of
-    // its entries, minus the step's `workspace` link. A step holds that link
-    // (→ ../..) so the shell can say workspace/…, and `docker cp` refuses a
-    // link that climbs out of what it copies ("invalid symlink"), so every
-    // script run in Docker failed before it started. The root it points at
-    // is not the script's to see here: what it may read is mounted below.
-    const entries = fs.readdirSync(opts.agentDir).filter((name) => {
-      if (name !== "workspace") return true;
-      try {
-        return !fs.lstatSync(path.join(opts.agentDir, name)).isSymbolicLink();
-      } catch {
-        return false;
-      }
-    });
-    if (entries.length) {
-      const copied = spawnSync(
-        "sh",
-        ["-c", 'dir="$1"; cli="$2"; dest="$3"; shift 3; tar --no-xattrs -C "$dir" -cf - -- "$@" | "$cli" cp - "$dest"', "sh", opts.agentDir, CLI, `${cid}:/workspace`, ...entries],
-        // No extended attributes: macOS tags files (com.apple.provenance) and
-        // the daemon cannot set them on its side, so the copy failed.
-        { encoding: "utf8", timeout: 120_000, env: { ...process.env, COPYFILE_DISABLE: "1" } },
-      );
-      if (copied.status !== 0) {
-        return { code: null, out: `copy in failed: ${(copied.stderr ?? "").slice(-300)}` };
-      }
-    }
+    // The agent's own directory becomes /workspace… — its entries staged
+    // like the workspace paths below (a scratch copy, opened up for the
+    // script's user, one tar), minus the step's `workspace` link. A step
+    // holds that link (→ ../..) so the shell can say workspace/…, and
+    // `docker cp` refuses a link that climbs out of what it copies
+    // ("invalid symlink"), so every Docker-run script failed before it
+    // started. And `docker cp` lands files as root while scripts run as
+    // `agent`, so a script could never write its own outputs/.
+    const own = fs
+      .readdirSync(opts.agentDir)
+      .filter((name) => {
+        if (name !== "workspace") return true;
+        try {
+          return !fs.lstatSync(path.join(opts.agentDir, name)).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      })
+      .map((name) => ({ host: path.join(opts.agentDir, name), container: `/workspace/${name}` }));
+    const copiedIn = stageIn(CLI, cid, own, ["/workspace"]);
+    if (copiedIn) return { code: null, out: `copy in failed: ${copiedIn}` };
     // …and any shared directories land at their declared paths.
     for (const [host, mount] of Object.entries(opts.readOnly ?? {})) {
       if (fs.existsSync(host)) docker(["cp", `${host}/.`, `${cid}:${mount}`], 120_000);
+    }
+    const staged = opts.staged ?? [];
+    if (staged.length) {
+      const failed = stageIn(CLI, cid, staged);
+      if (failed) return { code: null, out: `copy in failed: ${failed}` };
     }
 
     const result = await new Promise<{ code: number | null; out: string }>((resolve) => {
@@ -234,8 +239,89 @@ export async function runInContainer(
 
     // Bring deliverables back so outputs/ behaves the same either way.
     docker(["cp", `${cid}:/workspace/outputs/.`, path.join(opts.agentDir, "outputs")], 120_000);
+    for (const s of staged) stageBack(CLI, cid, s);
     return result;
   } finally {
     docker(["rm", "-f", cid], 30_000);
+  }
+}
+
+/**
+ * Copy the staged workspace paths into a created container: one tar, built
+ * in a scratch directory that mirrors the container paths, extracted at /.
+ * A path that does not exist yet (an output the script is told to write)
+ * gets its parent directory, so the write has somewhere to land.
+ */
+function stageIn(cli: string, cid: string, staged: { host: string; container: string }[], dirs: string[] = []): string | null {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-stage-"));
+  try {
+    for (const d of dirs) fs.mkdirSync(path.join(scratch, d), { recursive: true });
+    for (const { host, container } of staged) {
+      const dest = path.join(scratch, container);
+      if (fs.existsSync(host)) {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.cpSync(host, dest, { recursive: true, dereference: false });
+      } else {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+      }
+    }
+    // `docker cp` lands files as root and scripts run as `agent`: these are
+    // scratch copies, so open them up for the script to write into.
+    openUp(scratch);
+    const top = fs.readdirSync(scratch);
+    const r = spawnSync(
+      "sh",
+      ["-c", 'dir="$1"; cli="$2"; dest="$3"; shift 3; tar --no-xattrs -C "$dir" -cf - -- "$@" | "$cli" cp - "$dest"', "sh", scratch, cli, `${cid}:/`, ...top],
+      { encoding: "utf8", timeout: 120_000, env: { ...process.env, COPYFILE_DISABLE: "1" } },
+    );
+    return r.status === 0 ? null : (r.stderr ?? "").slice(-300);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Copy back what the script created or changed under one staged path. Files
+ * whose bytes did not change are left alone, so an input keeps its mtime —
+ * freshness checks read it.
+ */
+function stageBack(cli: string, cid: string, s: { host: string; container: string }): void {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-stage-"));
+  try {
+    const out = path.join(scratch, "x");
+    const got = spawnSync(cli, ["cp", `${cid}:${s.container}`, out], { encoding: "utf8", timeout: 120_000 });
+    if (got.status !== 0 || !fs.existsSync(out)) return;
+    syncChanged(out, s.host);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Write `from` over `to` where the bytes differ; recurse into folders. */
+export function syncChanged(from: string, to: string): void {
+  const st = fs.lstatSync(from);
+  if (st.isSymbolicLink()) return;
+  if (st.isDirectory()) {
+    fs.mkdirSync(to, { recursive: true });
+    for (const name of fs.readdirSync(from)) syncChanged(path.join(from, name), path.join(to, name));
+    return;
+  }
+  const next = fs.readFileSync(from);
+  if (fs.existsSync(to) && fs.statSync(to).isFile() && fs.readFileSync(to).equals(next)) return;
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  fs.writeFileSync(to, next);
+}
+
+/** Directories 0777, files writable by all (exec bits kept): a scratch tree only. */
+function openUp(dir: string): void {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      fs.chmodSync(p, 0o777);
+      openUp(p);
+    } else {
+      fs.chmodSync(p, fs.statSync(p).mode | 0o666);
+    }
   }
 }
