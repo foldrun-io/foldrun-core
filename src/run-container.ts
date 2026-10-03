@@ -25,7 +25,7 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { isPlatformPath, type ApiSpec, type Effort } from "./store.ts";
-import { divertedSummary, isDivertedPath } from "./test-mode.ts";
+import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
 import type { EventExtra } from "./step-exec.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, type RuntimeSpec } from "./runtime.ts";
@@ -1313,6 +1313,12 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       preserveTimestamps: true,
       filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
     });
+    // A test run: what its earlier steps wrote, over the real files (the
+    // copy is the baseline too, so only this step's own writes come back).
+    if (args.divert) {
+      const laid = overlayTestWrites(wsIn, args.divert.to);
+      if (laid.length) args.emit("info", `test: this step sees ${laid.length} file${laid.length === 1 ? "" : "s"} earlier steps of this run wrote`);
+    }
     const libIn = path.join(staging, "library");
     if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });

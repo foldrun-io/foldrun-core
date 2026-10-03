@@ -21,7 +21,7 @@ import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyMo
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
-import { TEST_WRITES_DIR, restoreDivertedDirs, snapshotDivertedDirs, testHeadline, testModeEnv, withholdSecrets } from "./test-mode.ts";
+import { TEST_WRITES_DIR, overlayTestWrites, restoreDivertedDirs, snapshotDivertedDirs, testHeadline, testModeEnv, withholdSecrets } from "./test-mode.ts";
 
 /** Does this process run steps in a sandbox — the container core ships, or
  *  one the platform registered (a pod)? */
@@ -2765,6 +2765,10 @@ async function runStep(
       // under the run and the originals come back.
       const attemptThrough = async (modelEnv: Record<string, string | undefined>, spec: TranslatorSpec | null) => {
         const before = testRun ? snapshotDivertedDirs(workspaceRoot) : null;
+        // What earlier steps of this test run wrote, laid over the real files
+        // for this attempt; restoreDivertedDirs puts the originals back.
+        const handed =
+          before && runId && overlayTestWrites(workspaceRoot, divertFor(runId).to).length ? snapshotDivertedDirs(workspaceRoot) : before;
         const t = spec ? await startTranslator(spec) : null;
         try {
           return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
@@ -2775,7 +2779,7 @@ async function runStep(
           }
           if (before && runId) {
             const d = divertFor(runId);
-            restoreDivertedDirs(workspaceRoot, before, d.to, d.note);
+            restoreDivertedDirs(workspaceRoot, before, d.to, d.note, handed ?? before);
           }
         }
       };

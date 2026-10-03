@@ -16,6 +16,7 @@ import {
   bodySummary,
   isDivertedPath,
   isSendCapableSecret,
+  overlayTestWrites,
   refusalBody,
   restoreDivertedDirs,
   rewriteResendEmail,
@@ -206,6 +207,43 @@ test("the in-process path snapshots and restores: what changed goes under the ru
   assert.deepEqual(aside.sort(), ["state/cursor.json", "storage/gone.txt", "storage/new.csv"]);
   assert.ok(notes.includes("would have deleted storage/gone.txt"));
   assert.ok(notes.includes("would have written state/cursor.json"));
+});
+
+test("a later step of a test run sees what earlier steps wrote; the workspace never does", () => {
+  // strata-desk 3 Oct: the compiler wrote today's PASS report, the mailer
+  // was handed the morning's FAIL one and refused, so the test proved nothing.
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-overlay-"));
+  fs.mkdirSync(path.join(ws, "storage"), { recursive: true });
+  fs.writeFileSync(path.join(ws, "storage", "quality.md"), "FAIL");
+  const to = path.join(ws, "runs", "run-7", "test-writes");
+  fs.mkdirSync(path.join(to, "storage"), { recursive: true });
+  fs.mkdirSync(path.join(to, "state"), { recursive: true });
+  fs.writeFileSync(path.join(to, "storage", "quality.md"), "PASS");
+  fs.writeFileSync(path.join(to, "state", "new.json"), "{}");
+  const old = new Date("2026-10-03T02:00:00Z");
+  fs.utimesSync(path.join(to, "storage", "quality.md"), old, old);
+
+  // The sandbox paths: the step's copy gets the writes, with their times.
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-overlay-copy-"));
+  fs.cpSync(path.join(ws, "storage"), path.join(copy, "storage"), { recursive: true });
+  assert.deepEqual(overlayTestWrites(copy, to).sort(), ["state/new.json", "storage/quality.md"]);
+  assert.equal(fs.readFileSync(path.join(copy, "storage", "quality.md"), "utf8"), "PASS");
+  assert.equal(fs.statSync(path.join(copy, "storage", "quality.md")).mtimeMs, old.getTime(), "the time it was written");
+  assert.deepEqual(overlayTestWrites(copy, path.join(ws, "nothing-here")), [], "a first step has nothing to see");
+
+  // The in-process path: laid over the workspace itself, then put back.
+  const before = snapshotDivertedDirs(ws);
+  overlayTestWrites(ws, to);
+  const handed = snapshotDivertedDirs(ws);
+  fs.writeFileSync(path.join(ws, "storage", "receipt.json"), "{\"id\":1}");
+  const notes: string[] = [];
+  const aside = restoreDivertedDirs(ws, before, to, (_rel, s) => notes.push(s), handed);
+  assert.deepEqual(aside, ["storage/receipt.json"], "only this step's write is its own");
+  assert.equal(fs.readFileSync(path.join(ws, "storage", "quality.md"), "utf8"), "FAIL", "the workspace is as it was");
+  assert.ok(!fs.existsSync(path.join(ws, "state", "new.json")), "an earlier step's new file is not left behind");
+  assert.ok(!fs.existsSync(path.join(ws, "storage", "receipt.json")));
+  assert.equal(fs.readFileSync(path.join(to, "storage", "receipt.json"), "utf8"), "{\"id\":1}");
+  assert.equal(fs.readFileSync(path.join(to, "storage", "quality.md"), "utf8"), "PASS", "the earlier write is still kept");
 });
 
 test("the flag is on the record, live: is read off a flow and an eval, and nothing is a test by default", () => {

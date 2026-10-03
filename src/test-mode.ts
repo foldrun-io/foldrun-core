@@ -18,7 +18,9 @@
 //     a test run; the env var says TEST_MODE_WITHHELD instead, so a script
 //     that forgot to check fails at the provider with an auth error
 //   - the write-back: state/ and storage/ go INTO the sandbox as usual and
-//     come out into runs/<id>/test-writes/ instead of the real directories
+//     come out into runs/<id>/test-writes/ instead of the real directories;
+//     the next step's copy has those writes laid over it (overlayTestWrites),
+//     so the run reads its own work and the workspace never sees it
 //
 // Nothing here weakens a live run: every function is a no-op unless the run
 // says `test: true`.
@@ -270,25 +272,32 @@ export function snapshotDivertedDirs(wsRoot: string): Map<string, Buffer> {
 
 /** Undo a step's writes to the diverted directories, keeping each changed
  *  or new file under `to` by its workspace-relative path. Deletions are
- *  undone too — the original is put back. Returns what was set aside. */
+ *  undone too — the original is put back. `handed` is what the step was
+ *  given when that was more than the workspace (the run's earlier test
+ *  writes, laid over it): only what the step changed from THAT is its
+ *  write. Returns what was set aside. */
 export function restoreDivertedDirs(
   wsRoot: string,
   before: Map<string, Buffer>,
   to: string,
   note: (rel: string, summary: string) => void,
+  handed: Map<string, Buffer> = before,
 ): string[] {
   const now = snapshotDivertedDirs(wsRoot);
   const aside: string[] = [];
   for (const [rel, next] of now) {
-    const was = before.get(rel) ?? null;
-    if (was && was.equals(next)) continue;
-    const dest = path.join(to, rel);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, next);
-    aside.push(rel);
-    note(rel, divertedSummary(rel, was, next));
-    if (was) fs.writeFileSync(path.join(wsRoot, rel), was);
-    else fs.rmSync(path.join(wsRoot, rel), { force: true });
+    const given = handed.get(rel) ?? null;
+    if (!(given && given.equals(next))) {
+      const dest = path.join(to, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, next);
+      aside.push(rel);
+      note(rel, divertedSummary(rel, before.get(rel) ?? null, next));
+    }
+    const orig = before.get(rel);
+    if (orig) {
+      if (!orig.equals(next)) fs.writeFileSync(path.join(wsRoot, rel), orig);
+    } else fs.rmSync(path.join(wsRoot, rel), { force: true });
   }
   for (const [rel, was] of before) {
     if (now.has(rel)) continue;
@@ -298,6 +307,37 @@ export function restoreDivertedDirs(
     aside.push(rel);
   }
   return aside;
+}
+
+/**
+ * A test run's later steps see what its earlier steps wrote. Those writes
+ * are kept under runs/<id>/test-writes/, never on the workspace, so each
+ * step's copy of the workspace gets them laid over it — otherwise a step
+ * reads the real files, and a flow that hands work on through storage/
+ * tests something no live run does: on 2026-10-03 a strata-desk test run's
+ * compiler wrote today's PASS report, and the mailer was handed the
+ * morning's FAIL one and refused. Times are kept, so a verify that asks
+ * whether a file is fresh answers for the step that wrote it. Returns the
+ * workspace-relative paths laid over.
+ */
+export function overlayTestWrites(wsCopy: string, from: string): string[] {
+  const laid: string[] = [];
+  for (const dir of TEST_DIVERTED_DIRS) {
+    const root = path.join(from, dir);
+    if (!fs.existsSync(root)) continue;
+    for (const entry of fs.readdirSync(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const abs = path.join(entry.parentPath, entry.name);
+      const rel = path.relative(from, abs).replaceAll("\\", "/");
+      const dest = path.join(wsCopy, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(abs, dest);
+      const st = fs.statSync(abs);
+      fs.utimesSync(dest, st.atime, st.mtime);
+      laid.push(rel);
+    }
+  }
+  return laid;
 }
 
 /** `[test] ` in front of a headline, once. */
