@@ -410,6 +410,34 @@ test("runner: the live reader sequence — a reconnect that got through, then th
   });
 });
 
+test("runner: the full re-run throws — its failed row says full, after the slim (lost) one", async () => {
+  // The step's image was set from the slim outcome before the re-run, and a
+  // re-run that threw (the executor could not start the full sandbox) never
+  // reached the line that sets it again: the failed row read "slim".
+  let n = 0;
+  const fake: Fake = async () => {
+    n += 1;
+    if (n === 1) {
+      return {
+        status: "failed", result: null, costUsd: 0.01, usage: { inputTokens: 100, outputTokens: 10 }, image: slim,
+        browserPod: { reconnects: 3, reconnected: 0, lost: { cause: "lost", detail: "ECONNREFUSED" }, writes: [] },
+        timing: { sandboxMs: 100, firstOutputMs: null, totalMs: 3000 },
+      };
+    }
+    throw new Error("full image pull failed");
+  };
+  await withFake(fake, AGENT, async () => {
+    const run = startFlowRun("acme", "desk", [step()], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.status, "failed");
+    assert.equal(n, 2, "the re-run was tried");
+    const s = done!.steps[0];
+    assert.deepEqual(s.tries?.map((t) => [t.image, t.status]), [["slim", "lost"], ["full", "failed"]], JSON.stringify(s.tries));
+    assert.equal(s.image?.variant, "full");
+    assert.equal(s.browserPod?.fallback, RERAN_ON_FULL);
+  });
+});
+
 test("recordAttempt: a re-attached attempt replaces its rows, the lost one too", () => {
   const s = { events: [], costUsd: 0.02, tokens: null, computeSecs: 5, finishedAt: "2026-10-01T10:13:00.000Z" } as unknown as StepRecord;
   s.podLostTry = { status: "lost", costUsd: 0.01, tokens: null, computeSecs: 3, finishedAt: "2026-10-01T10:12:30.000Z", image: "slim", browserPod: "x" };

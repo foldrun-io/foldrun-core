@@ -2617,9 +2617,13 @@ async function runStep(
           };
           const again = { ...lastArgs, input: { ...lastArgs.input, image: "full" as const }, resume: null };
           await lease?.commit();
-          outcome = await runTracked(again);
-          step.image = outcome.image ?? { variant: "full", why: "re-run after the browser pod was lost" };
+          // Before the call, not after: a re-run that throws (the full
+          // sandbox never started) is still the full go on the record — its
+          // failed row read "slim" when this was set only on success.
+          step.image = { variant: "full", why: "re-run after the browser pod was lost" };
           step.browserPod = { ...first.browserPod!, fallback: RERAN_ON_FULL };
+          outcome = await runTracked(again);
+          step.image = outcome.image ?? step.image;
         } else {
           push("error", decision.message);
           step.browserPod = { ...outcome.browserPod, failure: decision.message };
