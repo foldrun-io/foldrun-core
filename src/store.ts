@@ -531,7 +531,7 @@ export function buildMemoryIndex(dir: string, prefix = ""): string | null {
 // Workspace-scoped shared assets: skills/, memory/, tools/ sit beside agents/
 // and are available to every agent in that workspace.
 export function workspaceMemoryIndex(tenant: string, workspace: string): string | null {
-  return buildMemoryIndex(path.join(workspaceDir(tenant, workspace), "memory"), "../../memory/");
+  return buildMemoryIndex(path.join(workspaceDir(tenant, workspace), "memory"), "workspace/memory/");
 }
 
 // Knowledge is what you *gave* an agent — stable reference material an agent
@@ -543,7 +543,7 @@ export function knowledgeIndex(dir: string, prefix = ""): string | null {
 }
 
 export function workspaceKnowledgeIndex(tenant: string, workspace: string): string | null {
-  return knowledgeIndex(path.join(workspaceDir(tenant, workspace), "knowledge"), "../../knowledge/");
+  return knowledgeIndex(path.join(workspaceDir(tenant, workspace), "knowledge"), "workspace/knowledge/");
 }
 
 // One noun for capability. A tools/<name>.md file declares either an HTTP

@@ -760,8 +760,7 @@ function agentContext(
       `\`${workspace}\` workspace. Every path in this prompt is relative to it — ` +
       `\`outputs/\` is yours, and \`workspace/\` is the workspace root, in every tool ` +
       `and in the shell: the shared file store is \`workspace/storage/\`, what runs ` +
-      `carry forward is \`workspace/state/\`. (\`../../\` reaches the same root and ` +
-      `still works, so a path like \`../../knowledge/\` below is \`workspace/knowledge/\`.) ` +
+      `carry forward is \`workspace/state/\`, its knowledge \`workspace/knowledge/\`. ` +
       `Absolute paths are outside the workspace and will be refused.\n\n` +
       // A flow's whole point is that a later step works on what an earlier one
       // produced, and each agent writes to its own outputs/. A run showed what
@@ -812,24 +811,7 @@ function agentContext(
   // skills for a few tokens each.
   // Own skills, then the workspace's, then the workspace library — nearest
   // definition of a name wins, so a team default can be overridden locally.
-  const skills: DiscoveredSkill[] = [];
-  const seenSkills = new Set<string>();
-  const addSkills = (dir: string, prefix: string, subdir = "skills") => {
-    for (const skill of discoverSkills(dir, subdir)) {
-      if (seenSkills.has(skill.name)) continue;
-      seenSkills.add(skill.name);
-      skills.push({ ...skill, path: `${prefix}${skill.path}`, dir: skill.dir ? `${prefix}${skill.dir}` : null });
-    }
-  };
-  const workspaceRoot = path.join(agentDir, "..", "..");
-  addSkills(agentDir, "");
-  addSkills(workspaceRoot, "../../"); // the workspace's skills/
-  // The cross-client convention: skills any skills-compatible tool installs
-  // under .agents/skills/ are visible here too, and vice versa. Scanned after
-  // the native location so a foldrun-native skill wins a name clash, but both
-  // are discovered. project scope only — foldrun workspaces are self-contained.
-  addSkills(workspaceRoot, "../../", ".agents/skills");
-  addSkills(path.join(libraryDir(tenant)), "../../../../library/"); // the account library
+  const skills = skillsInScope(agentDir, tenant);
 
   // A skill with `when:` only loads when the run carries a matching tag —
   // so an agent with 119 skills costs 119 lines of context only when every
@@ -919,7 +901,7 @@ function agentContext(
   };
 
   const own = listDir(path.join(agentDir, "scripts"), "scripts/");
-  const shared = listDir(path.join(agentDir, "..", "..", "scripts"), "../../scripts/");
+  const shared = listDir(path.join(agentDir, "..", "..", "scripts"), "workspace/scripts/");
   // The library's path depends on where this run executes: isolated runs see
   // it at /library, host runs at its real location. Printing the host path
   // into a container's prompt handed the model files it could never open.
@@ -1503,8 +1485,8 @@ function agentContext(
     ? [
         { label: "knowledge/", dir: path.join(agentDir, "knowledge") },
         { label: "memory/", dir: path.join(agentDir, "memory") },
-        { label: "../../knowledge/", dir: path.join(wsRoot, "knowledge") },
-        { label: "../../memory/", dir: path.join(wsRoot, "memory") },
+        { label: "workspace/knowledge/", dir: path.join(wsRoot, "knowledge") },
+        { label: "workspace/memory/", dir: path.join(wsRoot, "memory") },
         { label: "workspace/state/", dir: path.join(wsRoot, "state") },
         { label: `workspace/${STORAGE_DIR}/`, dir: path.join(wsRoot, STORAGE_DIR) },
         { label: "outputs/", dir: path.join(agentDir, "outputs") },
@@ -4846,4 +4828,36 @@ export function scriptMounts(agentDir: string, tenant: string): Record<string, s
   const gallery = platform.galleryDir();
   if (gallery) mounts[path.join(gallery, "tools")] = "/gallery-tools";
   return mounts;
+}
+
+/**
+ * The skills an agent can see, nearest first, each with the path the agent
+ * is told to read it at. Own skills, then the workspace's, then the
+ * workspace's `.agents/skills/` (the cross-client convention, scanned after
+ * the native location so a foldrun-native skill wins a name clash), then the
+ * account library. The nearest definition of a name wins.
+ *
+ * The workspace's are written `workspace/skills/…`, the one spelling for the
+ * workspace root, which the file tools expand themselves. `../../skills/…`
+ * left the model to resolve it against a path it had to guess, and on the
+ * hello template it climbed one level too far and was refused.
+ */
+export function skillsInScope(agentDir: string, tenant: string): DiscoveredSkill[] {
+  const skills: DiscoveredSkill[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string, prefix: string, subdir = "skills") => {
+    for (const skill of discoverSkills(dir, subdir)) {
+      if (seen.has(skill.name)) continue;
+      seen.add(skill.name);
+      skills.push({ ...skill, path: `${prefix}${skill.path}`, dir: skill.dir ? `${prefix}${skill.dir}` : null });
+    }
+  };
+  const workspaceRoot = path.join(agentDir, "..", "..");
+  add(agentDir, "");
+  add(workspaceRoot, "workspace/");
+  add(workspaceRoot, "workspace/", ".agents/skills");
+  // The account library keeps its relative path: `account/` is expanded by
+  // the file tools only, and a skill's bundled scripts are run from the shell.
+  add(path.join(libraryDir(tenant)), "../../../../library/");
+  return skills;
 }

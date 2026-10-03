@@ -32,7 +32,7 @@ import type { RunRecord } from "./store.ts";
 // ------------------------------------------------------------------ search
 
 export interface SearchRoot {
-  /** How the agent should name the place: "knowledge/", "../../memory/". */
+  /** How the agent should name the place: "knowledge/", "workspace/memory/". */
   label: string;
   /** The directory, absolute. */
   dir: string;

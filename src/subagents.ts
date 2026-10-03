@@ -97,7 +97,7 @@ export function subagentPrompt(o: {
     `# Where you are\n\n` +
       `You are ${o.name}, a sub-agent started by ${o.parent} to do one job and report back. ` +
       `You work in ${o.parent}'s directory, \`agents/${o.parent}/\` in the \`${o.workspace}\` workspace: ` +
-      `\`../../\` is the workspace root, its knowledge is at \`../../knowledge/\`, and absolute paths are refused. ` +
+      `\`workspace/\` is the workspace root, its knowledge is at \`workspace/knowledge/\`, and absolute paths are refused. ` +
       `You have only the tools listed for you. When the job is done, reply with what you found or made — ` +
       `your reply is all ${o.parent} sees of your work, so put the facts and file paths in it.`,
     ...(o.shared?.trim() ? [o.shared.trim()] : []),
