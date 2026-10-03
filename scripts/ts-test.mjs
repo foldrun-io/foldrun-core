@@ -25,19 +25,42 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const files = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+// Test paths are the caller's: platform's `npm run k8s` runs this script from
+// its own repo with `tests/k8s-e2e.test.ts`, which is platform's file, not
+// core's. Resolved against ROOT, it was "Could not find" on every run since
+// the repos were split.
+const CALLER = process.cwd();
+const files = process.argv.slice(2).filter((a) => !a.startsWith("--")).map((f) => path.resolve(CALLER, f));
 const flags = process.argv.slice(2).filter((a) => a.startsWith("--"));
 if (!files.length) {
   console.error("usage: node scripts/ts-test.mjs <test.ts> [...] [--node-flags]");
+  process.exit(2);
+}
+const gone = files.filter((f) => !fs.existsSync(f));
+if (gone.length) {
+  console.error(`[ts-test] no such test file:\n  ${gone.join("\n  ")}`);
   process.exit(2);
 }
 
 const run = (cmd, args, opts = {}) =>
   spawnSync(cmd, args, { stdio: "inherit", cwd: ROOT, ...opts }).status ?? 1;
 
-// The happy path: this Node strips types itself.
+// The happy path: this Node strips types itself. The test runs from the
+// caller's directory, as it would under a plain `node --test`.
 if (process.features.typescript) {
-  process.exit(run(process.execPath, ["--test", ...flags, ...files]));
+  process.exit(run(process.execPath, ["--test", ...flags, ...files], { cwd: CALLER }));
+}
+
+// The compile path below links a test's `../src/` imports to core's dist, so
+// it is right for core's own tests only. Another repo's test importing its
+// own src/ would be pointed at core's modules instead — refuse it plainly.
+const foreign = files.filter((f) => path.relative(ROOT, f).startsWith(".."));
+if (foreign.length) {
+  console.error(
+    `[ts-test] this Node (${process.version}) cannot strip types, and only core's own tests can be compiled here:\n  ${foreign.join("\n  ")}\n` +
+      "Run it with a Node that strips types (22.18+ built with TypeScript support, or 23.6+).",
+  );
+  process.exit(2);
 }
 
 console.error(`[ts-test] this Node has no TypeScript support — compiling ${files.length} file(s) first`);
@@ -91,7 +114,7 @@ const config = {
     // emitted JS is repointed at dist below.
     typeRoots: ["./web/node_modules/@types", "./node_modules/@types"],
   },
-  include: files,
+  include: files.map((f) => path.relative(ROOT, f)),
 };
 const configPath = path.join(ROOT, `tsconfig.ts-test.${process.pid}.json`);
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
@@ -101,7 +124,7 @@ try {
   // Type errors are reported and do not stop the run — the point here is to
   // exercise a cluster or a daemon, not to re-run `npm run build`'s typecheck.
   run(tsc, ["-p", configPath]);
-  const compiled = files.map((f) => path.join(out, f.replace(/\.ts$/, ".js")));
+  const compiled = files.map((f) => path.join(out, path.relative(ROOT, f).replace(/\.ts$/, ".js")));
   const missing = compiled.filter((f) => !fs.existsSync(f));
   if (missing.length) {
     console.error(`[ts-test] tsc produced no output for:\n  ${missing.join("\n  ")}`);
