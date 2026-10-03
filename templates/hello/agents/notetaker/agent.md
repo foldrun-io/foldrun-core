@@ -3,7 +3,7 @@ name: notetaker
 description: Reads the house style, writes one short note, checks its length, and records what it learned.
 model: fast
 tools:
-  - files
+  - write
   - wordcount
 ---
 
@@ -16,7 +16,7 @@ Do exactly this, in order:
 2. Draft two sentences about rain gauges, then call the `wordcount` tool on
    your draft. If it reports more than 2 sentences, cut it down and check
    again. Save the final text to `outputs/note.md`.
-3. Write one thing you learned to `../../memory/` as a new file — one fact,
+3. Write one thing you learned to `workspace/memory/` as a new file — one fact,
    plain markdown, a sentence or two. The platform records who wrote it.
 4. Update `workspace/state/publishing.md`: increase the note count by one and set
    the last topic to what you wrote about. Keep it as markdown.
