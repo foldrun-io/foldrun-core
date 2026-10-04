@@ -8,9 +8,11 @@ name: deploy
 # all when busy (3 Oct: nothing between 18:26Z and 23:30Z).
 #
 # Dispatching to another repository needs a token that can write to
-# foldrun-infra: secret DEPLOY_DISPATCH_TOKEN (a fine-grained token, or a
-# GitHub App's, with Contents: read and write on foldrun-io/foldrun-infra
-# only). Without it this says so and the schedule still deploys.
+# foldrun-infra. Preferred: the foldrun-bot GitHub App (vars.FOLDRUN_BOT_CLIENT_ID
+# + secrets.FOLDRUN_BOT_PRIVATE_KEY, foldrun-infra github/app-secrets.sh): a
+# token minted per run, an hour long, Contents write on foldrun-infra only.
+# Until the App is set up, secret DEPLOY_DISPATCH_TOKEN. Neither: this says
+# so and the schedule still deploys.
 on:
   push:
     branches: [main]
@@ -26,12 +28,23 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
+      - name: a token for foldrun-infra, from the App
+        id: app
+        if: vars.FOLDRUN_BOT_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.FOLDRUN_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.FOLDRUN_BOT_PRIVATE_KEY }}
+          owner: foldrun-io
+          repositories: foldrun-infra
+          permission-contents: write
+
       - name: ask the box to deploy
         env:
-          GH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.DEPLOY_DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::DEPLOY_DISPATCH_TOKEN is not set — the box picks this up on its schedule instead"
+            echo "::notice::neither the foldrun-bot App nor DEPLOY_DISPATCH_TOKEN is set — the box picks this up on its schedule instead"
             exit 0
           fi
           gh api -X POST repos/foldrun-io/foldrun-infra/dispatches \
