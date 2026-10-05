@@ -28,8 +28,11 @@ test("a step's SDK session loads no claude.ai connectors and no on-disk MCP conf
       emit: () => {},
     }, query);
     assert.ok(seen, "the query ran");
-    const opts = seen as unknown as { strictMcpConfig?: boolean; env?: Record<string, string>; settingSources?: unknown[] };
+    const opts = seen as unknown as { strictMcpConfig?: boolean; env?: Record<string, string>; settingSources?: unknown[]; permissionMode?: string };
     assert.equal(opts.strictMcpConfig, true);
+    // Never the SDK's choice: unset, it ran auto mode and its classifier
+    // refused a granted script before canUseTool saw it.
+    assert.equal(opts.permissionMode, "default");
     assert.equal(opts.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
     assert.equal(opts.env?.KEEP, "1", "the step's own env is kept");
     assert.deepEqual(opts.settingSources, []);

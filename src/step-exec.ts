@@ -329,6 +329,13 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       // declares no tools gets none, instead of seeing the full Claude
       // Code toolset and burning turns on denied calls.
       tools: opts.allowed,
+      // Stated, never left to the SDK. Unset, it chose its own mode for the
+      // login it ran under, and in auto mode its classifier refused a granted
+      // script before canUseTool saw it: "denied by the Claude Code auto mode
+      // classifier. Reason: [Irreversible Local Destruction]" for backlink-
+      // desk's outreach_reset, which only marks old bodies STALE (2026-10-04
+      // and 05). The decision is ours: canUseTool and the PreToolUse hook.
+      permissionMode: "default",
       // Deliberately NOT allowedTools: listing them there auto-approves and
       // skips canUseTool entirely, which is where confinement happens. The
       // toolset is still restricted by `tools` above.
