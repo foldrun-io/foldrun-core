@@ -632,11 +632,23 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
             ...(block.is_error ? { err: true } : {}),
             ...(open.subagent ? { subagent: open.subagent } : {}),
           });
+          // Why it failed, on the trail. The span above carried only `err`,
+          // so a refused call left the agent's own guess as the only account
+          // of it: backlink-desk's outreach_reset "denied by the permission
+          // classifier" (run-muufboma-2t6l, 2026-10-05) could not be checked.
+          if (block.is_error) {
+            const why = toolResultText(block.content).replace(/\s+/g, " ").trim().slice(0, 300);
+            if (why) emit("error", `${open.name}: ${why}`, { call: block.tool_use_id, ...(open.subagent ? { subagent: open.subagent } : {}) });
+          }
           readPod(block.tool_use_id);
         }
       }
     } else if (message.type === "result") {
       status = message.subtype === "success" ? "completed" : "failed";
+      // Calls the SDK itself refused, which canUseTool never saw.
+      for (const d of ("permission_denials" in message && Array.isArray(message.permission_denials) ? message.permission_denials : [])) {
+        emit("error", `refused before it ran: ${String((d as { tool_name?: unknown }).tool_name ?? "a tool")}`);
+      }
       if (message.subtype === "error_max_turns") {
         emit("error", `stopped after ${opts.maxTurns ?? "its"} turns (max_turns: in the flow file) — the step did not finish`);
       }
@@ -1059,4 +1071,15 @@ function runVerify(
  */
 export function sdkEnv(base: Record<string, string | undefined> | undefined, extra: Record<string, string> = {}): Record<string, string | undefined> {
   return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
+}
+
+/** The text of a tool result, whichever shape it came in: a string, or a
+ *  list of content blocks of which only the text ones say anything. */
+export function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+    .map((b) => b.text)
+    .join(" ");
 }

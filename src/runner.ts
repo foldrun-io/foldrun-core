@@ -1756,6 +1756,42 @@ async function terminalAsk(question: string, options?: string[]): Promise<string
   }
 }
 
+/**
+ * What the person at the gate said, framed for the step's prompt — or "".
+ *
+ * The note is the freshest instruction the step has — later than the flow
+ * file, aimed at this exact run. When the gate asked a question (ask:), the
+ * note IS the answer and is framed as one.
+ *
+ * Both halves go through resolveDocLinks for the same reason the
+ * instruction does: this is authored text on its way to becoming a prompt,
+ * and the rule is that ALL of it expands. A person answering "which list?"
+ * with [[dead-ends]] was sending the model two literal brackets — the one
+ * reference syntax the workspace teaches, and the one place it silently did
+ * nothing. The previous step's results are NOT resolved, deliberately: that
+ * is model output, and a model that happens to emit [[brackets]] must not
+ * thereby name a file.
+ *
+ * An ask: gate approved with no note still says so. It used to add nothing,
+ * so the step never learned its question had been answered: gbp-desk's
+ * rivals sender, told "a plain approval means all offices", saw no answer
+ * at all and stopped BLOCKED (run-muu6r18y-417e, 2026-10-05).
+ */
+export function operatorBlock(step: Pick<StepRecord, "ask" | "approvalNote" | "approvedAt">, workspaceRoot: string): string {
+  const ask = step.ask ? resolveDocLinks(step.ask, workspaceRoot) : "";
+  if (step.approvalNote) {
+    const note = resolveDocLinks(step.approvalNote, workspaceRoot);
+    return step.ask
+      ? `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer:\n${note}\n</operator_answer>`
+      : `\n\n<operator_guidance>\nThe human who approved this step added:\n${note}\n</operator_guidance>`;
+  }
+  if (step.ask && step.approvedAt) {
+    return `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer: they approved it with no note — a plain yes.\n</operator_answer>`;
+  }
+  return "";
+}
+
+
 async function runStep(
   agentDir: string,
   tenant: string,
@@ -2143,28 +2179,7 @@ async function runStep(
       // happening to contain brackets.
       prompt += `\n\n<event>\nThis step waited for an external event. What arrived:\n${step.eventPayload}\n</event>`;
     }
-    if (step.approvalNote) {
-      // The person at the gate said something while letting the run through.
-      // That is the freshest instruction the step has — later than the flow
-      // file, aimed at this exact run. When the gate asked a question
-      // (ask:), the note IS the answer and is framed as one.
-      //
-      // Both halves go through resolveDocLinks for the same reason the
-      // instruction above does: this is authored text on its way to becoming
-      // a prompt, and the rule is that ALL of it expands. A person answering
-      // "which list?" with [[dead-ends]] was sending the model two literal
-      // brackets — the one reference syntax the workspace teaches, and the
-      // one place it silently did nothing.
-      //
-      // What is NOT resolved, deliberately: the previous step's results
-      // above. That is model output, not something a person wrote, and a
-      // model that happens to emit [[brackets]] must not thereby name a file.
-      const ask = step.ask ? resolveDocLinks(step.ask, workspaceRoot) : "";
-      const note = resolveDocLinks(step.approvalNote, workspaceRoot);
-      prompt += step.ask
-        ? `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer:\n${note}\n</operator_answer>`
-        : `\n\n<operator_guidance>\nThe human who approved this step added:\n${note}\n</operator_guidance>`;
-    }
+    prompt += operatorBlock(step, workspaceRoot);
     if (step.delegate?.length) {
       // The chooser's contract. The allowed set comes from the flow file;
       // the runner parses exactly this shape back out of the result, so the
