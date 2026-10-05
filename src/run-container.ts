@@ -293,18 +293,37 @@ export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Bu
   let common = 0;
   const max = Math.min(h.length, n.length);
   while (common < max && h.charCodeAt(common) === n.charCodeAt(common)) common++;
-  for (let end = common; end >= 0; end--) {
-    if (end > 0 && h[end - 1] !== "\n") continue;
-    const prefix = h.slice(0, end);
-    const matches =
-      typeof was === "string" ? sha(Buffer.from(prefix, "utf8")) === was : Buffer.from(prefix, "utf8").equals(was);
-    if (!matches) continue;
-    const hostAdded = h.slice(end);
-    const stepAdded = n.slice(end);
-    const joined = hostAdded && !hostAdded.endsWith("\n") ? hostAdded + "\n" : hostAdded;
-    return Buffer.from(prefix + joined + stepAdded, "utf8");
+  // One pass over the shared prefix. Rebuilding and hashing the prefix at
+  // every line boundary, from the longest down, was quadratic: on 6 Oct 2026
+  // a conflicted file of a few MB held the worker's event loop for minutes,
+  // the liveness probe killed it every 4.5 minutes, and every step on the box
+  // lost its model connection.
+  let end = -1;
+  if (typeof was === "string") {
+    const run = crypto.createHash("sha256");
+    if (run.copy().digest("hex") === was) end = 0;
+    let from = 0;
+    for (let nl = h.indexOf("\n"); nl !== -1 && nl < common; nl = h.indexOf("\n", nl + 1)) {
+      run.update(h.slice(from, nl + 1), "utf8");
+      from = nl + 1;
+      if (run.copy().digest("hex") === was) end = from;
+    }
+  } else {
+    // The base's bytes are known, so it can only end at their length.
+    const base = was.toString("utf8");
+    if (
+      base.length <= common &&
+      (base.length === 0 || base.endsWith("\n")) &&
+      h.startsWith(base) &&
+      Buffer.from(base, "utf8").equals(was)
+    )
+      end = base.length;
   }
-  return null;
+  if (end < 0) return null;
+  const hostAdded = h.slice(end);
+  const stepAdded = n.slice(end);
+  const joined = hostAdded && !hostAdded.endsWith("\n") ? hostAdded + "\n" : hostAdded;
+  return Buffer.from(h.slice(0, end) + joined + stepAdded, "utf8");
 }
 
 export function applyContainerChanges(

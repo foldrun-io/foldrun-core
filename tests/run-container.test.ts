@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawnSync as spawnSh } from "node:child_process";
 import {
   DOCKERFILE,
@@ -252,6 +253,26 @@ test("append merge: host rows without a trailing newline, a rewrite, and a new f
   assert.equal(mergeAppends(b("a\n"), b("a\nx"), b("a\ny\n"))!.toString(), "a\nx\ny\n");
   assert.equal(mergeAppends(b("a\nb\n"), b("a\nB\n"), b("a\nb\nc\n")), null, "a rewritten line is not an append");
   assert.equal(mergeAppends(null, b("{}\n"), b("[]\n")), null, "two new files are a conflict");
+  // Only the base's hash known: the same answers.
+  const h = (s: string) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
+  assert.equal(mergeAppends(h("a\n"), b("a\nx"), b("a\ny\n"))!.toString(), "a\nx\ny\n");
+  assert.equal(mergeAppends(h("a\nb\n"), b("a\nB\n"), b("a\nb\nc\n")), null);
+  assert.equal(mergeAppends(h(""), b("x\n"), b("y\n"))!.toString(), "x\ny\n", "an empty base");
+  assert.equal(mergeAppends(h("é\n"), b("é\nx\n"), b("é\ny\n"))!.toString(), "é\nx\ny\n", "multi-byte lines");
+  assert.equal(mergeAppends(b("a\nb\n"), b("a\nb\nx\n"), b("a\nb\ny\n"))!.toString(), "a\nb\nx\ny\n");
+  assert.equal(mergeAppends(b("a"), b("ab\n"), b("ac\n")), null, "a base that ends mid-line");
+});
+
+// A conflicted file of a few MB held the worker's event loop for minutes on
+// 6 Oct 2026 (the liveness probe killed it every 4.5 minutes).
+test("mergeAppends is linear in the file's size", async () => {
+  const { mergeAppends } = await import("../src/run-container.ts");
+  const base = Array.from({ length: 50_000 }, (_, i) => `{"line":${i},"pad":"${"x".repeat(80)}"}`).join("\n") + "\n";
+  const t = Date.now();
+  assert.equal(mergeAppends("0".repeat(64), Buffer.from(base + "host\n"), Buffer.from(base + "step\n")), null);
+  const hash = crypto.createHash("sha256").update(base, "utf8").digest("hex");
+  assert.equal(mergeAppends(hash, Buffer.from(base + "host\n"), Buffer.from(base + "step\n"))!.length, base.length + 10);
+  assert.ok(Date.now() - t < 2000, `took ${Date.now() - t}ms on a ${(base.length / 1e6).toFixed(1)}MB file`);
 });
 
 // FOLDRUN_RUNNER_IMAGE names an image to run as-is; anything falsy means
