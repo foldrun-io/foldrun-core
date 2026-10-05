@@ -342,7 +342,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/runs/<id>/message\` | POST | tell a running step something; \`step\` picks one of a parallel group |
 | \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
 | \`/flows/<f>/run\` | POST | start a flow |
-| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · POST | list agents, run one, copy one in from another workspace |
+| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · GET POST | list agents, run one, copy one in from another workspace |
 | \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
 | \`/tools/<t>/test\` | POST | exercise one tool alone |
 | \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
