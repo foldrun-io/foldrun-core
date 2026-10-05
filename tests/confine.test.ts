@@ -354,3 +354,31 @@ test("a write that would grow storage/, state/ or workspace/ inside the agent's 
   // Reading a stray that already exists is not refused.
   assert.equal(read(`${ROOTS.agentDir}/storage/old.json`).ok, true);
 });
+
+test("with the step's workspace link in place, a workspace/ path is checked but not rewritten", () => {
+  // Read rewritten and Edit checked as written disagreed on the path, so
+  // every Edit after a Read was refused "File has not been read yet".
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "confine-link-"));
+  const ws = path.join(root, "desk");
+  const agentDir = path.join(ws, "agents", "fact-checker");
+  fs.mkdirSync(path.join(ws, "storage", "draft"), { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(ws, "storage", "draft", "r.md"), "x");
+  const roots = { agentDir, workspaceRoot: ws, libraryRoot: path.join(root, "library") };
+  const p = `${agentDir}/workspace/storage/draft/r.md`;
+
+  // No link (the CLI's in-process path before a step, or a test harness): rewritten.
+  const before = checkPaths("Edit", { file_path: p }, roots);
+  assert.equal(before.ok, true);
+  assert.equal(before.updatedInput?.file_path, fs.realpathSync(path.join(ws, "storage", "draft", "r.md")));
+
+  fs.symlinkSync("../..", path.join(agentDir, "workspace"), "dir");
+  for (const tool of ["Read", "Edit"]) {
+    const v = checkPaths(tool, { file_path: p }, roots);
+    assert.equal(v.ok, true, tool);
+    assert.equal(v.updatedInput, undefined, `${tool} keeps the path as written`);
+  }
+  // Still confined: the link does not open a way out.
+  assert.equal(checkPaths("Read", { file_path: `${agentDir}/workspace/../../../../../../etc/passwd` }, roots).ok, false);
+  fs.rmSync(root, { recursive: true, force: true });
+});

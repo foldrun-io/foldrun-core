@@ -193,7 +193,7 @@ export function isWithin(root: string, abs: string): boolean {
 }
 
 /** Expand a virtual prefix to a real absolute path, or null if it has none. */
-export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnly: boolean } | null {
+export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnly: boolean; prefix: string } | null {
   // The SDK resolves a relative path against the cwd BEFORE canUseTool sees
   // it, so `workspace/storage/x.json` arrives as
   // `<agentDir>/workspace/storage/x.json` and never matched a prefix. The
@@ -205,10 +205,21 @@ export function expandVirtual(raw: string, roots: Roots): { abs: string; readOnl
   const candidate = rel !== null && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : raw;
   for (const v of VIRTUAL) {
     if (candidate.startsWith(v.prefix)) {
-      return { abs: path.resolve(v.root(roots), candidate.slice(v.prefix.length)), readOnly: v.readOnly };
+      return { abs: path.resolve(v.root(roots), candidate.slice(v.prefix.length)), readOnly: v.readOnly, prefix: v.prefix };
     }
   }
   return null;
+}
+
+/** Whether `<agentDir>/workspace` is the step's link to the workspace root
+ *  (linkWorkspace), so a `workspace/…` path opens the right file as written. */
+function linkedWorkspace(roots: Roots): boolean {
+  const link = path.join(roots.agentDir, "workspace");
+  try {
+    return fs.lstatSync(link).isSymbolicLink() && real(link) === real(path.resolve(roots.workspaceRoot));
+  } catch {
+    return false;
+  }
 }
 
 export function checkPaths(
@@ -312,8 +323,16 @@ export function checkPaths(
     }
 
     // Hand the real path back to the tool, so the virtual prefix the prompt
-    // advertises is one the agent can actually open.
-    if (virtual) rewritten = { ...(rewritten ?? input), [key]: abs };
+    // advertises is one the agent can actually open — unless the step's
+    // `workspace` link already opens it. Then the path is left as written,
+    // because the SDK remembers what was Read under the path the tool ran
+    // with but checks an Edit against the one the model wrote, before this
+    // hook sees it: Read workspace/x (rewritten) then Edit workspace/x was
+    // refused "File has not been read yet" on every try, and blog-desk's
+    // fact-checker spent a pass on it (run-muuhguk3-vhrg, 2026-10-05).
+    if (virtual && !(virtual.prefix === "workspace/" && linkedWorkspace(roots))) {
+      rewritten = { ...(rewritten ?? input), [key]: abs };
+    }
   }
 
   // Glob searches from `path` (the cwd when absent) and its PATTERN never
