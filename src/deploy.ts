@@ -208,6 +208,25 @@ export function readTree(dir: string): DeployFile[] {
  *  only the deployed files, so a library or gallery outward tool is not seen
  *  here — `foldrun check`, which resolves every scope, remains the real gate.
  *  Non-blocking by decision: the deploy proceeds and says so. */
+/**
+ * A frontmatter block that lost its opening `---`: `key: value` lines, then a
+ * lone `---`, with nothing above them. Nothing is read from it — the parser
+ * sees prose — so the agent runs with no tools and the default model, and a
+ * model told to call a tool it was never given writes the call out as text.
+ * seo-digest's editor did that every Sunday from 20 Sep to 5 Oct 2026.
+ * Returns the problem, or null.
+ */
+export function unopenedFrontmatter(raw: string): string | null {
+  const text = raw.replace(/^\uFEFF/, "");
+  if (/^---\r?\n/.test(text)) return null;
+  const lines = text.split(/\r?\n/);
+  const close = lines.findIndex((l) => l.trim() === "---");
+  if (close < 1) return null;
+  const above = lines.slice(0, close).filter((l) => l.trim() && !l.trim().startsWith("#"));
+  if (!above.length || !above.every((l) => /^[A-Za-z_][\w-]*:(\s|$)/.test(l) || /^\s+\S/.test(l))) return null;
+  return "the frontmatter has no opening `---`, so none of it is read: the agent runs with no tools and the default model. Add `---` as the first line.";
+}
+
 export function deployWarnings(files: DeployFile[]): DeployIssue[] {
   const front = (content: string): Record<string, unknown> => {
     try { return matter(content).data as Record<string, unknown>; } catch { return {}; }
@@ -284,6 +303,8 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
   // written, not discovered as a date that is a day out.
   for (const f of files) {
     if (!/^(AGENTS\.md|agents\/[^/]+\/agent\.md)$/.test(f.path)) continue;
+    const unopened = unopenedFrontmatter(f.content);
+    if (unopened) at(f.path, unopened);
     let front: Record<string, unknown> = {};
     try {
       front = matter(f.content).data as Record<string, unknown>;
