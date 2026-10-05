@@ -108,3 +108,21 @@ test("an event for a run that is not waiting on one is refused", async () => {
     w.done();
   }
 });
+
+test("an event delivered by a named person records them, and a step that is not waiting on one is refused", async () => {
+  const w = workspace({ sender: "quote sent", chaser: "followed up" });
+  try {
+    const run = startFlowRun("acme", "desk", [step("sender", 1), step("chaser", 2, { waitFor: "event" })], "quote");
+    await until(() => readRun("acme", "desk", run.id)?.status === "awaiting-approval");
+    await assert.rejects(deliverEvent("acme", "desk", run.id, "x", { step: 0 }), (e: Error & { status?: number }) => e.status === 409);
+    const { steps } = await deliverEvent("acme", "desk", run.id, "paid", { by: "by ann@acme.test", step: 1 });
+    assert.deepEqual(steps, [1]);
+    await until(() => ["completed", "failed"].includes(readRun("acme", "desk", run.id)?.status ?? ""), 20_000);
+    const done = readRun("acme", "desk", run.id)!.steps[1];
+    assert.equal(done.eventPayload, "paid");
+    assert.ok(done.events.some((e) => /approved by ann@acme\.test/.test(e.text)));
+    assert.ok(!done.events.some((e) => /by an external event/.test(e.text)));
+  } finally {
+    w.done();
+  }
+});

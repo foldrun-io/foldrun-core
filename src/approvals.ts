@@ -356,24 +356,31 @@ export async function expireStaleGate(
  *
  * Only steps waiting on an event are released: a run that is also asking a
  * person a question keeps asking.
+ *
+ * `by` names who delivered it when that is known — a signed-in person or a
+ * key through the dashboard's approve route — and `step` releases one
+ * waiting step rather than all of them.
  */
 export async function deliverEvent(
   tenant: string,
   workspace: string,
   runId: string,
   payload: string,
+  opts: { by?: string; step?: number } = {},
 ): Promise<{ run: RunRecord; steps: number[] }> {
   const run = readRun(tenant, workspace, runId);
   if (!run) throw new ApprovalError("run not found", 404);
   const waiting = run.steps
     .map((s, i) => ({ s, i }))
-    .filter(({ s }) => s.status === "awaiting-approval" && s.waitFor === "event");
-  if (waiting.length === 0) throw new ApprovalError("this run is not waiting for an event", 409);
+    .filter(({ s, i }) => s.status === "awaiting-approval" && s.waitFor === "event" && (opts.step === undefined || opts.step === i));
+  if (waiting.length === 0) {
+    throw new ApprovalError(opts.step === undefined ? "this run is not waiting for an event" : `step ${opts.step} is not waiting for an event`, 409);
+  }
   for (const { s } of waiting) s.eventPayload = payload.slice(0, 20_000);
   writeRun(tenant, workspace, run);
   let decided: number[] = [];
   for (const { i } of waiting) {
-    const out = await decideApproval(tenant, workspace, runId, { decision: "approve", step: i, by: "by an external event" });
+    const out = await decideApproval(tenant, workspace, runId, { decision: "approve", step: i, by: opts.by ?? "by an external event" });
     decided = decided.concat(out.steps);
   }
   return { run: readRun(tenant, workspace, runId) ?? run, steps: decided };
