@@ -246,6 +246,9 @@ export function deployWarnings(files: DeployFile[]): DeployIssue[] {
   const outwardAgents: string[] = [];
   const agentNames: string[] = [];
   const out: DeployIssue[] = [];
+  if (!files.some((f) => /^agents\/[^/]+\/agent\.md$/.test(f.path)) && !files.some((f) => /^\.(claude|agents)\/agents\/[^/]+\.md$/.test(f.path))) {
+    out.push({ where: "agents/", message: "no agents yet — add one (agents/<name>/agent.md), or import one from another workspace" });
+  }
   // The web: warnings check prints — the old session: key, and a pinned
   // user agent behind the runner image's Chrome, which the platform knows
   // from FOLDRUN_RUNNER_ENGINES (the deploy read it from the image).
@@ -327,9 +330,10 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     if (lang) at(f.path, lang);
     for (const w of localeProblems(front)) at(f.path, w);
   }
-  if (agents.size === 0) {
-    at("agents/", "no agents — a workspace needs at least one agents/<name>/agent.md");
-  }
+  // No agents is a workspace that has not started yet — "Create workspace"
+  // makes exactly that — and deploying it is harmless: a flow that names an
+  // agent this push lacks is refused below, step by step. deployWarnings says
+  // it, so the empty state is visible without blocking the first push.
 
   // Flows, parsed from the incoming text rather than from disk. A step naming
   // an agent that this push does not ship is the single most common way a

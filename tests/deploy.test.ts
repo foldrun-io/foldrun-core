@@ -112,9 +112,14 @@ test("a flow naming an agent the push does not ship is rejected", () => {
   assert.match(issues[0].message, /\[\[ghost\]\] does not exist/);
 });
 
-test("a workspace with no agents is rejected", () => {
-  const files = workspace().filter((f) => !f.path.startsWith("agents/"));
-  assert.ok(deployIssues(files).some((i) => /needs at least one/.test(i.message)));
+test("a workspace with no agents yet deploys, with a warning", () => {
+  // "Create workspace" makes a blank one; refusing its first push would make
+  // the empty state a dead end. A flow naming a missing agent still fails.
+  const blank = workspace().filter((f) => !f.path.startsWith("agents/") && !f.path.startsWith("flows/"));
+  assert.equal(deployIssues(blank).length, 0, JSON.stringify(deployIssues(blank)));
+  assert.ok(deployWarnings(blank).some((i) => /no agents yet/.test(i.message)));
+  const orphanFlow = workspace().filter((f) => !f.path.startsWith("agents/"));
+  assert.ok(deployIssues(orphanFlow).some((i) => /does not exist/.test(i.message)));
 });
 
 // Case matters on Linux and does not on macOS, so `Agents.md` deploys happily
@@ -145,7 +150,8 @@ test("a non-conformant memory file is rejected", () => {
 // reports the next one wastes a round trip per mistake.
 test("all the problems are reported together", () => {
   const issues = deployIssues([
-    { path: "flows/a.md", content: "---\nname: a\n---\n\n1. [[nobody]] — go\n" },
+    { path: "flows/a.md", content: "---\nname: a\n---\n\n1. [[nobody]] — go\n2. [[ghost]] — go\n" },
+    { path: "Agents.md", content: "x" },
   ]);
   assert.ok(issues.length >= 2, `expected several issues, got ${JSON.stringify(issues)}`);
 });

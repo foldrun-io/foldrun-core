@@ -57,7 +57,7 @@ import {
 } from "./okf.ts";
 import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
-import { starterFiles, accountFiles } from "./starter.ts";
+import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
@@ -2875,6 +2875,12 @@ export function setWorkspaceDescription(tenant: string, workspace: string, descr
  * this copy still said `type: Agent` after the CLI's had moved to `kind:`,
  * so every workspace made from the dashboard was born in the old format.
  */
+/** What the dashboard's "Create workspace" makes: blank (blankWorkspaceFiles),
+ *  minus the laptop-only files, for the same reason as templateFiles. */
+export function blankTemplateFiles(workspace: string): DeployFile[] {
+  return blankWorkspaceFiles(workspace).filter((f) => f.path === "AGENTS.md" || IN_WORKSPACE_DIR.test(f.path));
+}
+
 export function templateFiles(workspace: string): DeployFile[] {
   // The starter minus what only matters on a laptop's disk: .gitignore
   // guards a local clone's secrets, but the hosted store never keeps

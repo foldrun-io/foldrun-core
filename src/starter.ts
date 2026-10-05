@@ -342,7 +342,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/runs/<id>/message\` | POST | tell a running step something; \`step\` picks one of a parallel group |
 | \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
 | \`/flows/<f>/run\` | POST | start a flow |
-| \`/agents\` · \`/agents/<a>/run\` | GET POST · POST | list agents, run one |
+| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · POST | list agents, run one, copy one in from another workspace |
 | \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
 | \`/tools/<t>/test\` | POST | exercise one tool alone |
 | \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
@@ -498,4 +498,32 @@ expect:
 `,
     },
   ];
+}
+
+/**
+ * A new workspace with nothing in it to delete: its AGENTS.md, the
+ * .gitignore that keeps its secret key out of git, and the CLAUDE.md a coding
+ * tool reads. No example agents or flow.
+ *
+ * The starter's researcher and writer were a demo, and a person making a
+ * workspace for real work met them as clutter — "why does a new workspace
+ * have agents?" (owner, 2026-10-05). The agents worth having are usually ones
+ * already written in another workspace, which `agents/import` copies in; the
+ * example is still one flag away (`foldrun new <name> --starter`).
+ */
+export function blankWorkspaceFiles(workspace: string): StarterFile[] {
+  const keep = new Set(["AGENTS.md", ".gitignore", "CLAUDE.md"]);
+  return starterFiles(workspace)
+    .filter((f) => keep.has(f.path))
+    .map((f) =>
+      f.path === "AGENTS.md"
+        ? {
+            ...f,
+            content: f.content.replace(
+              "description: A starter workspace — edit the agents, then run the flow.",
+              "description: A new workspace — add an agent or import one from another workspace, then write a flow.",
+            ),
+          }
+        : f,
+    );
 }
