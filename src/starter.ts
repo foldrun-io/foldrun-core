@@ -47,6 +47,10 @@ foldrun_version: "0.1"
 # that declares the same key replaces it *whole* — base_url and token never
 # merge across scopes, so a provider block belongs entirely at one level.
 #
+# Your own model key needs no block: Settings → Model provider, or
+# \`foldrun account model set anthropic --key …\` (an API key, not a login).
+# A provider: block here or lower wins over it.
+#
 # provider:
 #   base_url: https://openrouter.ai/api
 #   token: \${OPENROUTER_API_KEY}
@@ -458,7 +462,7 @@ subagents: [researcher]     # colleagues it may delegate a job to (own context, 
 secrets: [CRM_TOKEN]        # keys the agent uses itself; a tool's own come with the tool
 limits: {web.search: 40, crm: 20, calls: 300}  # per step; a call past a limit is refused, never run
 timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
-provider: {}                # BYOK: your own model credential
+provider: {}                # BYOK for this agent; account-wide: \`foldrun account model set\`
 permissionMode: plan        # plan first, act once approved
 runtime:                    # only if scripts need packages
   packages: [requests]

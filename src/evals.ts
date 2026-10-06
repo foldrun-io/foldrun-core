@@ -31,6 +31,7 @@
 // they pass — no point paying a model to grade output already known to be
 // wrong.
 
+import { accountModelEnv } from "./model-env.ts";
 import { sdkEnv } from "./step-exec.ts";
 import fs from "node:fs";
 import path from "node:path";
@@ -477,6 +478,7 @@ async function judge(
   output: string,
   model: string,
   effort: Effort | null,
+  env: Record<string, string | undefined>,
 ): Promise<AssertionResult["detail"] & string> {
   const prompt =
     `You are grading one piece of output against one criterion. Answer with exactly ` +
@@ -493,7 +495,7 @@ async function judge(
       allowedTools: [],
       settingSources: [],
       strictMcpConfig: true,
-      env: sdkEnv(undefined),
+      env,
       maxTurns: 1,
     },
   });
@@ -513,6 +515,7 @@ async function checkAssertion(
   agentDir: string,
   model: string,
   effort: Effort | null,
+  judgeEnv: () => Record<string, string | undefined> = () => sdkEnv(undefined),
 ): Promise<AssertionResult> {
   const hay = output.toLowerCase();
   switch (assertion.type) {
@@ -545,7 +548,15 @@ async function checkAssertion(
       return { assertion, passed: code === 0, detail: `exit ${code ?? "error"}${out ? ` — ${out.slice(0, 200)}` : ""}` };
     }
     case "judge": {
-      const verdict = await judge(assertion.value, output, model, effort);
+      // The judge runs on the account's own model key, never quietly on the
+      // platform's: a customer's eval is not the operator's bill.
+      let env: Record<string, string | undefined>;
+      try {
+        env = judgeEnv();
+      } catch (err) {
+        return { assertion, passed: false, detail: `judge not run — ${err instanceof Error ? err.message : String(err)}` };
+      }
+      const verdict = await judge(assertion.value, output, model, effort, env);
       const passed = /^\s*PASS\b/i.test(verdict);
       return { assertion, passed, detail: verdict.slice(0, 300) || "judge returned nothing" };
     }
@@ -628,7 +639,14 @@ export async function runEval(
       const judges = testCase.expect.filter((a) => a.type === "judge");
       for (const a of cheap) assertions.push(await checkAssertion(a, output, agentDir, info.model, info.effort));
       if (assertions.every((r) => r.passed)) {
-        for (const a of judges) assertions.push(await checkAssertion(a, output, agentDir, info.model, info.effort));
+        const judgeEnv = () => {
+          const m = accountModelEnv(tenant, workspace, () => sdkEnv(undefined));
+          if (m.format !== "anthropic") {
+            throw new Error(`this account's provider speaks ${m.format}; a judge needs an Anthropic-format provider`);
+          }
+          return m.env;
+        };
+        for (const a of judges) assertions.push(await checkAssertion(a, output, agentDir, info.model, info.effort, judgeEnv));
       } else {
         for (const a of judges) {
           assertions.push({ assertion: a, passed: false, detail: "not run — an earlier check failed" });

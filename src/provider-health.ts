@@ -18,6 +18,7 @@
 // It reads the same provider block a run reads, resolved the same way, so a
 // pass here means a run would reach the same place with the same key.
 
+import { accountModelBlock } from "./model-credential.ts";
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
@@ -236,6 +237,8 @@ export function providersInUse(tenant: string): ProviderInUse[] {
   };
 
   add(frontmatterOf(path.join(accountDir(tenant), "AGENTS.md")).provider, null, "account");
+  // The account's own key from Settings → Model, which needs no block.
+  add(accountModelBlock((name) => getSecret(tenant, name)?.value ?? null), null, "account (Settings → Model)");
   for (const ws of safeList(() => listWorkspaces(tenant))) {
     const dir = workspaceDir(tenant, ws.name);
     add(frontmatterOf(path.join(dir, "AGENTS.md")).provider, ws.name, ws.name);

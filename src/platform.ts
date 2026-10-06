@@ -126,6 +126,11 @@ export interface PlatformHooks {
    *  on its record is resumed rather than destroyed and run again. Default:
    *  nothing is. */
   sandboxResumable(kind: string): boolean;
+  /** May this account's steps run on the platform's own model credential
+   *  (the host's key or Claude login)? A hosted platform lets only its
+   *  operator's accounts do so; every customer brings their own API key.
+   *  Default: yes — a laptop or a self-hosted install is its own operator. */
+  platformKeyAllowed(tenant: string): boolean;
   /**
    * Where the platform's built-in tools sit on disk, materialised at boot —
    * a shelf every account reads, beneath its own library. A name found in
@@ -204,6 +209,7 @@ const local: PlatformHooks = {
   egress: { lease: async () => null },
   workspaceChanged() {},
   sandboxResumable: () => false,
+  platformKeyAllowed: () => true,
   galleryDir: () => null,
   noteOAuthRefresh: async () => undefined,
   fetchUntrusted: (url, init) => fetch(url, init),

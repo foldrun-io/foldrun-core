@@ -3712,6 +3712,12 @@ export function runCost(run: RunRecord): number {
  * fan-out template is a row in the trace rather than work — billing any of
  * them would charge for steps the customer can see never executed, which is
  * the fastest way to lose an argument about an invoice.
+ *
+ * Tokens count only for steps that ran on the platform's own model
+ * credential. A step on the account's own key (`credential` "provider: …" —
+ * a provider: block, or Settings → Model) was paid for at the provider, and
+ * billing it again here charged a BYOK customer twice. And a carried step's
+ * tokens were billed where it ran, like its compute.
  */
 export function runMeter(run: RunRecord): {
   tokenCostUsd: number;
@@ -3726,17 +3732,19 @@ export function runMeter(run: RunRecord): {
   let computeSecs = 0;
   let smallSecs = 0;
   let netBytes = 0;
+  let tokenCostUsd = 0;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
     // A carried step ran — and was billed — in the run it was carried from.
     if (s.carriedFrom) continue;
     steps += 1;
+    if (!(s.credential ?? "").startsWith("provider:")) tokenCostUsd += s.costUsd ?? 0;
     const secs = s.computeSecs ?? 0;
     computeSecs += secs;
     if (s.size === "small") smallSecs += secs;
     netBytes += (s.actual?.rxBytes ?? 0) + (s.actual?.txBytes ?? 0);
   }
-  return { tokenCostUsd: runCost(run), steps, computeSecs, smallSecs, netBytes };
+  return { tokenCostUsd, steps, computeSecs, smallSecs, netBytes };
 }
 
 /**

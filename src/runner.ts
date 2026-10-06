@@ -15,7 +15,7 @@ import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { hostSafeEnv } from "./host-env.ts";
-import { resolveModelCredential, credentialLine } from "./model-credential.ts";
+import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken } from "./model-credential.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
@@ -1124,8 +1124,11 @@ function agentContext(
   //
   // The URL sits in git; the token is a ${SECRET} resolved server-side. An
   // agent's own block wins over the workspace's, like everything else here.
-  const providerBlock =
+  // Then the account's own model key (Settings → Model), when it set one:
+  // an account that brings its key need not write a block anywhere.
+  const fileBlock =
     (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
+  const providerBlock = fileBlock ?? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
   let providerEnv: Record<string, string> = {};
   let providerLabel: string | null = null;
   // Secret values pulled into the provider block, name → value. Kept apart
@@ -2010,6 +2013,29 @@ async function runStep(
     if (credential) {
       const line = credentialLine(credential);
       push(line.type, line.text);
+    }
+    // A hosted platform runs only its operator's accounts on its own model
+    // credential; every other account brings its own API key. Refused here,
+    // before a sandbox is rented, with what to do about it — not run on the
+    // operator's key, and not failed later by a provider.
+    if (!platform.platformKeyAllowed(tenant)) {
+      const own = Object.values(providerSecrets).concat(Object.values(providerEnv));
+      if (!providerLabel) {
+        push(
+          "error",
+          `no model key: this account runs on its own API key, and none is set. Add one in Settings → Model ` +
+            `(or \`foldrun model set <provider> --key …\`), or write a provider: block in AGENTS.md`,
+        );
+        step.status = "failed";
+        save();
+        return;
+      }
+      if (own.some((v) => isClaudeLoginToken(v))) {
+        push("error", "model key: a Claude login token (sk-ant-oat…) cannot be used here — use an API key from your provider");
+        step.status = "failed";
+        save();
+        return;
+      }
     }
     for (const w of providerWarnings) push("error", w);
     // A level that wrote a language nobody can read was skipped, not obeyed.

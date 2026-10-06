@@ -69,3 +69,44 @@ export function credentialLine(c: ModelCredential): { type: "info" | "error"; te
       "Set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`",
   };
 }
+
+
+// ---------------------------------------------------------------- the account's own key
+//
+// An account brings its own model key without writing a provider: block:
+// three secrets in the ACCOUNT vault (set from Settings → Model, the API's
+// /api/account/model, or `foldrun model set`). A provider: block at any
+// level still wins; this is what a step falls to when none names one, before
+// the platform's own credential.
+
+/** The account vault names the account's own model key lives under. */
+export const ACCOUNT_MODEL_SECRETS = {
+  provider: "FOLDRUN_MODEL_PROVIDER",
+  key: "FOLDRUN_MODEL_API_KEY",
+  baseUrl: "FOLDRUN_MODEL_BASE_URL",
+  format: "FOLDRUN_MODEL_FORMAT",
+} as const;
+
+/** A provider: block built from the account's own model secrets, or
+ *  undefined when it has set no key. `read` is the account-scope secret
+ *  reader (getSecret without a workspace). */
+export function accountModelBlock(read: (name: string) => string | null): Record<string, unknown> | undefined {
+  const key = read(ACCOUNT_MODEL_SECRETS.key);
+  if (!key) return undefined;
+  const block: Record<string, unknown> = { token: `\${${ACCOUNT_MODEL_SECRETS.key}}` };
+  const name = read(ACCOUNT_MODEL_SECRETS.provider);
+  const baseUrl = read(ACCOUNT_MODEL_SECRETS.baseUrl);
+  const format = read(ACCOUNT_MODEL_SECRETS.format);
+  if (name) block.name = name;
+  if (baseUrl) block.base_url = baseUrl;
+  if (format) block.format = format;
+  return block;
+}
+
+/** A Claude login token (`claude setup-token`, sk-ant-oat…), not an API key.
+ *  Anthropic's terms do not let a third-party product run customers on
+ *  claude.ai logins, so on a hosted platform only the operator's own
+ *  accounts may; a customer's key must be an API key. */
+export function isClaudeLoginToken(value: string | null | undefined): boolean {
+  return typeof value === "string" && /^sk-ant-oat\d*-/.test(value.trim());
+}
