@@ -1368,6 +1368,18 @@ function agentContext(
       `# Tools from scripts\n\nCall these directly — they run workspace scripts for you:\n\n${scriptTools.promptLines.join("\n")}`,
     );
   }
+  // The web tool's own description lists every action, so an agent whose
+  // search or fetch a model provider answers called web action=search,
+  // was refused, and only then used WebSearch — eight refusals in one
+  // reddit-desk validator step on 6 Oct 2026. Say it before the first call.
+  if (builtins.length) {
+    const named = builtins.map((b) => b.split("="));
+    parts.push(
+      `# Web search and fetch on this run\n\n` +
+        named.map(([action, tool]) => `- To ${action}, call **${tool}** directly. \`web\` with action=${action} is switched off on this run.`).join("\n") +
+        `\n\nThe web tool's other actions work as usual.`,
+    );
+  }
   if (declared.length) {
     parts.push(
       `# Secrets\n\nAvailable to your scripts as environment variables: ${declared.join(", ")}. ` +

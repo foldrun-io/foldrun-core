@@ -81,6 +81,14 @@ test("a model provider's own search sits beside our tool, and the tool is told t
   const { args } = await runAgent("tools: [web]\nweb:\n  search: anthropic\n");
   assert.ok(args!.input.allowed.includes("WebSearch"), "Anthropic's server-side search is granted beside ours");
   assert.equal(args!.env.FOLDRUN_WEB_BUILTIN, "search=WebSearch");
+  // Told up front, so the first search is not a refused web action=search.
+  assert.match(args!.input.systemPrompt, /To search, call \*\*WebSearch\*\* directly\. `web` with action=search is switched off/);
+  assert.doesNotMatch(args!.input.systemPrompt, /To fetch, call/, "fetch is still ours here");
+});
+
+test("no hand-over, no note: an agent on foldrun's own search is not told about WebSearch", async () => {
+  const { args } = await runAgent("tools: [web]\n");
+  assert.doesNotMatch(args!.input.systemPrompt, /Web search and fetch on this run/);
 });
 
 test("the per-action keys and tools outside web are not read: an error each", async () => {
