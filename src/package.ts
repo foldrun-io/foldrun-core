@@ -185,7 +185,16 @@ function agentClosure(names: string[], all: string[], read: (p: string) => strin
     }
     own.forEach((p) => out.add(p));
     const front = frontOf(read(`agents/${agent}/agent.md`));
-    for (const t of front.tools) for (const p of tools.get(t) ?? []) out.add(p);
+    for (const t of front.tools) {
+      for (const p of tools.get(t) ?? []) {
+        out.add(p);
+        // A single-file tool's program lives elsewhere in the workspace
+        // (`run: workspace/scripts/x.mjs`); without it the tool has nothing
+        // to run. onpage-desk's apply-onpage was exported without its script.
+        const prog = /^tools\/[^/]+\.md$/.test(p) ? toolProgram(read(p)) : null;
+        if (prog && all.includes(prog)) out.add(prog);
+      }
+    }
     for (const s of front.skills) for (const p of skills.get(s) ?? []) out.add(p);
     for (const s of front.scripts) if (all.includes(`scripts/${s}`)) out.add(`scripts/${s}`);
     if (colleagues) queue.push(...front.agents);
@@ -409,6 +418,8 @@ function needsOf(tenant: string, workspace: string, exists: boolean, files: Depl
     if (/^tools\//.test(f.path) && f.path.endsWith(".md")) {
       const data = safeFront(f.content);
       list(data.secrets).forEach((s) => need.secrets.add(s));
+      const prog = /^tools\/[^/]+\.md$/.test(f.path) ? toolProgram(f.content) : null;
+      if (prog && !paths.includes(prog)) need.scripts.add(prog);
     }
     if (/^(agents\/[^/]+\/agent\.md|tools\/.+\.md)$/.test(f.path)) {
       for (const m of f.content.matchAll(/\$\{([A-Z][A-Z0-9_]*)\}/g)) need.secrets.add(m[1]!);
@@ -483,6 +494,17 @@ function frontOf(content: string): AgentFront {
     agents: [...list(d.agents), ...list(d.subagents)],
     inline: new Set([...apis, ...mcp, ...scripts, ...scripts.map((s) => s.replace(/\.[^.]+$/, ""))].filter(Boolean)),
   };
+}
+
+/** The workspace file a single-file tool's `run:` names, as a workspace
+ *  path (`scripts/x.mjs`), or null when it names none or a place outside
+ *  the workspace (the account library, the gallery). */
+function toolProgram(content: string): string | null {
+  const run = safeFront(content).run;
+  if (typeof run !== "string") return null;
+  const rel = run.trim().replace(/^\.\//, "").replace(/^workspace\//, "").replace(/^(\.\.\/)+/, "");
+  if (/^(account|library|shared)\//.test(run.trim()) || rel.includes("..") || rel.startsWith("/")) return null;
+  return rel || null;
 }
 
 /** Workspace tool name → its files: `tools/<x>.md`, or a folder tool's whole folder. */

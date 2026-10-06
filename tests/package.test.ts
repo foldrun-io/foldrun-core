@@ -45,13 +45,15 @@ function desk() {
     { path: "agents/writer/agent.md", content: agent("writer", "tools: [read, cms]\nskills: [house-style]\nscripts: [count.py]\nsubagents: [researcher]\nsecrets: [CMS_TOKEN]\n") },
     { path: "agents/writer/memory/lesson.md", content: "---\ntype: Fact\n---\n\nLearned here.\n" },
     { path: "agents/researcher/agent.md", content: agent("researcher") },
-    { path: "agents/editor/agent.md", content: agent("editor") },
+    { path: "agents/editor/agent.md", content: agent("editor", "tools: [apply]\n") },
     { path: "agents/rescuer/agent.md", content: agent("rescuer") },
     { path: "agents/herald/agent.md", content: agent("herald", "tools: [poster]\n") },
     { path: "agents/loner/agent.md", content: agent("loner") },
     { path: "tools/cms.md", content: "---\nname: cms\nbase: https://cms.example\nheaders:\n  Authorization: Bearer ${CMS_KEY}\n---\n\nThe CMS.\n" },
     { path: "tools/poster/tool.md", content: "---\nname: poster\nrun: run.mjs\nsecrets: [POSTER_TOKEN]\n---\n\nPosts.\n" },
     { path: "tools/poster/run.mjs", content: "console.log('posted')\n" },
+    { path: "tools/apply.md", content: "---\nname: apply\nrun: workspace/scripts/apply.mjs\n---\n\nApplies.\n" },
+    { path: "scripts/apply.mjs", content: "console.log('applied')\n" },
     { path: "tools/unused.md", content: "---\nname: unused\nbase: https://x.example\n---\n" },
     { path: "skills/house-style/SKILL.md", content: "---\nname: house-style\ndescription: How we write.\n---\n\nShort.\n" },
     { path: "scripts/count.py", content: "print(1)\n" },
@@ -111,8 +113,10 @@ test("a flow exports itself, its subflows, every agent they need and the tools t
       "agents/writer/agent.md",
       "flows/announce.md",
       "flows/publish.md",
+      "scripts/apply.mjs",
       "scripts/count.py",
       "skills/house-style/SKILL.md",
+      "tools/apply.md",
       "tools/cms.md",
       "tools/poster/run.mjs",
       "tools/poster/tool.md",
@@ -141,7 +145,7 @@ test("importing a flow into another workspace: preview, needs, one revision", ()
 
     const plan = planImport("acme", "fresh", pkg);
     assert.equal(plan.creates, false);
-    assert.equal(plan.added.length, 12);
+    assert.equal(plan.added.length, 14);
     assert.deepEqual(plan.overwritten, []);
     // Secrets the files name and the account does not have — from the agent,
     // a tool's secrets: and a ${PLACEHOLDER}.
@@ -150,14 +154,14 @@ test("importing a flow into another workspace: preview, needs, one revision", ()
     assert.deepEqual(plan.needs.tools, []);
 
     const r = applyImport("acme", "fresh", pkg, { by: "test" });
-    assert.equal(r.written.length, 12);
+    assert.equal(r.written.length, 14);
     assert.ok(r.revision, "the import is one revision");
     assert.equal(readWorkspaceFile("acme", "fresh", "flows/publish.md"), readWorkspaceFile("acme", "blog", "flows/publish.md"));
     assert.ok(fs.statSync(path.join(workspaceDir("acme", "fresh"), "tools/poster/run.mjs")).mode & 0o100, "tool code stays executable");
 
     // Again: nothing to do.
     const again = planImport("acme", "fresh", pkg);
-    assert.equal(again.unchanged.length, 12);
+    assert.equal(again.unchanged.length, 14);
     assert.equal(applyImport("acme", "fresh", pkg).written.length, 0);
   });
 });
@@ -193,6 +197,18 @@ test("a workspace package makes a new workspace; an agent package names what it 
     assert.deepEqual(planImport("other", "empty", one).needs.agents, ["researcher"], "a subagent it delegates to is named, not carried");
     // A flow or agent goes into a workspace that exists.
     assert.throws(() => planImport("other", "nowhere", one), (e: unknown) => e instanceof PackageError && e.status === 404);
+  });
+});
+
+test("a single-file tool carries the script its run: names; without it, import names the script", () => {
+  withData(() => {
+    desk();
+    const pkg = packageOf("acme", "blog", "agent", "editor");
+    assert.deepEqual(pkg.files.map((f) => f.path), ["agents/editor/agent.md", "scripts/apply.mjs", "tools/apply.md"]);
+    saveWorkspace("acme", "bare", blankTemplateFiles("bare"));
+    const without = { ...pkg, files: pkg.files.filter((f) => f.path !== "scripts/apply.mjs") };
+    assert.deepEqual(planImport("acme", "bare", without).needs.scripts, ["scripts/apply.mjs"]);
+    assert.deepEqual(planImport("acme", "bare", pkg).needs.scripts, []);
   });
 });
 
