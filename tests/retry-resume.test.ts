@@ -200,3 +200,20 @@ test("a step whose outward tool ran is not run again when its connection drops",
     assert.ok(done!.steps[0].events.some((e) => /dropped after this step's tools ran — not retried/.test(e.text)), done!.steps[0].events.map((e) => e.text).join("\n"));
   });
 });
+
+test("an on-fail rescuer inherits the step's verify, so a rescue cannot skip the check that failed", async () => {
+  const fake: Fake = async (args) => {
+    if (args.input.agentName === "worker" || calls++ === 0) return { status: "failed", result: null, costUsd: 0 };
+    return { status: "completed", result: "fixed", costUsd: 0 };
+  };
+  let calls = 0;
+  await withFake(fake, false, async (ws) => {
+    fs.mkdirSync(path.join(ws, "agents/fixer"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "agents/fixer/agent.md"), "---\nname: fixer\ndescription: fixes\n---\n\nFix.\n");
+    const run = startFlowRun("acme", "desk", [step({ onFail: "fixer", verify: "test -s workspace/storage/out.txt" })], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    const rescue = done!.steps.find((s) => s.agent === "fixer");
+    assert.ok(rescue, done!.steps.map((s) => s.agent).join(","));
+    assert.equal(rescue!.verify, "test -s workspace/storage/out.txt");
+  });
+});

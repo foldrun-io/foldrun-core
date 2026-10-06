@@ -4477,8 +4477,13 @@ function driveRunInner(
             effort: step.effort,
             timeout: step.timeout,
             // The rescuer inherits the contract, not just the job: a step
-            // that promised data still owes data when someone else does it.
+            // that promised data still owes data when someone else does it,
+            // and a step that had to pass a check still has to pass it — a
+            // rescue whose result stood unchecked was a way round the very
+            // check that failed (found 7 Oct 2026, adding rescuers to
+            // medium-desk).
             output: step.output,
+            ...(step.verify ? { verify: step.verify } : {}),
             attempts: 0,
             status: "pending",
             events: [],
