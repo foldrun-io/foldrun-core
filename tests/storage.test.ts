@@ -25,6 +25,7 @@ import {
   readFileBytes,
   materializeFiles,
   harvestFiles,
+  storageBaseline,
   blobPath,
   mimeFor,
 } from "../src/storage.ts";
@@ -176,6 +177,42 @@ test("a run that changes a mirrored file is harvested as a new version", async (
 
   assert.deepEqual((await harvestFiles(TENANT, WS, "run:run-1")).saved, ["notes.txt"]);
   assert.equal((await readFileBytes(TENANT, WS, "notes.txt"))?.toString(), "after and longer");
+});
+
+// A run picked up again after its worker died: its finished steps' storage/
+// writes are only on disk. Materializing first put the store's older copy
+// over them (6 Oct 2026, reddit-desk's draft reverted to a posted one).
+test("a resumed run keeps what it wrote, and still takes an upload made while it ran", async () => {
+  await putFile(TENANT, WS, "post.json", Buffer.from('{"title":"old, already posted"}'), "run:run-0");
+  await putFile(TENANT, WS, "brief.md", Buffer.from("brief v1"), "user:me");
+  await materializeFiles(TENANT, WS);
+  const base = storageBaseline(TENANT, WS);
+
+  const dir = path.join(workspaceDir(TENANT, WS), "storage");
+  // A step writes today's draft (copy-out: rm then write).
+  fs.rmSync(path.join(dir, "post.json"));
+  fs.writeFileSync(path.join(dir, "post.json"), '{"title":"new draft"}');
+  // Meanwhile a person uploads a new brief; only the index moves.
+  await putFile(TENANT, WS, "brief.md", Buffer.from("brief v2, uploaded mid-run"), "user:me");
+
+  // The worker dies; the next one re-drives the run.
+  const { saved } = await harvestFiles(TENANT, WS, "run:run-1", { changedFrom: base });
+  assert.deepEqual(saved, ["post.json"], "only the run's own write is kept, not its stale copy of brief.md");
+  await materializeFiles(TENANT, WS);
+
+  assert.equal(fs.readFileSync(path.join(dir, "post.json"), "utf8"), '{"title":"new draft"}');
+  assert.equal(fs.readFileSync(path.join(dir, "brief.md"), "utf8"), "brief v2, uploaded mid-run");
+  assert.equal((await readFileBytes(TENANT, WS, "brief.md"))?.toString(), "brief v2, uploaded mid-run");
+});
+
+test("without a baseline, materializing first still loses the run's write (why the runner harvests first)", async () => {
+  await putFile(TENANT, WS, "post.json", Buffer.from("old"), "run:run-0");
+  await materializeFiles(TENANT, WS);
+  const f = path.join(workspaceDir(TENANT, WS), "storage", "post.json");
+  fs.rmSync(f);
+  fs.writeFileSync(f, "new draft");
+  await materializeFiles(TENANT, WS);
+  assert.equal(fs.readFileSync(f, "utf8"), "old");
 });
 
 // ---------- keeping bytes out of the source tree ----------

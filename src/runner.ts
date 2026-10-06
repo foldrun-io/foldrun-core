@@ -89,7 +89,7 @@ import { providerPreset } from "./providers.ts";
 import { buildScriptTools, parseScripts, type ExecutionContext, type ScriptSpec } from "./script-tools.ts";
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, type PreparedRuntime, type RuntimeSpec } from "./runtime.ts";
-import { materializeFiles, harvestFiles } from "./storage.ts";
+import { materializeFiles, harvestFiles, storageBaseline } from "./storage.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -3652,6 +3652,32 @@ function driveRunInner(
       //
       // Runs on resume too — a parked run's container is long gone, and the
       // one it comes back in needs the same files the first one had.
+      //
+      // A run re-driven after its worker died is the exception to "the store
+      // is newer than the disk": a park harvests before it parks, a crash does
+      // not, so what this run's finished steps wrote to storage/ is only on
+      // disk, and materializing first wrote the store's older copy over it.
+      // On 6 Oct 2026 a worker restart put reddit-desk's 2 Oct post back over
+      // that morning's draft, and a rerun from the validator would have
+      // posted it a second time. So a run that has been here before (its
+      // baseline is on disk) stores what it changed first; files it did not
+      // touch still come fresh from the store.
+      const baselineFile = path.join(runRoot, "runs", run.id, "storage-baseline.json");
+      if (fs.existsSync(baselineFile)) {
+        try {
+          const changedFrom = JSON.parse(fs.readFileSync(baselineFile, "utf8")) as Record<string, string>;
+          const { saved } = await harvestFiles(tenant, workspace, `run:${run.id}`, { changedFrom });
+          if (saved.length) {
+            run.steps[0]?.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `files: kept ${saved.join(", ")} written before the run was picked up again`,
+            });
+          }
+        } catch {
+          // the materialize below still runs; at worst this is the old behaviour
+        }
+      }
       try {
         const brought = await materializeFiles(tenant, workspace);
         if (brought.length) {
@@ -3661,6 +3687,8 @@ function driveRunInner(
             text: `files: ${brought.length} brought into the workspace`,
           });
         }
+        fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
+        fs.writeFileSync(baselineFile, JSON.stringify(storageBaseline(tenant, workspace)));
       } catch (err) {
         // A file store that is down must not take the run with it: most flows
         // never touch storage/, and the ones that do will fail their own verify.

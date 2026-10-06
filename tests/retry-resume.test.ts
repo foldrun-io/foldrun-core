@@ -7,6 +7,7 @@ import { createFlowRun, driveRun, startFlowRun, waitForRun } from "../src/runner
 import { readRun, writeRun, type FlowStep } from "../src/store.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
+import { putFile, storageBaseline, readFileBytes } from "../src/storage.ts";
 
 // The retry policy and the resume, exercised through a fake executor
 // registered under FOLDRUN_RUN_ISOLATION=fake. The fake sees exactly what
@@ -110,5 +111,40 @@ test("the same orphan is run again from the start when the executor cannot resum
     assert.equal(done.status, "completed");
     assert.equal(calls[0].resume ?? null, null, "no resume for an executor that cannot");
     assert.ok(done.steps[0].events.some((e) => /interrupted mid-step/.test(e.text)));
+  });
+});
+
+// 6 Oct 2026: a worker restart re-drove reddit-desk's run, and the storage/
+// mirror was refilled from the store before anything else — putting the
+// 2 Oct post back over the draft the finished writer step had just saved.
+test("a run re-driven after its worker died keeps what its finished steps wrote to storage/", async () => {
+  const seen: string[] = [];
+  const fake: Fake = async (args) => {
+    seen.push(fs.readFileSync(path.join(args.workspaceRoot, "storage", "post.json"), "utf8"));
+    return { status: "completed", result: "validated", costUsd: 0 };
+  };
+  await withFake(fake, true, async (ws) => {
+    await putFile("acme", "desk", "post.json", Buffer.from("2 Oct post, already live"), "run:old");
+    fs.mkdirSync(path.join(ws, "storage"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "storage", "post.json"), "2 Oct post, already live");
+    // What the dead driver left: step 1 (the writer) done, its draft on disk
+    // only, the baseline it took when the run began, step 2 mid-flight.
+    const run = createFlowRun("acme", "desk", [step(), step({ group: 2 })], "f", "running");
+    fs.mkdirSync(path.join(ws, "runs", run.id), { recursive: true });
+    fs.writeFileSync(path.join(ws, "runs", run.id, "storage-baseline.json"), JSON.stringify(storageBaseline("acme", "desk")));
+    fs.rmSync(path.join(ws, "storage", "post.json"));
+    fs.writeFileSync(path.join(ws, "storage", "post.json"), "6 Oct draft");
+    run.steps[0].status = "completed";
+    run.steps[1].status = "running";
+    run.steps[1].sandbox = { kind: "fake", ref: "pod-v", consumed: 1, since: new Date().toISOString() };
+    writeRun("acme", "desk", run);
+
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const done = readRun("acme", "desk", run.id)!;
+    assert.equal(done.status, "completed");
+    assert.deepEqual(seen, ["6 Oct draft"], "the resumed step saw the old post");
+    assert.equal(fs.readFileSync(path.join(ws, "storage", "post.json"), "utf8"), "6 Oct draft");
+    assert.equal((await readFileBytes("acme", "desk", "post.json"))?.toString(), "6 Oct draft");
+    assert.ok(done.steps[0].events.some((e) => /files: kept post\.json/.test(e.text)));
   });
 });

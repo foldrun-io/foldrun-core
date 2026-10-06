@@ -839,6 +839,14 @@ export async function materializeFiles(tenant: string, workspace: string): Promi
   return brought;
 }
 
+/** path → sha of every stored file: what `storage/` holds once
+ *  materializeFiles has run. A run keeps it to tell its own writes from the
+ *  files it was handed. */
+export function storageBaseline(tenant: string, workspace: string): Record<string, string> {
+  if (!fileStoreEnabled()) return {};
+  return Object.fromEntries(readIndex(tenant, workspace).files.map((f) => [f.path, f.sha]));
+}
+
 /**
  * Take what the run left in `storage/` back into the store, stamped with the
  * run that wrote it.
@@ -851,6 +859,7 @@ export async function harvestFiles(
   tenant: string,
   workspace: string,
   by: string,
+  opts: { changedFrom?: Record<string, string> } = {},
 ): Promise<{ saved: string[]; errors: string[] }> {
   if (!fileStoreEnabled()) return { saved: [], errors: [] };
   adoptLegacyFilesDir(workspaceDir(tenant, workspace));
@@ -885,6 +894,10 @@ export async function harvestFiles(
         // Same size is not proof, so confirm by hash before skipping a write.
         if (sha256(fs.readFileSync(abs)) === previous.sha) continue;
       }
+      // Only what the run itself changed: a file still holding the bytes it
+      // was handed is not this run's work, and the index may have moved on
+      // since (an upload while the run was going) — that must win.
+      if (opts.changedFrom && opts.changedFrom[norm] === sha256(fs.readFileSync(abs))) continue;
       await putFileQuietly(tenant, workspace, norm, fs.readFileSync(abs), by);
       saved.push(norm);
     } catch (err) {
