@@ -586,3 +586,32 @@ test("buildFailureSummary keeps the engine lines from anywhere in the log, not j
   assert.ok(s.length < 1500 + 2000, "a summary, not the log");
   assert.match(buildFailureSummary("nothing useful"), /no engine or ERROR line/);
 });
+
+// The engine's own home files in an agent's folder (settings, backups,
+// plugin caches, every session's transcript) never go into a sandbox and
+// never come back — 5,274 of them had piled up on the box by 6 Oct 2026.
+test("the agent engine's home files are neither copied in nor applied back", async () => {
+  const { allowedBack } = await import("../src/run-container.ts");
+  const { isPlatformPath } = await import("../src/store.ts");
+  for (const p of [
+    "agents/writer/.claude.json",
+    "agents/writer/.claude/projects/-workspace-agents-writer/0b1318ab.jsonl",
+    "agents/writer/.claude/backups/.claude.json.backup.1791155292509",
+    "agents/writer/.claude/plugins/plugin-directory-cache-v2.json",
+    "agents/writer/.claude/.last-cleanup",
+    "agents/post-writer/.claude.conflict-muvssaf1.json",
+    "agents/writer/.claude",
+  ]) {
+    assert.ok(isPlatformPath(p), `${p} is the engine's, not the workspace's`);
+    assert.equal(allowedBack(p), false, `${p} must not come back`);
+  }
+  for (const p of [
+    ".claude/agents/researcher.md", // an author's Claude Code subagent, imported as an agent
+    "agents/writer/agent.md",
+    "agents/writer/outputs/claude-notes.md",
+    "agents/writer/my.claude.txt",
+  ]) {
+    assert.equal(isPlatformPath(p), false, `${p} is the workspace's own`);
+  }
+  assert.equal(allowedBack("agents/writer/outputs/claude-notes.md"), true);
+});

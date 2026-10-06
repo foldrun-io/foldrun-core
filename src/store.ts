@@ -317,6 +317,19 @@ export function assertCanonicalCase(rel: string) {
 // fire (trigger-log.ts). Before it was listed here every deploy erased it.
 export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl", ".repo.json", "trigger-log.jsonl"];
 
+// The agent engine's own home files. Each step's sandbox runs the Claude
+// Agent SDK — the engine, whatever model answers — with its home in the
+// agent's folder, and the engine writes its settings (.claude.json, its
+// backups), plugin caches and the full transcript of every session
+// (.claude/projects/*.jsonl) there. Nothing in foldrun reads them. Copied
+// back after every step, they had piled up to 5,274 files and 19 MB in one
+// agent's folder on the box by 6 Oct 2026, carried every past conversation
+// into every sandbox, and their clashing rewrites were the "write-back
+// conflict on .claude.json" lines (and the big merges) of that day. A
+// workspace's own .claude/agents/*.md — Claude Code subagents an author
+// writes, imported as agents — sits at the workspace root and is untouched.
+const ENGINE_HOME_RE = /^agents\/[^/]+\/\.claude([./]|$)/;
+
 /** True for anything the platform, not the author or the agent, writes. */
 export function isPlatformPath(rel: string): boolean {
   const norm = rel.replaceAll("\\", "/");
@@ -325,6 +338,7 @@ export function isPlatformPath(rel: string): boolean {
   // are the vault, as far as anything outside the platform is concerned.
   if (/(^|\/)secrets\.json\./.test(norm)) return true;
   if (norm === "trigger-log.jsonl.tmp") return true;
+  if (ENGINE_HOME_RE.test(norm)) return true;
   return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
 }
 
