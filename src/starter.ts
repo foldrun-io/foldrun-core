@@ -353,6 +353,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/assets\` | POST | upload an asset |
 | \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
 | \`/notify/deliveries\` · \`/notify/deliveries/<id>/redeliver\` | GET · POST | every notify: webhook sent and each attempt; send one again |
+| \`/export\` · \`/import\` | GET · POST | the workspace, a flow (\`?kind=flow&name=\`) or an agent as a .zip; take one in (\`?dryRun=1\` first, \`?overwrite=1\` to replace) |
 | \`/restore\` | POST | the workspace's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
 | \`/vocabulary\` | GET | what this workspace's documents may say |
 

@@ -34,6 +34,8 @@ export * from "./src/linkable.ts";
 export * from "./src/refs.ts";
 export * from "./src/tool-names.ts";
 export * from "./src/history.ts";
+export * from "./src/zip.ts";
+export * from "./src/package.ts";
 export * from "./src/gitrepo.ts";
 export * from "./src/storage.ts";
 export * from "./src/secrets.ts";
