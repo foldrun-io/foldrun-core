@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createFlowRun, driveRun, startFlowRun, waitForRun } from "../src/runner.ts";
+import { createFlowRun, driveRun, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe } from "../src/runner.ts";
 import { readRun, writeRun, type FlowStep } from "../src/store.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
@@ -146,5 +146,57 @@ test("a run re-driven after its worker died keeps what its finished steps wrote 
     assert.equal(fs.readFileSync(path.join(ws, "storage", "post.json"), "utf8"), "6 Oct draft");
     assert.equal((await readFileBytes("acme", "desk", "post.json"))?.toString(), "6 Oct draft");
     assert.ok(done.steps[0].events.some((e) => /files: kept post\.json/.test(e.text)));
+  });
+});
+
+// 6 Oct 2026: the worker (and the egress proxy inside it) restarted every
+// 4.5 minutes, and every running step failed on a cut model connection.
+test("a cut model connection is the platform's: the step runs again without a retry: of its own", async () => {
+  let calls = 0;
+  const fake: Fake = async (args) => {
+    calls++;
+    if (calls === 1) {
+      args.emit("error", "Claude Code returned an error result: API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)");
+      return { status: "failed", result: null, costUsd: 0 };
+    }
+    return { status: "completed", result: "validated", costUsd: 0 };
+  };
+  await withFake(fake, false, async () => {
+    const run = startFlowRun("acme", "desk", [step()], "f"); // no retry: declared
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.status, "completed");
+    assert.equal(calls, 2);
+    assert.ok(done!.steps[0].events.some((e) => /the model connection dropped .* running the step again/.test(e.text)));
+  });
+});
+
+test("the connection rule: only the run's own final error, and never after outward tools ran", () => {
+  assert.ok(isModelConnectionLost("Claude Code returned an error result: API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)"));
+  assert.ok(isModelConnectionLost("Claude Code returned an error result: API Error: Connection dropped (ECONNRESET)"));
+  assert.ok(!isModelConnectionLost("WebFetch: API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)"), "a tool's own fetch is the step's business");
+  assert.ok(!isModelConnectionLost("Claude Code returned an error result: API Error: 529 overloaded"), "a busy provider has its own retry");
+  assert.ok(dropRetrySafe(false, [{ type: "tool" }]), "tools that only touch the workspace: safe to run again");
+  assert.ok(dropRetrySafe(true, [{ type: "text" }, { type: "error" }]), "outward tools granted but none ran: safe");
+  assert.ok(!dropRetrySafe(true, [{ type: "tool" }, { type: "error" }]), "an outward tool ran: the post may be up — not again");
+});
+
+test("a step whose outward tool ran is not run again when its connection drops", async () => {
+  let calls = 0;
+  const fake: Fake = async (args) => {
+    calls++;
+    args.emit("tool", "mcp__foldrun_scripts__send");
+    args.emit("error", "Claude Code returned an error result: API Error: Connection dropped (ECONNRESET)");
+    return { status: "failed", result: null, costUsd: 0 };
+  };
+  await withFake(fake, false, async (ws) => {
+    fs.mkdirSync(path.join(ws, "tools"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "tools", "send.md"), "---\ntransport: script\nname: send\noutward: true\ndescription: Sends one email.\nrun: send.mjs\ninterpreter: node\n---\n");
+    fs.writeFileSync(path.join(ws, "tools", "send.mjs"), "console.log('sent')\n");
+    fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), "---\nname: worker\ndescription: works\ntools: [send]\n---\n\nWork.\n");
+    const run = startFlowRun("acme", "desk", [step()], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.status, "failed");
+    assert.equal(calls, 1, "sent once, not twice");
+    assert.ok(done!.steps[0].events.some((e) => /dropped after this step's tools ran — not retried/.test(e.text)), done!.steps[0].events.map((e) => e.text).join("\n"));
   });
 });

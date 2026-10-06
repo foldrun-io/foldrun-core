@@ -2237,6 +2237,9 @@ async function runStep(
     // watched on both paths, because a refusal reads the same from a pod
     // and from this process.
     let lastRefusal = "";
+    // The step's model connection was cut (isModelConnectionLost): the
+    // platform's side going away under the step, not the step failing.
+    let lastDrop = "";
     // And WHY it refused, in words, when anything on the way saw the
     // headers that say so: the translator here, the egress proxy over
     // there. Kept apart from `lastRefusal` — that one decides whether to
@@ -2244,6 +2247,7 @@ async function runStep(
     let refusalWhy = "";
     const pushWatching: typeof push = (type, text, extra) => {
       if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
+      if (type === "error" && isModelConnectionLost(text)) lastDrop = text;
       const why = refusalFromLine(text);
       if (why) refusalWhy = why;
       push(type, text, extra);
@@ -2538,6 +2542,7 @@ async function runStep(
         lastArgs = a;
         return runIsolated(a);
       };
+      let attemptFrom = step.events.length;
       let outcome = await runTracked(firstArgs);
       step.sandbox = null; // whatever happens next starts its own
       // A 401 from a token that rotated mid-step is not a broken key: the
@@ -2574,6 +2579,28 @@ async function runStep(
         await lease?.commit();
         outcome = await runTracked(again);
         outcome = withEarlierTiming(outcome, previous);
+      }
+      // The model connection was cut under the step — the egress proxy or the
+      // worker went away (6 Oct 2026: a worker restarted every 4.5 minutes and
+      // every desk running failed on "Connection refused"). That is the
+      // platform's fault, so the step runs again, whatever its `retry:` —
+      // unless it can act outside the workspace and its tools already ran:
+      // the post may be up, and a second attempt would post it again.
+      for (let n = 1; n <= DROP_RETRIES && outcome.status === "failed" && lastDrop; n++) {
+        if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
+          push("info", `the model connection dropped after this step's tools ran — not retried: they can act outside the workspace, and another attempt could repeat what they did`);
+          break;
+        }
+        const wait = Math.round(retryBaseMs() * 2 * n);
+        push("info", `the model connection dropped (${lastDrop.slice(0, 80)}) — the platform's side, not the step's; running the step again in ${Math.round(wait / 1000)}s (${n} of ${DROP_RETRIES})`);
+        await sleep(wait);
+        lastDrop = "";
+        lastRefusal = "";
+        attemptFrom = step.events.length;
+        const previous = outcome.timing;
+        const again = isolatedArgs(platformModelEnv());
+        await lease?.commit();
+        outcome = withEarlierTiming(await runTracked(again), previous);
       }
       // The second supply, tried exactly once, and only when the primary
       // refused over money/auth/limits rather than the work failing. The
@@ -3073,6 +3100,22 @@ function isProviderRefusal(text: string): boolean {
   return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded|(weekly|daily|monthly|usage) limit|rate.?limit(ed)?\b.*resets?\b|limit\b.*\bresets?\b/i.test(
     text,
   );
+}
+
+/** A step's own model connection cut: the egress proxy or the worker it
+ *  runs through went away. Only the run's final error, never a tool's — a
+ *  WebFetch that could not connect is the step's business, not ours. */
+export function isModelConnectionLost(text: string): boolean {
+  return /^Claude Code returned an error result: API Error: (Connection (refused|dropped|error)|.*\b(ECONNREFUSED|ECONNRESET|socket hang up)\b)/i.test(text);
+}
+
+/** How many times a step whose model connection was cut runs again. */
+export const DROP_RETRIES = 2;
+
+/** May a step whose connection dropped run again? Yes, unless its tools can
+ *  act outward and one ran in this attempt (actedThenFailedCheck's rule). */
+export function dropRetrySafe(canActOutward: boolean, attemptEvents: { type: string }[]): boolean {
+  return !(canActOutward && attemptEvents.some((e) => e.type === "tool"));
 }
 
 /** How many times a busy provider is given another moment, and the longest
