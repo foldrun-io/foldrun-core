@@ -204,7 +204,8 @@ test("a single-file tool carries the script its run: names; without it, import n
   withData(() => {
     desk();
     const pkg = packageOf("acme", "blog", "agent", "editor");
-    assert.deepEqual(pkg.files.map((f) => f.path), ["agents/editor/agent.md", "scripts/apply.mjs", "tools/apply.md"]);
+    // editor has no skills: line, so it carries every workspace skill too.
+    assert.deepEqual(pkg.files.map((f) => f.path), ["agents/editor/agent.md", "scripts/apply.mjs", "skills/house-style/SKILL.md", "tools/apply.md"]);
     saveWorkspace("acme", "bare", blankTemplateFiles("bare"));
     const without = { ...pkg, files: pkg.files.filter((f) => f.path !== "scripts/apply.mjs") };
     assert.deepEqual(planImport("acme", "bare", without).needs.scripts, ["scripts/apply.mjs"]);
@@ -238,11 +239,24 @@ test("a workspace package with no AGENTS.md still makes a workspace", () => {
   });
 });
 
-test("readPackage refuses memory, state, escapes and non-text; accepts a hand-zipped folder", () => {
+test("readPackage skips what an import never writes, and lists it; refuses escapes and non-text", () => {
   const z = (files: Record<string, string>) => zip(Object.entries(files).map(([p, c]) => ({ path: p, data: Buffer.from(c) })));
-  assert.throws(() => readPackage(z({ "AGENTS.md": "x", "memory/x.md": "y" })), /may not write/);
-  assert.throws(() => readPackage(z({ "agents/a/agent.md": agent("a"), "agents/a/state/s.json": "{}" })), /may not write/);
-  assert.throws(() => readPackage(z({ "secrets.json": "{}" })), /may not write/);
+  const skippy = readPackage(z({
+    "AGENTS.md": "---\nname: x\n---\n",
+    "memory/x.md": "y",
+    "agents/a/agent.md": agent("a"),
+    "agents/a/state/s.json": "{}",
+    "secrets.json": "{}",
+    ".gitignore": "x",
+    "CLAUDE.md": "x",
+    "runs/scripts/x.json": "{}",
+    "storage/scripts/run.sh": "echo",
+    "foo/scripts/x.js": "1",
+    "tools/cms/.env": "KEY=secret",
+  }));
+  assert.deepEqual(skippy.files.map((f) => f.path), ["AGENTS.md", "agents/a/agent.md"]);
+  assert.deepEqual(skippy.skipped, [".gitignore", "CLAUDE.md", "agents/a/state/s.json", "foo/scripts/x.js", "memory/x.md", "runs/scripts/x.json", "secrets.json", "storage/scripts/run.sh", "tools/cms/.env"]);
+  assert.throws(() => readPackage(z({ "memory/x.md": "y" })), /no files to import/);
   assert.throws(() => readPackage(Buffer.from("garbage")), (e: unknown) => e instanceof PackageError && e.status === 400);
   assert.throws(
     () => readPackage(zip([{ path: "agents/a/agent.md", data: Buffer.from([0xff, 0xfe, 0x00]) }])),
@@ -250,7 +264,84 @@ test("readPackage refuses memory, state, escapes and non-text; accepts a hand-zi
   );
   assert.throws(() => readPackage(z({ [MANIFEST_FILE]: JSON.stringify({ format: "foldrun-package", version: 9 }), "AGENTS.md": "x" })), /newer/);
   // A Mac's "Compress" of the folder: one top directory, plus __MACOSX noise.
-  const hand = readPackage(z({ "blog/AGENTS.md": "---\nname: blog\n---\n", "blog/flows/f.md": "1. [[a]] — x\n", "__MACOSX/blog/._AGENTS.md": "junk" }));
+  const hand = readPackage(z({ "blog/AGENTS.md": "---\nname: blog\n---\n", "blog/flows/f.md": "1. [[a]] — x\n", "blog/.gitignore": "x", "__MACOSX/blog/._AGENTS.md": "junk" }));
   assert.equal(hand.manifest.kind, "workspace");
   assert.deepEqual(hand.files.map((f) => f.path), ["AGENTS.md", "flows/f.md"]);
+});
+
+test("audit: an import that cannot be written is refused before anything is written", () => {
+  withData(() => {
+    saveWorkspace("acme", "w", [{ path: "AGENTS.md", content: "---\nname: w\n---\n" }, { path: "knowledge/x.md", content: "---\ntype: Fact\n---\n\nx\n" }]);
+    const pkg = readPackage(zip([
+      { path: "knowledge/a.md", data: Buffer.from("---\ntype: Fact\n---\n\na\n") },
+      { path: "knowledge/x.md/y.md", data: Buffer.from("---\ntype: Fact\n---\n\ny\n") },
+    ]));
+    assert.throws(() => applyImport("acme", "w", pkg), (e: unknown) => e instanceof PackageError && e.status === 409 && /is a file/.test(e.message));
+    assert.equal(fs.existsSync(path.join(workspaceDir("acme", "w"), "knowledge/a.md")), false, "nothing written");
+    // A symlink on the way is refused too.
+    fs.symlinkSync("/tmp", path.join(workspaceDir("acme", "w"), "scripts"));
+    const viaLink = readPackage(zip([{ path: "scripts/x.sh", data: Buffer.from("echo\n") }]));
+    assert.throws(() => applyImport("acme", "w", viaLink), /is a link/);
+  });
+});
+
+test("audit: a flow named differently from its file, single-file skills, no skills: line, comma lists", () => {
+  withData(() => {
+    saveWorkspace("acme", "w", [
+      { path: "AGENTS.md", content: "---\nname: w\n---\n" },
+      { path: "flows/publish-v2.md", content: "---\nname: publish\ntrigger: manual\n---\n\n1. [[writer]] — Draft.\n2. [[flow:announce-it]] — Tell.\n" },
+      { path: "flows/announce.md", content: "---\nname: announce-it\ntrigger: manual\n---\n\n1. [[writer]] — Say.\n" },
+      { path: "agents/writer/agent.md", content: agent("writer", "tools: read, cms\nsubagents: helper, aide\nsecrets: CMS_TOKEN, OTHER\nskills: [house-style]\n") },
+      { path: "agents/helper/agent.md", content: agent("helper", "skills: []\n") },
+      { path: "agents/aide/agent.md", content: agent("aide", "skills: []\n") },
+      { path: "agents/plain/agent.md", content: "---\nname: plain\ndescription: p.\n---\n\nUse ${PATH} in the shell.\n" },
+      { path: "tools/cms.md", content: "---\nname: cms\nbase: https://cms.example\n---\n" },
+      { path: "skills/house-style.md", content: "---\nname: house-style\ndescription: How we write.\n---\n\nShort.\n" },
+      { path: "skills/tone/SKILL.md", content: "---\nname: tone\ndescription: Tone.\n---\n\nWarm.\n" },
+    ]);
+    const flow = packageOf("acme", "w", "flow", "publish").files.map((f) => f.path);
+    for (const p of ["flows/publish-v2.md", "flows/announce.md", "tools/cms.md", "agents/helper/agent.md", "agents/aide/agent.md", "skills/house-style.md"]) assert.ok(flow.includes(p), p);
+    assert.ok(!flow.includes("skills/tone/SKILL.md"), "writer names its skills");
+    // plain has no skills: line — the runtime gives it every skill, so the package carries them.
+    const plain = packageOf("acme", "w", "agent", "plain").files.map((f) => f.path);
+    assert.ok(plain.includes("skills/house-style.md") && plain.includes("skills/tone/SKILL.md"), plain.join(","));
+
+    saveWorkspace("acme", "bare", blankTemplateFiles("bare"));
+    const plan = planImport("acme", "bare", readPackage(packageZip(packageOf("acme", "w", "flow", "publish"))));
+    assert.deepEqual(plan.needs.flows, []);
+    assert.deepEqual(plan.needs.skills, []);
+    assert.deepEqual(plan.needs.tools, []);
+    assert.deepEqual(plan.needs.agents, []);
+    assert.deepEqual(plan.needs.secrets, ["CMS_TOKEN", "OTHER"]);
+    // ${PATH} in prose is a shell variable, not a secret to set.
+    assert.deepEqual(planImport("acme", "bare", readPackage(packageZip(packageOf("acme", "w", "agent", "plain")))).needs.secrets, []);
+  });
+});
+
+test("audit: a deployed file over 512 KB round-trips; code is executable on both import paths", () => {
+  withData(() => {
+    const big = "a,b\n" + "1,2\n".repeat(200_000);
+    saveWorkspace("acme", "w", [
+      { path: "AGENTS.md", content: "---\nname: w\n---\n" },
+      { path: "knowledge/big.csv", content: big },
+      { path: "tools/p/tool.md", content: "---\nname: p\nrun: run.mjs\n---\n" },
+      { path: "tools/p/run.mjs", content: "console.log(1)\n" },
+    ]);
+    const pkg = readPackage(packageZip(packageOf("acme", "w", "workspace")));
+    assert.ok(pkg.files.some((f) => f.path === "knowledge/big.csv"));
+    applyImport("acme", "made", pkg);
+    assert.ok(fs.statSync(path.join(workspaceDir("acme", "made"), "tools/p/run.mjs")).mode & 0o100, "executable when created");
+    saveWorkspace("acme", "merge", blankTemplateFiles("merge"));
+    applyImport("acme", "merge", pkg, { overwrite: true });
+    assert.ok(fs.statSync(path.join(workspaceDir("acme", "merge"), "tools/p/run.mjs")).mode & 0o100, "executable when merged");
+  });
+});
+
+test("audit: apply refuses when the workspace came or went since the caller checked", () => {
+  withData(() => {
+    desk();
+    const ws = readPackage(packageZip(packageOf("acme", "blog", "workspace")));
+    assert.throws(() => applyImport("acme", "blog", ws, { expect: "create" }), (e: unknown) => e instanceof PackageError && e.status === 409);
+    assert.throws(() => applyImport("acme", "nope", ws, { expect: "merge" }), (e: unknown) => e instanceof PackageError && e.status === 409);
+  });
 });

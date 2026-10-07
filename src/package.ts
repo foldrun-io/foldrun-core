@@ -32,7 +32,7 @@ import {
   isEditablePath,
   listWorkspaceFiles,
   listWorkspaces,
-  readFlow,
+  listFlows,
   parseFlow,
   readWorkspaceFile,
   saveWorkspace,
@@ -40,15 +40,14 @@ import {
   syncBundleFor,
   notifyWorkspaceChanged,
   workspaceDir,
-  WORKSPACE_DIRS,
   type DeployFile,
 } from "./store.ts";
 import { recordRevision, type RevisionFile } from "./history.ts";
 import { libraryDir, libraryTools } from "./library.ts";
 import { discoverSkills } from "./runner.ts";
 import { listSecrets } from "./secrets.ts";
-import { isRuntimeTool, toolEntryName } from "./tool-names.ts";
-import { MAX_EDITABLE_FILE } from "./paths.ts";
+import { isRuntimeTool } from "./tool-names.ts";
+import { refNames } from "./refs.ts";
 import { zip, unzip, ZipError } from "./zip.ts";
 
 export type PackageKind = "workspace" | "flow" | "agent";
@@ -68,6 +67,8 @@ export interface PackageManifest {
 export interface Package {
   manifest: PackageManifest;
   files: DeployFile[];
+  /** Entries in the zip that are not authored source, left out (readPackage). */
+  skipped?: string[];
 }
 
 /** An error the API layer turns into a status rather than a 500. */
@@ -82,14 +83,27 @@ export class PackageError extends Error {
 export const MANIFEST_FILE = "foldrun-package.json";
 const MAX_FILES = 500;
 
-/** Made by runs or by the engine, not authored — never in a package, and
- *  refused in one: an import must not plant memory or state in a desk. */
+/** The authored source of a workspace: AGENTS.md and these folders. A
+ *  path anywhere else is never written by an import — isEditablePath alone
+ *  accepts a scripts/ folder at any depth, which let a zip write
+ *  runs/scripts/… and storage/scripts/… into a desk (audit, 7 Oct). */
+const AUTHORED_TOP = new Set(["agents", "flows", "evals", "skills", "knowledge", "tools", "scripts"]);
+
+/** Inside those, what runs or the engine made, and .env files — never in a
+ *  package. A package carries secret NAMES; a value in a tool's .env would
+ *  leave with it. */
 const NOT_PACKAGED =
-  /^(state|memory)\/|^agents\/[^/]+\/(memory|outputs|state|workspace|\.claude)(\/|$)|^agents\/[^/]+\/\.claude[^/]*$|(^|\/)\.claude(\/|$)/;
+  /^agents\/[^/]+\/(memory|outputs|state|workspace|\.claude)(\/|$)|^agents\/[^/]+\/\.claude[^/]*$|(^|\/)\.claude(\/|$)|(^|\/)(\.env(\.[^/]*)?|[^/]+\.env)$/;
 
 export function isPackagedPath(rel: string): boolean {
+  if (rel === "AGENTS.md" || rel === "project.md") return true;
+  if (!AUTHORED_TOP.has(rel.split("/")[0]!)) return false;
   return !NOT_PACKAGED.test(rel) && isEditablePath(rel);
 }
+
+/** Largest one file in a package — what a deploy carries, not the 512 KB a
+ *  person edits: a deployed 800 KB CSV exported and then could not come back. */
+const MAX_PACKAGE_FILE = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------- export
 
@@ -140,16 +154,21 @@ export function packageFilename(m: PackageManifest): string {
 }
 
 function flowClosure(tenant: string, workspace: string, flow: string, all: string[], read: (p: string) => string): string[] {
+  // By name, the way a step addresses a flow — the file may be called
+  // something else (flows/publish-v2.md with name: publish was left out).
+  const byName = new Map(listFlows(tenant, workspace).map((f) => [f.name, f]));
   const flows = new Set<string>();
+  const files = new Set<string>();
   const agents = new Set<string>();
   const visit = (name: string) => {
     if (flows.has(name)) return;
-    const info = readFlow(tenant, workspace, name);
+    const info = byName.get(name);
     if (!info) {
       if (flows.size === 0) throw new PackageError(`no flow called "${name}" in ${workspace}`, 404);
       return; // a missing subflow — import reports it, export carries what exists
     }
     flows.add(name);
+    files.add(`flows/${info.file}`);
     for (const s of info.steps) {
       if (s.subflow) visit(s.subflow);
       else if (s.agent) agents.add(s.agent);
@@ -158,10 +177,7 @@ function flowClosure(tenant: string, workspace: string, flow: string, all: strin
     }
   };
   visit(flow);
-  const flowFiles = all.filter((p) => {
-    const m = /^flows\/(.+)\.md$/.exec(p);
-    return m ? flows.has(m[1]!) : false;
-  });
+  const flowFiles = all.filter((p) => files.has(p));
   return [...new Set([...flowFiles, ...agentClosure([...agents], all, read, true)])];
 }
 
@@ -196,7 +212,9 @@ function agentClosure(names: string[], all: string[], read: (p: string) => strin
         if (prog && all.includes(prog)) out.add(prog);
       }
     }
-    for (const s of front.skills) for (const p of skills.get(s) ?? []) out.add(p);
+    // No `skills:` line: the runtime gives the agent every skill in scope, so
+    // the package carries every workspace skill.
+    for (const s of front.skills ?? [...skills.keys()]) for (const p of skills.get(s) ?? []) out.add(p);
     for (const s of front.scripts) if (all.includes(`scripts/${s}`)) out.add(`scripts/${s}`);
     if (colleagues) queue.push(...front.agents);
   }
@@ -208,7 +226,7 @@ function agentClosure(names: string[], all: string[], read: (p: string) => strin
 export function readPackage(buf: Buffer): Package {
   let entries;
   try {
-    entries = unzip(buf, { maxEntries: MAX_FILES + 1, maxFileBytes: MAX_EDITABLE_FILE, maxTotalBytes: 50 * 1024 * 1024 });
+    entries = unzip(buf, { maxEntries: 5000, maxFileBytes: MAX_PACKAGE_FILE, maxTotalBytes: 50 * 1024 * 1024 });
   } catch (err) {
     if (err instanceof ZipError) throw new PackageError(err.message, 400);
     throw err;
@@ -217,14 +235,17 @@ export function readPackage(buf: Buffer): Package {
   // top directory. Look through it when that is all there is.
   const tops = new Set(entries.map((e) => e.path.split("/")[0]!));
   const top1 = [...tops][0]!;
-  if (tops.size === 1 && entries.every((e) => e.path.includes("/")) && !(WORKSPACE_DIRS as readonly string[]).includes(top1)) {
+  if (tops.size === 1 && entries.every((e) => e.path.includes("/")) && !AUTHORED_TOP.has(top1) && !["memory", "state"].includes(top1)) {
     const top = `${[...tops][0]}/`;
     entries = entries.map((e) => ({ ...e, path: e.path.slice(top.length) }));
   }
 
   let manifest: Partial<PackageManifest> = {};
   const files: DeployFile[] = [];
-  const refused: string[] = [];
+  // Not authored source: memory, state, a .gitignore or CLAUDE.md beside a
+  // hand-zipped folder, runs/… — never written, and listed, so the person
+  // sees what was left out rather than the whole zip being refused for it.
+  const skipped: string[] = [];
   for (const e of entries) {
     if (e.path === MANIFEST_FILE) {
       try {
@@ -235,7 +256,7 @@ export function readPackage(buf: Buffer): Package {
       continue;
     }
     if (!isPackagedPath(e.path)) {
-      refused.push(e.path);
+      skipped.push(e.path);
       continue;
     }
     const content = e.data.toString("utf8");
@@ -247,13 +268,12 @@ export function readPackage(buf: Buffer): Package {
     }
     files.push({ path: e.path, content });
   }
-  if (refused.length) {
+  if (files.length === 0) {
     throw new PackageError(
-      `the package holds files an import may not write: ${refused.slice(0, 8).join(", ")}${refused.length > 8 ? ` and ${refused.length - 8} more` : ""} — a package carries agents, flows, evals, knowledge, skills, tools and scripts, never memory, state or outputs`,
+      `the package has no files to import${skipped.length ? ` — only what an import never writes (${skipped.slice(0, 5).join(", ")}${skipped.length > 5 ? " …" : ""})` : ""}. A package carries AGENTS.md, agents, flows, evals, knowledge, skills, tools and scripts`,
       400,
     );
   }
-  if (files.length === 0) throw new PackageError("the package has no files to import", 400);
   if (files.length > MAX_FILES) throw new PackageError(`too many files: ${files.length} (at most ${MAX_FILES})`, 400);
 
   // No manifest: a workspace folder zipped by hand is still importable.
@@ -280,6 +300,7 @@ export function readPackage(buf: Buffer): Package {
       files: files.map((f) => f.path),
     },
     files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    skipped: skipped.sort(),
   };
 }
 
@@ -295,6 +316,9 @@ export interface ImportPlan {
   /** Files that exist with different text — written only with `overwrite`. */
   overwritten: string[];
   unchanged: string[];
+  /** In the zip, not written: memory, state, .gitignore, anything outside
+   *  the authored folders. */
+  skipped: string[];
   /** What the imported files name that the target cannot provide. The import
    *  still happens — a missing secret is set in a minute. */
   needs: {
@@ -322,11 +346,23 @@ export function planImport(tenant: string, workspace: string, pkg: Package): Imp
   const added: string[] = [];
   const overwritten: string[] = [];
   const unchanged: string[] = [];
+  const blocked: string[] = [];
   for (const f of pkg.files) {
     const abs = path.join(dir, f.path);
+    const why = exists ? targetProblem(dir, f.path) : null;
+    if (why) {
+      blocked.push(`${f.path}: ${why}`);
+      continue;
+    }
     if (!exists || !fs.existsSync(abs)) added.push(f.path);
     else if (sameText(fs.readFileSync(abs, "utf8"), f.content)) unchanged.push(f.path);
     else overwritten.push(f.path);
+  }
+  // Checked before anything is written, so an import is all or nothing: a
+  // zip naming knowledge/x.md/y.md where knowledge/x.md is a file failed
+  // half-way and left what it had written outside History (audit, 7 Oct).
+  if (blocked.length) {
+    throw new PackageError(`the package cannot be written into ${workspace}: ${blocked.slice(0, 5).join("; ")}${blocked.length > 5 ? " …" : ""}`, 409);
   }
   // A workspace with no AGENTS.md exports fine (sched-lab had none) but a new
   // workspace needs one: it gets the blank one "Create workspace" makes.
@@ -340,6 +376,7 @@ export function planImport(tenant: string, workspace: string, pkg: Package): Imp
     added,
     overwritten,
     unchanged,
+    skipped: pkg.skipped ?? [],
     needs: needsOf(tenant, workspace, exists, pkg.files),
   };
 }
@@ -348,9 +385,14 @@ export function applyImport(
   tenant: string,
   workspace: string,
   pkg: Package,
-  opts: { overwrite?: boolean; by?: string } = {},
+  opts: { overwrite?: boolean; by?: string; expect?: "create" | "merge" } = {},
 ): ImportResult {
   const plan = planImport(tenant, workspace, pkg);
+  // The caller checked permissions for one of these; if the workspace came
+  // or went since, refuse rather than skip the check that applied.
+  if (opts.expect && (opts.expect === "create") !== plan.creates) {
+    throw new PackageError(`${workspace} ${plan.creates ? "no longer exists" : "was created meanwhile"} — preview the import again`, 409);
+  }
   if (plan.overwritten.length && !opts.overwrite) {
     throw new PackageError(
       `${plan.overwritten.length} file${plan.overwritten.length === 1 ? "" : "s"} in ${workspace} would be overwritten: ${plan.overwritten.slice(0, 8).join(", ")}${plan.overwritten.length > 8 ? " …" : ""} — import with overwrite to replace them`,
@@ -364,6 +406,7 @@ export function applyImport(
   if (plan.creates) {
     const files = pkg.files.some((f) => f.path === "AGENTS.md") ? pkg.files : [...pkg.files, ...blankTemplateFiles(workspace)];
     saveWorkspace(tenant, workspace, files, meta);
+    for (const f of files) if (isCode(f.path)) fs.chmodSync(path.join(workspaceDir(tenant, workspace), f.path), 0o755);
     return { ...plan, written: files.map((f) => f.path), revision: null };
   }
 
@@ -372,20 +415,62 @@ export function applyImport(
   const dir = workspaceDir(tenant, workspace);
   const write = new Set([...plan.added, ...plan.overwritten]);
   const changes: RevisionFile[] = [];
-  for (const f of pkg.files) {
-    if (!write.has(f.path)) continue;
-    const abs = path.join(dir, f.path);
-    const before = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : null;
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, normalized(f.content));
-    // Same rule as writeWorkspaceFile: code is executable wherever it lives.
-    if (/(^|\/)scripts\//.test(f.path) || (/^tools\//.test(f.path) && !f.path.endsWith(".md"))) fs.chmodSync(abs, 0o755);
-    syncBundleFor(abs, before === null ? "Creation" : "Update");
-    changes.push({ path: f.path, before, after: fs.readFileSync(abs, "utf8") });
+  try {
+    for (const f of pkg.files) {
+      if (!write.has(f.path)) continue;
+      const abs = path.join(dir, f.path);
+      const before = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : null;
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, normalized(f.content));
+      changes.push({ path: f.path, before, after: null });
+      // Same rule as writeWorkspaceFile: code is executable wherever it lives.
+      if (isCode(f.path)) fs.chmodSync(abs, 0o755);
+    }
+  } catch (err) {
+    // Put back what this import wrote; nothing reaches History.
+    for (const c of changes.reverse()) {
+      const abs = path.join(dir, c.path);
+      try {
+        if (c.before === null) fs.rmSync(abs, { force: true });
+        else fs.writeFileSync(abs, c.before);
+      } catch {
+        // best effort — the error below is the one to report
+      }
+    }
+    throw new PackageError(`the import could not be written, and nothing was kept: ${err instanceof Error ? err.message : String(err)}`, 500);
+  }
+  for (const c of changes) {
+    const abs = path.join(dir, c.path);
+    syncBundleFor(abs, c.before === null ? "Creation" : "Update");
+    c.after = fs.readFileSync(abs, "utf8");
   }
   const rev = recordRevision(tenant, workspace, changes, meta);
   if (changes.length) notifyWorkspaceChanged(tenant, workspace, "write");
   return { ...plan, written: changes.map((c) => c.path), revision: rev?.id ?? null };
+}
+
+/** Code is executable wherever it lives — writeWorkspaceFile's rule. */
+const isCode = (rel: string) => /(^|\/)scripts\//.test(rel) || (/^tools\//.test(rel) && !rel.endsWith(".md"));
+
+/** Why a file cannot be written at `rel` in `dir`, or null: a parent that is
+ *  a file, a target that is a directory, or a symlink on the way. */
+function targetProblem(dir: string, rel: string): string | null {
+  const parts = rel.split("/");
+  let cur = dir;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]!);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch {
+      return null; // the rest does not exist yet — it will be made
+    }
+    if (st.isSymbolicLink()) return `${parts.slice(0, i + 1).join("/")} is a link`;
+    const last = i === parts.length - 1;
+    if (!last && !st.isDirectory()) return `${parts.slice(0, i + 1).join("/")} is a file`;
+    if (last && st.isDirectory()) return "a folder is there";
+  }
+  return null;
 }
 
 /** As writeWorkspaceFile stores it: one trailing newline. */
@@ -409,7 +494,18 @@ function needsOf(tenant: string, workspace: string, exists: boolean, files: Depl
   const tools = new Set([...toolFiles(paths, read).keys(), ...Object.keys(libraryTools(tenant))]);
   const skills = new Set([...skillFiles(paths, read).keys(), ...discoverSkills(libraryDir(tenant), "skills").map((s) => s.name)]);
   const agents = new Set(paths.map((p) => /^agents\/([^/]+)\/agent\.md$/.exec(p)?.[1]).filter((x): x is string => Boolean(x)));
-  const flows = new Set(paths.map((p) => /^flows\/(.+)\.md$/.exec(p)?.[1]).filter((x): x is string => Boolean(x)));
+  // Flow names as steps address them: the frontmatter name, else the file name.
+  const flows = new Set(
+    paths
+      .filter((p) => /^flows\/.+\.md$/.test(p))
+      .map((p) => {
+        try {
+          return parseFlow(p.slice("flows/".length), read(p)).name;
+        } catch {
+          return p.slice("flows/".length, -3);
+        }
+      }),
+  );
 
   const need = { secrets: new Set<string>(), tools: new Set<string>(), skills: new Set<string>(), scripts: new Set<string>(), agents: new Set<string>(), flows: new Set<string>() };
   for (const f of files) {
@@ -417,7 +513,7 @@ function needsOf(tenant: string, workspace: string, exists: boolean, files: Depl
     if (agent) {
       const front = frontOf(f.content);
       for (const t of front.tools) if (!isRuntimeTool(t) && !tools.has(t) && !front.inline.has(t)) need.tools.add(t);
-      for (const s of front.skills) if (!skills.has(s) && !agentSkill(paths, read, agent, s)) need.skills.add(s);
+      for (const s of front.skills ?? []) if (!skills.has(s) && !agentSkill(paths, read, agent, s)) need.skills.add(s);
       for (const s of front.scripts) {
         if (![`agents/${agent}/scripts/${s}`, `scripts/${s}`].some((p) => paths.includes(p)) && !fs.existsSync(path.join(libraryDir(tenant), "scripts", s))) need.scripts.add(s);
       }
@@ -430,8 +526,11 @@ function needsOf(tenant: string, workspace: string, exists: boolean, files: Depl
       const prog = /^tools\/[^/]+\.md$/.test(f.path) ? toolProgram(f.content) : null;
       if (prog && !paths.includes(prog)) need.scripts.add(prog);
     }
+    // ${NAME} placeholders in the frontmatter (an API's headers, an MCP
+    // server's env) — not the prose, where ${PATH} is a shell variable.
     if (/^(agents\/[^/]+\/agent\.md|tools\/.+\.md)$/.test(f.path)) {
-      for (const m of f.content.matchAll(/\$\{([A-Z][A-Z0-9_]*)\}/g)) need.secrets.add(m[1]!);
+      const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(f.content)?.[1] ?? "";
+      for (const m of fm.matchAll(/\$\{([A-Z][A-Z0-9_]*)\}/g)) need.secrets.add(m[1]!);
     }
     if (/^flows\/.+\.md$/.test(f.path)) {
       let steps: ReturnType<typeof parseFlow>["steps"] = [];
@@ -468,8 +567,9 @@ function needsOf(tenant: string, workspace: string, exists: boolean, files: Depl
 
 // ---------------------------------------------------------------- shared
 
-const list = (v: unknown): string[] =>
-  Array.isArray(v) ? v.map((x) => toolEntryName(x)).filter(Boolean) : typeof v === "string" && v.trim() ? [v.trim()] : [];
+/** A frontmatter list as the runtime reads it — arrays, comma strings, map
+ *  entries (refs.ts). */
+const list = (v: unknown): string[] => refNames(v).map((s) => s.trim()).filter(Boolean);
 
 function safeFront(content: string): Record<string, unknown> {
   try {
@@ -481,7 +581,8 @@ function safeFront(content: string): Record<string, unknown> {
 
 interface AgentFront {
   tools: string[];
-  skills: string[];
+  /** null when the agent has no `skills:` line — it gets every skill in scope. */
+  skills: string[] | null;
   scripts: string[];
   secrets: string[];
   /** Colleagues: `agents:` and `subagents:` together. */
@@ -497,7 +598,7 @@ function frontOf(content: string): AgentFront {
   const scripts = list(d.scripts);
   return {
     tools: list(d.tools),
-    skills: list(d.skills),
+    skills: d.skills === undefined || d.skills === null ? null : list(d.skills),
     scripts,
     secrets: list(d.secrets),
     agents: [...list(d.agents), ...list(d.subagents)],
@@ -535,14 +636,19 @@ function toolFiles(paths: string[], read: (p: string) => string): Map<string, st
   return out;
 }
 
-/** Workspace skill name → its folder's files. */
+/** Workspace skill name → its files: a skill folder (`skills/x/SKILL.md`
+ *  and what is beside it) or a single file (`skills/x.md`), as discoverSkills
+ *  finds them. */
 function skillFiles(paths: string[], read: (p: string) => string): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const p of paths) {
-    const m = /^skills\/([^/]+)\/SKILL\.md$/.exec(p);
-    if (!m) continue;
-    const name = String(safeFront(read(p)).name ?? m[1]);
-    out.set(name, paths.filter((q) => q.startsWith(`skills/${m[1]}/`)));
+    const folder = /^skills\/([^/]+)\/SKILL\.md$/.exec(p);
+    if (folder) {
+      out.set(String(safeFront(read(p)).name ?? folder[1]), paths.filter((q) => q.startsWith(`skills/${folder[1]}/`)));
+      continue;
+    }
+    const single = /^skills\/([^/]+)\.md$/.exec(p);
+    if (single) out.set(String(safeFront(read(p)).name ?? single[1]), [p]);
   }
   return out;
 }
@@ -550,8 +656,9 @@ function skillFiles(paths: string[], read: (p: string) => string): Map<string, s
 function agentSkill(paths: string[], read: (p: string) => string, agent: string, skill: string): boolean {
   const prefix = `agents/${agent}/skills/`;
   return paths.some((p) => {
-    if (!p.startsWith(prefix) || !p.endsWith("/SKILL.md")) return false;
-    const dir = p.slice(prefix.length, -"/SKILL.md".length);
-    return dir === skill || safeFront(read(p)).name === skill;
+    if (!p.startsWith(prefix)) return false;
+    const rest = p.slice(prefix.length);
+    const m = /^([^/]+)\/SKILL\.md$/.exec(rest) ?? /^([^/]+)\.md$/.exec(rest);
+    return Boolean(m) && (m![1] === skill || safeFront(read(p)).name === skill);
   });
 }
