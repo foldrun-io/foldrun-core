@@ -212,6 +212,32 @@ test("a single-file tool carries the script its run: names; without it, import n
   });
 });
 
+test("identical text is identical: no final newline and CRLF are not 'would replace'", () => {
+  withData(() => {
+    saveWorkspace("acme", "data", [
+      { path: "AGENTS.md", content: "---\nname: data\n---\n" },
+      { path: "scripts/roles.json", content: "{\n  \"a\": 1\n}" },
+      { path: "scripts/rows.csv", content: "a,b\r\n1,2\r\n" },
+    ]);
+    const pkg = readPackage(packageZip(packageOf("acme", "data", "workspace")));
+    const plan = planImport("acme", "data", pkg);
+    assert.deepEqual(plan.overwritten, []);
+    assert.equal(plan.unchanged.length, 3);
+  });
+});
+
+test("a workspace package with no AGENTS.md still makes a workspace", () => {
+  withData(() => {
+    const z = zip([{ path: "agents/a/agent.md", data: Buffer.from("---\nname: a\ndescription: A.\n---\n\nx\n") }, { path: MANIFEST_FILE, data: Buffer.from(JSON.stringify({ format: "foldrun-package", version: 1, kind: "workspace", name: "lab", workspace: "lab" })) }]);
+    const pkg = readPackage(z);
+    const plan = planImport("acme", "lab", pkg);
+    assert.ok(plan.creates && plan.added.includes("AGENTS.md"));
+    const r = applyImport("acme", "lab", pkg);
+    assert.ok(r.written.includes("AGENTS.md"));
+    assert.ok(fs.existsSync(path.join(workspaceDir("acme", "lab"), "AGENTS.md")));
+  });
+});
+
 test("readPackage refuses memory, state, escapes and non-text; accepts a hand-zipped folder", () => {
   const z = (files: Record<string, string>) => zip(Object.entries(files).map(([p, c]) => ({ path: p, data: Buffer.from(c) })));
   assert.throws(() => readPackage(z({ "AGENTS.md": "x", "memory/x.md": "y" })), /may not write/);

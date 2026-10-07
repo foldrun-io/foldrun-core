@@ -36,6 +36,7 @@ import {
   parseFlow,
   readWorkspaceFile,
   saveWorkspace,
+  blankTemplateFiles,
   syncBundleFor,
   notifyWorkspaceChanged,
   workspaceDir,
@@ -317,9 +318,6 @@ export function planImport(tenant: string, workspace: string, pkg: Package): Imp
   if (!exists && pkg.manifest.kind !== "workspace") {
     throw new PackageError(`no workspace called "${workspace}" — a ${pkg.manifest.kind} imports into one that exists`, 404);
   }
-  if (!exists && !pkg.files.some((f) => f.path === "AGENTS.md")) {
-    throw new PackageError("a new workspace needs an AGENTS.md, and this package has none", 400);
-  }
   const dir = workspaceDir(tenant, workspace);
   const added: string[] = [];
   const overwritten: string[] = [];
@@ -327,9 +325,12 @@ export function planImport(tenant: string, workspace: string, pkg: Package): Imp
   for (const f of pkg.files) {
     const abs = path.join(dir, f.path);
     if (!exists || !fs.existsSync(abs)) added.push(f.path);
-    else if (fs.readFileSync(abs, "utf8") === normalized(f.content)) unchanged.push(f.path);
+    else if (sameText(fs.readFileSync(abs, "utf8"), f.content)) unchanged.push(f.path);
     else overwritten.push(f.path);
   }
+  // A workspace with no AGENTS.md exports fine (sched-lab had none) but a new
+  // workspace needs one: it gets the blank one "Create workspace" makes.
+  if (!exists && !pkg.files.some((f) => f.path === "AGENTS.md")) added.push("AGENTS.md");
   return {
     kind: pkg.manifest.kind,
     name: pkg.manifest.name,
@@ -361,8 +362,9 @@ export function applyImport(
   const meta = { ...(opts.by ? { by: opts.by } : {}), message };
 
   if (plan.creates) {
-    saveWorkspace(tenant, workspace, pkg.files, meta);
-    return { ...plan, written: pkg.files.map((f) => f.path), revision: null };
+    const files = pkg.files.some((f) => f.path === "AGENTS.md") ? pkg.files : [...pkg.files, ...blankTemplateFiles(workspace)];
+    saveWorkspace(tenant, workspace, files, meta);
+    return { ...plan, written: files.map((f) => f.path), revision: null };
   }
 
   // One revision for the whole import, so History and restore treat it as
@@ -388,6 +390,13 @@ export function applyImport(
 
 /** As writeWorkspaceFile stores it: one trailing newline. */
 const normalized = (s: string) => `${s.trimEnd()}\n`;
+
+/** The same text, whatever the line endings and trailing whitespace. A file
+ *  a deploy stored without a final newline, or a CSV with CRLF endings, is
+ *  byte-different from what an import would write and identical to read —
+ *  comparing bytes listed six such files of a live desk as "would replace"
+ *  when the desk was re-imported into itself. */
+const sameText = (a: string, b: string) => a.replace(/\r\n/g, "\n").trimEnd() === b.replace(/\r\n/g, "\n").trimEnd();
 
 function needsOf(tenant: string, workspace: string, exists: boolean, files: DeployFile[]): ImportPlan["needs"] {
   const inPkg = new Map(files.map((f) => [f.path, f.content]));
