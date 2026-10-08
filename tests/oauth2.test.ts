@@ -164,3 +164,40 @@ test("the list marks auto-refreshing secrets without decrypting them", () =>
     assert.equal(rows.find((r) => r.name === "ADS_TOKEN")?.kind, "oauth2");
     assert.equal(rows.find((r) => r.name === "PLAIN_KEY")?.kind, undefined);
   }));
+
+test("a network blip at the token endpoint is retried; a refusal is not", async () => {
+  process.env.FOLDRUN_OAUTH_RETRY_MS = "1";
+  try {
+    await withVault(async () => {
+      // Drops the first two connections, then answers.
+      let hits = 0;
+      const flaky = http.createServer((req, res) => {
+        hits++;
+        if (hits <= 2) { req.socket.destroy(); return; }
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ access_token: "after-blip", expires_in: 3600 }));
+        });
+      });
+      await new Promise<void>((r) => flaky.listen(0, "127.0.0.1", () => r()));
+      const port = (flaky.address() as { port: number }).port;
+      setOAuth2Secret("acme", "BLIP", { token_url: `http://127.0.0.1:${port}/token`, client_id: "c", client_secret: "shh", refresh_token: "good-refresh" }, "desk");
+      const { env } = resolveSecrets("acme", ["BLIP"], "desk");
+      const out = await materializeSecrets(env, { tenant: "acme", workspace: "desk" });
+      flaky.close();
+      assert.equal(out.BLIP, "after-blip");
+      assert.equal(hits, 3, "two drops, then the answer");
+
+      // A 400 (revoked) is the provider's answer: asked once, not three times.
+      const t = await tokenServer();
+      setOAuth2Secret("acme", "REVOKED", { token_url: t.url, client_id: "c", client_secret: "shh", refresh_token: "bad" }, "desk");
+      await assert.rejects(materializeSecrets(resolveSecrets("acme", ["REVOKED"], "desk").env, { tenant: "acme", workspace: "desk" }), /revoked/i);
+      t.close();
+      assert.equal(t.calls(), 1);
+    });
+  } finally {
+    delete process.env.FOLDRUN_OAUTH_RETRY_MS;
+  }
+});

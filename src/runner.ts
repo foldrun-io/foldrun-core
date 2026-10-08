@@ -1368,7 +1368,8 @@ function agentContext(
   );
   if (scriptTools.promptLines.length) {
     parts.push(
-      `# Tools from scripts\n\nCall these directly — they run workspace scripts for you:\n\n${scriptTools.promptLines.join("\n")}`,
+      `# Tools from scripts\n\nCall these directly — they run workspace scripts for you. Each is called by its full name, ` +
+        `\`mcp__foldrun_scripts__<name>\` (\`web\` is \`mcp__foldrun_scripts__web\`); a bare name is refused:\n\n${scriptTools.promptLines.join("\n")}`,
     );
   }
   // The web tool's own description lists every action, so an agent whose
@@ -1394,7 +1395,13 @@ function agentContext(
     "Write deliverables for people to workspace/storage/ (kept and downloadable); write working text for later steps to outputs/; " +
       "what the next run needs goes to workspace/state/. Paths are relative to your agent directory, or start with workspace/ " +
       "for the workspace root (workspace/storage/ and the older ../../storage/ are the same place). There is no /tmp for you: a " +
-      "directory a tool made outside the workspace, such as a checkout, is reached only through that tool.",
+      "directory a tool made outside the workspace, such as a checkout, is reached only through that tool. " +
+      // 45 refusals in 34 runs (6–7 Oct 2026), nearly all an agent rewriting
+      // a plan or draft an earlier run left: the Write tool refuses a file
+      // that exists and has not been Read in this step, before any hook of
+      // ours can see the call. Said once here instead of learned per step.
+      "To replace a file that already exists, Read it first — Write refuses a file you have not Read in this step (a new file needs no Read). " +
+      "Built-in tools are capitalised: Read, Write, Edit, Glob, Grep, Bash.",
   );
 
   // The run's one-line summary is the first meaningful line of the last step
@@ -1464,6 +1471,12 @@ function agentContext(
     // names it (FOLDRUN_WEB_BUILTIN) rather than asking our engine.
     if (toolName === "web" && !ref.linked) {
       allowed.push(...providerWebTools);
+      // web writes what it found to files and says "Read that file" — a
+      // screenshot, a crawl, a page saved whole. An agent granted web alone
+      // was told to Read and refused it (blog-desk claim-checker, 7 Oct
+      // 2026: "Read is disabled for this session"). Reading is confined to
+      // the workspace like every file tool; disallowedTools still removes it.
+      if (!allowed.includes("Read")) allowed.push("Read");
       continue;
     }
 
@@ -2628,6 +2641,26 @@ async function runStep(
         await lease?.commit();
         outcome = withEarlierTiming(await runTracked(again), previous);
       }
+      // The model wrote its tool call out as text — `<invoke name="…">` in
+      // its last message — and stopped. Nothing ran, so nothing was done:
+      // seo-digest's editor three times (27 Sep, 4 and 5 Oct 2026), its own
+      // retry included, because the retry asked the same way. Run it once
+      // more with that said plainly, on the same safety rule as a dropped
+      // connection: never again after an outward tool already ran.
+      for (let n = 1; n <= TEXT_CALL_RETRIES && wroteToolCallAsText(attemptText(outcome.result, step.events.slice(attemptFrom))); n++) {
+        if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
+          push("info", "the model wrote a tool call as text instead of making it — not run again: this step's tools can act outside the workspace and already ran");
+          break;
+        }
+        push("info", `the model wrote a tool call as text instead of making it, so nothing ran — running the step again with a note (${n} of ${TEXT_CALL_RETRIES})`);
+        attemptFrom = step.events.length;
+        lastRefusal = "";
+        const previous = outcome.timing;
+        const base = isolatedArgs(platformModelEnv());
+        const again = { ...base, input: { ...base.input, prompt: `${base.input.prompt}\n\n${TEXT_CALL_NOTE}` } };
+        await lease?.commit();
+        outcome = withEarlierTiming(await runTracked(again), previous);
+      }
       // The second supply, tried exactly once, and only when the primary
       // refused over money/auth/limits rather than the work failing. The
       // retry is a fresh sandbox — the failed one is gone, and driveRun's
@@ -3134,6 +3167,33 @@ function isProviderRefusal(text: string): boolean {
 export function isModelConnectionLost(text: string): boolean {
   return /^Claude Code returned an error result: API Error: (Connection (refused|dropped|error)|.*\b(ECONNREFUSED|ECONNRESET|socket hang up)\b)/i.test(text);
 }
+
+/** A tool call written out as text rather than made: the model's last
+ *  message holds `<invoke name=…>` / `<function_calls>` markup. Only the tail
+ *  counts — a reply that quotes such markup mid-way and goes on is fine. */
+export function wroteToolCallAsText(text: string): boolean {
+  const tail = text.slice(-1500);
+  const open = tail.search(/<(?:antml:)?(?:invoke|function_calls)\b[^>]*>/);
+  if (open < 0) return false;
+  // Quoted mid-reply and then the reply carries on: not a stalled call.
+  const after = tail.slice(open).replace(/<\/(?:antml:)?(?:invoke|function_calls)>/g, "\u0000");
+  const lastClose = after.lastIndexOf("\u0000");
+  return lastClose < 0 || after.slice(lastClose + 1).trim().length < 200;
+}
+
+/** What an attempt said last: its result, or — when it ended without one —
+ *  the error that carried the model's final text. */
+function attemptText(result: string | null | undefined, events: { type: string; text?: string }[]): string {
+  if (result && result.trim()) return result;
+  const lastError = [...events].reverse().find((e) => e.type === "error");
+  return lastError?.text ?? "";
+}
+
+/** Runs again after a tool call written as text. */
+export const TEXT_CALL_RETRIES = 1;
+export const TEXT_CALL_NOTE =
+  "Note from the platform: your last attempt ended by writing a tool call out as text (an <invoke …> block), so it was not run and nothing happened. " +
+  "Make every tool call as a real tool call — never type its markup into your message.";
 
 /** How many times a step whose model connection was cut runs again. */
 export const DROP_RETRIES = 2;

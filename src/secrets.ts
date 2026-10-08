@@ -505,6 +505,15 @@ export interface OAuth2Config {
 
 const OAUTH2_PREFIX = "@oauth2 ";
 
+/** Tries at a token endpoint before a refresh is called failed: the first,
+ *  and two more after a short wait, for a network error, a 5xx or a 429. */
+export const OAUTH_REFRESH_TRIES = 3;
+/** Wait before try n (1-based retry): 1s, 3s — FOLDRUN_OAUTH_RETRY_MS scales it for tests. */
+export function oauthRetryDelayMs(n: number): number {
+  const base = Number(process.env.FOLDRUN_OAUTH_RETRY_MS ?? 1000);
+  return base * (n === 1 ? 1 : 3);
+}
+
 export function setOAuth2Secret(
   tenant: string,
   name: string,
@@ -550,12 +559,31 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<string>
       client_secret: config.client_secret,
       ...(config.extra ?? {}),
     });
-    const res = await fetchUntrusted(config.token_url, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-      signal: AbortSignal.timeout(15_000),
-    }, { sameOrigin: true });
+    // A network blip is retried; a provider's answer is not. "fetch failed"
+    // (a reset, a DNS hiccup, a timeout) failed whole steps on the first try
+    // — gbp-desk's Thursday posts, 7 Oct 2026. A 4xx (revoked, wrong client)
+    // will say the same thing again, so it goes straight to the error below
+    // and the reconnect mail; a 5xx or 429 is the provider busy, retried.
+    let res: Response | undefined;
+    let lastNetwork: unknown;
+    for (let attempt = 0; attempt < OAUTH_REFRESH_TRIES; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, oauthRetryDelayMs(attempt)));
+      try {
+        res = await fetchUntrusted(config.token_url, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+          signal: AbortSignal.timeout(15_000),
+        }, { sameOrigin: true });
+      } catch (err) {
+        lastNetwork = err;
+        res = undefined;
+        continue;
+      }
+      if (res.status === 429 || res.status >= 500) continue;
+      break;
+    }
+    if (!res) throw lastNetwork instanceof Error ? lastNetwork : new Error(String(lastNetwork));
     const payload = (await res.json().catch(() => ({}))) as {
       access_token?: string;
       expires_in?: number;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createFlowRun, driveRun, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe } from "../src/runner.ts";
+import { createFlowRun, driveRun, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe, wroteToolCallAsText, TEXT_CALL_NOTE } from "../src/runner.ts";
 import { readRun, writeRun, type FlowStep } from "../src/store.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
@@ -215,5 +215,61 @@ test("an on-fail rescuer inherits the step's verify, so a rescue cannot skip the
     const rescue = done!.steps.find((s) => s.agent === "fixer");
     assert.ok(rescue, done!.steps.map((s) => s.agent).join(","));
     assert.equal(rescue!.verify, "test -s workspace/storage/out.txt");
+  });
+});
+
+test("a tool call written out as text is caught, and the step runs once more with a note", async () => {
+  const prompts: string[] = [];
+  const fake: Fake = async (args) => {
+    prompts.push(String(args.input.prompt));
+    if (prompts.length === 1) {
+      return { status: "completed", result: 'Let me look.\n<invoke name="recall_desk_runs">\n<parameter name="since">2026-10-04T18:00</parameter>\n</invoke>', costUsd: 0 };
+    }
+    return { status: "completed", result: "GOOD — the digest", costUsd: 0 };
+  };
+  await withFake(fake, false, async () => {
+    const run = startFlowRun("acme", "desk", [step()], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.status, "completed");
+    assert.equal(prompts.length, 2, "run once more");
+    assert.ok(prompts[1].includes(TEXT_CALL_NOTE), "the second attempt is told what went wrong");
+    assert.ok(!prompts[0].includes(TEXT_CALL_NOTE));
+    assert.equal(done!.steps[0].result, "GOOD — the digest");
+    assert.ok(done!.steps[0].events.some((e) => /wrote a tool call as text/.test(e.text)));
+  });
+});
+
+test("the text-call rule: only a call left at the end of the reply", () => {
+  assert.ok(wroteToolCallAsText('<invoke name="x">\n<parameter name="a">1</parameter>\n</invoke>'));
+  assert.ok(wroteToolCallAsText("I'll call it now.\n<function_calls>\n<invoke name=\"x\">"), "an unclosed call");
+  assert.ok(!wroteToolCallAsText("GOOD — all done, nothing to call."));
+  assert.ok(!wroteToolCallAsText('The model once wrote <invoke name="x"></invoke> as text; ' + "and then the reply carries on for a good while. ".repeat(10)), "quoted mid-reply, then a real reply");
+});
+
+test("web brings Read with it (disallowedTools still wins), and the prompt names the read-first rule and exact tool names", async () => {
+  const seen: RunInContainerArgs[] = [];
+  const fake: Fake = async (args) => {
+    seen.push(args);
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  await withFake(fake, false, async (ws) => {
+    fs.mkdirSync(path.join(ws, "agents/looker"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "agents/looker/agent.md"), "---\nname: looker\ndescription: looks\ntools: [web, ping]\n---\n\nLook.\n");
+    fs.mkdirSync(path.join(ws, "tools"), { recursive: true });
+    fs.mkdirSync(path.join(ws, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "tools/ping.md"), "---\ntransport: script\nname: ping\ndescription: Answers pong.\nrun: workspace/scripts/ping.mjs\n---\n");
+    fs.writeFileSync(path.join(ws, "scripts/ping.mjs"), "console.log('pong')\n");
+    fs.mkdirSync(path.join(ws, "agents/blind"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "agents/blind/agent.md"), "---\nname: blind\ndescription: looks\ntools: [web]\ndisallowedTools: [Read]\n---\n\nLook.\n");
+    const run = startFlowRun("acme", "desk", [step({ agent: "looker" }), step({ agent: "blind", group: 2 })], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.status, "completed");
+    const [looker, blind] = seen;
+    assert.ok(looker.input.allowed.includes("Read"), `web grants Read: ${looker.input.allowed}`);
+    assert.ok(!blind.input.allowed.includes("Read"), "disallowedTools removes it again");
+    const sys = String(looker.input.systemPrompt);
+    assert.match(sys, /Read it first — Write refuses a file you have not Read/);
+    assert.match(sys, /Built-in tools are capitalised: Read, Write, Edit, Glob, Grep, Bash/);
+    assert.match(sys, /called by its full name, `mcp__foldrun_scripts__<name>`/);
   });
 });
