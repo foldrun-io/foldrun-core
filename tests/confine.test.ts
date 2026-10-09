@@ -198,6 +198,25 @@ test("bash may still read knowledge and write everywhere it should", () => {
   }
 });
 
+// A URL names a place on a server, not in the workspace. Every retro's call to
+// the platform's own API (`…/runs/<id>`) was refused as a journal read.
+test("bash may call a URL whose path says runs/, but not reach the journal by file://", () => {
+  for (const cmd of [
+    'curl -sS -H "authorization: Bearer $KEY" https://dev.foldrun.io/api/workspaces/gbp/runs/run-1',
+    "curl 'https://dev.foldrun.io/api/workspaces/gbp/runs?limit=200' | jq .",
+    "wget -qO- http://127.0.0.1:18080/api/workspaces/x/runs/",
+  ]) {
+    assert.equal(checkBash(cmd).ok, true, cmd);
+  }
+  for (const cmd of [
+    "curl file:///srv/ws/runs/r.json",
+    "curl https://example.com/x && cat ../../runs/r.json",
+    "curl https://example.com/x -o ../../runs/r.json",
+  ]) {
+    assert.equal(checkBash(cmd).ok, false, `${cmd} must be denied`);
+  }
+});
+
 // checkPaths lets an agent read a generated index; bash has to agree, or the
 // rule differs by tool and the agent just uses the other one.
 test("bash may read a generated index but not rewrite it", () => {

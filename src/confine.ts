@@ -426,6 +426,17 @@ const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
   },
 ];
 
+/**
+ * A web address, which names a place on a server rather than in the workspace.
+ *
+ * The protected-path patterns match a bare `runs/`, so an agent calling the
+ * platform's own API — `curl https://…/api/workspaces/x/runs/<id>` — was told
+ * it was reading the run journal. The weekly retros read their week through
+ * that API and were refused on 9 Oct 2026. Only http(s): a `file://` URL is a
+ * path, and stays checked.
+ */
+const WEB_URL = /\bhttps?:\/\/[^\s'"`)]+/gi;
+
 export function checkBash(command: string): ConfineVerdict {
   for (const re of BASH_ESCAPES) {
     if (re.test(command)) {
@@ -443,9 +454,10 @@ export function checkBash(command: string): ConfineVerdict {
   for (const segment of command.split(/[;|&]+|\n/)) {
     if (!segment.trim()) continue;
     const writes = WRITES_TO_A_FILE.test(segment);
+    const paths = segment.replace(WEB_URL, " ");
     for (const rule of PROTECTED_BASH) {
       if (rule.writeOnly && !writes) continue;
-      if (rule.re.test(segment)) return { ok: false, reason: `Bash was denied: ${rule.reason}` };
+      if (rule.re.test(paths)) return { ok: false, reason: `Bash was denied: ${rule.reason}` };
     }
   }
   return { ok: true };
