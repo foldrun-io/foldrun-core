@@ -11,6 +11,104 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [0.7.0] — 2026-10-09
+
+- A tool.md body reaches the model as the tool's guide ([218f41d](https://github.com/foldrun-io/foldrun-core/commit/218f41d))
+- Wait for the rotated Claude token on 'OAuth token revoked' too ([aab8eb8](https://github.com/foldrun-io/foldrun-core/commit/aab8eb8))
+- A re-run starts after a carried failed step instead of stopping at it ([63b11c3](https://github.com/foldrun-io/foldrun-core/commit/63b11c3))
+- Steps learn this install's API address: FOLDRUN_API_URL ([15cf8c5](https://github.com/foldrun-io/foldrun-core/commit/15cf8c5))
+- Platform retries for what is not the step's fault; fewer wasted turns ([b9e17f8](https://github.com/foldrun-io/foldrun-core/commit/b9e17f8))
+- Packages carry the script a single-file tool runs ([e80a94f](https://github.com/foldrun-io/foldrun-core/commit/e80a94f))
+- Export and import a workspace, flow or agent as a .zip (FOL-23) ([ef0be02](https://github.com/foldrun-io/foldrun-core/commit/ef0be02))
+
+### approvals
+
+- deliverEvent takes { by, step } — a signed-in person can release a wait: event step, named on the trace ([6d42265](https://github.com/foldrun-io/foldrun-core/commit/6d42265))
+
+### ci
+
+- the App token step is not fatal — an App not yet installed on a repository mints nothing, and the job uses the token secret instead ([c48740f](https://github.com/foldrun-io/foldrun-core/commit/c48740f))
+- cross-repo access through the foldrun-bot GitHub App when it is set up — a token per run, cut to the repositories and permission the job needs; the PAT secrets stay the fallback until then ([b3891b4](https://github.com/foldrun-io/foldrun-core/commit/b3891b4))
+
+### confine
+
+- a web URL whose path says runs/ is not the run journal ([0495b39](https://github.com/foldrun-io/foldrun-core/commit/0495b39))
+- leave a workspace/ path as written when the step's link opens it ([1ca98b1](https://github.com/foldrun-io/foldrun-core/commit/1ca98b1))
+
+### core
+
+- blank workspaces, and importing an agent from another workspace ([bd537e9](https://github.com/foldrun-io/foldrun-core/commit/bd537e9))
+
+### deploy
+
+- refuse an agent.md whose frontmatter has no opening --- ([e5f336a](https://github.com/foldrun-io/foldrun-core/commit/e5f336a))
+- a push to main asks the box to deploy (repository_dispatch to foldrun-infra) instead of waiting for its schedule ([776b982](https://github.com/foldrun-io/foldrun-core/commit/776b982))
+
+### deps
+
+- @modelcontextprotocol/sdk 1.32.1 (and sharp 0.35.5 in web) for new advisories ([169b604](https://github.com/foldrun-io/foldrun-core/commit/169b604))
+- proxy-addr 2.0.8 (and source-map-js 1.2.2 in web) for new advisories ([cbde053](https://github.com/foldrun-io/foldrun-core/commit/cbde053))
+
+### Export/import
+
+- fixes from the audit ([a2cb89f](https://github.com/foldrun-io/foldrun-core/commit/a2cb89f))
+
+### Import
+
+- identical text is not 'would replace'; a package with no AGENTS.md still makes a workspace ([ccf01b2](https://github.com/foldrun-io/foldrun-core/commit/ccf01b2))
+
+### judge
+
+- grades the step's conclusion as the reply, the work as context ([6b1810e](https://github.com/foldrun-io/foldrun-core/commit/6b1810e))
+
+### multi-tenant model keys
+
+- customers bring their own API key ([c4bc270](https://github.com/foldrun-io/foldrun-core/commit/c4bc270))
+
+### parseToolDef
+
+- a frontmatter guide: does not stand in for the body ([2545784](https://github.com/foldrun-io/foldrun-core/commit/2545784))
+
+### release
+
+- a publish npm refuses as already published is a published version — tag it ([a0e892a](https://github.com/foldrun-io/foldrun-core/commit/a0e892a))
+- tag without the laptop pre-push hook; actions pinned to commit SHAs ([14da9d3](https://github.com/foldrun-io/foldrun-core/commit/14da9d3))
+
+### release-pr
+
+- approve the release pull request's own ci run — it waits for approval, and the required checks are its jobs ([b3d1d4d](https://github.com/foldrun-io/foldrun-core/commit/b3d1d4d))
+
+### runner
+
+- a plain approval answers an ask: gate; step-exec: a failed tool call's reason reaches the trail ([c37e71f](https://github.com/foldrun-io/foldrun-core/commit/c37e71f))
+
+### runs
+
+- an on-fail rescuer inherits the step's verify ([a8eb1e9](https://github.com/foldrun-io/foldrun-core/commit/a8eb1e9))
+- the agent engine's home files stay in the sandbox ([39ec684](https://github.com/foldrun-io/foldrun-core/commit/39ec684))
+- a cut model connection runs the step again, unless it already acted outward ([50bbb51](https://github.com/foldrun-io/foldrun-core/commit/50bbb51))
+- a re-driven run keeps what its finished steps wrote to storage/ ([24c43aa](https://github.com/foldrun-io/foldrun-core/commit/24c43aa))
+
+### starter
+
+- CLAUDE.md template lists GET on agents/import ([7b9dc5e](https://github.com/foldrun-io/foldrun-core/commit/7b9dc5e))
+
+### step-exec
+
+- state permissionMode "default" — the SDK's auto-mode classifier was refusing granted tools ([a7931fe](https://github.com/foldrun-io/foldrun-core/commit/a7931fe))
+
+### Tool test
+
+- a script gets its granting agent's secrets, as in a run ([3436925](https://github.com/foldrun-io/foldrun-core/commit/3436925))
+
+### web
+
+- tell the agent up front when WebSearch/WebFetch answer search/fetch ([5733803](https://github.com/foldrun-io/foldrun-core/commit/5733803))
+
+### write-back
+
+- mergeAppends in one pass, not quadratic ([c85759b](https://github.com/foldrun-io/foldrun-core/commit/c85759b))
+
 ## [0.6.0] — 2026-10-03
 
 ### docker scripts
