@@ -896,8 +896,8 @@ export async function checkVerify(
      *  and `matches:` test this, because it is also what the run's headline
      *  is read from: a reporter that narrated between tool calls ("Now let
      *  me write the report…") failed `matches: ^BAD\b` with a correct
-     *  headline while the check read every turn joined. `judge:` still grades
-     *  the whole result. */
+     *  headline while the check read every turn joined. `judge:` grades this
+     *  too, as "the reply", with the whole result beside it as the work. */
     conclusion?: string | null;
     data?: unknown;
     /** The step's own model environment, for `judge:` — it grades on the
@@ -960,7 +960,13 @@ export async function checkVerify(
       return { ok, headline: ok ? "present and non-empty" : `${value} is missing or empty`, detail: "" };
     }
     case "judge": {
-      const verdict = await judgeReply(value, output, ctx.modelEnv ?? {}, ctx.signal);
+      // The reply is the final turn, as everywhere else; every turn goes
+      // beside it as the work, so a claim about what the step did can still
+      // be checked. Both as one <reply> failed `judge: the reply opens with
+      // GOOD` on a reply that did (fix-desk, run-muwevg72-7mza): the joined
+      // text opened with the narration before it.
+      const reply = ctx.conclusion?.trim() ? ctx.conclusion : output;
+      const verdict = await judgeReply(value, reply, output, ctx.modelEnv ?? {}, ctx.signal);
       const ok = /^\s*PASS\b/i.test(verdict);
       return { ok, headline: ok ? "PASS" : "FAIL", detail: verdict.slice(0, 300) };
     }
@@ -973,9 +979,24 @@ export async function checkVerify(
  * Same shape as the eval judge, and answered with one word first so the
  * verdict is a prefix test rather than a reading.
  */
+export function judgePrompt(rubric: string, reply: string, work: string): string {
+  const shown = reply.slice(0, 20_000);
+  const context = work.trim() && work.trim() !== reply.trim()
+    ? `Everything the step wrote while working, for context. "The reply" means only the reply block below, ` +
+      `never this:\n<work>\n${work.slice(-20_000)}\n</work>\n\n`
+    : "";
+  return (
+    `You are grading a reply against one requirement. Answer with PASS or FAIL as the ` +
+    `first word, then one sentence of reason.\n\nRequirement: ${rubric}\n\n` +
+    context +
+    `<reply>\n${shown}\n</reply>`
+  );
+}
+
 async function judgeReply(
   rubric: string,
-  output: string,
+  reply: string,
+  work: string,
   env: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<string> {
@@ -985,10 +1006,7 @@ async function judgeReply(
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   try {
     const q = query({
-      prompt:
-        `You are grading a reply against one requirement. Answer with PASS or FAIL as the ` +
-        `first word, then one sentence of reason.\n\nRequirement: ${rubric}\n\n` +
-        `<reply>\n${output.slice(0, 40_000)}\n</reply>`,
+      prompt: judgePrompt(rubric, reply, work),
       options: {
         model: "haiku",
         systemPrompt: "You grade text against a stated requirement. Be strict and literal.",

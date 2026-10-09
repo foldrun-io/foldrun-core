@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { joinEarlierGroups, startFlowRun, waitForRun } from "../src/runner.ts";
 import { readRun, type FlowStep } from "../src/store.ts";
-import { checkVerify } from "../src/step-exec.ts";
+import { checkVerify, judgePrompt } from "../src/step-exec.ts";
 import { suggestPath } from "../src/confine.ts";
 
 test("a step is handed every earlier group, oldest first", () => {
@@ -31,7 +31,7 @@ test("over the cap, the oldest groups go first and whole", () => {
   assert.equal(joinEarlierGroups(groups, 3, 10), "c".repeat(50), "the newest survives even when it alone is over the cap");
 });
 
-test("contains/matches read the conclusion; judge would read the whole result", async () => {
+test("contains/matches read the conclusion", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-verify-"));
   try {
     const result = "I'll start by reading the files.\nNow let me write the report.\nBAD — Melbourne is absent";
@@ -45,6 +45,18 @@ test("contains/matches read the conclusion; judge would read the whole result", 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The judge was handed every turn joined as "<reply>", so `judge: the reply
+// opens with GOOD` failed a step whose reply did (fix-desk, run-muwevg72-7mza).
+test("judge: grades the conclusion as the reply, with the work beside it", () => {
+  const work = "Total 10 matches in 3 files\nGOOD — applied 10 changes, commit f4be0d36";
+  const reply = "GOOD — applied 10 changes, commit f4be0d36";
+  const prompt = judgePrompt("the reply opens with GOOD", reply, work);
+  assert.match(prompt, /<reply>\nGOOD — applied/, "the reply block is the conclusion");
+  assert.match(prompt, /<work>\nTotal 10 matches/, "the narration is still there to check claims against");
+  assert.ok(prompt.indexOf("<work>") < prompt.indexOf("<reply>"), "the reply comes last, where the grader reads it as the answer");
+  assert.doesNotMatch(judgePrompt("x", reply, reply), /<work>/, "no work block when it is the reply");
 });
 
 test("the refusal names the path the agent probably meant", () => {
