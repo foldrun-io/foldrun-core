@@ -300,3 +300,36 @@ test("a script tool is tested with the granting agent's secrets, not a bystander
       assert.match(result.detail, /READ_KEY=set OTHER_KEY=unset/);
     },
   ));
+
+// Only `description:` reached the model, so agents invented what tool.md's
+// body documented (5 Oct 2026). The body now rides with the tool.
+test("a tool.md body reaches the model as the tool's guide; an inline program does not", async () => {
+  const { parseToolDef, toolGuide, TOOL_GUIDE_MAX } = await import("../src/store.ts");
+  const run = parseToolDef({ transport: "script", name: "peek", description: "peeks", run: "run.mjs" },
+    "peek", "Call it as:\n\n```\npeek --x 1\n```\n\nIt refuses a suburb in a slug.");
+  const g = (run!.spec as { guide?: string }).guide ?? "";
+  assert.match(g, /refuses a suburb/);
+  assert.match(g, /peek --x 1/, "a run: tool keeps its fenced examples");
+  const inline = parseToolDef({ transport: "script", name: "one", description: "one file" },
+    "one", "Use it for totals.\n\n```js\nconsole.log(1)\n```\n");
+  const ig = (inline!.spec as { guide?: string }).guide ?? "";
+  assert.match(ig, /Use it for totals/);
+  assert.doesNotMatch(ig, /console\.log/, "the program is code, not guidance");
+  assert.equal(toolGuide("   \n"), undefined);
+  assert.ok(toolGuide("x".repeat(TOOL_GUIDE_MAX + 50))!.endsWith("[the rest of tool.md is cut here]"));
+  const http = parseToolDef({ transport: "http", name: "self", base: "https://x.test/api", description: "runs" }, "self", "GET /runs?limit=200 lists runs.");
+  assert.match((http!.spec as { guide?: string }).guide ?? "", /limit=200/);
+});
+
+test("the guide is in the description the model gets for a script tool", async () => {
+  const { parseToolDef } = await import("../src/store.ts");
+  const { parseScripts, buildScriptTools } = await import("../src/script-tools.ts");
+  const def = parseToolDef({ transport: "script", name: "peek", description: "peeks", run: "run.mjs" }, "peek", "Never pass a suburb in a slug.");
+  const [spec] = parseScripts([def!.spec]);
+  assert.equal(spec.guide, "Never pass a suburb in a slug.");
+  const built = buildScriptTools(os.tmpdir(), [spec], {});
+  // The SDK server holds the tool; its description is what the model reads.
+  const inst = (built.server as unknown as { instance?: { _registeredTools?: Record<string, { description?: string }> } }).instance;
+  const desc = inst?._registeredTools?.peek?.description ?? JSON.stringify(built.server);
+  assert.match(desc, /Never pass a suburb in a slug/);
+});

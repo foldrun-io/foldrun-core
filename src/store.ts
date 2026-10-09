@@ -640,6 +640,27 @@ export function toolIsOutward(data: Record<string, unknown>): boolean {
   return data.outward === true;
 }
 
+/** How much of a tool.md body rides to the model with the tool. */
+export const TOOL_GUIDE_MAX = 6000;
+
+/**
+ * The prose under a tool.md's frontmatter: how to call it, what it refuses,
+ * what its output means. Only `description:` used to reach the model, so
+ * agents invented what the body documented (5 Oct 2026). The fenced program
+ * of a single-file tool is code, not guidance, and stays out.
+ */
+export function toolGuide(body: string | undefined, inlineProgram = false): string | undefined {
+  if (!body) return undefined;
+  let text = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  // Only a single-file tool's program is cut; in a `run:` tool every fenced
+  // block is an example of a call, which is exactly what the model needs.
+  const inline = inlineProgram ? fencedCodeBlock(text) : null;
+  if (inline) text = text.slice(0, inline.start) + text.slice(inline.end);
+  text = text.trim();
+  if (!text) return undefined;
+  return text.length > TOOL_GUIDE_MAX ? `${text.slice(0, TOOL_GUIDE_MAX)}\n\n[the rest of tool.md is cut here]` : text;
+}
+
 export function parseToolDef(data: Record<string, unknown>, fallbackName: string, body?: string): ToolDef | null {
   const name = typeof data.name === "string" ? data.name : fallbackName;
   // `transport:`, or a legacy `type: http|script|mcp` from before `type:` meant
@@ -677,13 +698,18 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
     // The program is a run: path, or the file's own fenced code block — the
     // single-file form, which is what lets a script tool read and edit like
     // every other markdown document.
-    if (typeof data.run === "string") return { kind: "script", name, spec: { ...data, name } };
+    if (typeof data.run === "string") {
+      const guide = toolGuide(body);
+      return { kind: "script", name, spec: { ...data, name, ...(guide ? { guide } : {}) } };
+    }
     const inline = body ? fencedCode(body) : null;
     if (!inline) return null;
-    return { kind: "script", name, spec: { ...data, name, code: inline.code, codeExt: inline.ext } };
+    const guide = toolGuide(body, true);
+    return { kind: "script", name, spec: { ...data, name, code: inline.code, codeExt: inline.ext, ...(guide ? { guide } : {}) } };
   }
   const [spec] = parseApis([{ ...data, name }]);
-  return spec ? { kind: "http", name, spec } : null;
+  const guide = toolGuide(body);
+  return spec ? { kind: "http", name, spec: guide ? { ...spec, guide } : spec } : null;
 }
 
 /**
@@ -879,6 +905,8 @@ export interface ApiSpec {
   name: string;
   base: string;
   description: string;
+  /** The tool.md body, for the model (see toolGuide). */
+  guide?: string;
   headers: Record<string, string>; // values may contain ${SECRET_NAME}
   query: Record<string, string>; // always-appended query params (e.g. api keys)
   methods: string[]; // allowed HTTP methods; default GET only

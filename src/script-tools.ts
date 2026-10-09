@@ -38,6 +38,8 @@ export interface ScriptSpec {
    *  script inline. Exactly one of the two is the program. */
   run: string;
   description: string;
+  /** The tool.md body, for the model: how to call it and what it means. */
+  guide?: string;
   args: Record<string, string>; // arg name → description
   interpreter?: string; // optional override, e.g. "python3", "bash"
   /** Seconds this script may run — for the crawl that legitimately takes
@@ -91,6 +93,7 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
       run: run ?? "",
       ...(code ? { code, codeExt: typeof e.codeExt === "string" ? e.codeExt : ".mjs" } : {}),
       description: typeof e.description === "string" ? e.description : "",
+      ...(typeof e.guide === "string" && e.guide.trim() ? { guide: e.guide } : {}),
       args,
       interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
       secrets: e.secrets === "proxied" ? "proxied" : undefined,
@@ -427,7 +430,8 @@ export function buildScriptTools(
     return tool(
       spec.name,
       `${spec.description || `Run ${spec.run}.`} Runs the workspace script ${spec.run}; returns its output. ` +
-        `Credentials it needs are already in its environment.`,
+        `Credentials it needs are already in its environment.` +
+        (spec.guide ? `\n\nHow to use it (from its tool.md):\n${spec.guide}` : ""),
       shape,
       async (args) => {
         const started = Date.now();

@@ -299,7 +299,8 @@ function genericTool(api: ApiSpec, env: Record<string, string>, bucket: TokenBuc
       `Allowed methods: ${api.methods.join(", ")}. Provide only the path after the base URL. ` +
       `Authentication is added automatically — never ask the user for credentials.` +
       typed +
-      rateSentence(api),
+      rateSentence(api) +
+      (api.guide ? `\n\nHow to use it (from its tool.md):\n${api.guide}` : ""),
     {
       method: z.enum(api.methods as [string, ...string[]]).describe("HTTP method"),
       path: z.string().describe("Path appended to the base URL, e.g. /customers/123/campaigns"),
@@ -405,6 +406,9 @@ export function buildApiTools(
           `. Credentials are injected for you.${rateLine}`,
         ...listed,
         ...more,
+        // Typed-only (an `operations:` allowlist) has no generic tool whose
+        // description could carry the guide, so it rides here.
+        ...(!withGeneric && api.guide ? [`  How to use it (from its tool.md):\n${api.guide}`] : []),
       );
     } else {
       promptLines.push(
