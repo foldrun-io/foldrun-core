@@ -277,7 +277,14 @@ export async function testTool(
       });
     }
 
-    const names = Array.isArray(def.spec.secrets) ? def.spec.secrets.map(String) : [];
+    // The tool's own secrets, and the calling agent's `secrets:` — a run
+    // hands a script both. Testing gbp_read (whose agent, not the tool,
+    // declares GBP_OAUTH) said "GBP_OAUTH is not set" while every run of the
+    // same call worked (9 Oct 2026). Only an agent that grants the tool: the
+    // agents[0] stand-in above is there for its depth, not its keys.
+    const own = Array.isArray(def.spec.secrets) ? def.spec.secrets.map(String) : [];
+    const granting = caller && caller.ownTools.includes(def.name) ? caller.secrets : [];
+    const names = [...new Set([...own, ...granting])];
     const { env: stored, missing } = resolveSecrets(tenant, names, workspace);
     const live = await liveSecrets(stored, { tenant, workspace });
     if ("error" in live) {

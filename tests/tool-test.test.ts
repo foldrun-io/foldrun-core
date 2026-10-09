@@ -278,3 +278,25 @@ for (const [refresh, expectOk] of [["good-refresh", true], ["revoked", false]] a
     }
   });
 }
+
+// A run hands a script its agent's `secrets:` as well as the tool's own.
+// gbp_read declares none itself; its agent declares GBP_OAUTH. The tester
+// said "GBP_OAUTH is not set" while every run of the same call worked.
+test("a script tool is tested with the granting agent's secrets, not a bystander's", () =>
+  withWorkspace(
+    {
+      "AGENTS.md": "---\nname: desk\n---\n",
+      "agents/aaa-bystander/agent.md": "---\nname: aaa-bystander\ndescription: no grant.\nsecrets: [OTHER_KEY]\n---\n\nwork.\n",
+      "agents/reader/agent.md": "---\nname: reader\ndescription: reads.\ntools: [peek]\nsecrets: [READ_KEY]\n---\n\nwork.\n",
+      "tools/peek/tool.md": "---\ntransport: script\nname: peek\ndescription: says which keys it can see.\nrun: run.mjs\n---\n",
+      "tools/peek/run.mjs": `console.log("READ_KEY=" + (process.env.READ_KEY ? "set" : "unset") + " OTHER_KEY=" + (process.env.OTHER_KEY ? "set" : "unset"));\n`,
+    },
+    async () => {
+      const { setSecret } = await import("../src/secrets.ts");
+      setSecret("acme", "READ_KEY", "r-value");
+      setSecret("acme", "OTHER_KEY", "o-value");
+      const result = await testTool("acme", "desk", workspaceTools("acme", "desk").peek);
+      assert.equal(result.ok, true, result.detail);
+      assert.match(result.detail, /READ_KEY=set OTHER_KEY=unset/);
+    },
+  ));
