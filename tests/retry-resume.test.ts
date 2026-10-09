@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createFlowRun, driveRun, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe, wroteToolCallAsText, TEXT_CALL_NOTE } from "../src/runner.ts";
+import { createFlowRun, driveRun, isAuthRefusal, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe, wroteToolCallAsText, TEXT_CALL_NOTE } from "../src/runner.ts";
 import { readRun, writeRun, type FlowStep } from "../src/store.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
@@ -293,4 +293,18 @@ test("a re-run starts after a carried failed step instead of stopping at it", as
     assert.equal(done.status, "completed");
     assert.equal(done.steps[0].status, "failed", "the carried step keeps the status it earned where it ran");
   });
+});
+
+// Every wording of "the credential was refused" must start the wait for the
+// rotated token; the 9 Oct one did not, and the step failed at a refresh.
+test("a refused credential is recognised in every wording Claude Code uses", () => {
+  for (const t of [
+    "Claude Code returned an error result: Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.",
+    "API Error: 401 {\"type\":\"error\"}",
+    "OAuth access token has been revoked",
+    "OAuth token has expired",
+  ]) assert.ok(isAuthRefusal(t), t);
+  for (const t of ["API Error: Connection refused (ECONNREFUSED)", "weekly limit reached", "API Error: 429"]) {
+    assert.equal(isAuthRefusal(t), false, t);
+  }
 });

@@ -3112,8 +3112,12 @@ function platformFallbackEnv(): Record<string, string> | null {
 const CREDENTIAL_ROTATION_WAIT_MS = 90_000;
 const CREDENTIAL_POLL_MS = 2_000;
 
-function isAuthRefusal(text: string): boolean {
-  return /API Error: 401|access token has (been revoked|expired)/i.test(text);
+/** A refusal of the credential itself, in any of the wordings Claude Code
+ *  has used. "Failed to authenticate: OAuth token revoked" (9 Oct 2026, a
+ *  step started one second before the 09:07:52Z refresh) matched none of the
+ *  older two, so the step failed instead of waiting for the new token. */
+export function isAuthRefusal(text: string): boolean {
+  return /API Error: 401|access token has (been revoked|expired)|OAuth token (has )?(been )?(revoked|expired)|Failed to authenticate/i.test(text);
 }
 
 /**
