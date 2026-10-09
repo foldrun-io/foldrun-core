@@ -695,6 +695,9 @@ export function parseToolDef(data: Record<string, unknown>, fallbackName: string
     };
   }
   if (kind === "script") {
+    // `guide` is the body's, never the frontmatter's: an author's `guide:`
+    // would otherwise ride to the model in place of the manual.
+    if ("guide" in data) { data = { ...data }; delete data.guide; }
     // The program is a run: path, or the file's own fenced code block — the
     // single-file form, which is what lets a script tool read and edit like
     // every other markdown document.
