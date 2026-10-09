@@ -3411,7 +3411,23 @@ export function runOutputPath(
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
   const p = runFilePath(tenant, workspace, runId);
-  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+  // EFS/NFS: writeRun() replaces this file by rename, so an open()+read()
+  // here can land on the just-unlinked inode and come back ESTALE (errno
+  // -116, surfaced by Node as "Unknown system error -116", syscall read).
+  // That isn't corruption — the next open() by path sees the committed new
+  // inode — so re-read a few times on ESTALE and rethrow anything else.
+  // (On dev-aws this surfaced as a CLI `--wait` call returning HTTP 500
+  // from waitForRun's poll while the run itself completed fine.)
+  const attempts = 5;
+  for (let i = 1; ; i++) {
+    try {
+      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if ((err.code === "ESTALE" || err.errno === -116) && i < attempts) continue;
+      throw e;
+    }
+  }
 }
 
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {
