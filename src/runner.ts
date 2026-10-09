@@ -4298,7 +4298,7 @@ function driveRunInner(
           save();
           if (freshGroup.every((s) => s.status !== "pending")) {
             // everything in this group was rejected
-            if (freshGroup.some((s) => s.status === "failed" && !s.optional)) {
+            if (freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom)) {
               run.status = "failed";
               break;
             }
@@ -4581,7 +4581,11 @@ function driveRunInner(
           save();
         }
 
-        const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional);
+        // A step carried into a re-run failed in the run it came from, not
+        // here: the person chose to start after it. Counting it stopped
+        // fix-desk's "re-run from the verifier" (run-muwfi5jn-4217) in under
+        // a second, before the one step it was asked to run.
+        const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom);
         if (requiredFailed) {
           run.status = "failed";
           break;

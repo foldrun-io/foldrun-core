@@ -273,3 +273,24 @@ test("web brings Read with it (disallowedTools still wins), and the prompt names
     assert.match(sys, /called by its full name, `mcp__foldrun_scripts__<name>`/);
   });
 });
+
+// fix-desk's publisher failed a verify on a correct reply; the person re-ran
+// from the verifier, and the carried failure stopped the re-run before it.
+test("a re-run starts after a carried failed step instead of stopping at it", async () => {
+  const calls: RunInContainerArgs[] = [];
+  const fake: Fake = async (args) => {
+    calls.push(args);
+    return { status: "completed", result: "GOOD — 5 of 5 live", costUsd: 0 };
+  };
+  await withFake(fake, false, async () => {
+    const run = createFlowRun("acme", "desk", [step(), step({ group: 2 })], "f", "queued");
+    run.steps[0] = { ...run.steps[0], status: "failed", result: "GOOD — published", carriedFrom: "run-old" };
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const done = readRun("acme", "desk", run.id)!;
+    assert.equal(calls.length, 1, "the step after the carried one ran");
+    assert.equal(done.steps[1].status, "completed");
+    assert.equal(done.status, "completed");
+    assert.equal(done.steps[0].status, "failed", "the carried step keeps the status it earned where it ran");
+  });
+});
