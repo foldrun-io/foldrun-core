@@ -369,6 +369,17 @@ export function buildApiTools(
       continue;
     }
 
+    // A base still holding `${FOLDRUN_API_URL}` was not filled: this install
+    // has no public address configured (a laptop, usually). Say so rather
+    // than hand the model a URL that cannot resolve.
+    if (/\$\{[A-Z_]+\}/.test(api.base)) {
+      promptLines.push(
+        `- **${api.name}** — unavailable this run: its base \`${api.base}\` names a variable this ` +
+          `install does not set (FOLDRUN_API_URL or FOLDRUN_PUBLIC_URL). Report it as blocked.`,
+      );
+      continue;
+    }
+
     const typedNames: string[] = [];
     for (const op of ops) {
       tools.push(typedTool(api, op, env, bucket, log));

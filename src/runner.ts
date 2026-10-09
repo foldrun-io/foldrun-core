@@ -14,7 +14,7 @@ import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
-import { hostSafeEnv } from "./host-env.ts";
+import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken } from "./model-credential.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -1281,6 +1281,9 @@ function agentContext(
     // one — the `websearch` library tool reads it. Not a secret; rides with
     // the clock so it reaches scripts, the sandbox and verify alike.
     ...(process.env.FOLDRUN_SEARCH_URL ? { FOLDRUN_SEARCH_URL: process.env.FOLDRUN_SEARCH_URL } : {}),
+    // Where this install's own API answers (host-env.ts platformApiUrl), so a
+    // script calls `$FOLDRUN_API_URL/workspaces/…` instead of naming a host.
+    ...(platformApiUrl() ? { FOLDRUN_API_URL: platformApiUrl()! } : {}),
     // Whose index our web search asks when the agent named a search API.
     // Unset means the account's own engine. The name, never the key.
     ...(searchChoice.shape === "direct" && searchChoice.provider

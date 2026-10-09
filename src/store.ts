@@ -20,6 +20,7 @@
 //
 // An account is a named directory (per OKF: tenancy is a hosting concern).
 
+import { expandPlatformVars } from "./host-env.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
@@ -1150,7 +1151,9 @@ export function parseApis(raw: unknown): ApiSpec[] {
     out.push({
       name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
       ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
-      base: trimSlashes(base),
+      // `${FOLDRUN_API_URL}` and `${FOLDRUN_PUBLIC_URL}` are the install's own
+      // addresses, filled here on the host so a desk never names one.
+      base: trimSlashes(expandPlatformVars(base)),
       description: typeof e.description === "string" ? e.description : "",
       headers: asRecordLocal(e.headers),
       query: asRecordLocal(e.query),

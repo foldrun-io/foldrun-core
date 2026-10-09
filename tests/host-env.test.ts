@@ -109,3 +109,32 @@ test("a verify: shell starts from the same base", () =>
       fs.rmSync(root, { recursive: true, force: true });
     }
   }));
+
+// A desk that reads its own run history wrote the host into its files, so the
+// same workspace would have called dev.foldrun.io after moving to production.
+test("a step learns its own API's address from the install, never from the desk", async () => {
+  const { platformApiUrl, expandPlatformVars } = await import("../src/host-env.ts");
+  const { parseApis } = await import("../src/store.ts");
+  assert.equal(platformApiUrl({ FOLDRUN_PUBLIC_URL: "https://app.foldrun.io/" }), "https://app.foldrun.io/api");
+  assert.equal(platformApiUrl({ FOLDRUN_API_URL: "https://api.foldrun.io/", FOLDRUN_PUBLIC_URL: "https://x" }), "https://api.foldrun.io");
+  assert.equal(platformApiUrl({}), undefined);
+  assert.equal(expandPlatformVars("${FOLDRUN_API_URL}/v1", { FOLDRUN_PUBLIC_URL: "https://app.foldrun.io" }), "https://app.foldrun.io/api/v1");
+  // Only the install's addresses: a secret named in a base stays unexpanded,
+  // because the base is printed in the prompt.
+  assert.equal(expandPlatformVars("https://${CRM_TOKEN}@x", { CRM_TOKEN: "s3cret" }), "https://${CRM_TOKEN}@x");
+  assert.equal(expandPlatformVars("${FOLDRUN_API_URL}", {}), "${FOLDRUN_API_URL}");
+  const before = process.env.FOLDRUN_PUBLIC_URL;
+  process.env.FOLDRUN_PUBLIC_URL = "https://app.foldrun.io";
+  try {
+    assert.equal(parseApis([{ name: "self", base: "${FOLDRUN_API_URL}/" }])[0].base, "https://app.foldrun.io/api");
+  } finally {
+    if (before === undefined) delete process.env.FOLDRUN_PUBLIC_URL; else process.env.FOLDRUN_PUBLIC_URL = before;
+  }
+});
+
+test("an apis: base left unfilled is reported unavailable, not handed to the model", async () => {
+  const { buildApiTools } = await import("../src/api-tools.ts");
+  const r = buildApiTools("t", [{ name: "self", base: "${FOLDRUN_API_URL}", description: "", headers: {}, query: {}, methods: ["GET"] }], "ws", { env: {}, missing: [] });
+  assert.equal(r.toolNames.length, 0);
+  assert.match(r.promptLines.join("\n"), /self\*\* — unavailable this run/);
+});
