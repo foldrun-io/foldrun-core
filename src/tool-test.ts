@@ -1,0 +1,549 @@
+// Call a tool once, now, and say what happened.
+//
+// Without this, the first time anyone finds out a tool is misconfigured is
+// mid-flow, inside an agent's turn, as a tool error the model paraphrases into
+// something vague. A wrong `base:`, a secret that was never set, a script path
+// with a typo — all of them look identical from the outside: the agent just
+// doesn't use the tool and says something plausible instead.
+//
+// So each transport gets a real exercise, not a syntax check:
+//
+//   http    an actual request to the declared base URL
+//   script  actually runs it, with the workspace's secrets in the environment
+//   mcp     actually starts the server and completes an MCP handshake
+//
+// Nothing here returns a secret value. Missing secrets are reported by *name*,
+// because "which one didn't you set" is the useful half and the value is not.
+
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+import { resolveSecrets, materializeSecrets } from "./secrets.ts";
+import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
+import { libraryDir } from "./library.ts";
+import { secretsUsedByApi } from "./api-tools.ts";
+import { attachOperations, prefetchOpenApi, type OperationSpec } from "./openapi.ts";
+import { commandFor, resolveRunPath } from "./script-tools.ts";
+import { parseRuntime, prepareRuntime } from "./runtime.ts";
+import { hostSafeEnv } from "./host-env.ts";
+import { linkWorkspace, workspaceLinkEnv } from "./confine.ts";
+import { fetchUntrusted, ResponseTooLarge, MAX_BYTES } from "./untrusted-fetch.ts";
+
+export interface ToolTestResult {
+  ok: boolean;
+  transport: "http" | "script" | "mcp";
+  /** One line, safe to show next to the button. */
+  summary: string;
+  /** The response body, stdout, or the server's tool list. Truncated. */
+  detail: string;
+  ms: number;
+  /** Names only — never values. */
+  missingSecrets: string[];
+}
+
+const MAX_DETAIL = 4000;
+const TIMEOUT_MS = 15_000;
+
+// A tool test runs tenant-authored code directly on the host — real runs are
+// containerized, this is not — so it must NOT inherit the dashboard's full
+// process.env. That env holds FOLDRUN_SECRET_KEY (the global install key that
+// signs every tenant's webhook tokens and git-push secrets), plus the S3/DB/
+// Stripe/GitHub credentials: handing them to a `console.log(process.env)`
+// script tool is cross-tenant compromise. The child instead starts from the
+// allowlisted host base (host-env.ts — the same one every in-process script,
+// verify shell and SDK Bash tool starts from) and gets the tool's own
+// declared secrets layered on top by the callers.
+const hostSafeBaseEnv = (): NodeJS.ProcessEnv => hostSafeEnv();
+
+const clip = (s: string) =>
+  s.length > MAX_DETAIL ? `${s.slice(0, MAX_DETAIL)}\n… truncated` : s;
+
+/** `${NAME}` → value, for headers and query. Same rule the runtime uses. */
+const substitute = (v: string, env: Record<string, string>) =>
+  v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k) => env[k] ?? "");
+
+/**
+ * The secrets as a run would hand them over: an oauth2 or service-account
+ * secret swapped for a live access token. Without this the tester passed the
+ * stored `@oauth2 {…}` recipe itself, so every tool behind Google OAuth failed
+ * its Test button while working in every run (gbp-desk review_candidates,
+ * 2026-09-28). A refresh that fails is the tester's answer, not a throw.
+ */
+async function liveSecrets(
+  env: Record<string, string>,
+  ctx: { tenant: string; workspace?: string },
+): Promise<{ env: Record<string, string> } | { error: string }> {
+  try {
+    return { env: await materializeSecrets(env, ctx) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Does a concrete path fit an operation's template (`/contacts/{id}`)? */
+function matchesTemplate(op: OperationSpec, concrete: string): boolean {
+  const re = new RegExp(
+    "^" + op.path.split(/\{[^/}]+\}/).map((part) => part.replace(/[.*+?^$()|[\]\\]/g, "\\$&")).join("[^/]+") + "$",
+  );
+  return re.test(concrete);
+}
+
+export interface ToolTestInput {
+  /** http: the path to try, appended to `base:`. */
+  path?: string;
+  /** script: values for the tool's declared `args:`. */
+  args?: Record<string, string>;
+}
+
+export async function testTool(
+  tenant: string,
+  workspace: string,
+  def: ToolDef,
+  input: ToolTestInput = {},
+): Promise<ToolTestResult> {
+  const probePath = input.path ?? "";
+  const started = Date.now();
+  const done = (r: Omit<ToolTestResult, "ms">): ToolTestResult => ({ ...r, ms: Date.now() - started });
+
+  if (def.kind === "http") {
+    const api = def.spec;
+    const needed = secretsUsedByApi(api);
+    const { env: stored, missing } = resolveSecrets(tenant, needed, workspace);
+    const live = await liveSecrets(stored, { tenant, workspace });
+    if ("error" in live) {
+      return done({ ok: false, transport: "http", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+    }
+    const env = live.env;
+
+    try {
+      let rel = probePath.startsWith("/") || probePath === "" ? probePath : `/${probePath}`;
+      let method = api.methods.includes("GET") ? "GET" : api.methods[0];
+
+      // An `operations:` allowlist binds the tester exactly as it binds a run:
+      // the probe may only be a GET to one of the listed operations, and an
+      // allowlist that resolves nothing is a failure, as it is in a run. A
+      // tester that reached the whole API would be the one door the allowlist
+      // left open, and would report "working" for a tool a run cannot use.
+      if (api.operations?.length) {
+        const fetched = await prefetchOpenApi(tenant, api.openapi ? [api.openapi] : []);
+        const { specs, warnings } = attachOperations([api], tenant, workspaceDir(tenant, workspace));
+        const ops = specs[0].resolvedOperations ?? [];
+        if (!ops.length) {
+          return done({
+            ok: false, transport: "http", missingSecrets: missing,
+            summary: "its operations: allowlist resolved no operations, so a run gets no tools from it",
+            detail: [...fetched, ...warnings].join("\n"),
+          });
+        }
+        const listed = ops.map((o) => `${o.method} ${o.path}`).join("\n");
+        const gets = ops.filter((o) => o.method === "GET");
+        const pathOnly = rel.split("?")[0];
+        if (pathOnly === "") {
+          const plain = gets.find((o) => !o.path.includes("{"));
+          if (!plain) {
+            return done({
+              ok: false, transport: "http", missingSecrets: missing,
+              summary: gets.length
+                ? "every GET operation takes a parameter; give a path, like " + gets[0].path
+                : "the allowlist has no GET operation, and the tester only sends GET: it will not probe a write",
+              detail: `operations:\n${listed}`,
+            });
+          }
+          rel = plain.path;
+        } else if (!gets.some((o) => matchesTemplate(o, pathOnly))) {
+          return done({
+            ok: false, transport: "http", missingSecrets: missing,
+            summary: "that path is not one of the tool's GET operations",
+            detail: `path: ${pathOnly}\noperations:\n${listed}`,
+          });
+        }
+        method = "GET";
+      }
+
+      const url = new URL(api.base + rel);
+      // Same confinement the agent gets: a probe can't reach another host.
+      if (!url.href.startsWith(api.base)) {
+        return done({
+          ok: false, transport: "http", missingSecrets: missing,
+          summary: "that path escapes the declared base URL",
+          detail: `base: ${api.base}\npath: ${probePath}`,
+        });
+      }
+      for (const [k, v] of Object.entries(api.query)) url.searchParams.set(k, substitute(v, env));
+
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(api.headers)) headers[k] = substitute(v, env);
+
+      // A URL the tenant chose, fetched from the web tier: through the
+      // platform's guard (no private or cluster address, each redirect hop
+      // checked), and the secrets in the headers go only to the origin
+      // they were written for.
+      const res = await fetchUntrusted(
+        url.href,
+        { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) },
+        { sameOrigin: true },
+      );
+      // The status is the test; a body past the limit is said, not shown.
+      let body: string;
+      try {
+        body = await res.text();
+      } catch (err) {
+        if (!(err instanceof ResponseTooLarge)) throw err;
+        body = `(the answer was larger than ${MAX_BYTES / (1024 * 1024)} MiB — not shown)`;
+      }
+
+      // An unset secret means the tool cannot authenticate, so it is not
+      // working — whatever a permissive endpoint chose to return. Reporting
+      // ok on a request that went out with no credentials is how you ship a
+      // tool that 401s the first time it meets the real API.
+      return done({
+        ok: res.ok && missing.length === 0,
+        transport: "http",
+        missingSecrets: missing,
+        summary:
+          missing.length > 0
+            ? `${method} ${url.pathname} → ${res.status}, but sent without ${missing.join(", ")}`
+            : `${method} ${url.pathname} → ${res.status} ${res.statusText}`,
+        detail: clip(body),
+      });
+    } catch (err) {
+      return done({
+        ok: false, transport: "http", missingSecrets: missing,
+        summary: err instanceof Error ? err.message : String(err),
+        // A missing secret usually surfaces as a 401 rather than an error, so
+        // say it here too — it is the likeliest cause of both.
+        detail: missing.length ? `unset secrets: ${missing.join(", ")}` : "",
+      });
+    }
+  }
+
+  if (def.kind === "script") {
+    let run = String(def.spec.run ?? "");
+    // A run's working directory is the calling AGENT's folder, not the
+    // workspace root — and scripts rely on that. `path.resolve(cwd, "..",
+    // "..", "state", f)` is the ordinary way to reach workspace state, and
+    // testing one directory too high sent it to <data>/<tenant>/state: a
+    // real file read from the wrong place, reported as an empty result
+    // rather than an error. The tester now stands where a run stands.
+    //
+    // Which agent: one that granted this tool, so the test is the call that
+    // would actually happen; any agent otherwise, since only the DEPTH
+    // changes what a relative path resolves to.
+    const dir = workspaceDir(tenant, workspace);
+    const agents = listAgents(tenant, workspace);
+    const caller =
+      agents.find((a) => a.ownTools.includes(def.name)) ?? agents[0] ?? null;
+    // With no agents at all there is nothing at that depth to stand in; the
+    // workspace root is wrong but it exists, and the note says so rather
+    // than failing a test over a workspace that cannot run anything yet.
+    const cwd = caller ? path.join(dir, "agents", caller.name) : dir;
+
+    // A single-file tool carries its program in a fenced block rather than
+    // in a file: `run:` is empty and `code:` holds it. The RUNTIME writes it
+    // out at call time (script-tools.ts) and has always worked; the tester
+    // only ever looked for a file, so the Test button failed for every one
+    // of them while the same tool ran fine in a flow — which is the worst
+    // possible way round, since that button is where a developer goes to
+    // find out whether their work is broken.
+    //
+    // Materialised the same way and in the same place a call would, so the
+    // test runs the identical program from the identical directory.
+    const inlineCode = typeof def.spec.code === "string" ? def.spec.code : "";
+    const inline = !run && !!inlineCode;
+    if (inline && !caller) {
+      // Nowhere to stand: the file would land at the workspace root, which
+      // is not where a run puts it and not somewhere a deploy diff should
+      // find it. Say what is missing instead.
+      return done({
+        ok: false, transport: "script", missingSecrets: [],
+        summary: "no agent to test it from",
+        detail: "This tool carries its code inline and is materialised inside the calling agent's folder. Grant it to an agent (tools:) and test again.",
+      });
+    }
+    if (inline) {
+      const ext = typeof def.spec.codeExt === "string" ? def.spec.codeExt : ".mjs";
+      const codeDir = path.join(cwd, ".tool-code");
+      try {
+        fs.mkdirSync(codeDir, { recursive: true });
+        fs.writeFileSync(path.join(codeDir, `${def.name}${ext}`), inlineCode, { mode: 0o755 });
+        run = `.tool-code/${def.name}${ext}`;
+      } catch (err) {
+        return done({
+          ok: false, transport: "script", missingSecrets: [],
+          summary: "its inline code could not be written",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // A materialised file was just written into cwd, so it resolves from
+    // there. A declared `run:` keeps resolving exactly as it always has.
+    const file = resolveRunPath(inline ? cwd : path.join(dir, "agents", "_probe"), run, libraryDir(tenant, "scripts"));
+
+    if (!fs.existsSync(file)) {
+      return done({
+        ok: false, transport: "script", missingSecrets: [],
+        summary: `no such script: ${run}`,
+        detail: `looked for ${file}\n\nThis is the commonest way to get a tool that silently never loads.`,
+      });
+    }
+
+    // The tool's own secrets, and the calling agent's `secrets:` — a run
+    // hands a script both. Testing gbp_read (whose agent, not the tool,
+    // declares GBP_OAUTH) said "GBP_OAUTH is not set" while every run of the
+    // same call worked (9 Oct 2026). Only an agent that grants the tool: the
+    // agents[0] stand-in above is there for its depth, not its keys.
+    const own = Array.isArray(def.spec.secrets) ? def.spec.secrets.map(String) : [];
+    const granting = caller && caller.ownTools.includes(def.name) ? caller.secrets : [];
+    const names = [...new Set([...own, ...granting])];
+    const { env: stored, missing } = resolveSecrets(tenant, names, workspace);
+    const live = await liveSecrets(stored, { tenant, workspace });
+    if ("error" in live) {
+      return done({ ok: false, transport: "script", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+    }
+    const env = live.env;
+    // The runtime's own choice of interpreter, not a second table beside it.
+    const interpreter =
+      typeof def.spec.interpreter === "string" ? def.spec.interpreter : undefined;
+
+    // Declared args become long flags, exactly as the runtime passes them.
+    const declared = def.spec.args && typeof def.spec.args === "object"
+      ? Object.keys(def.spec.args as Record<string, unknown>)
+      : [];
+    const flags: string[] = [];
+    for (const [k, v] of Object.entries(input.args ?? {})) {
+      if (v !== "" && /^[a-z][a-z0-9_]*$/i.test(k)) flags.push(`--${k}`, v);
+    }
+
+    // The tool's own dependencies, built (or reused) the way a run builds
+    // them. Without this a tool declaring `runtime: { packages: [requests] }`
+    // ran fine in a flow and failed the Test button with "no module named
+    // requests" — the one place a developer goes to find out if it works.
+    const toolRuntime = prepareRuntime(tenant, parseRuntime(def.spec.runtime));
+    if (toolRuntime.error) {
+      return done({
+        ok: false, transport: "script", missingSecrets: missing,
+        summary: "its runtime could not be built",
+        detail: [toolRuntime.error, ...toolRuntime.log].join("\n"),
+      });
+    }
+    const { cmd, args } = commandFor(
+      { interpreter, run: run, name: "", description: "", args: {} },
+      file,
+      toolRuntime.interpreters,
+    );
+    // The `workspace` link a step holds, held for the test too — a tool
+    // whose code says `workspace/state/x` found nothing here while the same
+    // call worked in a flow. Only from an agent's folder: at the workspace
+    // root there is no depth for it to stand at (the note below says so).
+    const link = caller ? linkWorkspace(cwd, dir) : null;
+    let ran: Awaited<ReturnType<typeof runOnce>>;
+    try {
+      ran = await runOnce(cmd, [...args, ...flags], cwd, workspaceLinkEnv({
+        ...hostSafeBaseEnv(),
+        ...toolRuntime.env,
+        ...env,
+      }, cwd));
+    } finally {
+      link?.release();
+      // A private build (a concurrent one was wedged) is this test's alone.
+      toolRuntime.dispose?.();
+    }
+    const { code, out } = ran;
+
+    // A script that needs arguments and got none has not failed — it has not
+    // been tested. Saying "exited 2" would send someone looking for a bug.
+    const untested = code !== 0 && declared.length > 0 && flags.length === 0;
+
+    return done({
+      ok: code === 0,
+      transport: "script",
+      missingSecrets: missing,
+      summary: untested
+        ? `needs ${declared.map((a) => `--${a}`).join(", ")} — fill them in and test again`
+        : code === 0 ? "exited 0" : `exited ${code ?? "with an error"}`,
+      detail: clip(
+        (caller
+          ? `ran from agents/${caller.name}/, where a run runs\n\n`
+          : `ran from the workspace root — there is no agent to stand in for, so a script that reaches workspace/ or ../../ will not find the workspace there\n\n`) +
+          (out || "(no output)"),
+      ),
+    });
+  }
+
+  // ---- mcp: start the server and complete a handshake ----
+  const spec = def.spec;
+  if (spec.url) {
+    // A remote server: the honest check we can make without a full client is
+    // that the endpoint answers.
+    try {
+      // Through the platform's guard, as the http probe is; only the status is read.
+      const res = await fetchUntrusted(spec.url, { signal: AbortSignal.timeout(TIMEOUT_MS) }, { sameOrigin: true });
+      await res.body?.cancel().catch(() => {});
+      return done({
+        ok: res.ok,
+        transport: "mcp",
+        missingSecrets: [],
+        summary: `${spec.url} → ${res.status} ${res.statusText}`,
+        detail: "Endpoint reachable. This does not verify the MCP handshake — only a local (command) server is started and spoken to.",
+      });
+    } catch (err) {
+      return done({
+        ok: false, transport: "mcp", missingSecrets: [],
+        summary: err instanceof Error ? err.message : String(err),
+        detail: "",
+      });
+    }
+  }
+
+  if (!spec.command) {
+    return done({
+      ok: false, transport: "mcp", missingSecrets: [],
+      summary: "no command: or url: — this tool cannot load",
+      detail: "",
+    });
+  }
+
+  const named = Object.entries(spec.env ?? {})
+    .map(([, v]) => String(v).match(/^\$\{([A-Z0-9_]+)\}$/)?.[1])
+    .filter((n): n is string => Boolean(n));
+  const { env: stored, missing } = resolveSecrets(tenant, named, workspace);
+  const live = await liveSecrets(stored, { tenant, workspace });
+  if ("error" in live) {
+    return done({ ok: false, transport: "mcp", missingSecrets: missing, summary: "a secret could not be refreshed", detail: live.error });
+  }
+  const env = live.env;
+  const childEnv: NodeJS.ProcessEnv = { ...hostSafeBaseEnv() };
+  for (const [k, v] of Object.entries(spec.env ?? {})) childEnv[k] = substitute(String(v), env);
+
+  const handshake = await mcpHandshake(spec.command, spec.args ?? [], childEnv);
+  return done({
+    ok: handshake.ok,
+    transport: "mcp",
+    missingSecrets: missing,
+    summary: handshake.summary,
+    detail: clip(handshake.detail),
+  });
+}
+
+/** Run a command to completion, capturing both streams together. */
+function runOnce(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve) => {
+    let out = "";
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      resolve({ code: null, out: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+    child.stdout?.on("data", (d) => (out += d));
+    child.stderr?.on("data", (d) => (out += d));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ code: null, out: `${out}${err.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, out });
+    });
+  });
+}
+
+/**
+ * Start a stdio MCP server and complete `initialize` + `tools/list`.
+ *
+ * This is the whole point of testing an MCP tool: "the binary exists" tells you
+ * nothing, and the failure people actually hit is a server that starts and then
+ * exposes nothing useful.
+ */
+function mcpHandshake(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; summary: string; detail: string }> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      resolve({ ok: false, summary: `could not start ${command}`, detail: String(err), });
+      return;
+    }
+
+    let buf = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (r: { ok: boolean; summary: string; detail: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      resolve(r);
+    };
+
+    const timer = setTimeout(
+      () => finish({
+        ok: false,
+        summary: "the server did not answer in time",
+        detail: stderr || "No response to initialize within 15s.",
+      }),
+      TIMEOUT_MS,
+    );
+
+    const send = (msg: unknown) => child.stdin?.write(`${JSON.stringify(msg)}\n`);
+
+    child.on("error", (err) =>
+      finish({ ok: false, summary: `could not start ${command}`, detail: err.message }));
+    child.stderr?.on("data", (d) => (stderr += d));
+
+    child.stdout?.on("data", (d) => {
+      buf += d;
+      // One JSON-RPC message per line.
+      for (const line of buf.split("\n").slice(0, -1)) {
+        if (!line.trim()) continue;
+        let msg: { id?: number; result?: { tools?: { name: string }[] }; error?: { message?: string } };
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.error) {
+          finish({ ok: false, summary: msg.error.message ?? "the server returned an error", detail: line });
+          return;
+        }
+        if (msg.id === 1) {
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+        } else if (msg.id === 2) {
+          const tools = msg.result?.tools ?? [];
+          finish({
+            ok: true,
+            summary: `connected — ${tools.length} tool${tools.length === 1 ? "" : "s"}`,
+            detail: tools.map((t) => `• ${t.name}`).join("\n") || "The server exposes no tools.",
+          });
+          return;
+        }
+      }
+      buf = buf.slice(buf.lastIndexOf("\n") + 1);
+    });
+
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "foldrun-tool-test", version: "0.1.0" },
+      },
+    });
+  });
+}

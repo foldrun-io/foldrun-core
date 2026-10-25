@@ -1,0 +1,1136 @@
+// The runtime's own translator: Anthropic Messages in, Chat Completions or
+// Responses out.
+//
+// The Agent SDK speaks one wire format. Most of the providers people bring
+// keys for speak another — OpenAI's Chat Completions, which OpenAI, Gemini,
+// xAI, Groq, Mistral, Hugging Face, Cloudflare and every local runtime all
+// implement. Rather than teach the runtime a second format, or install a
+// gateway beside it, this listens on localhost inside the run sandbox,
+// presents an Anthropic endpoint to the SDK, and rewrites each request and
+// each streamed reply between the two shapes. It exists only for the
+// duration of a step, holds only that step's key, and dies with it.
+//
+// `format: responses` is the third shape: OpenAI's newer Responses API,
+// which OpenAI recommends for new work and almost nobody else implements.
+// Same translator, same server, a second pair of mappings — chosen per
+// provider block, never guessed. It carries one thing Chat Completions
+// cannot: a document block crosses as an input_file, so a PDF an agent
+// reads reaches the model instead of being dropped.
+//
+// It is deliberately small. It translates what the SDK actually sends — a
+// system prompt, text and image blocks, tools with JSON schemas, tool calls
+// and their results, streaming — and drops what a Chat-Completions endpoint
+// has no word for (cache_control, top_k, server-side tools, thinking on
+// endpoints that lack reasoning_effort). Anything dropped is said once in
+// the run trace. Those endpoints cache prompt prefixes on their own side;
+// the cached share they report comes back as cache_read_input_tokens, so a
+// step's record says how much of its context was re-read. The translation is pure functions over JSON so the tests
+// can drive every mapping without a network; the server around them is a
+// few dozen lines.
+
+import http from "node:http";
+import crypto from "node:crypto";
+import { PROTECTED_PARAMS } from "./providers.ts";
+import { viaEgress } from "./egress.ts";
+import { fetchUntrusted } from "./untrusted-fetch.ts";
+import { trimSlashes } from "./paths.ts";
+import { captureRefusalHeaders, isRefusalStatus, refusalLine } from "./refusal.ts";
+
+// ------------------------------------------------------------------ shapes
+
+type Json = Record<string, unknown>;
+
+/**
+ * An OpenAI-shaped usage object as Anthropic's: fresh input, cached input,
+ * output. Both OpenAI shapes count the cached part INSIDE the prompt total
+ * (Chat's prompt_tokens_details.cached_tokens, Responses'
+ * input_tokens_details.cached_tokens; DeepSeek says prompt_cache_hit_tokens),
+ * so it is taken out of input here or the step would count it twice.
+ */
+export function anthropicUsage(u: Json | undefined, wire: TranslatorWire): { input: number; cached: number; output: number } {
+  if (!u) return { input: 0, cached: 0, output: 0 };
+  const total = Number((wire === "chat" ? u.prompt_tokens : u.input_tokens) ?? 0);
+  const details = (wire === "chat" ? u.prompt_tokens_details : u.input_tokens_details) as Json | undefined;
+  const raw = Number(details?.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0);
+  const cached = Number.isFinite(raw) ? Math.max(0, Math.min(raw, total)) : 0;
+  return {
+    input: total - cached,
+    cached,
+    output: Number((wire === "chat" ? u.completion_tokens : u.output_tokens) ?? 0),
+  };
+}
+
+function usageBlock(u: { input: number; cached: number; output: number } | null): Json {
+  return {
+    input_tokens: u?.input ?? 0,
+    output_tokens: u?.output ?? 0,
+    ...(u && u.cached > 0 ? { cache_read_input_tokens: u.cached } : {}),
+  };
+}
+
+export type TranslatorWire = "chat" | "responses";
+
+export interface TranslatorSpec {
+  /** The provider's base, e.g. https://api.openai.com/v1 — `/chat/completions`
+   *  or `/responses` is appended, by `wire`. */
+  upstreamBase: string;
+  /** Which OpenAI shape the endpoint speaks. Default chat. */
+  wire?: TranslatorWire;
+  /** Already resolved. Sent as `Authorization: Bearer`. */
+  upstreamKey: string;
+  /** Extra headers the provider wants, already resolved. */
+  headers?: Record<string, string>;
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
+  /** Map Anthropic `thinking:` to OpenAI `reasoning_effort`; off drops it. */
+  reasoningEffort?: boolean;
+  /** The provider block's `params:` — merged into the outgoing body after
+   *  the translation, so a file can set what this format does not model. */
+  params?: Record<string, unknown>;
+  /** `prompt_cache_key` for an endpoint that routes its prompt cache by
+   *  one (OpenAI, Mistral): the same key for every request that shares a
+   *  prefix — one per agent (prompt-layers.ts). Unset where the preset
+   *  does not say the parameter is understood. */
+  cacheKey?: string;
+  /** How the endpoint is named in the trace. */
+  label?: string;
+  /** The step's egress lease, when the sandbox must not hold the key: the
+   *  upstream request goes through it, and `upstreamKey` is a placeholder
+   *  the proxy fills. */
+  egress?: string;
+  /** The step's own zone, from the clock cascade — what a reset time in a
+   *  refusal is told in. UTC when nothing said otherwise. */
+  timezone?: string;
+
+}
+
+export interface RunningTranslator {
+  port: number;
+  /** The key the SDK must present — random per translator, so nothing but
+   *  this step's SDK process can use the localhost door. */
+  key: string;
+  baseUrl: string;
+  /** The env that points the SDK here. Overrides whatever provider env the
+   *  caller assembled: the translator is now the endpoint. */
+  env: Record<string, string>;
+  /** One line per request, drained by the caller into the run trace. */
+  drainLog: () => string[];
+  close: () => Promise<void>;
+}
+
+interface Dropped {
+  add(what: string): void;
+  lines(): string[];
+}
+
+function dropped(): Dropped {
+  const seen = new Set<string>();
+  return {
+    add: (w) => void seen.add(w),
+    lines: () => [...seen].map((w) => `translator: dropped ${w} — the endpoint has no equivalent`),
+  };
+}
+
+// ------------------------------------------------------- request mapping
+
+/**
+ * The SDK's `metadata.user_id` is a long composite string; OpenAI's own
+ * endpoint caps `safety_identifier` (Responses) at 64 characters and
+ * rejects the request outright — a gateway in front of it did not, which is
+ * how this shipped untested. A stable digest keeps the identity property
+ * (same user, same id) inside the limit. Applied to Chat Completions' `user`
+ * too, for the same reason.
+ */
+function stableId(id: string): string {
+  return id.length <= 64 ? id : crypto.createHash("sha256").update(id).digest("hex").slice(0, 64);
+}
+
+/**
+ * Whether a model is one OpenAI's own endpoint refuses a reasoning-effort
+ * parameter for ("Unsupported parameter: 'reasoning.effort'" on gpt-4o-mini).
+ * A gateway in front of it ignored the field, which is how the preset's
+ * reasoningEffort shipped untested against the origin. The families that do
+ * not reason are the ones named — anything else (o-series, gpt-5, grok,
+ * gemini, deepseek-r, qwen thinking) keeps getting the knob, because on a
+ * gateway the id alone cannot say and an ignored field costs nothing.
+ */
+export function modelRejectsReasoning(model: string): boolean {
+  const id = String(model).split("/").pop()?.toLowerCase() ?? "";
+  return /^(gpt-3|gpt-4|chatgpt|gpt-5-chat|davinci|babbage)/.test(id);
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && typeof b === "object" && (b as Json).type === "text")
+    .map((b) => String((b as Json).text ?? ""))
+    .join("\n");
+}
+
+function imagePart(block: Json): Json | null {
+  const src = block.source as Json | undefined;
+  if (!src) return null;
+  if (src.type === "base64" && typeof src.data === "string") {
+    return { type: "image_url", image_url: { url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}` } };
+  }
+  if (src.type === "url" && typeof src.url === "string") return { type: "image_url", image_url: { url: src.url } };
+  return null;
+}
+
+/**
+ * An Anthropic Messages request as a Chat Completions request. Pure.
+ *
+ * Message order matters to the other side: a tool result must directly
+ * follow the assistant turn that called the tool. Anthropic puts results
+ * inside the next user message, so those blocks become `tool` messages
+ * first and whatever else the user said follows as a user message.
+ */
+export function toChatCompletions(
+  req: Json,
+  opts: {
+    maxTokensParam?: "max_tokens" | "max_completion_tokens";
+    reasoningEffort?: boolean;
+    stream: boolean;
+    cacheKey?: string;
+    /** Merged in last, so the file wins over the translation. */
+    params?: Record<string, unknown>;
+  },
+  drop: Dropped = dropped(),
+): Json {
+  const out: Json = { model: req.model, stream: opts.stream };
+  if (opts.cacheKey) out.prompt_cache_key = opts.cacheKey;
+  const messages: Json[] = [];
+
+  const system = textOf(req.system);
+  if (system) messages.push({ role: "system", content: system });
+
+  for (const m of (Array.isArray(req.messages) ? req.messages : []) as Json[]) {
+    const content = m.content;
+    if (m.role === "assistant") {
+      const text = textOf(content);
+      const toolCalls: Json[] = [];
+      for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+        if (b.type === "tool_use") {
+          toolCalls.push({
+            id: String(b.id),
+            type: "function",
+            function: { name: String(b.name), arguments: JSON.stringify(b.input ?? {}) },
+          });
+        } else if (b.type === "thinking" || b.type === "redacted_thinking") {
+          drop.add("thinking blocks in the transcript");
+        }
+      }
+      const msg: Json = { role: "assistant" };
+      if (text) msg.content = text;
+      else if (!toolCalls.length) msg.content = "";
+      if (toolCalls.length) msg.tool_calls = toolCalls;
+      messages.push(msg);
+      continue;
+    }
+    // user
+    if (typeof content === "string") {
+      messages.push({ role: "user", content });
+      continue;
+    }
+    const parts: Json[] = [];
+    for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+      if (b.type === "tool_result") {
+        const inner = b.content;
+        const text = typeof inner === "string" ? inner : textOf(inner);
+        messages.push({
+          role: "tool",
+          tool_call_id: String(b.tool_use_id),
+          content: text || (b.is_error ? "error" : "ok"),
+        });
+        if (Array.isArray(inner) && (inner as Json[]).some((x) => x.type === "image")) drop.add("images inside tool results");
+      } else if (b.type === "text") {
+        parts.push({ type: "text", text: String(b.text ?? "") });
+      } else if (b.type === "image") {
+        const p = imagePart(b);
+        if (p) parts.push(p);
+      } else if (b.type === "document") {
+        drop.add("document blocks");
+      }
+    }
+    if (parts.length) {
+      // A single text part reads as a plain string on every endpoint;
+      // a list is only needed when an image is among them.
+      messages.push({
+        role: "user",
+        content: parts.length === 1 && parts[0].type === "text" ? parts[0].text : parts,
+      });
+    }
+  }
+  out.messages = messages;
+
+  const tools: Json[] = [];
+  for (const t of (Array.isArray(req.tools) ? req.tools : []) as Json[]) {
+    if (t.type && t.type !== "custom") {
+      drop.add(`server-side tool ${String(t.type)}`);
+      continue;
+    }
+    tools.push({
+      type: "function",
+      function: {
+        name: String(t.name),
+        ...(t.description ? { description: String(t.description) } : {}),
+        parameters: t.input_schema ?? { type: "object", properties: {} },
+      },
+    });
+  }
+  if (tools.length) out.tools = tools;
+
+  const tc = req.tool_choice as Json | undefined;
+  if (tc && tools.length) {
+    if (tc.type === "auto") out.tool_choice = "auto";
+    else if (tc.type === "any") out.tool_choice = "required";
+    else if (tc.type === "none") out.tool_choice = "none";
+    else if (tc.type === "tool" && tc.name) out.tool_choice = { type: "function", function: { name: String(tc.name) } };
+    if (tc.disable_parallel_tool_use === true) out.parallel_tool_calls = false;
+  }
+
+  if (typeof req.max_tokens === "number") out[opts.maxTokensParam ?? "max_tokens"] = req.max_tokens;
+  if (typeof req.temperature === "number") out.temperature = req.temperature;
+  if (typeof req.top_p === "number") out.top_p = req.top_p;
+  if (req.top_k !== undefined) drop.add("top_k");
+  if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) out.stop = req.stop_sequences;
+  const meta = req.metadata as Json | undefined;
+  if (meta && typeof meta.user_id === "string") out.user = stableId(meta.user_id);
+  if (opts.stream) out.stream_options = { include_usage: true };
+
+  // Thinking: budget → effort where the endpoint has the word, dropped
+  // where it does not. `effort` spelled directly is honoured the same way.
+  const thinking = req.thinking as Json | undefined;
+  const effortWord =
+    typeof req.effort === "string" ? req.effort : (req.output_config as Json | undefined)?.effort;
+  let effort: string | null = null;
+  if (typeof effortWord === "string") effort = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" }[effortWord] ?? null;
+  else if (thinking && thinking.type === "enabled") {
+    const b = Number(thinking.budget_tokens) || 0;
+    effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
+  } else if (thinking && thinking.type === "adaptive") effort = "medium";
+  if (effort) {
+    if (opts.reasoningEffort && !modelRejectsReasoning(String(req.model))) out.reasoning_effort = effort;
+    else drop.add(opts.reasoningEffort ? "thinking / effort (this model does not reason)" : "thinking / effort");
+  }
+
+  // The author's own fields, last, so the file wins over anything decided
+  // above — including a `reasoning_effort` they would rather set by hand.
+  // `null` removes a field the translation would otherwise have sent, which
+  // is the only way to say "do not send temperature at all" to an endpoint
+  // that rejects it. Structural keys were dropped at parse time.
+  for (const [key, value] of Object.entries(opts.params ?? {})) {
+    if ((PROTECTED_PARAMS as readonly string[]).includes(key)) continue;
+    if (value === null) delete out[key];
+    else out[key] = value;
+  }
+
+  return out;
+}
+
+/**
+ * An Anthropic Messages request as a Responses request. Pure.
+ *
+ * The Responses shape is flatter than Chat Completions: the system prompt
+ * is `instructions`, a tool call and its result are top-level items rather
+ * than an assistant field and a `tool` role, and a document is an input
+ * file the model reads itself. Order is preserved as written: a
+ * function_call item, then its function_call_output, then whatever else the
+ * user said.
+ */
+export function toResponses(
+  req: Json,
+  opts: {
+    reasoningEffort?: boolean;
+    stream: boolean;
+    cacheKey?: string;
+    params?: Record<string, unknown>;
+  },
+  drop: Dropped = dropped(),
+): Json {
+  const out: Json = { model: req.model, stream: opts.stream, store: false };
+  if (opts.cacheKey) out.prompt_cache_key = opts.cacheKey;
+  const system = textOf(req.system);
+  if (system) out.instructions = system;
+
+  const input: Json[] = [];
+  for (const m of (Array.isArray(req.messages) ? req.messages : []) as Json[]) {
+    const content = m.content;
+    if (m.role === "assistant") {
+      const text = textOf(content);
+      if (text) input.push({ role: "assistant", content: [{ type: "output_text", text }] });
+      for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+        if (b.type === "tool_use") {
+          input.push({ type: "function_call", call_id: String(b.id), name: String(b.name), arguments: JSON.stringify(b.input ?? {}) });
+        } else if (b.type === "thinking" || b.type === "redacted_thinking") {
+          drop.add("thinking blocks in the transcript");
+        }
+      }
+      continue;
+    }
+    if (typeof content === "string") {
+      input.push({ role: "user", content });
+      continue;
+    }
+    const parts: Json[] = [];
+    for (const b of Array.isArray(content) ? (content as Json[]) : []) {
+      if (b.type === "tool_result") {
+        const inner = b.content;
+        const text = typeof inner === "string" ? inner : textOf(inner);
+        input.push({ type: "function_call_output", call_id: String(b.tool_use_id), output: text || (b.is_error ? "error" : "ok") });
+        if (Array.isArray(inner) && (inner as Json[]).some((x) => x.type === "image")) drop.add("images inside tool results");
+      } else if (b.type === "text") {
+        parts.push({ type: "input_text", text: String(b.text ?? "") });
+      } else if (b.type === "image") {
+        const src = b.source as Json | undefined;
+        if (src?.type === "base64" && typeof src.data === "string") {
+          parts.push({ type: "input_image", image_url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}`, detail: "auto" });
+        } else if (src?.type === "url" && typeof src.url === "string") {
+          parts.push({ type: "input_image", image_url: src.url, detail: "auto" });
+        }
+      } else if (b.type === "document") {
+        // The one thing this shape can say that Chat Completions cannot.
+        const src = b.source as Json | undefined;
+        const title = typeof b.title === "string" ? b.title : "document.pdf";
+        if (src?.type === "base64" && typeof src.data === "string") {
+          parts.push({ type: "input_file", filename: title, file_data: `data:${String(src.media_type ?? "application/pdf")};base64,${src.data}` });
+        } else if (src?.type === "url" && typeof src.url === "string") {
+          parts.push({ type: "input_file", file_url: src.url });
+        } else if (src?.type === "text" && typeof src.data === "string") {
+          parts.push({ type: "input_text", text: src.data });
+        } else {
+          drop.add("document blocks of that source type");
+        }
+      }
+    }
+    if (parts.length) input.push({ role: "user", content: parts });
+  }
+  out.input = input;
+
+  const tools: Json[] = [];
+  for (const t of (Array.isArray(req.tools) ? req.tools : []) as Json[]) {
+    if (t.type && t.type !== "custom") {
+      drop.add(`server-side tool ${String(t.type)}`);
+      continue;
+    }
+    tools.push({
+      type: "function",
+      name: String(t.name),
+      ...(t.description ? { description: String(t.description) } : {}),
+      parameters: t.input_schema ?? { type: "object", properties: {} },
+      strict: false,
+    });
+  }
+  if (tools.length) out.tools = tools;
+
+  const tc = req.tool_choice as Json | undefined;
+  if (tc && tools.length) {
+    if (tc.type === "auto") out.tool_choice = "auto";
+    else if (tc.type === "any") out.tool_choice = "required";
+    else if (tc.type === "none") out.tool_choice = "none";
+    else if (tc.type === "tool" && tc.name) out.tool_choice = { type: "function", name: String(tc.name) };
+    if (tc.disable_parallel_tool_use === true) out.parallel_tool_calls = false;
+  }
+
+  if (typeof req.max_tokens === "number") out.max_output_tokens = req.max_tokens;
+  if (typeof req.temperature === "number") out.temperature = req.temperature;
+  if (typeof req.top_p === "number") out.top_p = req.top_p;
+  if (req.top_k !== undefined) drop.add("top_k");
+  if (Array.isArray(req.stop_sequences) && req.stop_sequences.length) drop.add("stop_sequences");
+  const meta = req.metadata as Json | undefined;
+  if (meta && typeof meta.user_id === "string") out.safety_identifier = stableId(meta.user_id);
+
+  const thinking = req.thinking as Json | undefined;
+  const effortWord =
+    typeof req.effort === "string" ? req.effort : (req.output_config as Json | undefined)?.effort;
+  let effort: string | null = null;
+  if (typeof effortWord === "string") effort = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" }[effortWord] ?? null;
+  else if (thinking && thinking.type === "enabled") {
+    const b = Number(thinking.budget_tokens) || 0;
+    effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
+  } else if (thinking && thinking.type === "adaptive") effort = "medium";
+  if (effort) {
+    if (opts.reasoningEffort !== false && !modelRejectsReasoning(String(req.model))) out.reasoning = { effort };
+    else drop.add(opts.reasoningEffort !== false ? "thinking / effort (this model does not reason)" : "thinking / effort");
+  }
+
+  for (const [key, value] of Object.entries(opts.params ?? {})) {
+    if ((PROTECTED_PARAMS as readonly string[]).includes(key)) continue;
+    if (value === null) delete out[key];
+    else out[key] = value;
+  }
+  return out;
+}
+
+// ------------------------------------------------------- response mapping
+
+type Stop = { reason: string; sequence: string | null };
+
+/**
+ * Why a Chat Completion stopped, in Anthropic's words. `content_filter`
+ * (OpenAI, Azure, Gemini's safety block) is a refusal; Mistral's
+ * `model_length` is the context window filling, not max_tokens. A stop
+ * sequence is named only where the provider says which one matched — vLLM
+ * as `stop_reason`, SGLang as `matched_stop` — and only when it is one the
+ * request asked for; plain OpenAI says `stop` either way, which reads as
+ * end_turn. pause_turn has no counterpart: server-side tools are dropped.
+ */
+function chatStop(choice: Json, sawTool: boolean, stops: readonly string[]): Stop {
+  const finish = choice.finish_reason;
+  if (finish === "content_filter") return { reason: "refusal", sequence: null };
+  if (finish === "length") return { reason: "max_tokens", sequence: null };
+  if (finish === "model_length") return { reason: "model_context_window_exceeded", sequence: null };
+  if (sawTool || finish === "tool_calls" || finish === "function_call") return { reason: "tool_use", sequence: null };
+  const matched = typeof choice.stop_reason === "string" ? choice.stop_reason : choice.matched_stop;
+  if (typeof matched === "string" && stops.includes(matched)) return { reason: "stop_sequence", sequence: matched };
+  return { reason: "end_turn", sequence: null };
+}
+
+/** Why a Response stopped: a refusal part or a content filter is a refusal. */
+function responsesStop(incomplete: unknown, sawTool: boolean, sawRefusal: boolean): string {
+  if (sawRefusal || incomplete === "content_filter") return "refusal";
+  if (incomplete === "max_output_tokens") return "max_tokens";
+  if (sawTool) return "tool_use";
+  return "end_turn";
+}
+
+function stopList(stops: unknown): string[] {
+  return Array.isArray(stops) ? stops.filter((s): s is string => typeof s === "string") : [];
+}
+
+function parseArgs(raw: unknown): unknown {
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { _unparsed: raw };
+  }
+}
+
+/** A finished Chat Completion as an Anthropic message. Pure. */
+export function fromChatCompletion(res: Json, requestedModel: string, stopSequences?: unknown): Json {
+  const choice = ((res.choices as Json[] | undefined) ?? [])[0] ?? {};
+  const msg = (choice.message as Json | undefined) ?? {};
+  const content: Json[] = [];
+  const text = typeof msg.content === "string" ? msg.content : textOf(msg.content);
+  if (text) content.push({ type: "text", text });
+  for (const tc of (Array.isArray(msg.tool_calls) ? msg.tool_calls : []) as Json[]) {
+    const fn = (tc.function as Json | undefined) ?? {};
+    content.push({
+      type: "tool_use",
+      id: String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+      name: String(fn.name ?? ""),
+      input: parseArgs(fn.arguments),
+    });
+  }
+  const usage = (res.usage as Json | undefined) ?? {};
+  const stop = chatStop(choice, content.some((c) => c.type === "tool_use"), stopList(stopSequences));
+  return {
+    id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
+    type: "message",
+    role: "assistant",
+    model: String(res.model ?? requestedModel),
+    content,
+    stop_reason: stop.reason,
+    stop_sequence: stop.sequence,
+    usage: usageBlock(anthropicUsage(usage, "chat")),
+  };
+}
+
+/**
+ * The streaming half: Chat-Completions chunks in, Anthropic SSE events out.
+ * A state machine because the two streams disagree about structure — one
+ * is a flat sequence of deltas, the other is blocks with explicit starts and
+ * stops — and a tool call's arguments arrive as fragments that the other
+ * side wants as `input_json_delta`s inside one open block.
+ */
+export class StreamTranslator {
+  private started = false;
+  private nextIndex = 0;
+  private textIndex: number | null = null;
+  /** Chat-Completions tool index → Anthropic block index. */
+  private tools = new Map<number, { block: number; argsSeen: boolean }>();
+  /** The last choice's stop fields: finish_reason and any matched stop. */
+  private finish: Json = {};
+  private usage: { input: number; cached: number; output: number } | null = null;
+  private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
+  private readonly model: string;
+  private readonly stops: string[];
+  constructor(model: string, stopSequences?: unknown) {
+    this.model = model;
+    this.stops = stopList(stopSequences);
+  }
+
+  private event(name: string, data: Json): string {
+    return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  private start(chunk: Json): string[] {
+    if (this.started) return [];
+    this.started = true;
+    if (typeof chunk.id === "string") this.id = chunk.id;
+    return [
+      this.event("message_start", {
+        type: "message_start",
+        message: {
+          id: this.id,
+          type: "message",
+          role: "assistant",
+          model: String(chunk.model ?? this.model),
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+    ];
+  }
+
+  private closeText(): string[] {
+    if (this.textIndex === null) return [];
+    const i = this.textIndex;
+    this.textIndex = null;
+    return [this.event("content_block_stop", { type: "content_block_stop", index: i })];
+  }
+
+  /** One parsed chunk in, zero or more SSE events out. */
+  feed(chunk: Json): string[] {
+    const out = this.start(chunk);
+    const u = chunk.usage as Json | undefined;
+    if (u && (u.prompt_tokens !== undefined || u.completion_tokens !== undefined)) {
+      this.usage = anthropicUsage(u, "chat");
+    }
+    const choice = ((chunk.choices as Json[] | undefined) ?? [])[0];
+    if (!choice) return out;
+    if (choice.finish_reason) this.finish = { finish_reason: choice.finish_reason, stop_reason: choice.stop_reason, matched_stop: choice.matched_stop };
+    const delta = (choice.delta as Json | undefined) ?? {};
+
+    const text = typeof delta.content === "string" ? delta.content : "";
+    if (text) {
+      if (this.textIndex === null) {
+        this.textIndex = this.nextIndex++;
+        out.push(
+          this.event("content_block_start", {
+            type: "content_block_start",
+            index: this.textIndex,
+            content_block: { type: "text", text: "" },
+          }),
+        );
+      }
+      out.push(
+        this.event("content_block_delta", {
+          type: "content_block_delta",
+          index: this.textIndex,
+          delta: { type: "text_delta", text },
+        }),
+      );
+    }
+
+    for (const [n, tc] of ((Array.isArray(delta.tool_calls) ? delta.tool_calls : []) as Json[]).entries()) {
+      const idx = typeof tc.index === "number" ? tc.index : this.tools.size + n;
+      const fn = (tc.function as Json | undefined) ?? {};
+      let entry = this.tools.get(idx);
+      if (!entry) {
+        // A new call: text stops here (a block is one thing), the tool
+        // block opens with the id and name the first fragment carries.
+        out.push(...this.closeText());
+        entry = { block: this.nextIndex++, argsSeen: false };
+        this.tools.set(idx, entry);
+        out.push(
+          this.event("content_block_start", {
+            type: "content_block_start",
+            index: entry.block,
+            content_block: {
+              type: "tool_use",
+              id: String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+              name: String(fn.name ?? ""),
+              input: {},
+            },
+          }),
+        );
+      }
+      const args = typeof fn.arguments === "string" ? fn.arguments : "";
+      if (args) {
+        entry.argsSeen = true;
+        out.push(
+          this.event("content_block_delta", {
+            type: "content_block_delta",
+            index: entry.block,
+            delta: { type: "input_json_delta", partial_json: args },
+          }),
+        );
+      }
+    }
+    return out;
+  }
+
+  /** The stream ended: close what is open, say why, and stop. */
+  finishStream(): string[] {
+    const out = this.start({});
+    out.push(...this.closeText());
+    for (const entry of this.tools.values()) {
+      // Anthropic expects the concatenated partial_json to parse; a call
+      // that streamed no arguments at all needs an explicit empty object.
+      if (!entry.argsSeen) {
+        out.push(
+          this.event("content_block_delta", {
+            type: "content_block_delta",
+            index: entry.block,
+            delta: { type: "input_json_delta", partial_json: "{}" },
+          }),
+        );
+      }
+      out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+    }
+    const stop = chatStop(this.finish, this.tools.size > 0, this.stops);
+    out.push(
+      this.event("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: stop.reason, stop_sequence: stop.sequence },
+        usage: usageBlock(this.usage),
+      }),
+    );
+    out.push(this.event("message_stop", { type: "message_stop" }));
+    return out;
+  }
+}
+
+/** A finished Response as an Anthropic message. Pure. */
+export function fromResponses(res: Json, requestedModel: string): Json {
+  const content: Json[] = [];
+  for (const item of (Array.isArray(res.output) ? res.output : []) as Json[]) {
+    if (item.type === "message") {
+      const text = (Array.isArray(item.content) ? (item.content as Json[]) : [])
+        .map((c) => (c.type === "output_text" ? String(c.text ?? "") : c.type === "refusal" ? String(c.refusal ?? "") : ""))
+        .join("");
+      if (text) content.push({ type: "text", text });
+    } else if (item.type === "function_call") {
+      content.push({
+        type: "tool_use",
+        id: String(item.call_id ?? item.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+        name: String(item.name ?? ""),
+        input: parseArgs(item.arguments),
+      });
+    }
+    // reasoning items and server-tool calls have no Anthropic block here
+  }
+  const usage = (res.usage as Json | undefined) ?? {};
+  const incomplete = (res.incomplete_details as Json | undefined)?.reason;
+  const refused = (Array.isArray(res.output) ? (res.output as Json[]) : []).some(
+    (item) => item.type === "message" && Array.isArray(item.content) && (item.content as Json[]).some((c) => c.type === "refusal"),
+  );
+  const stop = responsesStop(incomplete, content.some((c) => c.type === "tool_use"), refused);
+  return {
+    id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
+    type: "message",
+    role: "assistant",
+    model: String(res.model ?? requestedModel),
+    content,
+    stop_reason: stop,
+    stop_sequence: null,
+    usage: usageBlock(anthropicUsage(usage, "responses")),
+  };
+}
+
+/**
+ * The Responses stream as Anthropic SSE. Simpler than the Chat-Completions
+ * machine because the other side already speaks in items: an output item
+ * is added, its text or arguments arrive as deltas, it is done. Each item
+ * becomes one Anthropic block; `response.completed` carries the usage and
+ * the reason.
+ */
+export class ResponsesStreamTranslator {
+  private started = false;
+  private nextIndex = 0;
+  /** Responses output_index → Anthropic block index and kind. */
+  private blocks = new Map<number, { block: number; kind: "text" | "tool"; argsSeen: boolean }>();
+  private usage: { input: number; cached: number; output: number } | null = null;
+  private incomplete: string | null = null;
+  private sawTool = false;
+  private sawRefusal = false;
+  private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
+  private readonly model: string;
+  constructor(model: string) {
+    this.model = model;
+  }
+
+  private event(name: string, data: Json): string {
+    return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  private start(response?: Json): string[] {
+    if (this.started) return [];
+    this.started = true;
+    if (response && typeof response.id === "string") this.id = response.id;
+    return [
+      this.event("message_start", {
+        type: "message_start",
+        message: {
+          id: this.id,
+          type: "message",
+          role: "assistant",
+          model: String(response?.model ?? this.model),
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+    ];
+  }
+
+  /** One parsed event in, zero or more SSE events out. */
+  feed(ev: Json): string[] {
+    const type = String(ev.type ?? "");
+    const out = this.start(ev.response as Json | undefined);
+    if (type === "response.output_item.added") {
+      const item = (ev.item as Json | undefined) ?? {};
+      const idx = Number(ev.output_index ?? this.blocks.size);
+      if (item.type === "message") {
+        const block = this.nextIndex++;
+        this.blocks.set(idx, { block, kind: "text", argsSeen: false });
+        out.push(this.event("content_block_start", { type: "content_block_start", index: block, content_block: { type: "text", text: "" } }));
+      } else if (item.type === "function_call") {
+        const block = this.nextIndex++;
+        this.blocks.set(idx, { block, kind: "tool", argsSeen: false });
+        this.sawTool = true;
+        out.push(
+          this.event("content_block_start", {
+            type: "content_block_start",
+            index: block,
+            content_block: {
+              type: "tool_use",
+              id: String(item.call_id ?? item.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+              name: String(item.name ?? ""),
+              input: {},
+            },
+          }),
+        );
+      }
+      return out;
+    }
+    if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      const text = String(ev.delta ?? "");
+      if (type === "response.refusal.delta") this.sawRefusal = true;
+      if (entry && entry.kind === "text" && text) {
+        out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "text_delta", text } }));
+      }
+      return out;
+    }
+    if (type === "response.function_call_arguments.delta") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      const args = String(ev.delta ?? "");
+      if (entry && entry.kind === "tool" && args) {
+        entry.argsSeen = true;
+        out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: args } }));
+      }
+      return out;
+    }
+    if (type === "response.output_item.done") {
+      const entry = this.blocks.get(Number(ev.output_index));
+      if (entry) {
+        if (entry.kind === "tool" && !entry.argsSeen) {
+          // The arguments may have come whole on the done item rather than
+          // as deltas; Anthropic wants them as json deltas inside the block.
+          const item = (ev.item as Json | undefined) ?? {};
+          const args = typeof item.arguments === "string" && item.arguments.trim() ? item.arguments : "{}";
+          out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: args } }));
+          entry.argsSeen = true;
+        }
+        out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+        this.blocks.delete(Number(ev.output_index));
+      }
+      return out;
+    }
+    if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+      const r = (ev.response as Json | undefined) ?? {};
+      const u = r.usage as Json | undefined;
+      if (u) this.usage = anthropicUsage(u, "responses");
+      const reason = (r.incomplete_details as Json | undefined)?.reason;
+      if (typeof reason === "string") this.incomplete = reason;
+      return out;
+    }
+    return out;
+  }
+
+  /** The stream ended: close what is still open, say why, and stop. */
+  finishStream(): string[] {
+    const out = this.start();
+    for (const entry of this.blocks.values()) {
+      if (entry.kind === "tool") {
+        if (!entry.argsSeen) out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: "{}" } }));
+      }
+      out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+    }
+    const reason = responsesStop(this.incomplete, this.sawTool, this.sawRefusal);
+    out.push(
+      this.event("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: reason, stop_sequence: null },
+        usage: usageBlock(this.usage),
+      }),
+    );
+    out.push(this.event("message_stop", { type: "message_stop" }));
+    return out;
+  }
+}
+
+// ---------------------------------------------------------------- errors
+
+function errorType(status: number): string {
+  if (status === 400) return "invalid_request_error";
+  if (status === 401) return "authentication_error";
+  if (status === 403) return "permission_error";
+  if (status === 404) return "not_found_error";
+  if (status === 429) return "rate_limit_error";
+  if (status === 529) return "overloaded_error";
+  return "api_error";
+}
+
+function errorBody(status: number, message: string): string {
+  return JSON.stringify({ type: "error", error: { type: errorType(status), message } });
+}
+
+/** The provider's own words for what went wrong, whatever shape it used. */
+function upstreamMessage(text: string, status: number): string {
+  try {
+    const parsed = JSON.parse(text) as Json;
+    const err = parsed.error as Json | string | undefined;
+    if (typeof err === "string") return err;
+    if (err && typeof err.message === "string") return err.message;
+    if (typeof parsed.message === "string") return parsed.message;
+  } catch {
+    // not JSON — the text is the message
+  }
+  return text.slice(0, 500) || `upstream returned HTTP ${status}`;
+}
+
+// ---------------------------------------------------------------- server
+
+/** The most one upstream answer may be, read, on the host: a long streamed
+ *  reply is many small events, well past fetchUntrusted's 1 MiB default,
+ *  and still far under this. */
+export const UPSTREAM_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Start the translator for one step. Binds an ephemeral port on loopback,
+ * mints the key the SDK will present, and returns the env that points the
+ * SDK at it. Close it when the step is over.
+ */
+export async function startTranslator(spec: TranslatorSpec): Promise<RunningTranslator> {
+  const key = `fr-${crypto.randomBytes(16).toString("hex")}`;
+  const log: string[] = [];
+  const base = trimSlashes(spec.upstreamBase);
+  const label = spec.label ?? base;
+
+  const server = http.createServer(async (req, res) => {
+    const started = Date.now();
+    const send = (status: number, body: string, type = "application/json") => {
+      res.writeHead(status, { "content-type": type });
+      res.end(body);
+    };
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const presented = req.headers["x-api-key"] ?? (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const ok = typeof presented === "string" && presented.length === key.length && crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(key));
+      if (!ok) return send(401, errorBody(401, "translator: wrong key for this step"));
+
+      const raw = await new Promise<string>((resolve, reject) => {
+        let body = "";
+        req.on("data", (c: Buffer) => (body += c.toString()));
+        req.on("end", () => resolve(body));
+        req.on("error", reject);
+      });
+
+      if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
+        // No endpoint on the other side counts for us; four characters a
+        // token is the estimate every tokenizer lands near for English.
+        const chars = raw.length;
+        return send(200, JSON.stringify({ input_tokens: Math.ceil(chars / 4) }));
+      }
+      if (req.method !== "POST" || url.pathname !== "/v1/messages") {
+        return send(404, errorBody(404, `translator: no ${req.method} ${url.pathname} — only POST /v1/messages`));
+      }
+
+      let body: Json;
+      try {
+        body = JSON.parse(raw) as Json;
+      } catch {
+        return send(400, errorBody(400, "translator: request body is not JSON"));
+      }
+      const stream = body.stream === true;
+      const drop = dropped();
+      const responses = spec.wire === "responses";
+      const outbound = responses
+        ? toResponses(body, { reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream }, drop)
+        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream }, drop);
+      for (const line of drop.lines()) if (!log.includes(line)) log.push(line);
+
+      let upstream: Response;
+      try {
+        const target = `${base}${responses ? "/responses" : "/chat/completions"}`;
+        const request: RequestInit = {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${spec.upstreamKey}`,
+            ...(spec.headers ?? {}),
+          },
+          body: JSON.stringify(outbound),
+        };
+        // In a step the lease's proxy is the way out: it guards the address
+        // and fills the key itself. Without one this runs on the host — an
+        // eval's judge, a dashboard draft — at a base URL the tenant wrote,
+        // so through the platform's guard: no private or cluster address,
+        // the key never follows a redirect off the provider's origin, and
+        // the answer read to UPSTREAM_MAX_BYTES.
+        upstream = spec.egress
+          ? await fetch(viaEgress(spec.egress, target), request)
+          : await fetchUntrusted(target, request, { sameOrigin: true, maxBytes: UPSTREAM_MAX_BYTES });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.push(`POST ${label} → unreachable: ${message}`);
+        return send(502, errorBody(502, `translator: could not reach ${label}: ${message}`));
+      }
+
+      if (!upstream.ok) {
+        const text = await upstream.text();
+        const message = upstreamMessage(text, upstream.status);
+        log.push(`POST ${label} → ${upstream.status} (${Date.now() - started}ms): ${message.slice(0, 160)}`);
+        // The refusal in words, from the headers the response already
+        // carried. Only on a refusal, and only the allow-listed headers:
+        // a 400 about a malformed body is the work's problem, not the
+        // supply's, and explaining it as one would mislead.
+        if (isRefusalStatus(upstream.status)) {
+          log.push(
+            refusalLine({
+              status: upstream.status,
+              headers: captureRefusalHeaders(upstream.headers),
+              timezone: spec.timezone,
+              provider: label,
+            }),
+          );
+        }
+        // The status crosses unchanged, so a 401 or 429 from the provider
+        // reads as one to the SDK — and to the fallback decision upstream.
+        return send(upstream.status, errorBody(upstream.status, message));
+      }
+
+      const model = String(body.model ?? "");
+      if (!stream) {
+        const text = await upstream.text();
+        let parsed: Json;
+        try {
+          parsed = JSON.parse(text) as Json;
+        } catch {
+          return send(502, errorBody(502, `translator: ${label} answered with something that is not JSON`));
+        }
+        log.push(`POST ${label} → 200 (${Date.now() - started}ms, ${model})`);
+        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences)));
+      }
+
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model, body.stop_sequences);
+      const reader = upstream.body?.getReader();
+      if (!reader) {
+        for (const e of machine.finishStream()) res.write(e);
+        return res.end();
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let chunks = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") continue;
+          try {
+            chunks++;
+            for (const e of machine.feed(JSON.parse(data) as Json)) res.write(e);
+          } catch {
+            // a malformed chunk is skipped, not fatal — the stream goes on
+          }
+        }
+      }
+      for (const e of machine.finishStream()) res.write(e);
+      res.end();
+      log.push(`POST ${label} → 200 (stream, ${chunks} chunks, ${Date.now() - started}ms, ${model})`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.push(`translator error: ${message}`);
+      if (!res.headersSent) send(500, errorBody(500, `translator: ${message}`));
+      else {
+        // Mid-stream: say so as an Anthropic error event, so the SDK reads a
+        // failed reply, not a short one that merely stopped.
+        res.write(`event: error\ndata: ${errorBody(500, `translator: ${message}`)}\n\n`);
+        res.end();
+      }
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  return {
+    port,
+    key,
+    baseUrl,
+    env: {
+      ANTHROPIC_BASE_URL: baseUrl,
+      // The SDK sends ANTHROPIC_API_KEY as x-api-key, which is what the
+      // server above checks; the bearer slot is blanked so the SDK cannot
+      // fall back to Anthropic's own endpoint with a stale credential.
+      ANTHROPIC_API_KEY: key,
+      ANTHROPIC_AUTH_TOKEN: "",
+      CLAUDE_CODE_OAUTH_TOKEN: "",
+    },
+    drainLog: () => log.splice(0, log.length),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/**
+ * What a provider block needs from the translator, or null when the block
+ * speaks Anthropic and needs none. Values only — this crosses into the run
+ * container as JSON.
+ */
+export function translatorSpecFor(spec: {
+  format: string;
+  baseUrl: string;
+  token: string;
+  headers: Record<string, string>;
+  params?: Record<string, unknown>;
+  name?: string | null;
+  maxTokensParam?: "max_tokens" | "max_completion_tokens";
+  reasoningEffort?: boolean;
+  cacheKey?: string;
+}): TranslatorSpec | null {
+  if (spec.format !== "openai" && spec.format !== "responses") return null;
+  return {
+    wire: spec.format === "responses" ? "responses" : "chat",
+    upstreamBase: spec.baseUrl,
+    upstreamKey: spec.token,
+    headers: spec.headers,
+    params: spec.params,
+    maxTokensParam: spec.maxTokensParam,
+    reasoningEffort: spec.reasoningEffort,
+    ...(spec.cacheKey ? { cacheKey: spec.cacheKey } : {}),
+    label: spec.name ? `${spec.name} (${spec.baseUrl})` : spec.baseUrl,
+  };
+}

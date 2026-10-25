@@ -1,0 +1,259 @@
+// `web: {browse: …}` carries two things in one key: the browser's identity and,
+// optionally, the vendor that renders the page. These are the rules that keep
+// the two from standing on each other.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readBrowseSettings, resolveSearch, webProblems, WEB_BROWSE_ACTIONS, BROWSE_ENGINES, BROWSE_ENGINE_LIMITS } from "../src/providers.ts";
+
+test("a bare name still means a vendor, and carries no settings", () => {
+  const read = readBrowseSettings("browserbase");
+  assert.deepEqual(read.settings, {});
+  assert.equal(read.rest, "browserbase");
+  assert.equal(resolveSearch(read.rest, "browse").provider, "browserbase");
+});
+
+test("a block of settings alone means our own browser, configured", () => {
+  const read = readBrowseSettings({ engine: "firefox", user_agent: "UA/1.0", timezone: "Australia/Sydney" });
+  assert.deepEqual(read.settings, { engine: "firefox", user_agent: "UA/1.0", timezone: "Australia/Sydney" });
+  assert.equal(read.rest, undefined, "nothing left for the vendor resolver");
+  assert.equal(resolveSearch(read.rest, "browse").provider, null, "unset means the account's own browser");
+});
+
+test("settings and a vendor travel in the same block; via: is name:", () => {
+  const read = readBrowseSettings({ engine: "webkit", via: "browserbase" });
+  assert.deepEqual(read.settings, { engine: "webkit" });
+  assert.equal(resolveSearch(read.rest, "browse").provider, "browserbase");
+});
+
+test("an engine that does not exist is refused by name, not silently ignored", () => {
+  const read = readBrowseSettings({ engine: "opera" });
+  assert.match(read.error!, /web\.browse\.engine: opera/);
+  assert.match(read.error!, /chrome, firefox, safari/, "named the way the room talks, not by engine");
+  assert.deepEqual(webProblems({ web: { browse: { engine: "opera" } } }), [read.error]);
+});
+
+// A file should read the way people speak: chrome and safari, not chromium
+// and webkit. Underneath they are still the engines Playwright knows, and the
+// old spellings keep working so nothing written before this breaks.
+test("chrome is real Chrome (its own engine); safari is what a person writes for WebKit", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome" }).settings.engine, "chrome", "branded Chrome, distinct from chromium");
+  assert.equal(readBrowseSettings({ engine: "safari" }).settings.engine, "webkit");
+  assert.equal(readBrowseSettings({ engine: "firefox" }).settings.engine, "firefox");
+});
+
+test("the engine names still work, so no agent written before this breaks", () => {
+  assert.equal(readBrowseSettings({ engine: "chromium" }).settings.engine, "chromium");
+  assert.equal(readBrowseSettings({ engine: "webkit" }).settings.engine, "webkit");
+  assert.equal(readBrowseSettings({ engine: "chromium" }).settings.engine, "chromium", "the open-source build");
+  assert.equal(readBrowseSettings({ engine: "Chrome" }).settings.engine, "chrome", "case is not a trap");
+});
+
+test("a setting that is not text is refused", () => {
+  assert.match(readBrowseSettings({ user_agent: ["a", "b"] }).error!, /must be text, not a list/);
+});
+
+test("check still reports a vendor that cannot work, block or not", () => {
+  assert.match(webProblems({ web: { browse: { via: "nosuchvendor" } } })[0], /no remote browser by that name/);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "firefox" } } }), [], "a good block is not a problem");
+});
+
+test("cookies are named in the file, never written into it", () => {
+  const good = readBrowseSettings({ cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" });
+  assert.deepEqual(good.settings, { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" });
+  assert.equal(good.error, undefined);
+  // The mistake this refuses: the header line pasted where the name goes.
+  const bad = readBrowseSettings({ cookies: "sid=1:abc; uid=123" });
+  assert.match(bad.error!, /must be the NAME of a vault secret/);
+  assert.match(bad.error!, /foldrun secrets set NAME/);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "sid=1:abc" } } }), [bad.error]);
+});
+
+test("a cookie default must name the site it belongs to", () => {
+  // Without a domain the cookies would ride on whatever host a call opened,
+  // which is an agent handing one site another site's session.
+  const loose = readBrowseSettings({ cookies: "MEDIUM_COOKIES" });
+  assert.match(loose.error!, /needs web\.browse\.cookie_domain beside it/);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "MEDIUM_COOKIES" } } }), [loose.error]);
+  assert.deepEqual(webProblems({ web: { browse: { cookies: "MEDIUM_COOKIES", cookie_domain: ".medium.com" } } }), []);
+});
+
+// Storage is the sibling of cookies, for the sites whose login is not a
+// cookie: Firebase writes its record to IndexedDB, MSAL can keep tokens in
+// sessionStorage, and a cookie jar alone opens those pages signed out.
+test("storage names a secret and carries the origin it belongs to", () => {
+  const read = readBrowseSettings({
+    storage: "INDIEHACKERS_STORAGE",
+    storage_origin: "https://www.indiehackers.com",
+  });
+  assert.deepEqual(read.settings, {
+    storage: "INDIEHACKERS_STORAGE",
+    storage_origin: "https://www.indiehackers.com",
+  });
+  assert.equal(read.error, undefined);
+});
+
+test("the storage itself pasted into the file is refused, like cookies", () => {
+  const read = readBrowseSettings({ storage: '{"localStorage":{"token":"x"}}', storage_origin: "https://x.com" });
+  assert.match(read.error!, /must be the NAME of a vault secret/);
+});
+
+test("storage without an origin is refused: storage is walled off per origin", () => {
+  const read = readBrowseSettings({ storage: "APP_STORAGE" });
+  assert.match(read.error!, /needs web\.browse\.storage_origin beside it/);
+});
+
+test("a cookie domain is not an origin", () => {
+  const read = readBrowseSettings({ storage: "APP_STORAGE", storage_origin: ".example.com" });
+  assert.match(read.error!, /must be an origin, scheme and host/);
+});
+
+test("identities: one name for a bundle of settings, checked the way the block is", () => {
+  const good = readBrowseSettings({
+    identities: {
+      "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chrome", headers: { "x-tenant": "acme" } },
+      "au-desktop": { locale: "en-AU" },
+    },
+  });
+  assert.equal(good.error, undefined);
+  assert.deepEqual(good.settings.identities, {
+    "au-mobile": { device: "Pixel 7", locale: "en-AU", timezone: "Australia/Sydney", proxy: "PROXY_AU", engine: "chrome", headers: "{\"x-tenant\":\"acme\"}" },
+    "au-desktop": { locale: "en-AU" },
+  });
+  assert.equal(good.rest, undefined, "identities are settings, not a vendor");
+  assert.deepEqual(webProblems({ web: { browse: { identities: { au: { locale: "en-AU" } } } } }), []);
+
+  // The same refusals as the block, named for the identity.
+  assert.match(readBrowseSettings({ identities: { au: { engine: "opera" } } }).error!, /web\.browse\.identities\.au\.engine: opera/);
+  assert.match(readBrowseSettings({ identities: { au: { proxy: "http://u:p@host" } } }).error!, /identities\.au\.proxy must be the NAME of a vault secret/);
+  assert.match(readBrowseSettings({ identities: { au: { cookies: "MEDIUM_COOKIES" } } }).error!, /cookies needs cookie_domain beside it/);
+  assert.match(readBrowseSettings({ identities: { au: { mode: "text" } } }).error!, /identities\.au\.mode is not an identity setting/, "what one call does stays in the call");
+  assert.match(readBrowseSettings({ identities: { au: "Pixel 7" } }).error!, /identities\.au must be a block of settings/);
+  assert.match(readBrowseSettings({ identities: ["au"] }).error!, /identities must be a map of name to settings/);
+  assert.match(readBrowseSettings({ identities: { "no spaces": {} } }).error!, /is not a plain name/);
+});
+
+// A window or none. YAML hands over a boolean; a quoted one is the same wish.
+// Anything else is a typo worth saying out loud, not a silent headless run.
+test("live: true or false, only true carried", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome", live: true }).settings.live, true);
+  assert.equal(readBrowseSettings({ live: "true" }).settings.live, true);
+  assert.equal(readBrowseSettings({ live: false }).settings.live, undefined);
+  assert.equal(readBrowseSettings({ live: true }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ live: "yes" }).error!, /web\.browse\.live is true or false/);
+});
+
+test("version: a plain build label, validated and carried", () => {
+  assert.equal(readBrowseSettings({ engine: "chrome", version: "beta" }).settings.version, "beta");
+  assert.equal(readBrowseSettings({ version: "153.0.6" }).settings.version, "153.0.6");
+  assert.equal(readBrowseSettings({ version: "stable" }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ version: "beta; rm -rf" }).error!, /web\.browse\.version/);
+  assert.match(readBrowseSettings({ version: "../etc" }).error!, /web\.browse\.version/);
+});
+
+test("headless is true or false, and only false is carried", () => {
+  assert.equal(readBrowseSettings({ headless: false }).settings.headless, false);
+  assert.equal(readBrowseSettings({ headless: "false" }).settings.headless, false);
+  assert.equal(readBrowseSettings({ headless: true }).settings.headless, true);
+  assert.equal(readBrowseSettings({ engine: "chrome", headless: false }).settings.engine, "chrome");
+  assert.equal(readBrowseSettings({ headless: false }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ headless: "no" }).error!, /web\.browse\.headless is true or false/);
+  assert.match(readBrowseSettings({ headless: 0 }).error!, /true or false/);
+});
+
+test("lightpanda is an engine a file may name", () => {
+  assert.equal(readBrowseSettings({ engine: "lightpanda" }).settings.engine, "lightpanda");
+  assert.equal(readBrowseSettings({ engine: "LightPanda" }).settings.engine, "lightpanda");
+});
+
+test("allowed_domains: a list or a line of domains, lowercased, nothing else", () => {
+  assert.deepEqual(readBrowseSettings({ allowed_domains: ["Portal.Example.com", "*.cdn.example.com"] }).settings.allowed_domains, ["portal.example.com", "*.cdn.example.com"]);
+  assert.deepEqual(readBrowseSettings({ allowed_domains: "a.com, b.org" }).settings.allowed_domains, ["a.com", "b.org"]);
+  assert.equal(readBrowseSettings({ allowed_domains: ["a.com"] }).rest, undefined, "a setting, not a vendor");
+  assert.match(readBrowseSettings({ allowed_domains: ["https://a.com"] }).error!, /not a domain or \*\.domain/);
+  assert.match(readBrowseSettings({ allowed_domains: ["a.com/path"] }).error!, /not a domain/);
+  assert.match(readBrowseSettings({ allowed_domains: 3 }).error!, /list of domains/);
+});
+
+test("deny: only actions that exist — a misspelt denial would deny nothing", () => {
+  assert.deepEqual(readBrowseSettings({ deny: ["eval", "Download", "js"] }).settings.deny, ["eval", "download", "js"]);
+  assert.match(readBrowseSettings({ deny: ["evall"] }).error!, /evall is not a browse action/);
+  assert.ok(WEB_BROWSE_ACTIONS.includes("login"), "the new verbs are deniable");
+});
+
+test("boundaries, webgpu and ignore_https_errors are true or false, only true carried", () => {
+  for (const k of ["boundaries", "webgpu", "ignore_https_errors"] as const) {
+    assert.equal(readBrowseSettings({ [k]: true }).settings[k], true);
+    assert.equal(readBrowseSettings({ [k]: "true" }).settings[k], true);
+    assert.equal(readBrowseSettings({ [k]: false }).settings[k], undefined);
+    assert.match(readBrowseSettings({ [k]: "maybe" }).error!, new RegExp(`web\\.browse\\.${k} is true or false`));
+  }
+});
+
+test("init and extensions are paths inside the workspace", () => {
+  assert.deepEqual(readBrowseSettings({ init: ["scripts/stub.js"] }).settings.init, ["scripts/stub.js"]);
+  assert.deepEqual(readBrowseSettings({ extensions: "library/ext/a" }).settings.extensions, ["library/ext/a"]);
+  assert.match(readBrowseSettings({ init: ["/etc/passwd"] }).error!, /inside the workspace/);
+  assert.match(readBrowseSettings({ extensions: ["../other/ext"] }).error!, /inside the workspace/);
+});
+
+test("state_key names a secret, never the key", () => {
+  assert.equal(readBrowseSettings({ state_key: "BROWSER_STATE_KEY" }).settings.state_key, "BROWSER_STATE_KEY");
+  assert.match(readBrowseSettings({ state_key: "9f3a0c…" }).error!, /NAME of a vault secret/);
+});
+
+test("obscura is an engine; video records every call; live_view carries only false", () => {
+  assert.equal(readBrowseSettings({ engine: "obscura" }).settings.engine, "obscura");
+  assert.equal(readBrowseSettings({ video: true }).settings.video, true);
+  assert.equal(readBrowseSettings({ video: false }).settings.video, undefined);
+  assert.equal(readBrowseSettings({ live_view: false }).settings.live_view, false);
+  assert.equal(readBrowseSettings({ live_view: true }).settings.live_view, undefined, "on is the default, nothing to carry");
+  assert.match(readBrowseSettings({ live_view: "off" }).error!, /web\.browse\.live_view is true or false/);
+  assert.match(readBrowseSettings({ state_key: "A".repeat(65) }).error!, /NAME of a vault secret/, "the tool's 64-character cap, checked here too");
+});
+
+// The tool refuses an engine/option pair when a call runs; check refuses the
+// same pair in a web.browse block, in the tool's words, before anything runs.
+test("check refuses an engine paired with what it cannot do, in the tool's words", () => {
+  const lp = webProblems({ web: { browse: { engine: "lightpanda", video: true, device: "Pixel 7", headless: false } } });
+  assert.deepEqual(lp, [
+    "web.browse.video: video needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.device: device needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.headless: headless: false needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+  ]);
+  const ob = webProblems({ web: { browse: { engine: "obscura", allowed_domains: ["example.com"], live: true } } });
+  assert.equal(ob.length, 2);
+  assert.match(ob[0], /^web\.browse\.live: live is not something obscura can do \(it has no request interception, recording or profiles\)/);
+  assert.match(ob[1], /^web\.browse\.allowed_domains: allowed_domains is not something obscura can do/);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "firefox", webgpu: true } } }), ["web.browse.webgpu: webgpu is a Chromium feature — use engine chrome or chromium."]);
+  // What each engine CAN do is not a problem.
+  assert.deepEqual(webProblems({ web: { browse: { engine: "chrome", video: true, live: true, headless: false, allowed_domains: ["a.com"] } } }), []);
+  assert.deepEqual(webProblems({ web: { browse: { engine: "lightpanda", allowed_domains: ["a.com"] } } }), [], "lightpanda intercepts, so the lock holds");
+  assert.deepEqual(webProblems({ web: { browse: { engine: "obscura", device: undefined, init: ["s.js"] } } }), []);
+});
+
+test("an identity is checked with its own engine against the block it rides on", () => {
+  const p = webProblems({ web: { browse: { video: true, identities: { cheap: { engine: "lightpanda" }, ob: { engine: "obscura", proxy: "PROXY_AU" } } } } });
+  assert.deepEqual(p, [
+    "web.browse.identities.cheap: engine lightpanda with web.browse.video — video needs a browser that renders; lightpanda reads and drives pages without drawing them — use engine chrome.",
+    "web.browse.identities.ob.proxy: proxy is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome.",
+    "web.browse.identities.ob: engine obscura with web.browse.video — video is not something obscura can do (it has no request interception, recording or profiles) — use engine chrome.",
+  ]);
+  assert.match(webProblems({ web: { browse: { engine: "lightpanda", identities: { phone: { device: "Pixel 7" } } } } })[0], /^web\.browse\.identities\.phone\.device: device needs a browser that renders/);
+});
+
+test("six engines, chromium the default; every limited engine is one a file may name", () => {
+  assert.deepEqual([...BROWSE_ENGINES], ["chromium", "chrome", "firefox", "safari", "lightpanda", "obscura"]);
+  for (const e of Object.keys(BROWSE_ENGINE_LIMITS)) assert.equal(readBrowseSettings({ engine: e }).settings.engine, e);
+  for (const e of ["lightpanda", "obscura", "firefox", "webkit"]) assert.ok(BROWSE_ENGINE_LIMITS[e].cannot.includes("live"), `${e}: live is Chromium-only`);
+});
+
+test("state in the block: a plain name, and beside cookies only with state_key", () => {
+  assert.equal(readBrowseSettings({ state: "youtube" }).settings.state, "youtube");
+  assert.match(readBrowseSettings({ state: "../x" }).error!, /plain name/);
+  const seeded = readBrowseSettings({ state: "yt", cookies: "YOUTUBE_COOKIES", cookie_domain: ".youtube.com" });
+  assert.match(seeded.error!, /needs web\.browse\.state_key/);
+  const keyed = readBrowseSettings({ state: "yt", cookies: "YOUTUBE_COOKIES", cookie_domain: ".youtube.com", state_key: "BROWSER_STATE_KEY" });
+  assert.equal(keyed.error, undefined);
+  assert.equal(keyed.settings.state, "yt");
+  assert.match(readBrowseSettings({ state: "x", storage: "TOK", storage_origin: "https://a.b" }).error!, /cannot be combined with storage/);
+});

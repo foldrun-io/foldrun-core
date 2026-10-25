@@ -1,0 +1,281 @@
+# foldrun
+
+[![npm](https://img.shields.io/npm/v/@foldrun/core)](https://www.npmjs.com/package/@foldrun/core)
+
+**Agents are just folders. Write them, check them, run them.**
+
+An agent is a folder. Its instructions, skills, knowledge, memory, tools and
+tests are files you can read, diff and commit. There is no SDK to learn and no
+graph to wire — the runtime reads the folder.
+
+```bash
+npx foldrun init my-desk
+cd my-desk
+foldrun check          # validate everything — costs nothing
+foldrun run publish    # run the flow
+```
+
+```
+my-desk/
+├── AGENTS.md          what every agent here should know
+├── agents/            who does the work
+│   └── writer/agent.md
+├── flows/             in what order
+│   └── publish.md
+├── skills/            how a task is done
+├── knowledge/         what you gave them
+├── memory/            what they learned
+├── tools/             what they can call
+├── scripts/           code
+└── evals/             is it any good
+```
+
+**API reference:** docs/api.md — every route, its methods, and what it takes.
+
+## Built on other people's standards
+
+Most of this format is not ours. Where an open standard exists we adopt it
+rather than compete with it:
+
+| Layer | Standard | From |
+|---|---|---|
+| `AGENTS.md` | [AGENTS.md](https://agents.md/) | Linux Foundation |
+| `skills/` | [Agent Skills](https://agentskills.io) | Anthropic |
+| documents in `knowledge/`, `memory/` | [Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) | Google Cloud |
+| `tools/` | [MCP](https://modelcontextprotocol.io) | Anthropic, adopted broadly |
+| `flows/`, `evals/` | none exists — ours | |
+
+A skill written for Claude Code or Cursor runs here unchanged — including one installed in the cross-client `.agents/skills/` directory, which the runtime scans alongside its own `skills/`. A knowledge
+bundle exported by any OKF producer drops straight in. Agent frontmatter also
+accepts Claude Code's subagent fields, so those files mostly run as they are.
+
+## Flows are a numbered list
+
+```markdown
+1. [[researcher]] — find one topic worth writing about
+2. [[writer]]     — draft it
+2. [[fixer]]      — fix the technical issues, in parallel
+3. [[editor]]     — review both together
+   verify: test -s outputs/post.md
+```
+
+Same number runs at the same time; different numbers run in order. Each group
+receives everything the group before it produced. `verify:` means a shell
+command has to exit 0 — *done* should mean a check passed, not that the model
+stopped talking.
+
+## Evals, because prompts regress quietly
+
+```markdown
+## writes for farmers, not gardeners
+task: Propose a topic and say who it is for.
+expect:
+  - not-contains: leverage
+  - judge: the intended reader is a working farmer
+```
+
+Deterministic checks run first; a model only judges what survives them.
+`foldrun eval` in CI is how you find out a prompt edit made things worse.
+
+Every eval runs after every deploy unless it says otherwise. An eval of a
+whole flow costs a whole run each time — and may touch real systems — so mark
+it `trigger: manual` and it runs only when a person asks — the Run button,
+the API, or `foldrun eval`.
+
+## Which model, and how hard it thinks
+
+Two knobs, set anywhere from a whole agent down to one step of one flow —
+nearest wins, and the run trace names the winner:
+
+```yaml
+model: fast        # a tier (fast | default | max), an exact id, or "@preset/…"
+effort: high       # low | medium | high | xhigh | max
+```
+
+Tiers keep files from rotting when models are renamed; an exact id pins one;
+synonyms all land (`small`, `cheap`, `large`, `best`…). Effort is the
+orthogonal axis — `fast` + `max` is the cheap model told to take its time.
+
+A `provider:` block points the runtime at any endpoint speaking the Anthropic
+Messages API — OpenRouter's Anthropic skin runs 400+ models through it, a
+LiteLLM in front covers the rest — and remaps what the tiers mean there:
+
+```yaml
+provider:
+  base_url: https://openrouter.ai/api
+  token: ${OPENROUTER_API_KEY}
+  models:
+    fast: google/gemini-2.5-flash
+```
+
+The runtime then asks the gateway what each model can actually do, and uses
+the answer three ways: a step whose agent needs tools fails **at start** on a
+model that can't call them (one line, naming the nearest that can); `effort:`
+is fitted to each model's supported levels, out loud; and step cost is priced
+from the gateway's own rates, not one vendor's table. When a claim needs
+proving, `foldrun probe <model>` runs a real tool loop against it — a nonce
+the model must fetch through a tool and echo back — through your exact
+provider config. The catalogue is the gateway's claim; the probe is ground
+truth.
+
+## The host for markdown agents
+
+**foldrun cloud** runs your agents so you don't operate them: scheduled and
+webhook triggers, durable runs with full history, a secret store, team access,
+and containers you never touch. Push the folder, it runs.
+
+The CLI and the runtime are free to install from npm, and the hosted
+platform imports the same core rather than a fork. Writing and checking
+an agent locally costs nothing and needs no account — that is the on-ramp to
+the host, not a competitor to it.
+
+Where the two differ is operations, not capability. Locally a run happens in
+your terminal; hosted, it survives a restart, retries a failed step, waits days
+for an approval and tells you what it cost. Nothing is held back from the local
+version to make the hosted one worth buying.
+
+## This repo, and the others
+
+This is `foldrun-core`: the runtime, published to npm as `@foldrun/core`.
+Most people want the CLI, not this package — `npm install -g foldrun`.
+
+| Path | What |
+|---|---|
+| `src/` | the runtime: parse, run, check, evaluate |
+| `templates/` | starting points for a new workspace — see below |
+| `SPEC.md` | the agent and flow format |
+| `okf/PROFILE.md` | which parts of OKF are implemented |
+| `okf/WHITE-PAPER.md` | hosting OKF: what the spec leaves to hosts |
+| `tests/` | the runtime's tests (`npm test`) |
+
+The command-line tool is its own package,
+[`foldrun`](https://www.npmjs.com/package/foldrun), and depends on
+this package. The reference documentation is at
+[docs.foldrun.io](https://docs.foldrun.io). foldrun is source-available
+under the Functional Source License (see "Licence" below).
+
+### Templates and workspaces
+
+There is **one** place a workspace lives: wherever you made it. `foldrun init`
+makes one in a directory you name; the hosted platform makes one under
+`data/<tenant>/workspaces/<name>/`, which is gitignored because it holds your
+secrets, run journals and whatever your agents learned.
+
+`templates/` is not a second home for workspaces. It holds **starting points**
+— authored, committed, and shipped — and you turn one into a workspace:
+
+```bash
+foldrun init my-desk --from templates/hello
+foldrun check my-desk
+foldrun run note --workspace my-desk
+```
+
+`templates/hello` is the smaller of the two and exercises the whole format: an
+agent, a flow, a skill, a script tool as a folder (`tools/wordcount/` — a
+`tool.md` and the `run.py` it calls), knowledge it may only read, memory it
+writes back, and state it carries to the next run. `templates/blog-desk` is
+the two-agent shape of a real desk: a researcher picks the topic, a writer
+drafts it, over shared house style in `knowledge/` and an eval that holds the
+writer to it.
+
+A template ships, so it has to be correct without anyone running it: every
+bundle in `templates/` is checked for conformance on each test run, and its
+generated `index.md` is regenerated and compared against the committed one, so
+a hand-edited template cannot ship an index that disagrees with its own files.
+
+## Hosting it
+
+This package is the framework: everything needed to read a workspace and
+run it on the machine you are on. The platform — the dashboard, a queue and
+its worker, one sandbox per step, a vault, metering, a team — is built on
+it, in a separate package that plugs in through `src/platform.ts`. Nothing
+in this repository imports it. The platform is
+[foldrun-platform](https://github.com/foldrun-io/foldrun-platform) and
+[foldrun-web](https://github.com/foldrun-io/foldrun-web): run it on your own
+server with Docker Compose (`foldrun-web/self-hosting`), or use foldrun's
+hosted one; `foldrun deploy` moves a workspace from your machine to either
+unchanged.
+
+## Requirements
+
+Node 22+. Docker or Podman if your agents run scripts. `foldrun check` needs
+no credential at all.
+
+To *run* an agent you need one of:
+
+- **`ANTHROPIC_API_KEY`** — an API key from
+  [console.anthropic.com](https://console.anthropic.com).
+- **`CLAUDE_CODE_OAUTH_TOKEN`** — a Claude login token, from
+  `claude setup-token`. Used when no API key is set.
+- **Your own provider.** An agent that names a `provider:` needs no
+  Anthropic key: 29 endpoints are known by name, including `ollama`,
+  `lmstudio` and `vllm`, so a local model is a complete answer. Anything
+  not in that list works by spelling out `base_url:`, `format:` and
+  `auth:`. See [providers](https://docs.foldrun.io/providers).
+
+The first one set is used, and every step records which. The login Claude
+Code keeps on the machine is never picked up by itself. Anthropic does not
+allow products built on its Agent SDK to offer claude.ai login unless
+Anthropic has approved them, so check that the terms cover your use before
+you rely on a login token.
+
+## Versions
+
+[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html): a patch is
+a bug fix, a minor adds something and breaks nothing, a major breaks
+something and says what. The promise covers the **public API**, the entry
+points listed in `package.json` under `foldrun.publicApi`: `@foldrun/core`
+itself and the subpaths the `foldrun` CLI imports. Every other module under
+`@foldrun/core/*` can be reached, because the runner image imports its own
+copy by name, but it is internal and may change in any release. Deprecated
+names say so in their doc comment for at least one minor before a major
+removes them. Pre-releases are on npm's `next` tag. How a release decides
+its number: [CONTRIBUTING.md](CONTRIBUTING.md#versions).
+
+## Status
+
+Local and hosted runs work. Hosted runs go through a durable on-disk
+queue (survives restarts, parks at approval gates), the dashboard has
+accounts and sessions (scrypt + signed cookies; first signup is free, then
+`FOLDRUN_OPEN_SIGNUP=1`), spending lands in an append-only per-account
+ledger (`FOLDRUN_BILLING=1` makes an empty balance refuse new runs), and a
+`notify:` block in AGENTS.md webhooks you when a run fails or waits for
+approval.
+
+Teams: an account holds many users, joined by 7-day invite links minted in
+Settings. Webhook URLs rotate per-hook (generation counters — nothing
+secret stored) and every delivery, refused ones included, lands in a log.
+Card top-ups are two Stripe REST calls behind `STRIPE_SECRET_KEY`, writing
+the same ledger entry the manual API does.
+
+With `FOLDRUN_RUN_ISOLATION=container` (one box) or `=k8s` (cluster —
+native run pods, gVisor by RuntimeClass, egress-limited by NetworkPolicy)
+every step runs in a hardened throwaway sandbox: workspace copied in,
+events streamed out, changes filtered back so `knowledge/`, secrets and
+run history physically cannot come back modified. The CLI keeps in-process
+runs — on a laptop there is nothing to protect the server process from.
+
+Connections cover how services actually hand out credentials: API keys,
+API with base URL + headers, SSH (key or password — materialised as a
+ready-to-run wrapper, `"$NAME" 'uptime'`), browser OAuth with your own
+client, OAuth client-credentials, service accounts (RS256 JWT), and file
+secrets (0600). Values are encrypted at rest and never reach the model.
+
+A built-in tools gallery ships platform-maintained scripts — first entry:
+a headless browser (`fetch_rendered`) for pages that render with
+JavaScript. Assigning one copies it into your account library or a
+workspace; agents still opt in explicitly in their own markdown.
+
+Known gaps: one platform replica per data directory (the web/worker role
+split needs RWX storage), and the dashboard's run lists re-read run files
+per request (fine to thousands of runs).
+
+## Licence
+
+Source-available under the [Functional Source License 1.1, Apache 2.0 future
+licence](LICENSE) (`FSL-1.1-ALv2`). Use it for anything except offering it to
+others as a competing commercial product or service: personal use and use
+inside your own company are free, at any size. Each version becomes Apache 2.0
+two years after its release. [LICENSING.md](LICENSING.md) explains what is
+allowed and what needs a commercial licence (hello@foldrun.io), and which
+licence earlier versions shipped under.

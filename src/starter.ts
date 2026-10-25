@@ -1,0 +1,587 @@
+// The starter workspace, defined once.
+//
+// Two things used to build one: `foldrun init` had its own copy and the
+// dashboard's "new workspace" button had another. They drifted exactly as you
+// would expect — different flow names, one with evals and knowledge and one
+// without — and when structural documents moved from `type:` to `kind:`, one
+// copy was migrated and the other silently kept writing the old spelling.
+//
+// This is the same failure the consistency tests exist to catch: a list in two
+// places, one updated, nothing erroring. So there is one definition here and
+// both callers read it.
+//
+// Not to be confused with KINDS[kind].template(), which makes *one* document
+// of a kind with a placeholder name — that is what the New button uses inside
+// an existing workspace. This is the set of files a brand-new workspace starts
+// with, and they reference each other on purpose: the flow names the agents,
+// the eval names the writer, so `foldrun check` passes and `foldrun run
+// publish` works before anything has been edited.
+
+/** One authored file, relative to the workspace root. */
+export interface StarterFile {
+  path: string;
+  content: string;
+}
+
+/**
+ * The account root's own files — one scope up from any workspace.
+ *
+ * The account AGENTS.md was readable from the day `workspaceFrontmatter` and
+ * `sharedInstructions` learned to look for it, and nothing ever wrote one. So
+ * the outer half of "nearest-wins" existed only for people who had read the
+ * spec closely enough to know the file could exist at all, which is the same
+ * failure as prose that reached no model: a feature nobody is told about.
+ *
+ * Deliberately near-empty. This file's frontmatter governs *every* workspace
+ * under it, so the scaffold ships the shape and a commented example rather
+ * than a live `provider:` — a starter that silently routed every future
+ * workspace somewhere would be worse than no starter.
+ */
+export function accountFiles(account: string): StarterFile[] {
+  return [
+    {
+      path: "AGENTS.md",
+      content: `---
+foldrun_version: "0.1"
+# Config here applies to every workspace under this account, and a workspace
+# that declares the same key replaces it *whole* — base_url and token never
+# merge across scopes, so a provider block belongs entirely at one level.
+#
+# Your own model key needs no block: Settings → Model provider, or
+# \`foldrun account model set anthropic --key …\` (an API key, not a login).
+# A provider: block here or lower wins over it.
+#
+# provider:
+#   base_url: https://openrouter.ai/api
+#   token: \${OPENROUTER_API_KEY}
+#   models:            # what this gateway calls each tier
+#     fast: google/gemini-2.5-flash
+#     max: anthropic/claude-opus-4.1
+#   headers:           # anything else the gateway wants
+#     X-Title: foldrun
+#
+# The token is sent as a bearer credential. A gateway that wants it as a key
+# header asks for that by name: headers: { x-api-key: \${THE_SECRET} }.
+#
+# The four jobs of running agents, each a block — or write the same keys at
+# the top; one place or the other, never both:
+#
+# governance:          # who answers for it, what it may spend and ship
+#   owner: you@example.com
+#   budget: 60/month
+#   deploy_block: secrets
+# guardrail:           # what agents may reach and call
+#   limits: {calls: 300, repeat: 5}
+#   network: trusted
+# observability:       # what is recorded, and who is told
+#   notify: {email: you@example.com, events: [failed]}
+#   alerts: {failure_rate: 30%}
+# evaluation:          # how work is judged
+#   judge: {model: fast}
+---
+
+# ${account}
+
+Context every agent in every workspace here shares.
+
+Unlike the frontmatter above, this prose **accumulates**: a workspace's
+AGENTS.md is added to it, not swapped for it, so a rule written here cannot be
+dropped further down.
+`,
+    },
+  ];
+}
+
+/**
+ * What an account folder ignores, at its own root.
+ *
+ * The workspace scaffold has always shipped one of these; an account folder is
+ * the thing that gets committed now, and the key that decrypts its secrets
+ * lives at ITS root — `<account>/.foldrun/` — so the guard has to be here too
+ * or the first `git add .` commits the vault key.
+ */
+export function accountGitignore(): StarterFile {
+  return {
+    path: ".gitignore",
+    content: `# The key that decrypts every secret in this account, plus the local run
+# store. Never commit these.
+.foldrun/
+
+# Written by runs, not by you.
+workspaces/*/runs/
+workspaces/*/outputs/
+state/
+storage/
+# The link a running step keeps in its agent folder (workspace/ for the
+# shell); removed when the step ends, ignored in case one is left behind.
+workspaces/*/agents/*/workspace
+
+.env
+.env.local
+.DS_Store
+`,
+  };
+}
+
+export function starterFiles(workspace: string): StarterFile[] {
+  return [
+    {
+      // AGENTS.md, not project.md — the file was renamed to the Linux
+      // Foundation standard and this scaffold was missed once already, so
+      // every workspace made from the dashboard started with a file nothing
+      // reads.
+      path: "AGENTS.md",
+      content: `---
+name: ${workspace}
+description: A starter workspace — edit the agents, then run the flow.
+foldrun_version: "0.1"
+---
+
+# ${workspace}
+
+Context every agent here shares. Prices, rules, anything they should all know.
+`,
+    },
+
+    {
+      // A workspace is meant to be a git repository — that is the whole pitch,
+      // that you can diff and review what an agent is. So it has to arrive
+      // knowing which of its own files must never be committed. The decisive
+      // one is `.foldrun/.secret-key`: the CLI writes the key that decrypts
+      // every secret *inside the workspace*, and without this file the first
+      // `git add -A` after setting a secret commits it.
+      path: ".gitignore",
+      content: `# The key that decrypts every secret in this workspace, plus the
+# local run store. Never commit these.
+.foldrun/
+
+# Written by runs, not by you.
+runs/
+outputs/
+# The link a running step keeps in its agent folder (workspace/ for the
+# shell); removed when the step ends, ignored in case one is left behind.
+agents/*/workspace
+
+.env
+.env.local
+.DS_Store
+`,
+    },
+
+    {
+      path: "agents/researcher/agent.md",
+      content: `---
+name: researcher
+description: Finds one thing worth writing about, and says why.
+model: fast
+effort: high
+tools:
+  - web
+  - read
+web:
+  actions: [search, fetch]
+---
+
+Pick exactly one topic, in a short paragraph, and say who it helps and why now.
+Do not write the article.
+`,
+    },
+
+    {
+      path: "agents/writer/agent.md",
+      content: `---
+name: writer
+description: Turns a brief into a short draft.
+tools:
+  - write
+---
+
+Write a short draft from the brief you were given. Save it to outputs/draft.md.
+`,
+    },
+
+    {
+      path: "flows/publish.md",
+      content: `---
+name: publish
+trigger: manual
+---
+
+Read the numbers, not the order of the lines.
+Same number = at the same time. Different number = one after the other.
+
+1. [[researcher]] — find one topic worth writing about
+2. [[writer]] — draft it
+`,
+    },
+
+    {
+      // knowledge/ is an OKF bundle, so this one declares itself in `type:`.
+      path: "knowledge/house-style.md",
+      content: `---
+type: Reference
+title: How we write
+description: How we write. Agents read this; they never rewrite it.
+status: stable
+---
+
+- Short sentences. One idea each.
+- Say the number, not "significant growth".
+`,
+    },
+
+    {
+      // The other half of OKF, and the half the starter never showed. Same
+      // format as knowledge/, different write permission: an agent may add
+      // here, and when it does the runtime stamps `generated:` so a fact it
+      // worked out never looks like one you gave it.
+      path: "memory/what-worked.md",
+      content: `---
+type: Fact
+title: What worked last time
+description: Something learned from a run. Agents add files here themselves.
+status: stable
+# generated: is stamped automatically when an agent writes a memory.
+# Add verified: with a \`human:\` actor once you have checked one yourself —
+# that is what moves it from unverified to human-reviewed in the index.
+---
+
+Short drafts got edited less than long ones. Prefer four paragraphs to eight.
+`,
+    },
+
+    {
+      // For the CODING TOOL the author is using, not for the platform — this is
+      // the one file here that foldrun itself never reads. Claude Code and its
+      // peers look for AGENTS.md/CLAUDE.md at the root of whatever they open,
+      // and without one they infer conventions from the tree, which for a
+      // workspace of loosely-structured markdown means guessing frontmatter
+      // fields that do not exist and putting agents in the wrong place.
+      //
+      // The platform already imports .claude/agents/*.md as agents, so a
+      // subagent authored in Claude Code deploys as a foldrun agent with no
+      // conversion. That path is much more useful when the tool knows it
+      // exists, which is most of what this file is for.
+      path: "CLAUDE.md",
+      content: `# Working on this foldrun workspace
+
+This is a foldrun workspace: agents, flows and knowledge as markdown. There is
+no build — the files ARE the program — so the loop is edit, check, run, deploy.
+
+## The loop
+
+\`\`\`sh
+foldrun check              # validate everything, offline, no model calls
+foldrun run <flow>         # run it locally against real models
+foldrun eval               # run the evals
+foldrun deploy --url <server> --token $FOLDRUN_TOKEN
+\`\`\`
+
+\`check\` is cheap and catches a broken flow before a schedule fires it at 3am.
+Run it after edits, the way you would run a typecheck.
+
+It is also the security scanner: a key written into a file, hidden text in
+knowledge or skills, an agent that reads the web while holding a secret and
+an open way out, \`curl | sh\`, an MCP server at no fixed version. Every
+finding names its rule (\`secret/hardcoded\`). \`foldrun check --security\`
+fails on any of them; \`<!-- foldrun-ignore <rule>: <reason> -->\` on the line
+before accepts one; \`--write-baseline\` accepts what is there today, and
+\`--format sarif\` feeds GitHub code scanning (\`foldrun docs checks\`).
+
+A deploy that would delete files this folder no longer has lists them and
+stops: with no terminal it is refused. Tell the person what it would delete; add \`--yes\`
+only when they asked for exactly that deletion.
+
+## Where things go
+
+| Path | What |
+|---|---|
+| \`AGENTS.md\` | shared context every agent in this workspace sees |
+| \`agents/<name>/agent.md\` | one role: its persona, model, tools |
+| \`flows/<name>.md\` | steps, in order, naming the agents that run them |
+| \`knowledge/\` | reference material agents read |
+| \`memory/\` | what past runs learned — agents write here themselves |
+| \`evals/\` | tests for agents, same idea as unit tests |
+| \`skills/\` | a procedure an agent can follow, named in \`skills:\` |
+| \`hooks/\` | your code at every tool call, step start or step end (\`hook.md\` + \`run.mjs\`), turned on with \`hooks:\` — refuse, rewrite, add context; same on every model |
+| \`tools/\` | a folder tool: its definition and its code together |
+| \`scripts/\` | code the agents call, referenced by \`scripts:\` |
+| \`state/\` | what runs accumulate. Yours to read, never deployed over |
+| \`.claude/agents/<name>.md\` | a Claude Code subagent — deploys AS an agent |
+
+\`knowledge/\` is what you tell the agents; \`memory/\` is what they worked out.
+Regenerated every run means a file; accumulated across runs means \`state/\`.
+
+That last row is worth knowing: a subagent you write in Claude Code is imported
+as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
+
+## Paths inside a workspace
+
+An agent's working directory is \`agents/<name>/\`. Write every path to the
+workspace's own folders as \`workspace/…\` — \`workspace/storage/report.csv\`,
+\`workspace/state/cursor.json\` — in an agent's prose, in flow options
+(\`each: rows of\`, \`when: rows of\`, \`verify:\`, \`preview:\`, \`schema:\`) and in
+script arguments. It resolves the same in the file tools, the shell, scripts
+and checks. The older \`../../storage/…\` reaches the same place and still
+works; \`foldrun check\` suggests the new spelling where it sees it.
+A Node script started as \`node workspace/tools/x/run.mjs\` is its own main
+module there, so its \`import.meta.url\` entry check runs (it did not before
+2 Oct 2026 and exited 0 doing nothing).
+
+## What a deploy does NOT touch
+
+\`runs/\`, \`state/\`, \`storage/\`, \`secrets.json\`, the trigger log, and any
+memory an agent wrote that your push does not mention. Those belong to the platform, not to git — a deploy that
+reverted what an agent learned would make every run a little dumber.
+
+Secrets never go in these files. \`foldrun secrets\` puts them in the vault, and
+agents reference them by name. Bind one to the sites it is for
+(\`foldrun secrets sites NAME api.example.com\`) and it never enters a sandbox:
+the egress proxy fills \`\${NAME}\` in requests to those sites alone. Which sites
+a sandbox may reach at all is \`network:\` — open for an agent that reads the web,
+the trusted list plus what it declares for every other (\`foldrun agent network\`).
+
+## Talking to a deployed workspace
+
+The CLI is local except for \`deploy\`. To inspect or drive a workspace running
+on a server, use the HTTP API — every route takes the same API key
+(\`Authorization: Bearer $FOLDRUN_TOKEN\`, from Settings → API keys) or a browser
+session, and refuses without one.
+
+\`\`\`sh
+export FOLDRUN_TOKEN=...   FOLDRUN_URL=https://your-server   WS=my-workspace
+api() { p=$1; shift; curl -sS -H "authorization: Bearer $FOLDRUN_TOKEN" "$FOLDRUN_URL/api/$p" "$@"; }
+
+api workspaces/$WS/runs                       # recent runs, newest first
+api workspaces/$WS/runs/<id>                  # the full trail of one
+api workspaces/$WS/runs/<id>/stream           # follow a live one (SSE)
+api workspaces/$WS/flows/<flow>/run -X POST   # start one
+\`\`\`
+
+All of it, \`/api/workspaces/<workspace>\` unless noted:
+
+| Route | Methods | For |
+|---|---|---|
+| \`/\` | GET DELETE PATCH | the workspace itself |
+| \`/deploy\` | POST | what \`foldrun deploy\` calls |
+| \`/source\` | GET PUT PATCH DELETE | read and write single files |
+| \`/runs\` | GET | list runs |
+| \`/runs/<id>\` | GET DELETE | one run, every step |
+| \`/runs/<id>/stream\` | GET | live events, server-sent |
+| \`/runs/<id>/stop\` | POST | kill it — destroys the sandbox too |
+| \`/runs/<id>/rerun\` | POST | again, or from a chosen step |
+| \`/runs/<id>/approve\` | POST | release a run waiting on a human |
+| \`/runs/<id>/answer\` | POST | answer a question an agent is asking mid-step (\`tools: [ask]\`) |
+| \`/runs/<id>/message\` | POST | tell a running step something; \`step\` picks one of a parallel group |
+| \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
+| \`/flows/<f>/run\` | POST | start a flow |
+| \`/flows/<f>/filter\` | POST | would this delivery start it? its \`filter:\` against a payload — nothing starts |
+| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · GET POST | list agents, run one, copy one in from another workspace |
+| \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
+| \`/evals/<e>/compare\` | GET POST | its cases under two to four models, side by side — test runs, a spend limit |
+| \`/evals/<e>/grades\` · \`/evals/<e>/grade\` | GET · POST | a grader's grades (\`trigger: runs\`); grade one finished run now |
+| \`/evals/<e>/improve\` · \`/proposals\` · \`/proposals/<id>\` | POST · GET · GET POST | ask for a proposed fix; list them; apply or dismiss one |
+| \`/tools/<t>/test\` | POST | exercise one tool alone |
+| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
+| \`/assets\` | POST | upload an asset |
+| \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
+| \`/notify/deliveries\` · \`/notify/deliveries/<id>/redeliver\` | GET · POST | every notify: webhook sent and each attempt; send one again |
+| \`/export\` · \`/import\` | GET · POST | the workspace, a flow (\`?kind=flow&name=\`) or an agent as a .zip; take one in (\`?dryRun=1\` first, \`?overwrite=1\` to replace) |
+| \`/restore\` | POST | the workspace's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
+| \`/vocabulary\` | GET | what this workspace's documents may say |
+| \`/check\` | GET | what \`foldrun check\` says about the deployed copy, as findings with rule ids (\`?security=1\`) |
+| \`/assistant\` | POST | ask the assistant, or have it write agents, flows, tools and skills — from the docs only; proposals come back, nothing is written |
+
+Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/schedule\`,
+\`/api/approvals\`, \`/api/issues\` (what went wrong, open until resolved), \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
+\`/api/me/notifications\` (what mail you get; a key acts for whoever minted it),
+\`/api/me/inbox\` (what waits on you: gates, questions, issues, proposed fixes, your failed runs),
+\`/api/account/backups\` (snapshots, restore requests), \`/api/me/onboarding\` (getting started),
+\`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
+and \`/api/metrics\` (Prometheus).
+
+Every call answers — and the CLI sends — \`Foldrun-Version: YYYY-MM-DD\` (dated API
+versions; an account pin in Settings → API), \`X-RateLimit-*\` headers (a \`429\`
+carries \`Retry-After\`), and writes that start work take an \`Idempotency-Key\`
+(a retry with the same key replays the first answer). The whole surface as
+OpenAPI 3.1: \`/api/openapi.json\` (open), or \`foldrun api spec --out openapi.json\`.
+
+Debugging a failed run is usually: \`runs\` to find it, \`runs/<id>\` to read which
+step failed and what it cost, fix the markdown, \`deploy\`, then \`rerun\`.
+
+Every route, with request and response shapes, is in \`docs/api.md\` in the
+foldrun repository — including secrets, keys, billing, OAuth, webhooks and
+restore.
+
+## Writing a flow
+
+A numbered list of steps. The number is the GROUP: same number means those
+steps run in parallel, and the flow waits for all of them before the next.
+The dashboard's canvas and the CLI edit the same file: \`foldrun flow show
+<flow>\` draws it, \`foldrun flow add <flow> <pattern>\` inserts a pattern
+(chain, parallel, router, fan-out, loop, approval, ask, wait, rescue,
+subflow), \`foldrun flow rm-step\` removes a step, and \`foldrun agent link
+<agent> --subagent|--consult|--can-ask\` wires agents together.
+
+\`\`\`markdown
+---
+trigger: manual          # manual | schedule | webhook
+schedule: "0 9 * * 1"    # cron, when trigger: schedule
+timezone: Australia/Sydney
+owner: ana@example.com   # who answers for it; else the workspace's, else the account's
+model: default           # a default for every step here
+effort: low
+overlap: skip            # skip | queue — what a second run does while one is live
+priority: normal         # high | normal | low — where its runs stand in the queue
+---
+
+1. [[researcher]] — Find three sources on {{topic}}.
+2. [[writer]] — Draft from what the researcher found.
+   model: max
+   verify: judge: the draft cites every source
+3?. [[editor]] — Tighten it.
+4!. [[publisher]] — Publish it.
+\`\`\`
+
+\`3?.\` is optional — it may be skipped. \`4!.\` needs a human to approve before it
+runs. \`[[flow:other-flow]]\` in place of an agent runs another flow as a step.
+
+Indented under a step, any of:
+
+| | |
+|---|---|
+| \`approve: true\` | stop for a human (\`!\` is shorthand for this) |
+| \`when: <MARKER>\` | run only if a line of the previous result begins with it |
+| \`when: rows of <path>\` | run only if that CSV has a data row — for the steps after an \`each:\` |
+| \`case: <value>\` / \`else: true\` | branch on the previous step's result |
+| \`retry: 2\` | re-run on failure, up to 5 |
+| \`timeout: 900\` | seconds before the step is cut off |
+| \`verify: <shell>\` | the step fails unless the command exits 0; the reply is in \`$FOLDRUN_REPLY_FILE\` |
+| \`verify: judge: <claim>\` | a model grades the claim against the output |
+| \`verify: contains:\` / \`not-contains:\` / \`matches:\` / \`file:\` | the cheap checks, no shell |
+| \`model:\` / \`effort:\` | override the flow's default for this step |
+| \`loop: 3\` / \`until: <condition>\` | repeat until it holds, at most 5 |
+| \`each: lines\` | run once per line of the previous result |
+| \`each: rows of <path>\` | run once per CSV row |
+| \`max: 10\` | cap how many iterations \`each:\` produces |
+| \`on-fail: [[agent]]\` | who handles it when this step fails |
+| \`wait: 30m\` | pause before running — \`90s\`, \`30m\`, \`4h\`, \`3d\` |
+| \`wait: event\` | hold until something POSTs the run's event URL; the body reaches the step |
+| \`ask: <question>\` | ask a human, use the answer |
+| \`preview: draft/*.mdx\` | what the approval box shows — paths under \`storage/\`, globs allowed |
+| \`delegate: [[a]], [[b]]\` | hand the step to whichever fits, up to 5 |
+| \`output: json\` | the reply ends with one JSON value; the next step gets it as data, \`each: items\` fans out over it |
+| \`schema: {...}\` | with \`output: json\` — the JSON Schema the value must satisfy; inline, a YAML block under the key, or a file path |
+| \`each: items\` | run once per element of the previous step's JSON array |
+| \`parallel: 3\` | how many \`each:\` instances run at once — default all |
+| \`max_turns: 20\` | the most model turns before the step is stopped, beside \`budget:\` and \`timeout:\` |
+| \`limits: {web.search: 10}\` | this step's call limits, over the agent's key by key |
+
+## Writing an agent
+
+Frontmatter then prose. The prose IS the system prompt, so write it to be read
+by a model: what this role is for, what it must not do, what good looks like.
+
+\`\`\`markdown
+---
+name: researcher
+description: Finds and summarises sources.
+owner: ana@example.com      # who answers for it; else the workspace's, else the account's
+model: default              # fast | default | max
+effort: low                 # how hard to think about it
+size: large                 # small | large | heavy — the sandbox it rents
+tools: [web, read, ask, peers, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it
+disallowedTools: [Bash]     # subtract from what it would otherwise have
+skills: [house-style]       # from skills/
+hooks: [no-force-push]      # from hooks/ or the library: code at every tool call
+scripts: [summarise.py]     # from scripts/, each becomes a callable tool
+apis: [{ name: crm }]       # an HTTP API, as a tool
+mcpServers: {}              # an MCP server, as a tool
+agents: [writer]            # colleagues this one may consult (an answer, no tools)
+subagents: [researcher]     # colleagues it may delegate a job to (own context, own tools ≤ its own)
+sandbox: own                # delegated to: run each job in its own sandbox (own tools, secrets, network)
+secrets: [CRM_TOKEN]        # keys the agent uses itself; a tool's own come with the tool
+limits: {web.search: 40, crm: 20, calls: 300}  # per step; a call past a limit is refused, never run
+network: [api.example.com]  # sites its sandbox may reach, added to the trusted list; open | trusted | none
+timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
+provider: {}                # BYOK for this agent; account-wide: \`foldrun account model set\`
+permissionMode: plan        # plan first, act once approved
+runtime:                    # only if scripts need packages
+  packages: [requests]
+  system: [ffmpeg]          # Debian packages, apt-installed before the step
+---
+
+You research a topic and report what you found...
+\`\`\`
+
+The fields that do one of the four jobs of running agents may be grouped
+under it — \`governance:\` (owner, budget), \`guardrail:\` (limits, network,
+hooks, disallowedTools, permissionMode, secrets), and in AGENTS.md also
+\`observability:\` (alerts, telemetry, notify, capture) and \`evaluation:\`
+(judge). A block reads exactly as the same keys at the top; a key written
+both ways is refused (\`config/conflict\`). \`foldrun docs four-jobs\`.
+
+Only \`name\` and the prose are required. Every other field widens or narrows
+what the agent can reach, and the default is narrow.
+
+\`timezone:\` is nearest-wins all the way down: the agent's own, else its
+flow's, else the workspace's AGENTS.md, else the account's, else UTC. It sets
+\`TZ\` and the date the agent is told, so a Sydney desk stamps the Sydney date.
+
+\`runtime:\` installs pip/npm packages in the sandbox each agent runs in. Pin
+versions the normal way (\`pandas>=2\`, \`lodash@^4\`). \`system:\` adds Debian
+packages \u{2014} a program (\`ffmpeg\`), a library's headers for a pip package that
+compiles (\`libcairo2-dev\`, \`python3-dev\`), \`build-essential\` \u{2014} installed with
+apt before the step starts and cached, so later runs only unpack them. An agent that
+finds it needs something mid-run installs it itself with the \`install\` tool
+(apt, pip or npm), which every agent has; declaring is only a speed-up.
+
+Link documents to each other with \`[[wikilinks]]\` — the name, not the path.
+`,
+    },
+
+    {
+      path: "evals/writer-quality.md",
+      content: `---
+name: writer-quality
+agent: writer
+model: fast
+effort: low
+---
+
+## writes something
+task: Write two sentences about rain.
+expect:
+  - judge: it is two sentences and mentions rain
+`,
+    },
+  ];
+}
+
+/**
+ * A new workspace with nothing in it to delete: its AGENTS.md, the
+ * .gitignore that keeps its secret key out of git, and the CLAUDE.md a coding
+ * tool reads. No example agents or flow.
+ *
+ * The starter's researcher and writer were a demo, and a person making a
+ * workspace for real work met them as clutter — "why does a new workspace
+ * have agents?" (owner, 2026-10-05). The agents worth having are usually ones
+ * already written in another workspace, which `agents/import` copies in; the
+ * example is still one flag away (`foldrun new <name> --starter`).
+ */
+export function blankWorkspaceFiles(workspace: string): StarterFile[] {
+  const keep = new Set(["AGENTS.md", ".gitignore", "CLAUDE.md"]);
+  return starterFiles(workspace)
+    .filter((f) => keep.has(f.path))
+    .map((f) =>
+      f.path === "AGENTS.md"
+        ? {
+            ...f,
+            content: f.content.replace(
+              "description: A starter workspace — edit the agents, then run the flow.",
+              "description: A new workspace — add an agent or import one from another workspace, then write a flow.",
+            ),
+          }
+        : f,
+    );
+}

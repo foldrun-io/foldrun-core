@@ -1,0 +1,4664 @@
+// Filesystem storage. Three real directories, one per scope — the nesting IS
+// the scope model, so "nearest wins" is literally walking up the tree:
+//
+//   data/<account>/                        the company: one bill, one identity
+//   ├── secrets.json                       account credentials
+//   ├── library/                           shared by every workspace
+//   │   └── {skills,memory,knowledge,tools,scripts}/
+//   ├── .runtimes/                         generated: container images, venvs
+//   └── workspaces/<workspace>/            a trust boundary
+//       ├── AGENTS.md                      shared context for this workspace
+//       ├── agents/<agent>/                one role
+//       │   └── {agent.md,skills,memory,knowledge,scripts,outputs}/
+//       ├── {flows,evals,skills,memory,knowledge,tools,scripts,state}/
+//       ├── secrets.json                   workspace credentials
+//       └── runs/                          generated: the audit trail
+//
+// Anything generated is either dot-prefixed (.runtimes, .results) or named for
+// what produced it (runs/, outputs/). Everything else is authored by a person
+// or an agent, and belongs in git.
+//
+// An account is a named directory (per OKF: tenancy is a hosting concern).
+
+import { expandPlatformVars } from "./host-env.ts";
+import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
+import type { BrowserPodOutcome } from "./browser-pod.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
+import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
+import { platform } from "./platform.ts";
+import { toLF, asRaw } from "./eol.ts";
+import type { TestEffect } from "./test-mode.ts";
+import type { OperatorEvent } from "./operator.ts";
+import matter, { frontmatterErrorText, configMatter } from "./matter.ts";
+import { readAgentsMdKeys } from "./agents-md.ts";
+
+/**
+ * The frontmatter of one markdown file, as the runtime reads it. Exported
+ * for the CLI: `foldrun probe` used to import gray-matter itself, which is
+ * this package's dependency, not the CLI's — on an installed CLI the import
+ * failed, the catch swallowed it, and the workspace's provider block was
+ * silently ignored, so the probe went to Anthropic and reported a model
+ * that "may not exist". Reading through here, the CLI cannot drift from
+ * the runtime, and there is nothing to fail to import.
+ */
+export function readFrontmatter(file: string): Record<string, unknown> {
+  return configMatter(fs.readFileSync(file, "utf8")).data as Record<string, unknown>;
+}
+import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts";
+import { refNames } from "./refs.ts";
+import { checkFilter } from "./trigger-filter.ts";
+import { parseBudget, budgetProblem } from "./budget.ts";
+import { timezoneProblem } from "./clock.ts";
+import { parseStepLimits, readLimits } from "./limits.ts";
+import { networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
+import { webProblems, webWarnings, runnerEngines, webConfig } from "./providers.ts";
+import { actionProblems } from "./web-actions.ts";
+import { languageProblem } from "./language.ts";
+import { localeProblems } from "./locale.ts";
+import {
+  readBundle, syncIndex, appendLog, provenanceMarks, syncWorkspaceBundles,
+} from "./okf.ts";
+import { readTransport, KINDS } from "./kinds.ts";
+import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
+import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
+import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
+
+// Where workspaces live. The hosted app keeps many under data/; the CLI runs
+// against one folder, which is what `foldrun run ./my-desk` has to mean.
+
+/**
+ * Single-workspace mode. When set, the workspace IS this directory — no
+ * tenant, no projects/ nesting. That's the difference between a framework you
+ * run on a folder and a platform that hosts many, and it's the only thing the
+ * core needs to know about which one it's in.
+ */
+export { singleWorkspace };
+
+// The directories a workspace is made of. Declared once: this list had drifted
+// into four separate copies, and the file tree quietly stopped showing
+// knowledge/, evals/ and state/ because one of them was never updated.
+export const WORKSPACE_DIRS = [
+  "agents",
+  "flows",
+  "evals",
+  "skills",
+  "memory",
+  "knowledge",
+  "tools",
+  "scripts",
+  "hooks",
+  "state",
+] as const;
+
+const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
+
+// Where the file store mirrors its bytes for a run to read. Deliberately not
+// in WORKSPACE_DIRS: that list is the workspace's *source*, and everything
+// derived from it — the file tree, the git export, what a deploy may carry —
+// treats membership as "this is reviewable text". Blobs are not. Declared
+// here rather than in files.ts because saveWorkspace has to know the name to
+// preserve it, and store.ts is the module files.ts depends on, not the
+// reverse. See files.ts for the whole argument.
+export const STORAGE_DIR = "storage";
+/** What this directory was called before. Read-only: nothing writes here any
+ *  more, but installs created before the rename have bytes under it, and a
+ *  workspace whose files vanished on upgrade is a data-loss bug however
+ *  cosmetic the cause. `adoptLegacyFilesDir` moves one across, once. */
+export const LEGACY_FILES_DIR = "files";
+
+/**
+ * Move a pre-rename `files/` directory to `storage/`, once, in place.
+ *
+ * Called on the paths that resolve the store and the run mirror, so an
+ * existing install upgrades the first time either is touched rather than
+ * needing a migration step someone has to remember to run. A no-op when
+ * `storage/` already exists (the normal case after the first call) or when
+ * there is nothing to move (a fresh install).
+ */
+export function adoptLegacyFilesDir(parent: string): void {
+  const current = path.join(parent, STORAGE_DIR);
+  const legacy = path.join(parent, LEGACY_FILES_DIR);
+  if (fs.existsSync(current) || !fs.existsSync(legacy)) return;
+  try {
+    fs.renameSync(legacy, current);
+  } catch {
+    // A rename across devices, or a permission we do not have: copy instead,
+    // and leave the original alone rather than risk losing it.
+    try {
+      fs.cpSync(legacy, current, { recursive: true });
+    } catch {
+      /* the caller sees an absent directory, which is the pre-rename state */
+    }
+  }
+}
+
+/**
+ * Rewrite a pre-rename `mdagent_version:` in an AGENTS.md to `foldrun_version:`,
+ * once, in place.
+ *
+ * The reader used to accept both spellings, which meant the old name lived on
+ * forever in files nobody would ever edit. Migrating on touch retires it: the
+ * first read of an account or workspace converts the file, and after that
+ * there is one name in the codebase and one name on disk.
+ *
+ * Only the key is touched — same line, same value, same everything else — so
+ * a file with comments or unusual formatting comes through unchanged.
+ */
+export function adoptLegacyVersionKey(dir: string): void {
+  for (const name of ["AGENTS.md", "project.md"]) {
+    const file = path.join(dir, name);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (!/^mdagent_version:/m.test(raw)) continue;
+    try {
+      fs.writeFileSync(file, raw.replace(/^mdagent_version:/m, "foldrun_version:"));
+    } catch {
+      /* read-only checkout, or a source tree we do not own: the caller reads
+         the file either way, and a missing version is a warning, not a stop. */
+    }
+  }
+}
+
+// Where an account keeps its workspaces. Renamed from "projects" once the
+// concept settled on *workspace* everywhere else; the old directory is still
+// read so an existing install keeps working without a migration step.
+const WORKSPACES = "workspaces";
+const LEGACY_WORKSPACES = "projects";
+
+function workspacesRoot(tenant: string) {
+  const current = path.join(dataRoot(), tenant, WORKSPACES);
+  if (fs.existsSync(current)) return current;
+  const legacy = path.join(dataRoot(), tenant, LEGACY_WORKSPACES);
+  return fs.existsSync(legacy) ? legacy : current;
+}
+const SAFE_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+export function assertSafeName(name: string, kind: string) {
+  if (!SAFE_NAME.test(name)) throw new Error(`invalid ${kind} "${name}" — kebab-case only`);
+}
+
+export function workspaceDir(tenant: string, workspace: string) {
+  const single = singleWorkspace();
+  if (single) return path.resolve(single);
+  assertSafeName(tenant, "tenant");
+  assertSafeName(workspace, "workspace");
+  // An existing workspace keeps its current home; a new one is created under
+  // the canonical name.
+  const legacy = path.join(dataRoot(), tenant, LEGACY_WORKSPACES, workspace);
+  if (fs.existsSync(legacy)) return legacy;
+  return path.join(dataRoot(), tenant, WORKSPACES, workspace);
+}
+
+/**
+ * The account root — where `library/`, account secrets and the account-wide
+ * AGENTS.md live.
+ *
+ * On a laptop it is wherever `singleAccountRoot` says: the workspace's parent
+ * for a flat `my-desk/`, and the account root two levels up for a workspace
+ * inside `my-account/workspaces/`. Same rule libraryDir uses, so the two never
+ * disagree about where "up" is.
+ */
+export function accountDir(tenant: string) {
+  const single = singleWorkspace();
+  if (single) return singleAccountRoot()!;
+  assertSafeName(tenant, "tenant");
+  return path.join(dataRoot(), tenant);
+}
+
+/**
+ * Create the account's AGENTS.md if it is missing. Returns what it wrote.
+ *
+ * Called from every path that brings a workspace into being, because there is
+ * no separate "create an account" step — the account root accumulates
+ * (`library/`, `secrets.json`) as things need it, and its AGENTS.md is one
+ * more of those things.
+ *
+ * Never overwrites, and treats the legacy `project.md` as already-present: the
+ * whole file is hand-authored config, and a deploy is not permission to touch
+ * a scope the deploy did not ship. `dir` is explicit for `foldrun init`, which
+ * writes a workspace to an arbitrary path before anything is pinned to it and
+ * so cannot ask accountDir where "up" is.
+ */
+export function ensureAccountFiles(tenant: string, dir = accountDir(tenant)): string[] {
+  const written: string[] = [];
+  for (const f of accountFiles(path.basename(path.resolve(dir)))) {
+    if (fs.existsSync(path.join(dir, f.path))) continue;
+    if (f.path === "AGENTS.md" && fs.existsSync(path.join(dir, "project.md"))) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, f.path), f.content);
+    written.push(f.path);
+  }
+  return written;
+}
+
+export interface DeployFile {
+  path: string;
+  content: string;
+}
+
+// Files whose names are part of a standard, and must be spelled exactly.
+// AGENTS.md is the Linux Foundation convention; SKILL.md is the Agent Skills
+// standard. Case-insensitive filesystems (macOS, Windows)
+// happily accept `Skill.md` locally and then it vanishes on a Linux runtime —
+// so the wrong case is rejected here, loudly, with the right spelling.
+const CANONICAL = ["AGENTS.md", "SKILL.md"];
+
+/**
+ * The format version this build understands.
+ *
+ * A workspace declares what it targets with `foldrun_version` in AGENTS.md.
+ * Without it, the first breaking change to the flow grammar or frontmatter
+ * silently changes what everyone's existing files mean — the one failure a
+ * format cannot recover from, because there is no error to notice.
+ *
+ * Missing is treated as "current": nobody's existing workspace breaks by
+ * having been written before this existed.
+ */
+export const FORMAT_VERSION = "0.1";
+
+export interface VersionCheck {
+  declared: string | null;
+  supported: string;
+  /** Set when the workspace targets something this build cannot promise. */
+  warning: string | null;
+}
+
+export function checkFormatVersion(declared: unknown): VersionCheck {
+  const value = typeof declared === "string" ? declared.trim() : null;
+  if (!value) return { declared: null, supported: FORMAT_VERSION, warning: null };
+
+  const [major, minor = "0"] = value.split(".");
+  const [okMajor, okMinor] = FORMAT_VERSION.split(".");
+  if (major !== okMajor) {
+    return {
+      declared: value,
+      supported: FORMAT_VERSION,
+      warning:
+        `this workspace targets foldrun format ${value}, and this build understands ` +
+        `${FORMAT_VERSION}. A different major version may mean different behaviour — ` +
+        `read it as best-effort rather than correct.`,
+    };
+  }
+  if (Number(minor) > Number(okMinor)) {
+    return {
+      declared: value,
+      supported: FORMAT_VERSION,
+      warning:
+        `this workspace targets foldrun format ${value}; this build understands ` +
+        `${FORMAT_VERSION}. Newer fields will be ignored rather than rejected.`,
+    };
+  }
+  return { declared: value, supported: FORMAT_VERSION, warning: null };
+}
+
+export function assertCanonicalCase(rel: string) {
+  const base = rel.split("/").pop() ?? rel;
+  for (const want of CANONICAL) {
+    if (base !== want && base.toLowerCase() === want.toLowerCase()) {
+      throw new Error(
+        `"${base}" must be spelled exactly "${want}" — it is a standard filename and the case is ` +
+          `part of it. Rename it and try again.`,
+      );
+    }
+  }
+}
+
+/**
+ * What the platform owns inside a workspace directory, in one place.
+ *
+ * Three separate mechanisms need this exact list and drifted apart while it
+ * lived in each of them: deploys must preserve these files, and the run
+ * executors (docker and k8s) must not copy them into a sandbox. A platform
+ * file added to one list and not the others is either silently wiped by the
+ * next deploy or silently handed to every container — both invisible until
+ * someone is bitten.
+ */
+// trigger-log.jsonl: the scheduler's record of why a flow did or did not
+// fire (trigger-log.ts). Before it was listed here every deploy erased it.
+export const PLATFORM_FILES = ["secrets.json", "hooks.json", "hook-deliveries.jsonl", ".repo.json", "trigger-log.jsonl"];
+
+// The agent engine's own home files. Each step's sandbox runs the Claude
+// Agent SDK — the engine, whatever model answers — with its home in the
+// agent's folder, and the engine writes its settings (.claude.json, its
+// backups), plugin caches and the full transcript of every session
+// (.claude/projects/*.jsonl) there. Nothing in foldrun reads them. Copied
+// back after every step, they had piled up to 5,274 files and 19 MB in one
+// agent's folder on the box by 6 Oct 2026, carried every past conversation
+// into every sandbox, and their clashing rewrites were the "write-back
+// conflict on .claude.json" lines (and the big merges) of that day. A
+// workspace's own .claude/agents/*.md — Claude Code subagents an author
+// writes, imported as agents — sits at the workspace root and is untouched.
+const ENGINE_HOME_RE = /^agents\/[^/]+\/\.claude([./]|$)/;
+
+/** True for anything the platform, not the author or the agent, writes. */
+export function isPlatformPath(rel: string): boolean {
+  const norm = rel.replaceAll("\\", "/");
+  if (PLATFORM_FILES.includes(norm)) return true;
+  // The vault's lock and in-flight temp files (secrets.ts#mutateVaultFile)
+  // are the vault, as far as anything outside the platform is concerned.
+  if (/(^|\/)secrets\.json\./.test(norm)) return true;
+  if (norm === "trigger-log.jsonl.tmp") return true;
+  if (ENGINE_HOME_RE.test(norm)) return true;
+  return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
+}
+
+/** What a deploy keeps whatever it ships — the rule above saveWorkspace's
+ *  body. planDeploy reports removals through the same test, so a plan never
+ *  lists a file the save would keep. */
+export function keptOnDeploy(rel: string, shipped: ReadonlySet<string>): boolean {
+  return (
+    // Platform bookkeeping (the vault, hook rotation state, the delivery
+    // log, the trigger log, run history) — losing any of it on deploy
+    // silently breaks something: agents lose secrets, a rotated hook
+    // un-rotates, the record of why a schedule skipped is gone.
+    isPlatformPath(rel) ||
+    /(^|\/)state\//.test(rel) ||
+    rel === STORAGE_DIR ||
+    rel.startsWith(`${STORAGE_DIR}/`) ||
+    (/(^|\/)memory\/[^/]+\.md$/.test(rel) && !shipped.has(rel))
+  );
+}
+
+export function saveWorkspace(
+  tenant: string,
+  workspace: string,
+  files: DeployFile[],
+  /** Attribution for the revision this save records. A deploy passes the
+   *  commit, which becomes the revision's id. */
+  meta: ChangeMeta & {
+    commit?: string | null;
+    /** Keep every file that is not editable source — what an agent wrote
+     *  into its own folder at run time (a browser profile, a PDF it
+     *  downloaded). A restore sets it: history holds source, so a file it
+     *  never tracked is not one a restore may take away. */
+    keepUntracked?: boolean;
+  } = {},
+) {
+  if (files.length > 500) throw new Error("too many files");
+  for (const f of files) {
+    const norm = path.normalize(f.path);
+    if (norm.startsWith("..") || path.isAbsolute(norm) || norm.startsWith("runs")) {
+      throw new Error(`illegal file path: ${f.path}`);
+    }
+    assertCanonicalCase(norm);
+    if (!IN_WORKSPACE_DIR.test(norm) && norm !== "project.md" && norm !== "AGENTS.md") {
+      throw new Error(
+        `unexpected file: ${f.path} — a workspace holds AGENTS.md plus ` +
+          `${WORKSPACE_DIRS.map((d) => `${d}/`).join(", ")}`,
+      );
+    }
+  }
+
+  // Executable: an agent's own scripts/, or the workspace-level shared scripts/.
+  const isScript = (rel: string) => {
+    const norm = path.normalize(rel);
+    return (
+      /^agents\/[^/]+\/scripts\//.test(norm) || // an agent's own scripts
+      /^agents\/[^/]+\/skills\/[^/]+\/scripts\//.test(norm) || // scripts bundled in a skill
+      /^scripts\//.test(norm) // workspace-wide shared scripts
+    );
+  };
+
+  const dir = workspaceDir(tenant, workspace);
+
+  // The scope above has to exist before anything under it runs, and this is
+  // the only chokepoint every hosted workspace passes through — the dashboard's
+  // New button, the API, and `git push` deploys all land here.
+  ensureAccountFiles(tenant);
+
+  // A deploy replaces the workspace, but it must not destroy what it never
+  // owned. Git is authoritative for the files it ships; the platform owns
+  // everything an agent produced at run time. So:
+  //
+  //   runs/            always kept — the audit trail
+  //   state/           always kept — what an agent carries between runs
+  //   storage/         always kept — the file store's run mirror, which no
+  //                    deploy can ship (a deploy carries source, and bytes
+  //                    are not source) and every run expects to find. Note
+  //                    the pre-rename `files/` is NOT protected here: a
+  //                    workspace still holding one loses it on deploy, which
+  //                    is why adoptLegacyFilesDir runs on the read paths.
+  //   memory/*.md      kept when the deploy doesn't ship that file
+  //
+  // That last rule is the subtle one. Memory is written from both sides: a
+  // human commits a fact, and an agent learns one. Keeping only the files the
+  // deploy *didn't* mention means deleting a memory in git deletes it on the
+  // server, while a memory an agent wrote survives a push that never knew
+  // about it. Before this, every deploy silently erased everything the agents
+  // had learned.
+  const shipped = new Set(files.map((f) => path.normalize(f.path)));
+  // What is there now, for the revision: every editable file's content
+  // before this save replaces the tree.
+  const before = new Map<string, string>();
+  if (fs.existsSync(dir)) {
+    for (const rel of listWorkspaceFiles(tenant, workspace)) {
+      try {
+        before.set(rel, fs.readFileSync(path.join(dir, rel), "utf8"));
+      } catch {
+        // vanished mid-read; not part of the revision
+      }
+    }
+  }
+
+  const isAgentOwned = (rel: string) => keptOnDeploy(rel, shipped) || (meta.keepUntracked === true && !before.has(rel) && !shipped.has(rel));
+
+  const snapshot = fs.existsSync(dir) ? fs.mkdtempSync(path.join(dataRoot(), ".keep-")) : null;
+  const preserved: string[] = [];
+  if (snapshot) {
+    for (const entry of entriesNoFollow(dir)) {
+      const rel = String(entry).split(path.sep).join("/");
+      const from = path.join(dir, rel);
+      try {
+        // lstat, never stat: a link is never followed. An agent folder's link
+        // to a file outside the workspace was copied in as that file's
+        // contents — on a restore with keepUntracked, any such link
+        // (Codex, 18 Oct 2026).
+        if (!fs.lstatSync(from).isFile() || !isAgentOwned(rel)) continue;
+      } catch {
+        continue; // a file that vanished mid-deploy
+      }
+      const to = path.join(snapshot, rel);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      preserved.push(rel);
+    }
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+
+  for (const f of files) {
+    const target = path.join(dir, path.normalize(f.path));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, f.content);
+    // Anything under an agent's scripts/ is meant to be run.
+    if (isScript(f.path)) fs.chmodSync(target, 0o755);
+  }
+
+  // Restore after writing, so a deploy never overwrites preserved state.
+  if (snapshot) {
+    for (const rel of preserved) {
+      const to = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(snapshot, rel), to);
+    }
+    fs.rmSync(snapshot, { recursive: true, force: true });
+  }
+
+  // The revision: shipped files against what they replaced, plus anything
+  // that was there and is not any more (and was not preserved).
+  const keep = new Set(preserved);
+  const changes: RevisionFile[] = files.map((f) => {
+    const rel = path.normalize(f.path).split(path.sep).join("/");
+    return { path: rel, before: before.get(rel) ?? null, after: f.content };
+  });
+  for (const [rel, content] of before) {
+    if (!shipped.has(rel) && !keep.has(rel)) changes.push({ path: rel, before: content, after: null });
+  }
+  recordRevision(tenant, workspace, changes, {
+    by: meta.by ?? (meta.commit ? "deploy" : "system"),
+    message: meta.message ?? (meta.commit ? `deployed ${meta.commit.slice(0, 7)}` : undefined),
+    commit: meta.commit ?? null,
+  });
+
+  // The files are conformant concepts the moment they land; the bundles around
+  // them are not bundles until their index.md exists to carry okf_version. A
+  // deploy writes straight to disk, so nothing else would generate them.
+  syncWorkspaceBundles(dir);
+
+  // Here, not in deployWorkspace: a workspace CREATED with files (the API's
+  // create, the CLI's first deploy, a template) comes through this function
+  // without going through deployWorkspace, and the first live check found
+  // exactly that — a new desk's cron was seen on the five-minute rescan, not
+  // the next tick.
+  workspaceChanged(tenant, workspace, "deploy");
+
+  return { preserved: preserved.length };
+}
+
+// The prompt-facing index for an OKF bundle (memory/ or knowledge/).
+//
+// The on-disk artifact is index.md, written by syncIndex and conformant with
+// the spec. This builds the same listing with paths the agent can actually
+// open, plus the v0.2 signals that change how a fact should be treated: a
+// stale price list or an unverified claim should not read like a confirmed
+// one.
+//
+// There is no curated preamble. A hand-written MEMORY.md used to be read in
+// ahead of this listing, and it was a reserved name we invented inside someone
+// else's format — a consumer applying OKF's rules saw an untyped concept and
+// rejected the bundle. Shared prose belongs in AGENTS.md, which is already the
+// place for context every agent here gets.
+export function buildMemoryIndex(dir: string, prefix = ""): string | null {
+  if (!fs.existsSync(dir)) return null;
+
+  const lines: string[] = [];
+  for (const doc of readBundle(dir)) {
+    const marks = [
+      doc.type && doc.type !== "Memory" ? doc.type : null,
+      doc.status !== "stable" ? doc.status : null,
+      doc.stale ? `STALE since ${doc.staleAfter} — confirm before relying on it` : null,
+      // Same signals as the on-disk index, one definition — see provenanceMarks.
+      // This is the copy a model reads mid-run, so it is the one that decides
+      // whether it treats its own earlier guess as a fact.
+      ...provenanceMarks(doc),
+    ].filter(Boolean);
+    lines.push(
+      `- [${doc.title}](${prefix}${doc.file})` +
+        (doc.description ? ` — ${doc.description}` : "") +
+        (marks.length ? ` _(${marks.join(", ")})_` : ""),
+    );
+  }
+
+  return lines.length ? lines.join("\n") : null;
+}
+
+// Workspace-scoped shared assets: skills/, memory/, tools/ sit beside agents/
+// and are available to every agent in that workspace.
+export function workspaceMemoryIndex(tenant: string, workspace: string): string | null {
+  return buildMemoryIndex(path.join(workspaceDir(tenant, workspace), "memory"), "workspace/memory/");
+}
+
+// Knowledge is what you *gave* an agent — stable reference material an agent
+// reads and never rewrites. Memory is what it *learned* and authors itself.
+// Keeping them apart matters: a price list an agent silently edits is a bug,
+// and a fact it discovered that you have to maintain by hand is a chore.
+export function knowledgeIndex(dir: string, prefix = ""): string | null {
+  return buildMemoryIndex(dir, prefix);
+}
+
+export function workspaceKnowledgeIndex(tenant: string, workspace: string): string | null {
+  return knowledgeIndex(path.join(workspaceDir(tenant, workspace), "knowledge"), "workspace/knowledge/");
+}
+
+// One noun for capability. A tools/<name>.md file declares either an HTTP
+// endpoint or a script — `type:` says which, and it's inferred when omitted
+// (a `base:` means http, a `run:` means script). Both are granted the same
+// way, with `tools: [name]`, so "what can this agent do?" has one answer in one
+// place instead of three (`tools:`, `scripts:`, `apis:`).
+// An MCP server an agent can connect to. MCP is the cross-vendor standard for
+// tools (Anthropic, OpenAI, Google), so accepting a server here is what lets
+// someone reuse the ecosystem instead of re-describing an integration we
+// already have a format for. Both transports the SDK supports are allowed:
+// a local process (`command`) or a remote endpoint (`url`).
+const asRecord = (v: unknown): Record<string, string> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, String(x)]))
+    : {};
+
+export interface McpSpec {
+  name: string;
+  description: string;
+  command?: string;
+  args: string[];
+  env: Record<string, string>; // values may contain ${SECRET_NAME}
+  url?: string;
+  headers: Record<string, string>;
+}
+
+/** `outward: true` in a tool's frontmatter: this one sends, posts, buys,
+ *  publishes or uploads. It changes nothing at run time — `check` uses it to
+ *  insist the step that grants it has a verify or a gate. */
+export type OutwardMark = { outward?: boolean };
+
+export type ToolDef =
+  | ({ kind: "http"; name: string; spec: ApiSpec } & OutwardMark)
+  | ({ kind: "script"; name: string; spec: Record<string, unknown> } & OutwardMark)
+  | ({ kind: "mcp"; name: string; spec: McpSpec } & OutwardMark);
+
+/**
+ * The program inside a single-file script tool: the first fenced block whose
+ * language tag names a runnable language. By tag, not by position — a body
+ * legitimately opens with a \`\`\`yaml example of the tools: line, and running
+ * the documentation would be a memorable bug. Untagged fences never qualify:
+ * "which block is the program" must be answerable by reading, not guessing.
+ */
+export function fencedCode(body: string): { code: string; ext: string } | null {
+  const block = fencedCodeBlock(body);
+  return block ? { code: block.code, ext: block.ext } : null;
+}
+
+/**
+ * The same block, with where it sits — for the migration that lifts a
+ * single-file tool's program out into a file beside it. Extracting the code
+ * and then removing it from the body are the same question asked twice, and
+ * a second copy of the language table is how they would come to disagree.
+ */
+export function fencedCodeBlock(
+  body: string,
+): { code: string; ext: string; start: number; end: number } | null {
+  const EXT: Record<string, string> = {
+    js: ".mjs", mjs: ".mjs", javascript: ".mjs", ts: ".mjs",
+    python: ".py", py: ".py", bash: ".sh", sh: ".sh", ruby: ".rb", rb: ".rb",
+  };
+  for (const m of body.matchAll(/```([a-zA-Z0-9]+)\r?\n([\s\S]*?)```/g)) {
+    const ext = EXT[m[1].toLowerCase()];
+    if (ext && m[2].trim()) {
+      return { code: m[2], ext, start: m.index!, end: m.index! + m[0].length };
+    }
+  }
+  return null;
+}
+
+/**
+ * `outward: true` — this tool changes something that is not ours: it sends,
+ * posts, buys, publishes, uploads. The runtime does not treat it differently;
+ * `check` does, because the step that uses one is the step where a silent
+ * failure costs something that cannot be taken back. See `lintFlow`.
+ */
+export function toolIsOutward(data: Record<string, unknown>): boolean {
+  return data.outward === true;
+}
+
+/** How much of a tool.md body rides to the model with the tool. */
+export const TOOL_GUIDE_MAX = 6000;
+
+/**
+ * The prose under a tool.md's frontmatter: how to call it, what it refuses,
+ * what its output means. Only `description:` used to reach the model, so
+ * agents invented what the body documented (5 Oct 2026). The fenced program
+ * of a single-file tool is code, not guidance, and stays out.
+ */
+export function toolGuide(body: string | undefined, inlineProgram = false): string | undefined {
+  if (!body) return undefined;
+  let text = body.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  // Only a single-file tool's program is cut; in a `run:` tool every fenced
+  // block is an example of a call, which is exactly what the model needs.
+  const inline = inlineProgram ? fencedCodeBlock(text) : null;
+  if (inline) text = text.slice(0, inline.start) + text.slice(inline.end);
+  text = text.trim();
+  if (!text) return undefined;
+  return text.length > TOOL_GUIDE_MAX ? `${text.slice(0, TOOL_GUIDE_MAX)}\n\n[the rest of tool.md is cut here]` : text;
+}
+
+export function parseToolDef(data: Record<string, unknown>, fallbackName: string, body?: string): ToolDef | null {
+  const name = typeof data.name === "string" ? data.name : fallbackName;
+  // `transport:`, or a legacy `type: http|script|mcp` from before `type:` meant
+  // the document. `type: Tool` says what the file is and deliberately says
+  // nothing about how it connects, so it falls through to inference below.
+  const declared = readTransport(data);
+  // Inferred when neither is present, so simple files stay simple.
+  const kind =
+    declared ??
+    (typeof data.command === "string" || typeof data.url === "string"
+      ? "mcp"
+      : typeof data.run === "string"
+        ? "script"
+        : "http");
+
+  if (kind === "mcp") {
+    const command = typeof data.command === "string" ? data.command : undefined;
+    const url = typeof data.url === "string" ? data.url : undefined;
+    if (!command && !url) return null;
+    return {
+      kind: "mcp",
+      name,
+      spec: {
+        name,
+        description: typeof data.description === "string" ? data.description : "",
+        command,
+        args: Array.isArray(data.args) ? data.args.map(String) : [],
+        env: asRecord(data.env),
+        url,
+        headers: asRecord(data.headers),
+      },
+    };
+  }
+  if (kind === "script") {
+    // `guide` is the body's, never the frontmatter's: an author's `guide:`
+    // would otherwise ride to the model in place of the manual.
+    if ("guide" in data) { data = { ...data }; delete data.guide; }
+    // The program is a run: path, or the file's own fenced code block — the
+    // single-file form, which is what lets a script tool read and edit like
+    // every other markdown document.
+    if (typeof data.run === "string") {
+      const guide = toolGuide(body);
+      return { kind: "script", name, spec: { ...data, name, ...(guide ? { guide } : {}) } };
+    }
+    const inline = body ? fencedCode(body) : null;
+    if (!inline) return null;
+    const guide = toolGuide(body, true);
+    return { kind: "script", name, spec: { ...data, name, code: inline.code, codeExt: inline.ext, ...(guide ? { guide } : {}) } };
+  }
+  const [spec] = parseApis([{ ...data, name }]);
+  const guide = toolGuide(body);
+  return spec ? { kind: "http", name, spec: guide ? { ...spec, guide } : spec } : null;
+}
+
+/**
+ * Tools in a directory, in both shapes.
+ *
+ *   tools/email.md            flat — a definition and nothing else
+ *   tools/bounce-verify/      folder — tool.md plus the code it runs
+ *     tool.md
+ *     run.mjs
+ *
+ * The folder is the shape to write. A script tool is a definition and an
+ * executable that cannot be separated — point `run:` at the wrong scope and
+ * the tool silently resolves to nothing — so keeping them in one directory
+ * is what stops the two from ever disagreeing. It is also how skills already
+ * work, which is the pattern people have seen.
+ *
+ * A folder tool's `run:` is relative to its own folder, and rewritten here
+ * to the scope-qualified path the runner resolves. That is the point of the
+ * shape: the definition never names the scope it lives in, so the same
+ * folder works copied into a workspace or installed at the account.
+ *
+ * Flat files keep working unchanged — the shape is a migration, not a break.
+ */
+/**
+ * A folder tool's `requirements.txt` and `package.json`, as a `runtime:`
+ * block. Requirement lines only: comments and blanks are left out, and so
+ * are options — whole option lines (`-r`, `--index-url`, `-e`) and the ones
+ * a requirement carries (`--hash=…`). Options never reach the installer,
+ * which takes them from the same argv as its operands; their NAMES are kept
+ * in `ignored`, never their values (an index URL can carry a password), so
+ * the build log can say what was not applied. Anything else that is not a
+ * requirement is refused later by parseRuntime with a log line, the same as
+ * it would be in tool.md. `dependencies` only — a tool's dev dependencies
+ * are its author's, not its runtime's.
+ */
+export function folderRuntime(folder: string): Record<string, unknown> | null {
+  const out: { packages?: string[]; npm?: string[]; node?: boolean; ignored?: string[] } = {};
+  const req = path.join(folder, "requirements.txt");
+  if (fs.existsSync(req)) {
+    const packages: string[] = [];
+    const ignored = new Set<string>();
+    // Logical lines: a trailing backslash continues onto the next, which is
+    // how pip-compile --generate-hashes writes every pin. Read line by line,
+    // `pandas==2.1 \` became `pandas==2.1\`, was refused as invalid, and
+    // its hash lines were dropped as options: a hash-pinned file installed
+    // nothing at all.
+    const logical = fs.readFileSync(req, "utf8").replace(/\\\r?\n/g, " ").split(/\r?\n/);
+    for (const raw of logical) {
+      const line = raw.replace(/(^|\s)#.*$/, "").trim();
+      if (!line) continue;
+      // The requirement is what comes before its first option.
+      const [head, ...opts] = line.split(/\s+(?=-)/);
+      for (const o of line.startsWith("-") ? [line, ...opts] : opts) ignored.add(o.split(/[\s=]/)[0]);
+      if (line.startsWith("-")) continue;
+      const requirement = head.replace(/\s+/g, "");
+      if (requirement) packages.push(requirement);
+    }
+    if (packages.length) out.packages = packages;
+    if (ignored.size) out.ignored = [...ignored];
+  }
+  const pkg = path.join(folder, "package.json");
+  if (fs.existsSync(pkg)) {
+    try {
+      const deps = (JSON.parse(fs.readFileSync(pkg, "utf8")) as { dependencies?: Record<string, string> }).dependencies ?? {};
+      const npm = Object.entries(deps).map(([name, range]) => (range && range !== "*" && range !== "latest" ? `${name}@${range}` : name));
+      if (npm.length) {
+        out.npm = npm;
+        out.node = true;
+      }
+    } catch {
+      // An unreadable package.json declares nothing; tool.md still can.
+    }
+  }
+  return out.packages || out.npm || out.ignored ? out : null;
+}
+
+/** tool.md's own `runtime:` plus what the folder's files add. */
+function mergeRuntimeBlocks(own: unknown, extra: Record<string, unknown>): Record<string, unknown> {
+  const base = own && typeof own === "object" && !Array.isArray(own) ? { ...(own as Record<string, unknown>) } : {};
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+  const packages = [...new Set([...list(base.packages ?? base.pip), ...list(extra.packages)])];
+  const npm = [...new Set([...list(base.npm), ...list(extra.npm)])];
+  const ignored = [...new Set([...list(base.ignored), ...list(extra.ignored)])];
+  delete base.pip;
+  return {
+    ...base,
+    ...(packages.length ? { packages } : {}),
+    ...(npm.length ? { npm } : {}),
+    ...(ignored.length ? { ignored } : {}),
+    ...(extra.node && base.node === undefined ? { node: true } : {}),
+  };
+}
+
+function readToolDir(dir: string, scope: "workspace" | "account" = "workspace"): Record<string, ToolDef> {
+  if (!fs.existsSync(dir)) return {};
+  const out: Record<string, ToolDef> = {};
+  const broken: string[] = [];
+
+  const add = (raw: string, fallbackName: string, folder: string | null) => {
+    try {
+      const { data, content } = matter(raw);
+      // A COPY, because the qualification below is a mutation and the object
+      // is not ours: gray-matter caches its result by the input string, so two
+      // byte-identical definitions at different scopes are handed the same
+      // `data` object. Mutating it in place stamped the first reader's scope
+      // onto the second — an account tool whose `run:` came back
+      // `workspace/tools/…`, resolving to a path in whichever workspace was
+      // read first, and therefore to nothing. Silent, and dependent on read
+      // order, which is the worst pair of properties a bug can have.
+      //
+      // Real case: the same `browser` tool installed at the account and in a
+      // workspace, which is exactly what installing one gallery tool twice
+      // produces.
+      const d = { ...(data as Record<string, unknown>) };
+      // A folder tool's code sits beside its definition; qualify the path so
+      // the runner can find it from an agent directory two levels down.
+      if (folder && typeof d.run === "string" && !/^(workspace|account|shared|library)\//.test(d.run)) {
+        d.run = `${scope}/tools/${folder}/${d.run.replace(/^\.\//, "")}`;
+      }
+      // The ecosystem's own dependency files, beside the code that needs them,
+      // count as `runtime:` — a tool copied out of a repo keeps working.
+      if (folder) {
+        const extra = folderRuntime(path.join(dir, folder));
+        if (extra) d.runtime = mergeRuntimeBlocks(d.runtime, extra);
+      }
+      const def = parseToolDef(d, fallbackName, content);
+      // `outward: true` rides on the definition so a caller that resolved the
+      // grants — `check` — can ask which agents can act outside the workspace
+      // without reading every tool file a second time.
+      if (def) out[def.name] = toolIsOutward(d) ? { ...def, outward: true } : def;
+      else broken.push(`${fallbackName}: no base, run, command or fenced code block — nothing to call`);
+    } catch (err) {
+      // A malformed definition must not fail every run in the workspace. But
+      // it must not vanish either: dropped silently, a tool with a YAML typo
+      // is indistinguishable from one that was never created, and the agent
+      // that opted into it is told the tool "is not in the workspace" —
+      // which sends its author looking in the wrong place entirely.
+      broken.push(`${fallbackName}: ${err instanceof Error ? err.message.split("\n")[0] : "unreadable"}`);
+    }
+  };
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const manifest = path.join(dir, entry.name, "tool.md");
+      if (fs.existsSync(manifest)) add(fs.readFileSync(manifest, "utf8"), entry.name, entry.name);
+      continue;
+    }
+    if (!entry.name.endsWith(".md")) continue;
+    add(fs.readFileSync(path.join(dir, entry.name), "utf8"), entry.name.replace(/\.md$/, ""), null);
+  }
+  // Reported through the definitions map so a caller that only wants tools
+  // can ignore it, and the runner can say what is actually wrong.
+  brokenTools.set(dir, broken);
+  return out;
+}
+
+/** Why a tool in this directory failed to load, keyed by directory. */
+const brokenTools = new Map<string, string[]>();
+
+/** Definitions that exist on disk but could not be read, for the scopes an
+ *  agent draws on. Empty when everything parsed. */
+export function brokenToolReport(tenant: string, workspace: string): string[] {
+  const dirs = [
+    path.join(workspaceDir(tenant, workspace), "tools"),
+    path.join(dataRoot(), tenant, "library", "tools"),
+  ];
+  return dirs.flatMap((d) => brokenTools.get(d) ?? []);
+}
+
+export function workspaceTools(tenant: string, workspace: string): Record<string, ToolDef> {
+  return readToolDir(path.join(workspaceDir(tenant, workspace), "tools"), "workspace");
+}
+
+export { readToolDir };
+
+// Files under agents/<name>/scripts/ — the agent's own tooling, runnable
+// with the bash tool.
+export function agentScripts(tenant: string, workspace: string, agent: string): string[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "agents", agent, "scripts");
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { recursive: true })) {
+    const rel = String(entry);
+    if (fs.statSync(path.join(dir, rel)).isFile()) out.push(rel);
+  }
+  return out.sort();
+}
+
+// An API an agent may call. The platform turns each one into a single tool
+// scoped to `base`, resolving ${SECRET} placeholders server-side so the
+// agent never sees credentials.
+export interface ApiSpec {
+  name: string;
+  base: string;
+  description: string;
+  /** The tool.md body, for the model (see toolGuide). */
+  guide?: string;
+  headers: Record<string, string>; // values may contain ${SECRET_NAME}
+  query: Record<string, string>; // always-appended query params (e.g. api keys)
+  methods: string[]; // allowed HTTP methods; default GET only
+  /** Seconds a call may take, when the tool.md says so. Unset: no clock. */
+  timeout?: number;
+  /** An OpenAPI 3.x document describing the API: a path relative to the
+   *  workspace root (`tools/hubspot/openapi.json`, JSON or YAML) or an
+   *  https URL. Each operation becomes its own typed tool. */
+  openapi?: string;
+  /** Which of the document's operations to expose — operationIds or
+   *  `"METHOD /path"` strings. Absent: every operation, capped at 60.
+   *  Present: only these, and the generic `call_<api>` tool is withheld —
+   *  always. If none of them resolve (document missing, moved, or an
+   *  operation renamed) the API gets no tools that run: it fails closed. */
+  operations?: string[];
+  /** Calls per second this API may see from one step: `count` is the burst
+   *  the bucket holds, `perSec` the refill rate. `"5/s"` → {5, 5};
+   *  `"100/m"` → {100, 1.67}. A call over the limit waits, never fails. */
+  rate?: { count: number; perSec: number };
+  /** The operations the `openapi:` document yielded, filled in by
+   *  attachOperations (openapi.ts) before the step is assembled. parseApis
+   *  leaves it unset. Plain JSON: this crosses into the run container. */
+  resolvedOperations?: import("./openapi.ts").OperationSpec[];
+}
+
+export interface AgentInfo {
+  name: string;
+  description: string;
+  /** `owner:` — the person accountable for this agent: its own, else the
+   *  workspace AGENTS.md's, else the account's. Null when none of the three
+   *  names one. */
+  owner: string | null;
+  /** Which of the three `owner` came from. */
+  ownerFrom: OwnerSource | null;
+  model: string;
+  /** The other half of model selection. listAgents has always returned it;
+   *  the interface did not say so, so every consumer had to re-read the file
+   *  to show it. */
+  effort: string | null;
+  tools: string[];
+  apis: ApiSpec[];
+  /** The author's own tools named in `tools:` — the subset that is not a
+   *  built-in. Same list as `tools`, minus what the runtime provides. */
+  ownTools: string[];
+  /** Names still written under the removed `use:` key. Nothing is granted
+   *  for them; `foldrun check` and the run log say what to write instead. */
+  legacyUse: string[];
+  /** Retired built-in names still in `tools:` (files, bash) — granted, but
+   *  `check` says what to write instead. */
+  retiredTools: string[];
+  /** Colleagues this agent may consult mid-run (`agents:`) — each becomes a
+   *  consult_<name> tool. The team's edges, as the author drew them. */
+  consults: string[];
+  /** Colleagues this agent may DELEGATE to (`subagents:`) — each runs with
+   *  its own context and its own tools, no wider than this agent's. */
+  subagents: string[];
+  /** `sandbox: own` — delegated to, it runs each job in its own sandbox. */
+  sandbox?: "own";
+  /** The `skills:` allowlist, or null when the field is absent — which is
+   *  not the same thing: absent inherits every skill in scope, an empty
+   *  list withholds all of them. */
+  skills: string[] | null;
+  secrets: string[];
+  /** `budget:` — the most this agent may spend in ONE run, in USD, across
+   *  every step it takes in it; null is no cap. Per run and nothing else:
+   *  an agent has no calendar, the workspace and the account do. */
+  budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
+  /** `timezone:` — the calendar this agent works to, nearest-wins over its
+   *  flow's, its workspace's and the account's. Null inherits. */
+  timezone: string | null;
+  /** What is wrong with the `timezone:` line, or null. */
+  timezoneProblem: string | null;
+  languageProblem: string | null;
+  /** region:/currency:/units:/calendar: values that cannot be read. */
+  localeProblems: string[];
+  /** `web:` values that cannot work. The run says
+   *  so in its trail and carries on; check and deploy say so first. */
+  webProblems: string[];
+  /** `web:` that works but should change — the old `session:` key, a pinned
+   *  user agent behind the runner image's Chrome (when this process knows
+   *  that Chrome: FOLDRUN_RUNNER_ENGINES). Warnings, never refusals. */
+  webWarnings: string[];
+  /** `schedule:` written on an agent, which nothing runs — only a flow has
+   *  a clock. The message, or null when there is no such line. */
+  scheduleProblem: string | null;
+  /** `limits:` — the agent's own per-step call limits, as readable. */
+  limits: Record<string, number>;
+  /** What is wrong with the `limits:` block's shape; key-vs-grant problems
+   *  need the tool lists, and `check` adds them (limits.ts limitKeyProblems). */
+  limitProblems: string[];
+  /** What cannot be read in `network:` (network.ts) — a level that is not
+   *  one, a site with a scheme or a path. */
+  networkProblems: string[];
+  /** The sites this agent's steps may reach, resolved the way a run
+   *  resolves them — its `network:`, the workspace's, the account's, and
+   *  the default (open when it may fetch or browse the web, else trusted).
+   *  `implied` here is its `apis:` hosts; a run also adds its MCP servers',
+   *  its web providers' and its bound secrets' sites. */
+  network: NetworkPolicy & { readsWeb: boolean };
+  /** Tools this agent declares inline rather than in `tools:` — `apis:`,
+   *  `scripts:` and `mcpServers:` names — which a limit may also name. */
+  inlineTools: string[];
+  /** agent.md's frontmatter does not parse (bad YAML): the agent is listed
+   *  with defaults and this says why, rather than the listing throwing —
+   *  one broken file once took down every account's worker (20 Oct 2026). */
+  frontmatterError?: string;
+}
+
+// Recognised HTTP verbs a tool may declare. Deliberately NOT named
+// "safe methods" — in HTTP that term means "no side effects" (GET, HEAD), and
+// DELETE is the opposite. This is an allowlist: unknown or exotic verbs are
+// dropped rather than passed to fetch, and a tool that declares none is
+// read-only, because the least dangerous thing should happen when a file says
+// nothing.
+const ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+// Model selection. Tiers are the portable default — they keep working as
+// models are renamed. An explicit alias or full model id is passed straight
+// through for callers who want to pin one.
+export const MODEL_TIERS: Record<string, string> = {
+  fast: "haiku",
+  default: "sonnet",
+  max: "opus",
+};
+
+// The same three tiers under every name someone reasonably reaches for.
+// Nobody should have to learn our vocabulary to pick a model, and the
+// alternative to accepting `small` is worse than pedantic: an unrecognised
+// word is passed through as a model id, so `model: small` would reach the
+// provider as a model called "small" and fail the step at run time, on a
+// file that reads perfectly. A synonym table is cheaper than that error.
+const MODEL_ALIASES: Record<string, keyof typeof MODEL_TIERS> = {
+  fast: "fast",
+  small: "fast",
+  cheap: "fast",
+  mini: "fast",
+  light: "fast",
+  low: "fast",
+  haiku: "fast",
+
+  default: "default",
+  standard: "default",
+  base: "default",
+  balanced: "default",
+  mid: "default",
+  medium: "default",
+  normal: "default",
+  sonnet: "default",
+
+  max: "max",
+  large: "max",
+  big: "max",
+  best: "max",
+  smart: "max",
+  high: "max",
+  deep: "max",
+  opus: "max",
+};
+
+export type Tier = keyof typeof MODEL_TIERS;
+
+/** Which tier a word names, or null if it names none. Exported because the
+ *  provider block keys a remap table by tier and should accept every word
+ *  `model:` does — one vocabulary, not two. */
+export function resolveTier(value: unknown): Tier | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return MODEL_ALIASES[value.trim().toLowerCase()] ?? null;
+}
+
+export function resolveModel(value: unknown): string {
+  const raw = typeof value === "string" && value.trim() ? value.trim() : "default";
+  const tier = resolveTier(raw);
+  if (tier) return MODEL_TIERS[tier];
+  return raw; // "claude-opus-5" | a provider's own id | …
+}
+
+// Effort is the other half of model selection, and the orthogonal one: the
+// model is which brain, effort is how long it thinks before answering. The
+// five levels are the SDK's own union — we neither invent our own scale nor
+// narrow theirs, so a level added upstream is one line here.
+export { EFFORT_LEVELS } from "./frontmatter-fields.ts";
+export type Effort = (typeof EFFORT_LEVELS)[number];
+
+const EFFORT_ALIASES: Record<string, Effort> = {
+  low: "low",
+  min: "low",
+  minimal: "low",
+  lowest: "low",
+  fast: "low",
+  quick: "low",
+
+  medium: "medium",
+  med: "medium",
+  mid: "medium",
+  moderate: "medium",
+  normal: "medium",
+  balanced: "medium",
+
+  high: "high",
+  default: "high", // the SDK's default, said out loud
+  deep: "high",
+
+  xhigh: "xhigh",
+  "x-high": "xhigh",
+  "extra-high": "xhigh",
+  extrahigh: "xhigh",
+  "very-high": "xhigh",
+  veryhigh: "xhigh",
+  higher: "xhigh",
+
+  max: "max",
+  maximum: "max",
+  highest: "max",
+  full: "max",
+};
+
+/**
+ * `null` for both "not set" and "not a level we know" — unlike a model, the
+ * set is closed, so passing an unrecognised word through would be a 400 from
+ * the API rather than someone's pinned choice. Callers that can report say
+ * which it was with `isEffortWord`.
+ */
+export function resolveEffort(value: unknown): Effort | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return EFFORT_ALIASES[value.trim().toLowerCase()] ?? null;
+}
+
+/** True when a non-empty `effort:` was written but names no level — the
+ *  one case worth a line in the run trace, because silence there looks
+ *  exactly like the setting having been applied. */
+export function isEffortWord(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0 && resolveEffort(value) === null;
+}
+
+const RATE_UNIT_SECONDS: Record<string, number> = {
+  s: 1, sec: 1, second: 1,
+  m: 60, min: 60, minute: 60,
+  h: 3600, hr: 3600, hour: 3600,
+};
+
+/** `"5/s"`, `"100/m"`, `"1000/h"` → a bucket size and refill rate. Null for
+ *  anything else: an unreadable limit is ignored rather than guessed. */
+export function parseRate(value: unknown): { count: number; perSec: number } | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return { count: value, perSec: value };
+  }
+  if (typeof value !== "string") return null;
+  const m = /^\s*(\d+(?:\.\d+)?)\s*\/\s*([a-z]+)\s*$/i.exec(value);
+  if (!m) return null;
+  const count = Number(m[1]);
+  const unit = RATE_UNIT_SECONDS[m[2].toLowerCase()];
+  if (!(count > 0) || !unit) return null;
+  return { count, perSec: count / unit };
+}
+
+// apis: frontmatter:
+//   apis:
+//     - name: google_ads
+//       base: https://googleads.googleapis.com/v18
+//       description: Google Ads REST API. Use searchStream for metrics.
+//       methods: [GET, POST]
+//       headers:
+//         Authorization: Bearer ${GOOGLE_ADS_TOKEN}
+//         developer-token: ${GOOGLE_ADS_DEV_TOKEN}
+//       openapi: tools/google_ads/openapi.yaml   # optional: typed tools
+//       operations: [searchStream, "GET /customers/{id}"]
+//       rate: 10/s                               # or 100/m, 1000/h
+
+export function parseApis(raw: unknown): ApiSpec[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ApiSpec[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === "string" ? e.name : null;
+    const base = typeof e.base === "string" ? e.base : null;
+    if (!name || !base) continue;
+    const asRecordLocal = (v: unknown): Record<string, string> =>
+      v && typeof v === "object" && !Array.isArray(v)
+        ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, String(x)]))
+        : {};
+    const methods = Array.isArray(e.methods)
+      ? e.methods.map((m) => String(m).toUpperCase()).filter((m) => ALLOWED_METHODS.includes(m))
+      : ["GET"];
+    const rate = parseRate(e.rate);
+    const operations = Array.isArray(e.operations)
+      ? e.operations.map((o) => String(o).trim()).filter(Boolean)
+      : null;
+    out.push({
+      name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
+      ...(Number(e.timeout) > 0 ? { timeout: Number(e.timeout) } : {}),
+      // `${FOLDRUN_API_URL}` and `${FOLDRUN_PUBLIC_URL}` are the install's own
+      // addresses, filled here on the host so a desk never names one.
+      base: trimSlashes(expandPlatformVars(base)),
+      description: typeof e.description === "string" ? e.description : "",
+      headers: asRecordLocal(e.headers),
+      query: asRecordLocal(e.query),
+      methods: methods.length ? methods : ["GET"],
+      ...(typeof e.openapi === "string" && e.openapi.trim() ? { openapi: e.openapi.trim() } : {}),
+      // An explicit list, even an empty one, means "only these" — the
+      // generic tool is withheld. Absent means "everything, plus call_<api>".
+      ...(operations ? { operations } : {}),
+      ...(rate ? { rate } : {}),
+    });
+  }
+  return out;
+}
+
+export interface FlowStep {
+  agent: string;
+  instruction: string;
+  /** The instruction was written over more than one line and the parser
+   *  joined them. It runs, but `foldrun check` says so: a wrapped
+   *  instruction is one editor keystroke away from being a paragraph of
+   *  prose the parser has to guess about. */
+  wrapped?: boolean;
+  group: number; // steps sharing a group number run in parallel
+  optional: boolean; // "2?" — failure doesn't fail the flow
+  /** Set when the step targets another flow (`[[flow:name]]`) instead of an agent. */
+  subflow?: string;
+  /** Overrides the agent's own model for this step only. */
+  model?: string;
+  /** Overrides the agent's own effort for this step only — the expensive
+   *  step in an otherwise cheap flow is exactly what this is for. */
+  effort?: string;
+  /** Pause for a human before running this step. */
+  approve?: boolean;
+  /** Run only if the previous group's result has a line beginning with
+   *  this marker (case-insensitive). The previous group is the nearest
+   *  earlier one that produced a result. Independent: every matching
+   *  `when:` step in a group runs. */
+  when?: string;
+  /** Exclusive routing: of a group's `case:` steps, only the FIRST whose
+   *  marker leads a line of the previous group's result runs; the rest are
+   *  routed past. */
+  case?: string;
+  /** The route of last resort: runs only when none of its group's `case:`
+   *  steps matched. */
+  else?: boolean;
+  /** Attempts on failure, beyond the first. */
+  retry?: number;
+  /** Abandon the step after this many seconds. */
+  timeout?: number;
+  /** Another agent takes the step over when it fails: same instruction, the
+   *  failure as context. Success continues the flow with the rescuer's
+   *  result; a second failure fails the step as it always did. */
+  onFail?: string;
+  /** Seconds to hold before this step runs — "wait: 3d" parses to 259200.
+   *  The run parks in the queue, not in a process. */
+  waitSecs?: number;
+  /** `wait: event` — hold until something outside POSTs the run's event
+   *  URL. Same parking as an approval, released by a machine instead of a
+   *  person; the body it sends reaches the step as its event payload. This
+   *  is what lets a flow send a quote, wait for the reply, then follow up,
+   *  without the platform becoming a chat product. */
+  waitFor?: "event";
+  /** For `each: rows` — the CSV whose rows fan the step out, agent-relative
+   *  like every other path an instruction uses. */
+  eachPath?: string;
+  /** A question for a human. The step parks like an approval; the answer
+   *  typed at the gate reaches the step's prompt. */
+  ask?: string;
+  /** What the gate shows before a person decides: paths under storage/,
+   *  globs allowed (`draft/*.mdx, draft/images/*.webp`). Declared in the
+   *  flow so the preview does not depend on the previous step remembering
+   *  to name its files. Resolved against storage/ when the run parks. */
+  preview?: string[];
+  /** Model-led delegation, bounded by declaration: this step's agent picks
+   *  which of THESE agents run next, one instruction each. The choice set
+   *  is the file's, the picks are the model's, the record shows both. */
+  delegate?: string[];
+  /** Evaluator loop: when this step's result lacks `until:`'s marker, wind
+   *  back to the previous group and go again — at most this many extra
+   *  cycles. Bounded by declaration, so the worst-case cost is still
+   *  readable off the file. */
+  loop?: number;
+  /** The marker (case-insensitive) whose presence in this step's result ends
+   *  the loop early. Required for `loop:` to mean anything. */
+  until?: string;
+  /** Fan-out: run one instance of this step per item of the previous
+   *  group's result. `lines` — one item per non-empty line of the prose;
+   *  `rows` — one per CSV row of a file; `items` — one per element of the
+   *  JSON array a previous `output: json` step returned. */
+  each?: "lines" | "rows" | "items";
+  /** Fan-out cap. Items beyond it are dropped, and the run log says so. */
+  max?: number;
+  /** A check run after the step; failing it fails the step. Either a shell
+   *  command (non-zero exit fails) or one of the eval assertions —
+   *  `contains: x`, `not-contains: x`, `matches: regex`, `file: path`,
+   *  `judge: sentence` — so a flow and an eval share one vocabulary. */
+  verify?: string;
+  /** The step returns data, not just prose: its reply must end with one JSON
+   *  value in a ```json block. The runner parses it, fails the step when it
+   *  cannot, and hands the value to the next group losslessly — the narrow
+   *  move the grammar ADR allowed instead of variables. */
+  output?: "json";
+  /** `schema:` — the JSON Schema an `output: json` value must satisfy,
+   *  written inline (one-line JSON, or a YAML block under the key) and
+   *  checked where the reply is; a value that does not fit fails the step
+   *  with the field named. */
+  schema?: Record<string, unknown> | boolean;
+  /** `schema: <path>` — the same, in a file under the workspace, read when
+   *  the step runs. */
+  schemaPath?: string;
+  /** `parallel:` — how many of an `each:` step's instances run at once.
+   *  Unset is all of them, which is what fan-out always did. */
+  parallel?: number;
+  /** `max_turns:` — the most model turns this step may take before it is
+   *  stopped, beside `budget:` (money) and `timeout:` (time). */
+  maxTurns?: number;
+  /** `limits: {web.search: 10}` — this step's call limits, over the agent's
+   *  (nearest wins per key). See limits.ts. */
+  limits?: Record<string, number>;
+  /** 1-indexed line in the flow file. Diagnostics without a line make you
+   *  search; every real linter emits file:line. */
+  line?: number;
+  /** What is wrong with an option's VALUE, in the author's words — `timeout:
+   *  abc`, `retry: 9`, `each: columns`. The parser keeps the step (a run
+   *  still has a shape) and the lint reports each of these as an error, so
+   *  `foldrun check` fails on a value that would otherwise be read as
+   *  something the author never wrote: `timeout: 15m` used to be one second. */
+  problems?: string[];
+}
+
+export interface FlowInfo {
+  name: string;
+  file: string;
+  trigger: string;
+  schedule: string | null;
+  timezone: string | null;
+  /** The model every step in this flow runs on, unless the step names its
+   *  own. Nearest wins: step, then flow, then the agent's own frontmatter. */
+  model: string | null;
+  /** Same, for effort. */
+  effort: string | null;
+  /** What a new fire does while a run of this flow is still live:
+   *  "skip" doesn't start one, "queue" starts it but the worker holds it
+   *  until the live run finishes. Unset keeps today's behaviour (runs may
+   *  overlap) — a default that changed underfoot would surprise every flow
+   *  that legitimately runs in parallel. */
+  overlap: "skip" | "queue" | null;
+  /** `issues: auto-close`: a run that goes fine closes this flow's open
+   *  issues (FOL-72 step 7). Unset is `stay-open`: a person resolves them. */
+  issues?: "auto-close" | "stay-open";
+  /** Where this flow's runs stand in the queue against everyone else's:
+   *  "high" is claimed before the round-robin, "low" after it. Adds to the
+   *  account's own priority; the account's cap still bounds how many run
+   *  at once, so a high lane never starves the rest outright. Unset is
+   *  normal — first come, fair across accounts. */
+  priority: "high" | "normal" | "low" | null;
+  /** The most one run of this flow may spend, in USD. A literal, never an
+   *  expression — the cap is readable off the file, which is the property
+   *  the whole grammar exists to keep. Checked between groups: the group
+   *  that crosses it is the last one that runs. Null: no cap of its own
+   *  (the workspace's monthly `budget:` still applies). */
+  budget: number | null;
+  /** What is wrong with the `budget:` line, or null. */
+  budgetProblem: string | null;
+  /** `trigger: flow` — start when this other flow of the workspace finishes,
+   *  with `on:` saying which endings count. The finished run's summary and
+   *  result become this run's task. */
+  after: string | null;
+  /** `blocked` is a completed run whose verdict is BLOCKED — the work
+   *  refused itself. `completed` no longer includes those: a follow-up to a
+   *  publish that did not happen should not run as if it had. */
+  on: "completed" | "failed" | "blocked" | "any";
+  /** `trigger: once` — an ISO 8601 instant; fires the first tick at or after
+   *  it, once, then never again. */
+  at: string | null;
+  /** `trigger: watch` — a URL polled every `every:` seconds (default 15m);
+   *  fires when its content changes, with the new content as the task. */
+  url: string | null;
+  every: number | null;
+  /** `trigger: webhook` may also demand a provider's signature on every
+   *  delivery: GitHub (X-Hub-Signature-256), Stripe (Stripe-Signature), Slack
+   *  (X-Slack-Signature, plus the url_verification handshake) or a plain
+   *  `hmac` (X-Signature, hex SHA-256 of the body). `signingSecret` is the
+   *  NAME of the vault secret holding the shared key, never its value. */
+  signature: "github" | "stripe" | "slack" | "hmac" | null;
+  signingSecret: string | null;
+  /** `trigger: storage` — a path prefix under storage/; a file landing
+   *  there starts the flow with the path as its task. */
+  path: string | null;
+  /** `filter:` — the fields a delivery must have before it becomes a run
+   *  (trigger-filter.ts): matched against a webhook's JSON body, an email,
+   *  a chained run or a storage event. Null: no `filter:` line, every
+   *  delivery. Kept exactly as written — a list, `false`, a word — so one
+   *  that cannot be read matches nothing (fails closed) rather than reading
+   *  as no filter at all. Test it with `!= null`, never for truthiness. */
+  filter: unknown;
+
+  // ---- how often a trigger is allowed to become a run ----
+  //
+  // Everything above says what starts a flow. These four say how many of
+  // those starts are real. They are orchestration, so they are keys; they
+  // are literals, so nothing is evaluated; and each answers a question a
+  // person can only answer about their own flow, which is the test the
+  // grammar applies before it grows.
+
+  /** `idempotency:` — the name of the field that identifies a delivery, so
+   *  the same one twice starts one run. A header on the request
+   *  ("x-github-delivery"), or "body:<key>" for a top-level field of a JSON
+   *  body. A name, never an expression: the value is read from the delivery,
+   *  not computed from it. Null: every delivery is its own event. */
+  idempotency: string | null;
+  /** `debounce:` — seconds of quiet before a fired trigger becomes a run.
+   *  A burst of deliveries, storage writes or watched changes collapses into
+   *  one run once they stop. The task is the LAST event's, since that is the
+   *  state the flow is reacting to. Null: every event starts a run. */
+  debounce: number | null;
+  /** `throttle:` — the least time between two runs of this flow. A trigger
+   *  arriving inside the window is dropped, and the trace of the run that
+   *  held the window says how many. Null: no floor. */
+  throttle: number | null;
+  /** `catchup:` — what a scheduled flow does about a fire it missed while
+   *  the platform was not running. "last" is the behaviour that always
+   *  applied: one make-up run for however many were missed. "none" skips
+   *  them, for a flow whose moment has passed by the time anyone notices.
+   *  Null reads as "last". */
+  catchup: "last" | "none" | null;
+
+  // ---- when to stop trusting the flow ----
+
+  /** `disable_after:` — consecutive failed runs after which the platform
+   *  stops firing this flow's schedule and says so. A nightly desk that has
+   *  failed all week is not going to fix itself, and every one of those runs
+   *  costs money and sends mail. Null: never quarantined. */
+  disableAfter: number | null;
+  /** `pause_when:` — a marker (DONE, NOTHING LEFT) that, leading a line of
+   *  any step's reply in the flow's latest run, pauses its schedule: the
+   *  work is finished, so firing again would only spend money saying so.
+   *  Derived from that run, like disable_after, so a run that finds work
+   *  again (a person clicking Run after adding some) lifts it by itself.
+   *  Null: never paused. */
+  pauseWhen: string | null;
+  /** `sla:` — seconds a run of this flow is expected to take. A run still
+   *  going well past it is reported once, as a notification, and keeps
+   *  running: this is a smoke alarm, not a timeout. Null: no expectation. */
+  sla: number | null;
+
+  // ---- who may answer a gate, and for how long it waits ----
+
+  /** `approvers:` — the email addresses that may decide this flow's gates,
+   *  or the single word "admins" for anyone at admin or above. Empty means
+   *  the account's existing rule: any member who can run the workspace.
+   *  Nobody may approve their own run's gate whatever this says. */
+  approvers: string[] | null;
+  /** `approve_within:` — how long a gate waits for a person before the run
+   *  is rejected and fails. A gate with no expiry holds its run, and its
+   *  place in the account's concurrency, for as long as nobody looks.
+   *  Null: it waits indefinitely, which stays the default. */
+  approveWithin: number | null;
+
+  /** `live: true` — this flow's runs are real even where the platform would
+   *  default them to test: in a preview workspace, and as an eval's subject.
+   *  Only ever an opt-out of the safe default, never the other way round. */
+  live: boolean;
+
+  /** `description:` — one line on what this flow is for, shown in listings
+   *  and the trace. Read here so a documented, scaffolded field means
+   *  something rather than sitting in every file unread. */
+  description: string | null;
+
+  /** `owner:` — the person accountable for this flow: its own, else the
+   *  workspace AGENTS.md's, else the account's. parseFlow sees only the
+   *  file, so it fills the flow's own; listFlows and readFlow add the rest. */
+  owner: string | null;
+  /** Which of the three `owner` came from. */
+  ownerFrom: OwnerSource | null;
+
+  /** Flow-level frontmatter values the parser could not read — a bad
+   *  `overlap:`/`priority:`/`catchup:`/`on:`/`signature:`, or a step line
+   *  whose `[[target]]` is malformed. Errors, the way a bad step option is,
+   *  rather than a silent default. */
+  frontProblems: string[];
+
+  steps: FlowStep[];
+}
+
+// The list lives with every other frontmatter field (frontmatter-fields.ts).
+export { FLOW_TRIGGERS } from "./frontmatter-fields.ts";
+export type FlowTrigger = (typeof FLOW_TRIGGERS)[number];
+
+// Skills and memory files belonging to one agent — for the graph view and
+// [[ ]] autocomplete.
+export interface AgentAssets {
+  skills: string[]; // skill names (frontmatter name or filename)
+  memory: string[]; // memory file names under memory/
+}
+
+export function agentAssets(tenant: string, workspace: string, agent: string): AgentAssets {
+  const base = path.join(workspaceDir(tenant, workspace), "agents", agent);
+  const nameOf = (file: string, fallback: string) => {
+    try {
+      return matter(fs.readFileSync(file, "utf8")).data.name ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  // Skills: folders with SKILL.md (Agent Skills standard) plus flat .md files.
+  const skills: string[] = [];
+  const skillsDir = path.join(base, "skills");
+  if (fs.existsSync(skillsDir)) {
+    for (const entry of fs.readdirSync(skillsDir).sort()) {
+      const full = path.join(skillsDir, entry);
+      if (fs.statSync(full).isDirectory()) {
+        const skillMd = path.join(full, "SKILL.md");
+        if (fs.existsSync(skillMd)) skills.push(nameOf(skillMd, entry));
+      } else if (entry.endsWith(".md")) {
+        skills.push(nameOf(full, entry.replace(/\.md$/, "")));
+      }
+    }
+  }
+
+  const memory: string[] = [];
+  const memoryDir = path.join(base, "memory");
+  if (fs.existsSync(memoryDir)) {
+    for (const f of fs.readdirSync(memoryDir).sort()) {
+      if (f.endsWith(".md") && !["index.md", "log.md"].includes(f)) {
+        memory.push(nameOf(path.join(memoryDir, f), f.replace(/\.md$/, "")));
+      }
+    }
+  }
+  return { skills, memory };
+}
+
+/** `schedule:` on an agent runs nothing — only a flow has a clock. Named so
+ *  it fails loudly rather than deploying clean and never firing. */
+function agentScheduleProblem(data: Record<string, unknown>): string | null {
+  return data.schedule !== undefined
+    ? "schedule: an agent has no schedule of its own — only a flow runs on a clock. Put schedule: on the flow that runs this agent, or remove it."
+    : null;
+}
+
+/** A per-run `budget:` as a number, or null. A period other than "run"
+ *  written here is a mistake the lint names; it is not silently a cap. */
+function runBudget(raw: unknown): number | null {
+  const b = parseBudget(raw, "run");
+  return b && b.period === "run" ? b.usd : null;
+}
+
+/** The names an agent's inline tool fields grant: `apis:`, `scripts:` (an
+ *  object's name, or a file's base name) and `mcpServers:`. */
+function inlineToolNames(data: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  if (Array.isArray(data.apis)) {
+    for (const a of data.apis) if (a && typeof a === "object" && typeof (a as { name?: unknown }).name === "string") out.push((a as { name: string }).name);
+  }
+  if (Array.isArray(data.scripts)) {
+    for (const sc of data.scripts) {
+      if (typeof sc === "string") out.push(path.basename(sc).replace(/\.[^.]+$/, ""));
+      else if (sc && typeof sc === "object" && typeof (sc as { name?: unknown }).name === "string") out.push((sc as { name: string }).name);
+    }
+  }
+  if (data.mcpServers && typeof data.mcpServers === "object") out.push(...Object.keys(data.mcpServers));
+  return out;
+}
+
+export function listAgents(tenant: string, workspace: string): AgentInfo[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "agents");
+  if (!fs.existsSync(dir)) return [];
+  // The two levels above every agent, for the network: cascade.
+  const frontOf = (file: string): Record<string, unknown> => {
+    try {
+      return readFrontmatter(file);
+    } catch {
+      return {}; // no AGENTS.md at that level, or one that does not parse
+    }
+  };
+  const accountFront = frontOf(path.join(accountDir(tenant), "AGENTS.md"));
+  const workspaceFront = frontOf(path.join(workspaceDir(tenant, workspace), "AGENTS.md"));
+  return fs
+    .readdirSync(dir)
+    .filter((n) => fs.existsSync(path.join(dir, n, "agent.md")))
+    .sort()
+    .map((name) => {
+      // One agent whose YAML does not parse is that agent's problem, not
+      // the account's: listed with defaults and the reason, never thrown
+      // out of a listing every page, the scheduler and the worker's boot
+      // read.
+      let data: Record<string, any> = {};
+      let frontmatterError: string | undefined;
+      try {
+        ({ data } = configMatter(fs.readFileSync(path.join(dir, name, "agent.md"), "utf8")));
+      } catch (err) {
+        frontmatterError = frontmatterErrorText(err);
+      }
+      const tools = refNames(data.tools);
+      const actions = webConfig(data, { ...accountFront, ...workspaceFront }).actions;
+      const readsWeb = tools.includes("web") && (!actions || actions.some((a) => a === "fetch" || a === "browse"));
+      const network = {
+        ...resolveNetwork({
+          account: accountFront.network,
+          workspace: workspaceFront.network,
+          agent: data.network,
+          readsWeb,
+          implied: parseApis(data.apis).map((a) => { try { return new URL(a.base).host; } catch { return ""; } }),
+        }),
+        readsWeb,
+      };
+      return {
+        network,
+        name,
+        description: data.description ?? "",
+        ...resolveOwner(data.owner, workspaceFront.owner, accountFront.owner),
+        model: data.model ?? "default",
+        effort: data.effort ?? null,
+        tools,
+        apis: parseApis(data.apis),
+        ownTools: ownToolNames(data),
+        legacyUse: legacyUseNames(data),
+        retiredTools: retiredToolNames(data),
+        consults: refNames(data.agents),
+        subagents: refNames(data.subagents),
+        ...(data.sandbox === "own" ? { sandbox: "own" as const } : {}),
+        skills: data.skills === undefined ? null : refNames(data.skills),
+        secrets: Array.isArray(data.secrets) ? data.secrets.map(String) : [],
+        budget: runBudget(data.budget),
+        budgetProblem: budgetProblem(data.budget, ["run"]),
+        timezone: typeof data.timezone === "string" ? data.timezone : null,
+        timezoneProblem: timezoneProblem(data.timezone),
+        languageProblem: languageProblem(data.language),
+        localeProblems: localeProblems(data),
+        webProblems: [...webProblems(data), ...actionProblems(data)],
+        webWarnings: webWarnings(data, { chrome: runnerEngines()?.chrome, chromium: runnerEngines()?.chromium }),
+        scheduleProblem: agentScheduleProblem(data),
+        ...(() => { const l = readLimits(data.limits); return { limits: l.limits, limitProblems: l.problems }; })(),
+        networkProblems: networkProblems(data.network),
+        inlineTools: inlineToolNames(data),
+        ...(frontmatterError ? { frontmatterError } : {}),
+      };
+    });
+}
+
+// Kept here for callers that import it from the store; it lives in matter.ts
+// so the scanner can use it without the store.
+export { frontmatterErrorText };
+
+/** The body of a file whose frontmatter would not parse: what follows the
+ *  closing fence, so a flow's steps can still be read and shown. */
+function bodyAfterFrontmatter(raw: string): string {
+  const m = raw.match(/^---\n[\s\S]*?\n---[ \t]*(?:\n|$)/);
+  return m ? raw.slice(m[0].length) : raw;
+}
+
+// A step targets an agent — `[[writer]]` — or another flow — `[[flow:digest]]`,
+// which is how one flow triggers another.
+// `(\S.*|)` rather than `(.*)`: the instruction either starts with a
+// non-space or is empty, so the `\s*` before it has exactly one way to
+// match. With `(.*)` both could own the same spaces, which is quadratic on
+// a line of them — and a flow file is customer input.
+const STEP_RE = /^\s*(\d+)([?!])?\.?\s+\[\[(flow:)?([a-z0-9-]+)\]\]\s*(?:[—–-]\s*)?(\S.*|)$/;
+
+// One quantifier after the colon; the value is trimmed by unquote(). A key
+// with nothing after it is an option with an empty value, which is what it
+// says, rather than a line that vanished.
+const OPTION_RE = /^(\s+)([a-z_-]+):(.*)$/;
+
+/** The option keys a step actually has. An indented `word: rest` that is
+ *  NOT one of these is a line of the instruction — "Warning: do not
+ *  publish" is prose that happens to contain a colon, and it used to be
+ *  swallowed as an unknown option, silently, along with any typo of a real
+ *  key. The consistency suite reads this list against the docs. */
+export const STEP_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "limits", "loop", "max", "max_turns", "model",
+  "on-fail", "onfail", "output", "parallel", "preview", "retry", "schema", "timeout", "until", "verify", "wait", "when",
+]);
+
+/** A line that opens a markdown block rather than continuing a sentence:
+ *  a heading, a bullet, a numbered item, a quote, a rule, or a paragraph
+ *  that opens in bold. Tested against the line already trimmed, so it says
+ *  "this is a document" whatever margin the list gave it. */
+const MARKDOWN_BLOCK_RE = /^(?:#{1,6}\s|[-*+]\s|>\s|\d+[.)]\s|\*\*|__|---|\|)/;
+
+/** The most fan-out instances `parallel:` may run at once — the fan-out's
+ *  own hard cap, since more slots than items is no cap. */
+export const PARALLEL_CAP = 20;
+/** The most turns `max_turns:` may allow. A turn is one model reply, tool
+ *  calls included; a step that needs more than this is not one step. */
+export const MAX_TURNS_CAP = 500;
+
+/** "90s", "30m", "4h", "3d" — or a bare number of seconds. Clamped to 30
+ *  days: a wait is a pause in a flow, not a second scheduler. */
+export function parseWait(value: string): number | undefined {
+  const secs = parseDuration(value);
+  return secs === undefined ? undefined : Math.min(secs, 30 * 86400);
+}
+
+/** The one duration grammar every key shares — `wait:`, `timeout:`, the
+ *  flow's `throttle:`/`debounce:`/`sla:` — as whole seconds, at least 1.
+ *  Undefined for anything that is not one: the caller says what the key
+ *  was, because "not a duration" is only useful with the line it names. */
+export function parseDuration(value: string): number | undefined {
+  const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*([smhd]?)$/i);
+  if (!m) return undefined;
+  const mult = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase() as "" | "s" | "m" | "h" | "d"];
+  const secs = Math.round(Number(m[1]) * mult);
+  return secs > 0 ? secs : undefined;
+}
+
+/** `timeout:` — the same units `wait:` takes, and no ceiling: the platform
+ *  sets no clock of its own, so the author's number stands as written.
+ *  `timeout: 15m` was `Math.max(1, Number("15m") || 0)` — one second — and
+ *  every step wearing it was cut off before its first tool call returned. */
+export function parseTimeout(value: string): number | undefined {
+  return parseDuration(value);
+}
+
+/** A whole number within [min, max], or undefined — for the counted
+ *  options (`retry:`, `loop:`, `max:`, `parallel:`). "abc" and "2.5" and "9"
+ *  on a key capped at 5 are all refused rather than silently rounded,
+ *  clamped, or read as zero. */
+function parseCount(value: string, min: number, max: number): number | undefined {
+  if (!/^\d+$/.test(value.trim())) return undefined;
+  const n = Number(value.trim());
+  return n >= min && n <= max ? n : undefined;
+}
+
+/** An ISO 8601 instant (YAML may already have parsed it into a Date), or
+ *  null for anything that is not one — a `once` flow with an unreadable
+ *  `at:` never fires, and `foldrun check` says so. */
+export function parseInstant(raw: unknown): string | null {
+  if (!(typeof raw === "string" || raw instanceof Date)) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * Strip the quotes a person wrapped a whole value in, and only those.
+ *
+ * `schedule: "0 8 * * *"` is quoted so YAML-minded readers are comfortable,
+ * and the cron parser must not see the quotes. But the rule that did this
+ * removed a leading OR a trailing quote independently, so a value that
+ * merely *ended* with one lost it — and
+ *
+ *   verify: test "$(cat workspace/storage/draft/published.run)" = "$FOLDRUN_RUN_ID"
+ *
+ * reached bash unbalanced, which exited 2 with "unexpected EOF" on every
+ * run. The step could never pass, whatever the agent did, and nothing said
+ * why: the trace printed the command the parser had already broken.
+ *
+ * So a pair is only stripped when the value opens and closes with the same
+ * quote AND contains no other instance of it — which is what "the whole
+ * value is quoted" actually means. `"a" = "b"` keeps its quotes, because
+ * they are two pairs, not one wrapper.
+ */
+export function unquote(raw: string): string {
+  const value = raw.trim();
+  const q = value[0];
+  if ((q !== '"' && q !== "'") || value.length < 2 || !value.endsWith(q)) return value;
+  const inner = value.slice(1, -1);
+  return inner.includes(q) ? value : inner;
+}
+
+/**
+ * Does this text carry the marker a `when:` is looking for?
+ *
+ * At the START OF A LINE, not anywhere in the prose. A plain substring
+ * search is the obvious implementation and it is wrong in a way that is
+ * very hard to see: an agent writing
+ *
+ *   There are no BLOCKED items this week.
+ *
+ * opened a `when: BLOCKED` gate, because the word is right there. Saying a
+ * marker is absent necessarily names it, so the more carefully an agent
+ * explains itself the more likely it is to trip its own condition. It bit
+ * one desk on its first run and sat latent in another.
+ *
+ * A verdict is written as a headline — the line leads with it — so leading
+ * position is what distinguishes "this is my verdict" from "here is a word
+ * I am using in a sentence". Markdown decoration in front of it is fine: a
+ * heading, a bullet or bold is still a line that leads with the marker.
+ *
+ * The marker must also END at a boundary, so BLOCKED does not match
+ * BLOCKEDBY.
+ */
+/**
+ * The path of a `when: rows of <path>` condition, or null when the condition
+ * is a marker. `rows of` is the phrase `each:` uses for the same file, so a
+ * flow reads a CSV one way in both. The whole phrase is required: a bare
+ * `when: ROWS` stays the marker it always was.
+ */
+export function whenRowsPath(when: string): string | null {
+  const m = when.trim().match(/^rows\s+of\s+(\S.*)$/i);
+  return m ? m[1].trim() : null;
+}
+
+export function markerPresent(text: string | null | undefined, marker: string): boolean {
+  const needle = marker.trim().toLowerCase();
+  if (!needle || !text) return false;
+  for (const raw of text.split("\n")) {
+    // Strip what markdown puts in front of a headline: heading hashes,
+    // quote marks, list bullets, emphasis, backticks.
+    // Heading hashes, quote marks, bullets, numbered-list markers, task
+    // checkboxes, a leading table pipe, emphasis, backticks.
+    const line = raw.replace(/^(?:[\s>#*_`\-+|]|\d+[.)](?=\s)|\[[ xX]\])*/, "").toLowerCase();
+    if (!line.startsWith(needle)) continue;
+    const after = line[needle.length];
+    // End of line, or a separator. A letter or digit means this is a longer
+    // word that merely begins the same way.
+    if (after === undefined || !/[a-z0-9]/.test(after)) return true;
+  }
+  return false;
+}
+
+export function parseFlow(file: string, raw: string): FlowInfo {
+  // A flow saved with CRLF (Windows, some editors) read as no steps at all:
+  // every line kept its "\r", which STEP_RE's `.` will not match. Read it as
+  // LF; the line count, and so every step's `line`, is the same.
+  raw = raw.replace(/\r\n/g, "\n");
+  // Frontmatter that does not parse is a flow-level problem (an error in
+  // check), not a throw: listFlows feeds every workspace listing, the
+  // scheduler and the worker's boot. With no frontmatter read the flow is
+  // manual, so a broken schedule never fires.
+  let data: Record<string, any> = {};
+  let content: string;
+  let frontError: string | null = null;
+  try {
+    ({ data, content } = configMatter(raw));
+  } catch (err) {
+    frontError = frontmatterErrorText(err);
+    content = bodyAfterFrontmatter(raw);
+  }
+  const steps: FlowStep[] = [];
+  // Flow-level problems: a malformed step target (below) and unreadable
+  // frontmatter enums (before the return). Reported as errors by flow-lint.
+  const frontProblems: string[] = [];
+  if (frontError) frontProblems.push(frontError);
+  // Frontmatter is stripped by matter(), so add it back to keep line numbers
+  // pointing at the real file rather than the body.
+  const offset = raw.slice(0, raw.length - content.length).split("\n").length - 1;
+  let lineNo = 0;
+  // A `schema:` with nothing after the colon takes the lines indented
+  // deeper than it as a YAML block — the one place the grammar allows a
+  // shape to be written out rather than named, because a schema is a
+  // document and a one-line one is unreadable past three fields.
+  let block: { step: FlowStep; indent: number; lines: string[] } | null = null;
+  // The step still accepting wrapped instruction lines, or null once
+  // anything has closed it. See the continuation rule below.
+  let open: FlowStep | null = null;
+  const endBlock = () => {
+    if (!block) return;
+    const { step, lines } = block;
+    block = null;
+    // Dedent by the block's own margin, not trim: the first line's indent
+    // is every line's indent, and YAML reads a mapping by its columns.
+    const margin = Math.min(...lines.filter((l) => l.trim()).map((l) => l.match(/^\s*/)![0].length));
+    const text = lines.map((l) => (l.trim() ? l.slice(margin) : "")).join("\n").trim();
+    if (!text) return void (step.problems ??= []).push("schema: — the block under it is empty");
+    const parsed = parseSchemaText(text);
+    if ("problem" in parsed) (step.problems ??= []).push(`schema: ${parsed.problem}`);
+    else step.schema = parsed.schema;
+  };
+  for (const line of content.split("\n")) {
+    lineNo++;
+    if (block) {
+      const indent = line.match(/^(\s*)\S/)?.[1].length;
+      if (indent === undefined) {
+        block.lines.push("");
+        continue;
+      }
+      if (indent > block.indent) {
+        block.lines.push(line.slice(block.indent + 1));
+        continue;
+      }
+      endBlock();
+    }
+    const m = line.match(STEP_RE);
+    if (m) {
+      steps.push({
+        group: Number(m[1]),
+        // Both "2? [[x]]" and an `approve: true` option are accepted; "!"
+        // is shorthand for the common case of needing a human.
+        optional: m[2] === "?",
+        approve: m[2] === "!" || undefined,
+        agent: m[4],
+        subflow: m[3] ? m[4] : undefined,
+        instruction: m[5].trim(),
+        line: lineNo + offset,
+      });
+      open = steps[steps.length - 1];
+      continue;
+    }
+    // A line shaped like a numbered step whose `[[target]]` STEP_RE would
+    // not accept — capitals or an underscore in the name — used to fall
+    // through and be swallowed as prose, so the step silently vanished.
+    // Name it instead: an agent is [a-z0-9-], and a real one that is merely
+    // missing is a separate, later error.
+    const shape = line.match(/^\s*\d+[?!]?\.?\s+\[\[(flow:)?([^\]]*)\]\]/);
+    if (shape && !STEP_RE.test(line)) {
+      frontProblems.push(`step \`[[${shape[1] ?? ""}${shape[2]}]]\` on line ${lineNo + offset}: a step targets an agent or flow named in lower case, digits and dashes — not \`${shape[2]}\`.`);
+    }
+    // An indented line that is not an option continues the instruction —
+    // but only while the step is still open.
+    //
+    // Both directions of this have been wrong in production. Dropping the
+    // continuation silently cut twenty-five live instructions off mid
+    // sentence. Taking every indented line instead read the *wrapped lines
+    // of a bullet list* three paragraphs below the last step as orders: the
+    // gbp-desk publisher was told to "publish Tuesday's five every way step
+    // 3 could fail was also a way Thursday's five silently never went out".
+    //
+    // So a step's instruction ends where the step ends. A continuation is
+    // an indented line that follows the step line, or a previous
+    // continuation, with nothing in between — no blank line, no unindented
+    // line, no option, no schema block. Once any of those closes the step
+    // the instruction is finished, and prose below the last step is prose.
+    //
+    // Indented markdown never continues an instruction either. A heading, a
+    // bullet, a quote, a numbered item or a paragraph opening in bold is a
+    // document, not a sentence somebody wrapped, and the indentation is a
+    // list's own margin.
+    const opt = line.match(OPTION_RE);
+    const isOption = !!opt && STEP_OPTION_KEYS.has(opt[2]);
+    if (open && /^\s+\S/.test(line) && !isOption) {
+      if (MARKDOWN_BLOCK_RE.test(line.trim())) {
+        open = null;
+      } else {
+        open.instruction = `${open.instruction} ${line.trim()}`.trim();
+        open.wrapped = true;
+        continue;
+      }
+    }
+    // Anything that is not a continuation closes the step to further ones.
+    open = null;
+    // Indented options belong to the step above them.
+    if (opt && steps.length) {
+      const step = steps[steps.length - 1];
+      const [, indentText, key, rawValue] = opt;
+      const value = unquote(rawValue);
+      // A value the key cannot read is recorded, never guessed at. Every
+      // one of these used to be coerced — Number("abc") || 0, clamped —
+      // and the run went ahead with a number the author never wrote.
+      const problem = (text: string) => (step.problems ??= []).push(`${key}: ${value} — ${text}`);
+      if (key === "approve") step.approve = value !== "false";
+      else if (key === "when") step.when = value;
+      else if (key === "case") step.case = value;
+      else if (key === "else") step.else = value !== "false";
+      else if (key === "retry") {
+        const n = parseCount(value, 0, 5);
+        if (n === undefined) problem("a whole number of extra attempts, at most 5");
+        // Over the cap still runs, capped: the check fails, the run does not.
+        step.retry = n ?? Math.min(5, Math.max(0, Math.floor(Number(value)) || 0));
+      }
+      else if (key === "timeout") {
+        const secs = parseTimeout(value);
+        if (secs === undefined) problem("not a duration; write seconds (900) or 15m, 4h, 3d");
+        else step.timeout = secs;
+      }
+      else if (key === "verify") step.verify = value;
+      else if (key === "output") {
+        if (/^json$/i.test(value)) step.output = "json";
+        else problem("the only shape is json");
+      }
+      else if (key === "model") step.model = value;
+      else if (key === "effort") step.effort = value;
+      else if (key === "loop") {
+        const n = parseCount(value, 1, 5);
+        if (n === undefined) problem("a whole number of extra cycles, 1 to 5");
+        step.loop = n ?? (Math.min(5, Math.max(1, Math.floor(Number(value)) || 0)) || undefined);
+      }
+      else if (key === "until") step.until = value;
+      else if (key === "each") {
+        if (value === "lines") step.each = "lines";
+        else if (value === "items") step.each = "items";
+        else if (/^rows\b/.test(value)) {
+          step.each = "rows";
+          // "rows of workspace/storage/leads.csv" — the path is the part after "of".
+          step.eachPath = value.replace(/^rows(\s+of)?\s*/, "").trim() || undefined;
+          if (!step.eachPath) problem("rows needs a file: each: rows of workspace/storage/leads.csv");
+        }
+        else problem("lines, items, or rows of <path>");
+      }
+      else if (key === "on-fail" || key === "onfail") step.onFail = refNames(value)[0] ?? undefined;
+      else if (key === "wait") {
+        if (/^event$/i.test(value)) step.waitFor = "event";
+        else {
+          step.waitSecs = parseWait(value);
+          if (step.waitSecs === undefined) problem("event, or a duration: 90s, 30m, 4h, 3d");
+        }
+      }
+      else if (key === "ask") { step.ask = value; }
+      else if (key === "preview") {
+        step.preview = value.split(",").map((p) => p.trim().replace(/^(\.\.\/\.\.\/|workspace\/)?storage\//, "")).filter(Boolean);
+      }
+      else if (key === "delegate") step.delegate = refNames(value).slice(0, 5);
+      else if (key === "max") {
+        const n = parseCount(value, 1, 20);
+        if (n === undefined) problem("a whole number of items, 1 to 20");
+        step.max = n ?? (Math.min(20, Math.max(1, Math.floor(Number(value)) || 0)) || undefined);
+      }
+      else if (key === "parallel") {
+        const n = parseCount(value, 1, PARALLEL_CAP);
+        if (n === undefined) problem(`a whole number of instances to run at once, 1 to ${PARALLEL_CAP}`);
+        else step.parallel = n;
+      }
+      else if (key === "max_turns") {
+        const n = parseCount(value, 1, MAX_TURNS_CAP);
+        if (n === undefined) problem(`a whole number of turns, 1 to ${MAX_TURNS_CAP}`);
+        else step.maxTurns = n;
+      }
+      else if (key === "limits") {
+        const read = parseStepLimits(value);
+        for (const p of read.problems) problem(p);
+        if (Object.keys(read.limits).length) step.limits = read.limits;
+      }
+      else if (key === "schema") {
+        if (!value) block = { step, indent: indentText.length, lines: [] };
+        else if (/^[{[]/.test(value)) {
+          const parsed = parseSchemaText(value);
+          if ("problem" in parsed) problem(parsed.problem);
+          else step.schema = parsed.schema;
+        }
+        else if (!/\s/.test(value) && (/\.(json|ya?ml)$/i.test(value) || value.includes("/"))) step.schemaPath = value;
+        else problem("a JSON object, a path under the workspace (schemas/lead.json), or a YAML block on the lines below");
+      }
+    }
+  }
+  endBlock();
+  // A frontmatter enum written with a typo — `overlap: que` — read as null
+  // and ran with the silent default. flows.md promises otherwise ("a value
+  // the option cannot read is a check error, never a guess"); make it true
+  // for these too, not only for step options.
+  const badEnum = (key: string, val: unknown, allowed: string[]) => {
+    if (typeof val === "string" && val.trim() && !allowed.includes(val.trim())) {
+      frontProblems.push(`${key}: ${val} — the values are ${allowed.join(", ")}.`);
+    }
+  };
+  badEnum("overlap", data.overlap, ["skip", "queue"]);
+  badEnum("issues", data.issues, ["stay-open", "auto-close"]);
+  badEnum("priority", data.priority, ["high", "normal", "low"]);
+  badEnum("catchup", data.catchup, ["none", "last"]);
+  badEnum("on", data.on, ["completed", "failed", "blocked", "any"]);
+  badEnum("signature", data.signature, ["github", "stripe", "slack", "hmac"]);
+  for (const p of checkFilter(data.filter)) frontProblems.push(p);
+
+  steps.sort((a, b) => a.group - b.group);
+  return {
+    name: data.name ?? file.replace(/\.md$/, ""),
+    file,
+    trigger: data.trigger ?? "manual",
+    schedule: data.schedule ?? null,
+    timezone: data.timezone ?? null,
+    model: data.model ?? null,
+    effort: data.effort ?? null,
+    overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
+    ...(data.issues === "auto-close" || data.issues === "stay-open" ? { issues: data.issues } : {}),
+    live: data.live === true,
+    priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
+    budget: runBudget(data.budget),
+    budgetProblem: budgetProblem(data.budget, ["run"]),
+    // `after: [[flow:publish]]` — a link or a bare name, read the same way
+    // as every other file-naming field (refs.ts).
+    after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,
+    on: data.on === "failed" || data.on === "blocked" || data.on === "any" ? data.on : "completed",
+    at: parseInstant(data.at),
+    url: typeof data.url === "string" ? data.url.trim() : null,
+    every: typeof data.every === "string" || typeof data.every === "number" ? (parseWait(String(data.every)) ?? null) : null,
+    signature: ["github", "stripe", "slack", "hmac"].includes(String(data.signature))
+      ? (String(data.signature) as FlowInfo["signature"])
+      : null,
+    signingSecret:
+      typeof data.signing_secret === "string"
+        ? data.signing_secret.trim().replace(/^\$\{|\}$/g, "")
+        : null,
+    path: typeof data.path === "string" ? data.path.trim().replace(/^\/+/, "") : null,
+    filter: data.filter === undefined || data.filter === null ? null : data.filter,
+    // A header name is case-insensitive on the wire; a JSON field is not.
+    // `body:eventId` lower-cased to `body:eventid` matched nothing, and a
+    // dedupe that matches nothing admits everything.
+    idempotency: typeof data.idempotency === "string" ? idempotencyName(data.idempotency) : null,
+    debounce: durationOf(data.debounce),
+    throttle: durationOf(data.throttle),
+    catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
+    disableAfter: Number.isFinite(Number(data.disable_after)) && Number(data.disable_after) > 0
+      ? Math.min(100, Math.floor(Number(data.disable_after)))
+      : null,
+    pauseWhen: typeof data.pause_when === "string" && data.pause_when.trim() && data.pause_when.trim().length <= 60
+      ? data.pause_when.trim()
+      : null,
+    sla: durationOf(data.sla),
+    approvers: approverList(data.approvers),
+    approveWithin: durationOf(data.approve_within),
+    description: typeof data.description === "string" ? data.description.trim() || null : null,
+    ...resolveOwner(data.owner, undefined, undefined, "flow"),
+    frontProblems,
+    steps,
+  };
+}
+
+/** A schema written out: JSON, or YAML (parsed as frontmatter is, by the
+ *  same engine). The result must be an object — a schema is a document,
+ *  and `schema: 3` or `schema: [a, b]` describes nothing. */
+export function parseSchemaText(text: string): { schema: Record<string, unknown> | boolean } | { problem: string } {
+  let value: unknown;
+  try {
+    value = /^\s*[{[]/.test(text) ? JSON.parse(text) : matter(`---\n${text}\n---\n`).data;
+  } catch (err) {
+    return { problem: `cannot read the schema — ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` };
+  }
+  if (typeof value === "boolean") return { schema: value };
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length === 0) {
+    return { problem: "a schema is a JSON object (type, properties, required, …)" };
+  }
+  return { schema: value as Record<string, unknown> };
+}
+
+function idempotencyName(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  return v.toLowerCase().startsWith("body:") ? `body:${v.slice(5).trim()}` : v.toLowerCase();
+}
+
+/** A duration frontmatter value — "30m", "2d", or bare seconds — or null.
+ *  Shares parseWait's units and its thirty-day ceiling, so every duration in
+ *  the format is written and bounded the same way. */
+function durationOf(raw: unknown): number | null {
+  if (typeof raw === "number") return raw > 0 ? Math.min(Math.round(raw), 30 * 86400) : null;
+  if (typeof raw !== "string") return null;
+  return parseWait(raw) ?? null;
+}
+
+/** `approvers:` — a YAML list, or one address, or "admins". Lower-cased,
+ *  because an email address that differs only in case is the same person and
+ *  a gate that refuses them is a support ticket. */
+function approverList(raw: unknown): string[] | null {
+  const items = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const out = items.map((v) => String(v).trim().toLowerCase()).filter(Boolean);
+  return out.length ? [...new Set(out)] : null;
+}
+
+/** May this person decide a gate of this flow? `approvers:` is an allowlist
+ *  of addresses plus the word "admins"; an empty list defers to whatever
+ *  permission the caller already needed to reach the route.
+ *
+ *  Self-approval is refused separately (see approvals.ts): who STARTED a run
+ *  is a property of the run, not of the flow file. */
+export function mayApprove(
+  flow: Pick<FlowInfo, "approvers"> | null | undefined,
+  who: { email?: string | null; role?: string | null },
+): boolean {
+  const list = flow?.approvers;
+  if (!list || list.length === 0) return true;
+  const email = (who.email ?? "").trim().toLowerCase();
+  if (email && list.includes(email)) return true;
+  return list.includes("admins") && (who.role === "admin" || who.role === "owner");
+}
+
+/** A live run of this flow — the fact overlap: decisions are made on. */
+export function flowHasLiveRun(tenant: string, workspace: string, flowName: string): boolean {
+  return listRunSummaries(tenant, workspace).some(
+    (r) => r.flow === flowName && (r.status === "running" || r.status === "queued" || r.status === "awaiting-approval"),
+  );
+}
+
+// Rearranging a flow from the dashboard rewrites the numbers in the markdown
+// and nothing else. Working on raw text blocks rather than re-serialising the
+// parsed FlowInfo means instructions, option lines, frontmatter and any prose
+// survive a drag exactly as the author wrote them — the file stays theirs.
+//
+// `groups` is the new arrangement: an array of groups, each holding indices
+// into the flow's parsed `steps`. Steps sharing a group run in parallel.
+interface FlowBlock {
+  group: number;
+  lines: string[]; // the step line, plus its indented options and notes
+}
+
+// Split a flow file into its frontmatter, any prose before the first step,
+// and one block per step. Blocks come back in the same order as parseFlow's
+// steps, so a block index and a step index mean the same thing.
+function splitFlowBlocks(raw: string) {
+  const head = raw.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)/)?.[1] ?? "";
+  const preamble: string[] = [];
+  const blocks: FlowBlock[] = [];
+  for (const line of raw.slice(head.length).split("\n")) {
+    if (STEP_RE.test(line)) blocks.push({ group: Number(line.match(STEP_RE)![1]), lines: [line] });
+    else if (blocks.length) blocks[blocks.length - 1].lines.push(line);
+    else preamble.push(line);
+  }
+  // parseFlow sorts by group, and Array.prototype.sort is stable, so the same
+  // sort here keeps block i aligned with steps[i].
+  const ordered = blocks.map((b, i) => ({ ...b, i })).sort((a, b) => a.group - b.group || a.i - b.i);
+  while (preamble.length && preamble[preamble.length - 1].trim() === "") preamble.pop();
+  return { head, preamble, blocks: ordered as FlowBlock[] };
+}
+
+function emitFlow(head: string, preamble: string[], groups: FlowBlock[][]): string {
+  const out: string[] = [];
+  groups.forEach((group, g) => {
+    for (const block of group) {
+      const [stepLine, ...rest] = block.lines;
+      const m = stepLine.match(STEP_RE)!;
+      const [, , marker = "", flowPrefix = "", target, instruction] = m;
+      out.push(
+        `${g + 1}${marker}. [[${flowPrefix}${target}]]${instruction.trim() ? ` — ${instruction.trim()}` : ""}`,
+      );
+      while (rest.length && rest[rest.length - 1].trim() === "") rest.pop();
+      out.push(...rest);
+    }
+  });
+  // Keep the blank line that conventionally follows frontmatter.
+  const gap = preamble.length ? `${preamble.join("\n")}\n\n` : head ? "\n" : "";
+  return `${head}${gap}${out.join("\n")}\n`;
+}
+
+/**
+ * Rewrite a flow's trigger in place — the dashboard's trigger picker.
+ *
+ * Line-level surgery on the frontmatter, not a YAML round-trip: everything
+ * the author wrote (comments, key order, unrelated keys) survives verbatim,
+ * and the diff is exactly the lines that changed. A flow with no
+ * frontmatter gains the smallest one that can carry the trigger.
+ */
+function setFlowTriggerLF(
+  raw: string,
+  opts: { trigger: FlowTrigger; schedule?: string; timezone?: string },
+): string {
+  if (!(FLOW_TRIGGERS as readonly string[]).includes(opts.trigger)) {
+    throw new Error(`unknown trigger "${opts.trigger}" — one of ${FLOW_TRIGGERS.join(", ")}`);
+  }
+  const wanted = new Map<string, string | null>();
+  wanted.set("trigger", opts.trigger === "manual" ? null : opts.trigger); // manual is the default — say nothing
+  if (opts.trigger === "schedule") {
+    const cron = (opts.schedule ?? "").trim();
+    // Shape only — the scheduler's parseCron is the authority, and the API
+    // route runs it; importing it here would cycle store ↔ scheduler.
+    const shaped = /^@\w+$/.test(cron) || cron.split(/\s+/).length === 5;
+    if (!cron || !shaped) {
+      throw new Error(`"${cron}" is not a cron expression (5 fields, or @daily-style)`);
+    }
+    wanted.set("schedule", `"${cron}"`);
+    wanted.set("timezone", opts.timezone?.trim() ? opts.timezone.trim() : null);
+  } else {
+    wanted.set("schedule", null);
+    wanted.set("timezone", null);
+  }
+
+  const lines = raw.split("\n");
+  const hasFront = lines[0]?.trim() === "---";
+  const close = hasFront ? lines.indexOf("---", 1) : -1;
+  const front = hasFront && close > 0 ? lines.slice(1, close) : [];
+  const body = hasFront && close > 0 ? lines.slice(close + 1) : lines;
+
+  const kept = front.filter((line) => {
+    const key = line.match(/^(\w+):/)?.[1];
+    return !(key && wanted.has(key));
+  });
+  for (const [key, value] of wanted) {
+    if (value !== null) kept.push(`${key}: ${value}`);
+  }
+
+  if (kept.length === 0) return body.join("\n").replace(/^\n+/, "");
+  return ["---", ...kept, "---", ...body].join("\n");
+}
+
+/**
+ * Rewrite one step's option lines — the board's step editor. Surgical, like
+ * every flow rewrite: only the managed option lines of block `index` change;
+ * the step line, its unmanaged options (approve stays the `!` marker's
+ * business), other steps, comments and frontmatter survive verbatim.
+ * `null` clears an option; values are clamped exactly as parseFlow reads
+ * them, so what the editor writes is what the runner will do.
+ */
+/**
+ * Rewrite one step's instruction, and nothing else.
+ *
+ * The step line carries four things — the group number, the optional/approve
+ * marker, the wikilink, and the instruction — and only the last is being
+ * edited. Rebuilding the line from the parsed step would silently normalise
+ * the other three (a "2?" becoming "2.", an en dash becoming an em dash), so
+ * the prefix is taken verbatim from the file and only the tail replaced. A
+ * flow's markdown stays the author's.
+ */
+function updateFlowStepInstructionLF(raw: string, index: number, instruction: string): string {
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
+    throw new Error(`no step ${index}`);
+  }
+  const block = blocks[index];
+  const line = block.lines[0];
+  const m = line.match(STEP_RE);
+  if (!m) throw new Error(`step ${index} is not a step line`);
+  // Everything up to where the instruction starts, exactly as written.
+  const prefix = m[5] ? line.slice(0, line.length - m[5].length) : `${line.trimEnd()} — `;
+  const next = instruction.trim().replace(/\s*\n\s*/g, " ");
+  block.lines = [`${prefix}${next}`.trimEnd(), ...block.lines.slice(1)];
+  // Same regrouping as updateFlowStep: consecutive blocks sharing a number
+  // are one parallel group, and emitFlow puts the file back together.
+  const groups: FlowBlock[][] = [];
+  for (const b of blocks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].group === b.group) last.push(b);
+    else groups.push([b]);
+  }
+  return emitFlow(head, preamble, groups);
+}
+
+function updateFlowStepLF(
+  raw: string,
+  index: number,
+  options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max" | "limits", string | number | null>>,
+): string {
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
+    throw new Error(`no step ${index}`);
+  }
+
+  const clamp: Record<string, (v: string) => string | null> = {
+    model: (v) => v || null,
+    effort: (v) => resolveEffort(v) ?? null,
+    verify: (v) => v || null,
+    when: (v) => v || null,
+    case: (v) => v || null,
+    else: (v) => (v === "true" || v === "1" ? "true" : null),
+    until: (v) => v || null,
+    retry: (v) => String(Math.min(5, Math.max(0, Number(v) || 0))),
+    timeout: (v) => (Number(v) > 0 ? String(Math.max(1, Math.floor(Number(v)))) : null),
+    loop: (v) => (Number(v) > 0 ? String(Math.min(5, Math.max(1, Math.floor(Number(v))))) : null),
+    max: (v) => (Number(v) > 0 ? String(Math.min(20, Math.max(1, Math.floor(Number(v))))) : null),
+    each: (v) => (v === "lines" ? "lines" : null),
+    // `{web.search: 10, calls: 300}` — one line, read the way parseFlow
+    // reads it; a value it would flag is refused rather than written.
+    limits: (v) => {
+      if (!v || v === "{}") return null;
+      const read = parseStepLimits(v);
+      if (read.problems.length) throw new Error(`limits: ${read.problems[0]}`);
+      const pairs = Object.entries(read.limits);
+      return pairs.length ? `{${pairs.map(([k, n]) => `${k}: ${n}`).join(", ")}}` : null;
+    },
+  };
+
+  const block = blocks[index];
+  const managed = new Set(Object.keys(options));
+  const kept = block.lines.slice(1).filter((line) => {
+    const key = line.match(OPTION_RE)?.[2];
+    return !(key && managed.has(key));
+  });
+  const added: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === null || value === undefined || !(key in clamp)) continue;
+    const cleaned = clamp[key](String(value).trim());
+    if (cleaned === null) continue;
+    added.push(`   ${key}: ${cleaned}`);
+  }
+  block.lines = [block.lines[0], ...added, ...kept];
+
+  // Reassemble the original grouping: consecutive blocks sharing a group.
+  const groups: FlowBlock[][] = [];
+  for (const b of blocks) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].group === b.group) last.push(b);
+    else groups.push([b]);
+  }
+  return emitFlow(head, preamble, groups);
+}
+
+function reorderFlowStepsLF(raw: string, groups: number[][]): string {
+  const { head, preamble, blocks: ordered } = splitFlowBlocks(raw);
+
+  const seen = new Set<number>();
+  for (const group of groups) {
+    if (group.length === 0) throw new Error("a group must contain at least one step");
+    for (const i of group) {
+      if (!Number.isInteger(i) || i < 0 || i >= ordered.length) throw new Error(`no step ${i}`);
+      if (seen.has(i)) throw new Error(`step ${i} appears twice`);
+      seen.add(i);
+    }
+  }
+  if (seen.size !== ordered.length) {
+    throw new Error(`expected all ${ordered.length} steps, got ${seen.size}`);
+  }
+
+  return emitFlow(head, preamble, groups.map((g) => g.map((i) => ordered[i])));
+}
+
+/** Append a step as its own group at the end of the flow. */
+function addFlowStepLF(
+  raw: string,
+  step: { target: string; subflow?: boolean; instruction?: string },
+): string {
+  assertSafeName(step.target, "step target");
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  const instruction = (step.instruction ?? "").replace(/[\r\n]+/g, " ").trim();
+  const line = `0. [[${step.subflow ? "flow:" : ""}${step.target}]]${instruction ? ` — ${instruction}` : ""}`;
+  if (!STEP_RE.test(line)) throw new Error("could not build a valid step line");
+  const groups = groupBlocks(blocks);
+  groups.push([{ group: 0, lines: [line] }]);
+  return emitFlow(head, preamble, groups);
+}
+
+/** Drop one step, by its index in the flow's parsed steps. */
+function removeFlowStepLF(raw: string, index: number): string {
+  const { head, preamble, blocks } = splitFlowBlocks(raw);
+  if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
+    throw new Error(`no step ${index}`);
+  }
+  const kept = blocks.filter((_, i) => i !== index);
+  return emitFlow(head, preamble, groupBlocks(kept));
+}
+
+// The rewriters above work on LF (eol.ts); the web route calls these with
+// the file as saved, so a CRLF flow is read as LF and written back as CRLF.
+export const setFlowTrigger = (raw: string, opts: Parameters<typeof setFlowTriggerLF>[1]): string =>
+  asRaw(raw, setFlowTriggerLF(toLF(raw), opts));
+export const updateFlowStepInstruction = (raw: string, index: number, instruction: string): string =>
+  asRaw(raw, updateFlowStepInstructionLF(toLF(raw), index, instruction));
+export const updateFlowStep = (raw: string, index: number, options: Parameters<typeof updateFlowStepLF>[2]): string =>
+  asRaw(raw, updateFlowStepLF(toLF(raw), index, options));
+export const reorderFlowSteps = (raw: string, groups: number[][]): string =>
+  asRaw(raw, reorderFlowStepsLF(toLF(raw), groups));
+export const addFlowStep = (raw: string, step: Parameters<typeof addFlowStepLF>[1]): string =>
+  asRaw(raw, addFlowStepLF(toLF(raw), step));
+export const removeFlowStep = (raw: string, index: number): string => asRaw(raw, removeFlowStepLF(toLF(raw), index));
+
+/** Blocks → the group structure they currently describe. */
+function groupBlocks(blocks: FlowBlock[]): FlowBlock[][] {
+  const map = new Map<number, FlowBlock[]>();
+  for (const b of blocks) map.set(b.group, [...(map.get(b.group) ?? []), b]);
+  return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
+export function listFlows(tenant: string, workspace: string): FlowInfo[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "flows");
+  if (!fs.existsSync(dir)) return [];
+  const owned = flowOwner(tenant, workspace);
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".md"))
+    .sort()
+    .map((f) => owned(parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"))));
+}
+
+/** A flow with its owner filled from the workspace and account when its own
+ *  file names none. */
+function flowOwner(tenant: string, workspace: string): (flow: FlowInfo) => FlowInfo {
+  let above: { workspace: unknown; account: unknown } | null = null;
+  return (flow) => {
+    if (flow.owner) return flow;
+    above ??= {
+      workspace: readAgentsMdKeys(workspaceDir(tenant, workspace)).owner,
+      account: readAgentsMdKeys(accountDir(tenant)).owner,
+    };
+    return { ...flow, ...resolveOwner(undefined, above.workspace, above.account) };
+  };
+}
+
+export type OwnerSource = "agent" | "flow" | "workspace" | "account";
+
+/** `owner:` down the cascade: the file's own, the workspace AGENTS.md's, the
+ *  account's. A blank or non-string value is no value. `own` is labelled
+ *  "agent" or "flow" by the caller's kind; here it is whichever is given. */
+export function resolveOwner(
+  own: unknown,
+  workspace?: unknown,
+  account?: unknown,
+  ownKind: "agent" | "flow" = "agent",
+): { owner: string | null; ownerFrom: OwnerSource | null } {
+  const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  for (const [v, from] of [[own, ownKind], [workspace, "workspace"], [account, "account"]] as const) {
+    const t = text(v);
+    if (t) return { owner: t, ownerFrom: from };
+  }
+  return { owner: null, ownerFrom: null };
+}
+
+/** One flow of a workspace by name, or null. The same read listFlows makes,
+ *  named so callers that want a single flow — the approval rules, the
+ *  runner's budget stamp — do not each re-implement the directory walk. */
+export function readFlow(tenant: string, workspace: string, flowName: string): FlowInfo | null {
+  const dir = path.join(workspaceDir(tenant, workspace), "flows");
+  if (!fs.existsSync(dir)) return null;
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+    const flow = parseFlow(f, fs.readFileSync(path.join(dir, f), "utf8"));
+    if (flow.name === flowName) return flowOwner(tenant, workspace)(flow);
+  }
+  return null;
+}
+
+export interface WorkspaceSummary {
+  name: string;
+  description: string;
+  agents: number;
+  flows: number;
+  deployedAt: string;
+  runCount: number;
+  /** The workspace's picture, as a URL, when the page that lists it looked
+   *  one up (avatars.ts) — the store itself does not. */
+  avatar?: string | null;
+}
+
+/**
+ * Every account this installation holds.
+ *
+ * A tenant is a directory under the data root, but not every directory there
+ * is one — `.runtimes/` sits beside them, and so do keys.json and the secret
+ * key. What makes a tenant is that it holds workspaces, so that is the test.
+ *
+ * Single-workspace mode has no accounts at all: the workspace *is* the whole
+ * installation, and there is nothing above it to enumerate.
+ */
+export function listTenants(): string[] {
+  if (singleWorkspace()) return [];
+  const root = dataRoot();
+  if (!fs.existsSync(root)) return [];
+  return fs
+    .readdirSync(root)
+    .filter((name) => SAFE_NAME.test(name))
+    .filter((name) => {
+      const dir = path.join(root, name);
+      try {
+        if (!fs.statSync(dir).isDirectory()) return false;
+      } catch {
+        return false;
+      }
+      return [WORKSPACES, LEGACY_WORKSPACES].some((w) => fs.existsSync(path.join(dir, w)));
+    })
+    .sort();
+}
+
+export function listWorkspaces(tenant: string): WorkspaceSummary[] {
+  assertSafeName(tenant, "tenant");
+  const dir = workspacesRoot(tenant);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((n) => fs.statSync(path.join(dir, n)).isDirectory())
+    .map((name) => {
+      const pDir = path.join(dir, name);
+      // AGENTS.md is the workspace's config file; project.md is the name it
+      // had before. Take the first NON-EMPTY description across both — not the
+      // first file that merely exists. A workspace with both files but a
+      // description only in project.md (AGENTS.md carrying just `notify:`, say)
+      // otherwise shows blank, because the old code broke on file-exists.
+      let description = "";
+      for (const file of ["AGENTS.md", "project.md"]) {
+        const p = path.join(pDir, file);
+        if (!fs.existsSync(p)) continue;
+        try {
+          const d = matter(fs.readFileSync(p, "utf8")).data.description ?? "";
+          if (d) { description = d; break; }
+        } catch {
+          // an unreadable file is not a description; try the next
+        }
+      }
+      const runsDir = path.join(pDir, "runs");
+      return {
+        name,
+        description,
+        agents: listAgents(tenant, name).length,
+        flows: listFlows(tenant, name).length,
+        deployedAt: fs.statSync(pDir).mtime.toISOString(),
+        runCount: fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0,
+      };
+    })
+    .sort((a, b) => b.deployedAt.localeCompare(a.deployedAt));
+}
+
+// ---------- file management (dashboard editing) ----------
+
+// Editable paths: project.md, .md files under agents/ or flows/, and an
+// agent's own scripts (text source files it runs with bash).
+// csv/tsv: a desk's registers and ledgers (who was emailed, what was
+// posted) are tables, and refusing them meant a register could be neither
+// seeded nor read through the door — only rewritten by a run (2026-09-15).
+const SCRIPT_EXT = /\.(py|sh|[mc]?js|ts|rb|sql|txt|json|ya?ml|toml|env|md|[ct]sv)$/i;
+
+/**
+ * May this path be edited — and therefore, must it be listed?
+ *
+ * The listing and the writer used to answer this separately, and drifted
+ * twice. First `state/notes.md` could be written and never appeared; that was
+ * fixed by adding a state rule to the listing. Then folder tools arrived and
+ * `tools/x/run.mjs` — the program half of every script tool — was writable,
+ * readable, and invisible in the file tree, so the code you were told to edit
+ * could not be found.
+ *
+ * Writable and invisible is the worst of both. One rule decides now: the
+ * listing asks the writer, so a path that can be saved is a path that shows.
+ */
+export function isEditablePath(rel: string): boolean {
+  try {
+    assertEditablePath(rel);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function assertEditablePath(rel: string) {
+  const norm = path.normalize(rel);
+  if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
+  assertCanonicalCase(norm);
+  if (norm === "project.md" || norm === "AGENTS.md") return norm;
+  if (norm.includes("outputs/")) throw new Error(`not an editable path: ${rel}`);
+  if (/scripts\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
+  if (/^agents\/[^/]+\/skills\/[^/]+\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
+  if (/^(skills|memory|knowledge|tools|state)\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
+  if (/^(agents|flows|evals)\//.test(norm) && norm.endsWith(".md")) return norm;
+  throw new Error(`not an editable path: ${rel}`);
+}
+
+
+/** Files under the account directory that exist, are worth showing, and must
+ *  never be served. Listing them is honest — hiding them is what makes a file
+ *  tree disagree with the filesystem it claims to show — but their contents
+ *  are the vault and the money, so a reader gets the reason instead. */
+// billing.json, oauth-connections.json and secret-health.json were listed and
+// served until 2026-09-24: any member of the account, a viewer included, could
+// open the Stripe customer id and billing email, and which connections exist.
+const ACCOUNT_SEALED: Record<string, string> = {
+  "secrets.json": "the vault — encrypted, and never served to a browser. Manage secrets in Settings.",
+  "oauth-clients.json": "OAuth client credentials — never served to a browser.",
+  "ledger.jsonl": "the billing ledger — append-only, read it through Usage and Wallet.",
+  "billing.json": "the account's billing settings — read and change them in Wallet.",
+  "oauth-connections.json": "connected apps and their health — see Settings → Connections.",
+  "secret-health.json": "secret usage bookkeeping — see Settings → Secrets.",
+};
+
+export function accountFileSealed(rel: string): string | null {
+  const norm = rel.replaceAll("\\", "/");
+  if (/(^|\/)secrets\.json\.[^/]+$/.test(norm)) return "the vault's lock or a save in flight — never served.";
+  if (Object.hasOwn(ACCOUNT_SEALED, norm)) return ACCOUNT_SEALED[norm];
+  // What a move into the database leaves behind: billing.json.imported-<date>
+  // and the like, kept for a rollback — the same contents, so the same seal.
+  const moved = /^(.+\.json)\.imported-[\d-]+$/.exec(norm);
+  if (moved && Object.hasOwn(ACCOUNT_SEALED, moved[1])) return ACCOUNT_SEALED[moved[1]];
+  if (/^(billed|once|topups|workspaces\/[^/]+\/runs)\//.test(norm)) {
+    return "generated bookkeeping, not an authored file.";
+  }
+  if (/^workspaces\/[^/]+\/secrets\.json$/.test(norm)) {
+    return "the workspace vault — encrypted, and never served to a browser.";
+  }
+  return null;
+}
+
+/** Generated bookkeeping: nobody authored it, no agent reads it, and each has
+ *  a page that presents it properly. Listing it would add rows whose only
+ *  function is to refuse the person who clicked them, which is noise wearing
+ *  honesty's clothes. `accountFileSealed` still refuses these if a path is
+ *  constructed directly — the listing hides them, the reader guards them. */
+const ACCOUNT_BOOKKEEPING =
+  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json(\.[^/]+)?$/;
+
+/**
+ * The account directory as it actually is on disk.
+ *
+ * A faithful walk, with one rule for what it leaves out: show what a person
+ * authors or an agent reads. That keeps the path you see the path an agent
+ * types, which is the whole point of the tree — while sparing you rows that
+ * exist only to be refused.
+ *
+ * The vault is not an exception to that rule. Secrets are authored in Settings
+ * and reach an agent as environment variables — never as a file, deliberately,
+ * so that no single read can carry them all off. `secrets.json` is therefore
+ * neither authored here nor read by an agent, and a row that can only refuse
+ * the person who clicks it teaches nothing. The reader still guards it.
+ */
+export function listAccountFiles(tenant: string, cap = 4000): string[] {
+  const root = accountDir(tenant);
+  if (!fs.existsSync(root)) return [];
+  const out: string[] = [];
+  const walk = (abs: string, rel: string, depth: number) => {
+    if (out.length >= cap || depth > 8) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (out.length >= cap) return;
+      const next = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isSymbolicLink()) continue;
+      // Content-addressed blobs and a run's copied outputs are bytes under a
+      // hash — thousands of names that mean nothing to a reader. The
+      // revision store (.history), the runtime cache (.runtimes, with npm's
+      // _cacache under it) and the file-store indexes (storage/) are the
+      // platform's own bookkeeping: real paths, but not files anyone reads
+      // here, and between them most of what the page used to list.
+      if (/(^|\/)(blobs|outputs|\.results|node_modules|\.git|\.history|\.runtimes|\.npm-cache|_cacache|storage|previews|avatars)$/.test(next)) continue;
+      if (ACCOUNT_BOOKKEEPING.test(next)) continue;
+      if (e.isDirectory()) walk(path.join(abs, e.name), next, depth + 1);
+      else out.push(next);
+    }
+  };
+  walk(root, "", 0);
+  return out;
+}
+
+/** One file under the account directory, or the reason it will not be served. */
+export function readAccountFile(tenant: string, rel: string): { content: string } | { sealed: string } {
+  const sealed = accountFileSealed(rel);
+  if (sealed) return { sealed };
+  const norm = rel.replaceAll("\\", "/");
+  if (norm.includes("..")) return { sealed: "path escapes the account directory." };
+  const file = path.join(accountDir(tenant), norm);
+  try {
+    if (fs.statSync(file).size > 512 * 1024) return { sealed: "too large to show here — download it instead." };
+    return { content: fs.readFileSync(file, "utf8") };
+  } catch {
+    return { sealed: "could not be read." };
+  }
+}
+
+export function listWorkspaceFiles(tenant: string, workspace: string): string[] {
+  const dir = workspaceDir(tenant, workspace);
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of entriesNoFollow(dir)) {
+    const rel = String(entry);
+    if (/(^|\/)(runs|outputs)\//.test(rel)) continue;
+    // Skip anything reached through a symlink — a stray link would otherwise
+    // pull another workspace (or the whole library) into this listing.
+    try {
+      if (fs.lstatSync(path.join(dir, rel)).isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    // Generated, not authored — the same reason runs/ is hidden above.
+    if (/(^|\/)\.results\//.test(rel)) continue;
+
+    // Directories are entries too, and a directory is not an editable file.
+    try {
+      if (!fs.statSync(path.join(dir, rel)).isFile()) continue;
+    } catch {
+      continue;
+    }
+    // One rule, asked of the writer — see isEditablePath. The four separate
+    // predicates that used to live here disagreed with it twice, and both
+    // times the symptom was a file you could save and could not see.
+    if (isEditablePath(rel)) out.push(rel);
+  }
+  return out.sort();
+}
+
+export function readWorkspaceFile(tenant: string, workspace: string, rel: string): string {
+  const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
+  if (!fs.existsSync(p)) throw new Error(`file not found: ${rel}`);
+  return fs.readFileSync(p, "utf8");
+}
+
+/** Who made a change and why — recorded on its revision. */
+export interface ChangeMeta {
+  by?: string;
+  message?: string;
+}
+
+export function writeWorkspaceFile(
+  tenant: string,
+  workspace: string,
+  rel: string,
+  content: string,
+  meta: ChangeMeta = {},
+) {
+  // 512 KB: a folder tool's program is one file, and the gallery browser's is
+  // past 256 KB. Still a file a person edits, not a store for data.
+  if (content.length > MAX_EDITABLE_FILE) throw new Error("file too large");
+  matter(content); // reject files whose frontmatter doesn't parse
+  const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
+  const existed = fs.existsSync(p);
+  const before = existed ? fs.readFileSync(p, "utf8") : null;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  // One trailing newline, never a run of them.
+  //
+  // Models end a document with blank lines — several, sometimes dozens — and
+  // nothing trimmed them, so every save kept whatever the last writer left.
+  // A reader sees it as a file that scrolls for a page after the text stops;
+  // the editor's line gutter dutifully numbered all of it. Trailing blank
+  // lines are not content in any format this holds (markdown, YAML
+  // frontmatter, a script), and no author types thirty of them on purpose.
+  fs.writeFileSync(p, `${content.trimEnd()}\n`);
+  // Code is executable wherever it lives: the scripts shelf, a skill's
+  // bundled scripts/, or a folder tool's own directory. A run.mjs written
+  // without the bit fails at exec, which reads as "the tool is broken".
+  const norm = rel.replaceAll("\\", "/");
+  if (/^scripts\//.test(norm) || /(^|\/)scripts\//.test(norm) ||
+      (/^tools\//.test(norm) && !norm.endsWith(".md"))) {
+    fs.chmodSync(p, 0o755);
+  }
+  syncBundleFor(p, existed ? "Update" : "Creation");
+  // The revision: what it was, what it is now. Identical content records
+  // nothing — see history.ts.
+  recordRevision(tenant, workspace, [{ path: norm, before, after: fs.readFileSync(p, "utf8") }], meta);
+  workspaceChanged(tenant, workspace, "write");
+}
+
+/** Tell the platform, and never let its listener fail a write. */
+function workspaceChanged(tenant: string, workspace: string, why: "write" | "deploy" | "delete") {
+  try {
+    platform.workspaceChanged(tenant, workspace, why);
+  } catch {
+    // a scheduler that could not be told will find out on its next rescan
+  }
+}
+export { workspaceChanged as notifyWorkspaceChanged };
+
+// memory/ and knowledge/ are OKF bundles, so index.md has to stay current —
+// a generated index that drifts is the same class of bug as a memory index
+// naming files that don't exist.
+export function syncBundleFor(file: string, change?: "Creation" | "Update") {
+  // Walk up to the bundle root — a concept may sit in a nested section.
+  let dir = path.dirname(file);
+  let hops = 0;
+  while (hops < 6) {
+    const base = path.basename(dir);
+    if (base === "memory" || base === "knowledge") break;
+    dir = path.dirname(dir);
+    hops++;
+  }
+  const kind = path.basename(dir);
+  if (kind !== "memory" && kind !== "knowledge") return;
+
+  // A workspace- or account-level bundle is a root; an agent's own is nested
+  // inside one, and the spec permits okf_version only at a bundle root.
+  const isRoot = path.basename(path.resolve(dir, "..", "..")) !== "agents";
+  syncIndex(dir, kind === "memory" ? "Memory" : "Knowledge", isRoot);
+  if (change) {
+    appendLog(dir, path.relative(dir, file).split(path.sep).join("/"), change);
+  }
+}
+
+/**
+ * Rename one editable file. Both ends pass the same gate as a write — a
+ * rename must not be able to move a file somewhere a write couldn't create
+ * it — and an existing target refuses rather than silently replacing
+ * someone's work. Bundle indexes on both sides are re-synced, because a
+ * memory file leaving a bundle is as much a change to its index as one
+ * arriving.
+ */
+/**
+ * Why a path can never be moved or renamed, in a sentence — or null when it
+ * can. One vocabulary for the tree, the API and the tests, because "not an
+ * editable path" told the person *that* they were refused and made them
+ * guess at *why*, when the why is the whole lesson: in this format,
+ * location is meaning.
+ */
+export function anchoredReason(rel: string): string | null {
+  const norm = rel.replaceAll("\\", "/");
+  const base = norm.split("/").pop()!;
+  if (norm === "AGENTS.md" || norm === "project.md") {
+    return `${base} is the workspace's own identity — it cannot move; rename or delete the workspace instead`;
+  }
+  if (base === "agent.md") {
+    return "agent.md is the agent because of where it sits — to rename the agent, rename its folder";
+  }
+  if (base === "SKILL.md") {
+    return "SKILL.md names its skill — to rename the skill, rename its folder";
+  }
+  if (base === "tool.md") {
+    return "tool.md names its tool — to rename the tool, rename its folder";
+  }
+  if (/(^|\/)(knowledge|memory)\/(.*\/)?(index|log)\.md$/.test(norm)) {
+    return `${base} is generated from the files around it — it is rebuilt in place on the next write`;
+  }
+  return null;
+}
+
+export function renameWorkspaceFile(tenant: string, workspace: string, from: string, to: string, meta: ChangeMeta = {}) {
+  // Refuse with the reason before any path validation: "not an editable
+  // path" is true of AGENTS.md too, and the generic sentence buries the
+  // specific one worth reading.
+  const why = anchoredReason(from) ?? anchoredReason(to);
+  if (why) throw new Error(why);
+  const dir = workspaceDir(tenant, workspace);
+  const src = path.join(dir, assertEditablePath(from));
+  const dst = path.join(dir, assertEditablePath(to));
+  if (!fs.existsSync(src)) throw new Error(`${from} does not exist`);
+  if (fs.existsSync(dst)) throw new Error(`${to} already exists`);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const moved = deletionsUnder(workspaceDir(tenant, workspace), path.normalize(from).replaceAll("\\", "/"));
+  fs.renameSync(src, dst);
+  // A rename is a deletion and a creation with the same bytes, which is
+  // exactly how git records one and what lets "where did this go" be answered.
+  const toNorm = path.normalize(to).replaceAll("\\", "/");
+  recordRevision(
+    tenant,
+    workspace,
+    [
+      ...moved,
+      ...moved.map((f) => ({
+        path: f.path === path.normalize(from).replaceAll("\\", "/") ? toNorm : f.path.replace(path.normalize(from).replaceAll("\\", "/"), toNorm),
+        before: null,
+        after: f.before,
+      })),
+    ],
+    { message: `renamed ${from} → ${to}`, ...meta },
+  );
+  syncBundleFor(src);
+  syncBundleFor(dst, "Update");
+  workspaceChanged(tenant, workspace, "write");
+}
+
+/** Every text file under a path, as revision entries recording deletion. */
+function deletionsUnder(dir: string, norm: string): RevisionFile[] {
+  const abs = path.join(dir, norm);
+  if (!fs.existsSync(abs)) return [];
+  if (fs.statSync(abs).isFile()) {
+    return [{ path: norm, before: fs.readFileSync(abs, "utf8"), after: null }];
+  }
+  return fs
+    .readdirSync(abs, { recursive: true })
+    .map(String)
+    .filter((e) => {
+      try {
+        return fs.statSync(path.join(abs, e)).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .map((e) => ({
+      path: `${norm}/${e.split(path.sep).join("/")}`,
+      before: fs.readFileSync(path.join(abs, e), "utf8"),
+      after: null,
+    }));
+}
+
+export function deleteWorkspacePath(tenant: string, workspace: string, rel: string, meta: ChangeMeta = {}) {
+  const norm = path.normalize(rel).replaceAll("\\", "/");
+  if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
+  const dir = workspaceDir(tenant, workspace);
+  // The two files a workspace cannot exist without. assertEditablePath lets
+  // them through — they are editable — but editable and deletable are
+  // different claims, and deleting AGENTS.md is deleting the workspace's
+  // own name.
+  // The same sentences the tree and the rename path use — one vocabulary
+  // for "this file is structure, not content". An identity file is only
+  // deletable as its whole folder: agent.md alone leaves a folder that is
+  // no longer an agent but still shadows the name.
+  const anchored = anchoredReason(norm);
+  if (anchored) {
+    if (/(agent|SKILL|tool)\.md$/.test(norm)) {
+      throw new Error(`${norm.split("/").pop()} is its folder's identity — delete the whole folder instead`);
+    }
+    throw new Error(anchored);
+  }
+  // Whole-folder units: an agent, a skill, a folder tool. Each is one thing
+  // to its reader, so each is one thing to delete.
+  // An underscore is allowed in the folder's name: a tool called
+  // `my_tool` is one thing too, and its tool.md is refused alone above.
+  if (/^agents\/[a-z0-9_-]+$/.test(norm) ||
+      /^(skills|tools)\/[a-z0-9_-]+$/.test(norm) ||
+      /^agents\/[a-z0-9_-]+\/skills\/[a-z0-9_-]+$/.test(norm)) {
+    const gone = deletionsUnder(dir, norm);
+    fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
+    recordRevision(tenant, workspace, gone, { message: `deleted ${norm}/`, ...meta });
+    return;
+  }
+  const p = path.join(dir, assertEditablePath(norm));
+  const gone = deletionsUnder(dir, norm);
+  fs.rmSync(p, { force: true });
+  recordRevision(tenant, workspace, gone, meta);
+  // A bundle's index must stop naming what is gone.
+  syncBundleFor(p);
+  workspaceChanged(tenant, workspace, "write");
+}
+
+export function deleteWorkspace(tenant: string, workspace: string) {
+  const dir = workspaceDir(tenant, workspace);
+  if (!fs.existsSync(dir)) throw new Error(`workspace ${workspace} not found`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  workspaceChanged(tenant, workspace, "delete");
+}
+
+/**
+ * What a rename would break, so the caller can say so before doing it.
+ *
+ * The workspace name is not just a directory: it is in every webhook URL *and*
+ * in the token those URLs carry, which is derived from `tenant/workspace/flow`.
+ * So a rename invalidates both halves — an old hook doesn't 404, it fails the
+ * signature check, which reads like an attack rather than a rename. Anything
+ * calling those URLs has to be re-pointed by hand.
+ */
+export function renameImpact(tenant: string, workspace: string): { webhookFlows: string[] } {
+  return {
+    webhookFlows: listFlows(tenant, workspace)
+      .filter((f) => f.trigger === "webhook")
+      .map((f) => f.name),
+  };
+}
+
+/**
+ * Rename a workspace: move the directory, then update the `name:` in AGENTS.md
+ * so the file and its folder don't disagree.
+ *
+ * Runs, state and secrets travel with it — they live inside the directory, so
+ * there is nothing to migrate and nothing to lose.
+ */
+export function renameWorkspace(tenant: string, from: string, to: string) {
+  assertSafeName(to, "workspace");
+  if (from === to) return;
+
+  const src = workspaceDir(tenant, from);
+  if (!fs.existsSync(src)) throw new Error(`workspace ${from} not found`);
+
+  // Deliberately not workspaceDir(): that returns the *legacy* path when one
+  // exists, and renaming into `projects/` would resurrect the old layout.
+  const dest = singleWorkspace()
+    ? (() => { throw new Error("cannot rename in single-workspace mode"); })()
+    : path.join(dataRoot(), tenant, WORKSPACES, to);
+  if (fs.existsSync(dest)) throw new Error(`workspace ${to} already exists`);
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(src, dest);
+
+  const agentsMd = path.join(dest, "AGENTS.md");
+  if (fs.existsSync(agentsMd)) {
+    const raw = fs.readFileSync(agentsMd, "utf8");
+    fs.writeFileSync(agentsMd, raw.replace(/^name:.*$/m, `name: ${to}`));
+  }
+}
+
+/** Set a workspace's description, in AGENTS.md, without touching anything else. */
+export function setWorkspaceDescription(tenant: string, workspace: string, description: string) {
+  const file = path.join(workspaceDir(tenant, workspace), "AGENTS.md");
+  if (!fs.existsSync(file)) throw new Error("this workspace has no AGENTS.md");
+
+  const raw = fs.readFileSync(file, "utf8");
+  const block = raw.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
+  if (!block) throw new Error("AGENTS.md has no frontmatter");
+
+  const [, open, body, close] = block;
+  const lines = body.split("\n");
+  const at = lines.findIndex((l) => /^description:/.test(l));
+  const line = `description: ${description}`;
+  if (at === -1) lines.push(line);
+  else lines[at] = line;
+
+  fs.writeFileSync(file, raw.replace(open + body + close, open + lines.join("\n") + close));
+}
+
+/**
+ * Starter files for "+ New workspace" in the dashboard.
+ *
+ * Kept as a name because the API route and its callers use it; the content
+ * lives in starter.ts so this and `foldrun init` cannot drift. They did:
+ * this copy still said `type: Agent` after the CLI's had moved to `kind:`,
+ * so every workspace made from the dashboard was born in the old format.
+ */
+/** What the dashboard's "Create workspace" makes: blank (blankWorkspaceFiles),
+ *  minus the laptop-only files, for the same reason as templateFiles. */
+export function blankTemplateFiles(workspace: string): DeployFile[] {
+  return blankWorkspaceFiles(workspace).filter((f) => f.path === "AGENTS.md" || IN_WORKSPACE_DIR.test(f.path));
+}
+
+export function templateFiles(workspace: string): DeployFile[] {
+  // The starter minus what only matters on a laptop's disk: .gitignore
+  // guards a local clone's secrets, but the hosted store never keeps
+  // secrets in the tree and saveWorkspace rightly refuses files outside
+  // the workspace's own vocabulary.
+  return starterFiles(workspace).filter((f) => f.path === "AGENTS.md" || IN_WORKSPACE_DIR.test(f.path));
+}
+
+// Kept as names because routes import them; the content lives in KINDS, which
+// is the single table every creation path reads.
+export const AGENT_TEMPLATE = (name: string) => KINDS.agents.template(name);
+export const FLOW_TEMPLATE = (name: string, firstAgent: string) =>
+  KINDS.flows.template(name, { firstAgent });
+
+// The orchestration patterns a new flow can start from. Each template ships
+// the pattern's syntax filled in with real agent names, because a working
+// example in your own workspace teaches loop:/until:/each: better than any
+// reference page — you rename the instructions, not learn the shape.
+export const FLOW_PATTERNS = ["pipeline", "review-loop", "fan-out", "debate", "router"] as const;
+export type FlowPattern = (typeof FLOW_PATTERNS)[number];
+
+export function flowPatternTemplate(pattern: FlowPattern, name: string, agents: string[]): string {
+  // Real agents where they exist, honest placeholders where they don't —
+  // `foldrun check` will point at any placeholder left unrenamed.
+  const a = (i: number, fallback: string) => agents[i] ?? agents[0] ?? fallback;
+  const head = `---\nname: ${name}\n---\n\n`;
+  switch (pattern) {
+    case "review-loop":
+      return (
+        head +
+        `1. [[${a(0, "writer")}]] — draft the deliverable\n` +
+        `2. [[${a(1, "reviewer")}]] — review it against the brief; end your reply with APPROVED when it is ready\n` +
+        `   loop: 3\n` +
+        `   until: APPROVED\n`
+      );
+    case "fan-out":
+      return (
+        head +
+        `1. [[${a(0, "lister")}]] — list the items to process, one per line\n` +
+        `2. [[${a(1, "worker")}]] — handle this one item\n` +
+        `   each: lines\n` +
+        `   max: 10\n` +
+        `3. [[${a(2, "summariser")}]] — pull every result into one summary\n`
+      );
+    case "router":
+      return (
+        head +
+        `1. [[${a(0, "classifier")}]] — classify the request: reply with exactly one word, BUG or QUESTION\n` +
+        `2. [[${a(1, "debugger")}]] — investigate and fix the bug\n` +
+        `   case: BUG\n` +
+        `2. [[${a(2, "writer")}]] — answer the question clearly\n` +
+        `   case: QUESTION\n` +
+        `2. [[${a(3, "triager")}]] — neither label fit; say what is missing\n` +
+        `   else: true\n`
+      );
+    case "debate":
+      return (
+        head +
+        `1. [[${a(0, "researcher")}]] — gather the facts\n` +
+        `2. [[${a(1, "advocate")}]] — argue the strongest case for, from the facts\n` +
+        `2. [[${a(2, "skeptic")}]] — argue the strongest case against, from the facts\n` +
+        `3. [[${a(3, "judge")}]] — weigh both cases and give a verdict\n`
+      );
+    default:
+      return FLOW_TEMPLATE(name, a(0, "my-agent"));
+  }
+}
+
+export interface RunEvent {
+  t: string;
+  type: "text" | "tool" | "error" | "info";
+  text: string;
+  /** Tool events come in pairs: the call, and its completion. Both carry
+   *  the provider's tool_use id so a reader can pair them; the completion
+   *  also carries how long the tool ran and whether it errored. The
+   *  timeline draws a span from the pair; the trace shows one line. Absent
+   *  on records from before this existed — then a tool is a tick, not a bar. */
+  call?: string;
+  ms?: number;
+  err?: boolean;
+  /** On a tool completion: the result's length in characters — what it put
+   *  into the conversation, which every later turn sends again. Absent before
+   *  18 Oct 2026. */
+  bytes?: number;
+  /** Set on a test run's event that reports what the platform did instead
+   *  of the real thing — a refused send, a redirected email, a diverted
+   *  state write, a withheld secret. The run page lists these; the text is
+   *  still the trace's line. See test-mode.ts. */
+  effect?: TestEffect;
+  /** Set when a person was involved mid-step: a question the agent asked
+   *  (ask_person), its answer, or a message a person sent in (operator.ts). */
+  operator?: OperatorEvent;
+  /** Set on a tool event a SUB-AGENT made (`subagents:`): its name. The
+   *  trace labels the call with it; cost stays the step's. */
+  subagent?: string;
+  /** Set on an error a failed check wrote — `verify:` (its headline and its
+   *  detail), `output: json`, a schema. What the runner reads to decline a
+   *  retry of an outward step whose tools already ran. */
+  check?: boolean;
+  /** Set on the line a hook wrote — a deny, a rewrite, context, a failure
+   *  (hooks.ts). The run page and the Hooks page read these. */
+  hook?: { hook: string; event: string; did: string; tool?: string; reason?: string; ms: number };
+  /** Set on a tool event whose content was recorded (FOL-54 step 4): the
+   *  call's input, on the call; its output, on the completion. The content is
+   *  under runs/<run>/calls/<call>.json, secrets masked — readCapturedCall.
+   *  Absent when the workspace says `capture: metadata`, and before 19 Oct
+   *  2026. */
+  captured?: boolean;
+  /** On a tool call: the id of the model call that asked for it (a
+   *  ModelCall's `id`), so the trace can nest it. Since 19 Oct 2026. */
+  inCall?: string;
+}
+
+/** One model call in a step (FOL-54 step 4): what the model was sent back
+ *  for and what came of it. A step's turns, one by one, where the step
+ *  record had only their sum. */
+export interface ModelCall {
+  /** The provider's message id. */
+  id: string;
+  /** 1, 2, 3 … in the order they came back. */
+  n: number;
+  /** When the response arrived. */
+  at: string;
+  /** From the request going out (the step's start, or the last tool result
+   *  coming back) to the response arriving. */
+  ms: number;
+  model?: string;
+  /** Why the model stopped: end_turn, tool_use, max_tokens, … */
+  stop?: string;
+  /** All input (fresh + cache), as the step's own `tokens` counts it. */
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** How many tools it called in this turn. */
+  tools: number;
+  /** Set when a sub-agent (`subagents:`) made the call. */
+  subagent?: string;
+  /** Which attempt of the step made it, from the second on. */
+  attempt?: number;
+}
+
+/** The most of one tool input or output a run records (FOL-54 step 4). */
+export const CAPTURE_CAP = 64 * 1024;
+
+/** What a recorded tool call took and gave, secrets masked, each part capped. */
+export interface CapturedCall {
+  id: string;
+  tool: string;
+  input?: string;
+  output?: string;
+  /** The whole input's / output's length in characters, before masking and
+   *  the cap; `truncated` says whether the text was cut. */
+  inputChars?: number;
+  outputChars?: number;
+  /** Either part cut; and which. */
+  truncated?: boolean;
+  inputCut?: boolean;
+  outputCut?: boolean;
+}
+
+/** A question an agent asked a person while its step ran (tools: [ask]). */
+export interface StepQuestion {
+  id: string;
+  question: string;
+  options?: string[];
+  askedAt: string;
+  answer?: string;
+  answeredAt?: string;
+  by?: string | null;
+  /** true when the wait ran out with no answer. */
+  unanswered?: boolean;
+}
+
+/** A message a person sent into a running step, and when the agent got it —
+ *  or, with `from`, one a colleague in the same parallel group sent it
+ *  (tools: [peers]); with `to`, one this step sent its colleagues. */
+export interface StepMessage {
+  text: string;
+  by?: string | null;
+  at: string;
+  deliveredAt: string;
+  /** The sibling agent that sent it (`by` is `peer:<agent>` then). */
+  from?: string;
+  /** The sibling agents this step sent it to. */
+  to?: string[];
+}
+
+/** One attempt of a step — see StepRecord.tries. */
+export interface StepAttempt {
+  /** Which try, 1-based, in the order they ran: a retry is the next try,
+   *  and so is the full re-run after a slim go the browser pod was lost
+   *  under. Equal to the step's attempt (`attempts` at the time) unless
+   *  `attempt` says otherwise. */
+  n: number;
+  /** The step's attempt this try belongs to, written only when it is not
+   *  `n` — after a lost slim go, its full re-run is try 2 of attempt 1. */
+  attempt?: number;
+  /** `lost`: a slim go the account's browser pod went away under, which
+   *  the step ran again on the full image within the same attempt — a row
+   *  of its own (image slim), before the full go's. */
+  status: "completed" | "failed" | "lost";
+  costUsd: number | null;
+  tokens: TokenUsage | null;
+  /** Model turns this attempt took; absent before 18 Oct 2026. */
+  turns?: number | null;
+  computeSecs: number | null;
+  startedAt: string;
+  finishedAt: string;
+  /** The last error event this attempt wrote, when it failed. */
+  error?: string;
+  /** The runner image this attempt ended on, and — when it browsed through
+   *  the account's pod from slim — what happened to the pod: reconnects,
+   *  the re-run on full, or why it was not re-run. */
+  image?: "full" | "slim";
+  browserPod?: string;
+}
+
+/** The step's totals across its attempts, from the rows. Null where no
+ *  attempt reported the figure — an in-process step rents no sandbox, and
+ *  billing reads null as zero, not as "unknown, charge something". */
+export function sumAttempts(tries: StepAttempt[]): Pick<StepAttempt, "costUsd" | "tokens" | "computeSecs" | "turns"> {
+  const costs = tries.map((t) => t.costUsd).filter((c): c is number => typeof c === "number");
+  const turns = tries.map((t) => t.turns).filter((c): c is number => typeof c === "number");
+  const toks = tries.map((t) => t.tokens).filter((t): t is TokenUsage => !!t);
+  const secs = tries.map((t) => t.computeSecs).filter((c): c is number => typeof c === "number");
+  return {
+    costUsd: costs.length ? costs.reduce((a, b) => a + b, 0) : null,
+    tokens: toks.length ? sumTokens(toks) : null,
+    computeSecs: secs.length ? secs.reduce((a, b) => a + b, 0) : null,
+    ...(turns.length ? { turns: turns.reduce((a, b) => a + b, 0) } : {}),
+  };
+}
+
+export { type TokenUsage, type PromptLayerRecord, tokensOf, sumTokens, cacheHitRate, measuredHitRate, runTokens, promptLayersChanged, promptCacheNote } from "./tokens.ts";
+import { sumTokens, type TokenUsage, type PromptLayerRecord } from "./tokens.ts";
+
+/** One job a step handed to an isolated sub-agent. `id` is the job's own
+ *  record's `delegation` — not an index, which moves when records are
+ *  spliced in before it. */
+export interface StepDelegation {
+  id: string;
+  agent: string;
+  status: "running" | "completed" | "failed" | "skipped";
+  costUsd?: number | null;
+  ms?: number | null;
+}
+
+/** The marker rescueStep puts in a rescue's instruction; how a rescue record
+ *  written before `rescueOf` existed is still recognised. */
+export const RESCUE_MARKER = "<rescue>\nYou are taking this step over:";
+
+/** Is this record an on-fail rescue rather than a step of the flow? */
+export function isRescueRecord(step: { rescueOf?: string; instruction?: string | null }): boolean {
+  return !!step.rescueOf || (step.instruction ?? "").includes(RESCUE_MARKER);
+}
+
+/** Is this record put in by the runner rather than by the flow — an on-fail
+ *  rescue, or an isolated sub-agent's run (`subagentOf`)? Neither is launched
+ *  with a group, handed on as a group's output, reset by a loop, or copied by
+ *  a re-run as work. */
+export function isSplicedRecord(step: { rescueOf?: string; subagentOf?: string; instruction?: string | null }): boolean {
+  return !!step.subagentOf || isRescueRecord(step);
+}
+
+export interface StepRecord {
+  agent: string;
+  instruction: string;
+  /** Questions the agent asked a person mid-step (tools: [ask]), newest
+   *  last. One without an answer (and not `unanswered`) is still open. */
+  questions?: StepQuestion[];
+  /** Messages a person sent into the running step, as delivered. */
+  messages?: StepMessage[];
+  group: number;
+  optional: boolean;
+  /** Carried from the flow — see FlowStep. Both are resolved at run
+   *  time rather than stored resolved, so a record stays readable as
+   *  what its author wrote. */
+  model?: string;
+  effort?: string;
+  approve?: boolean;
+  when?: string;
+  case?: string;
+  else?: boolean;
+  retry?: number;
+  timeout?: number;
+  verify?: string;
+  /** Attempts made so far, for the run trace. */
+  attempts?: number;
+  /**
+   * One row per attempt, oldest first: what each cost and how it ended.
+   * `costUsd`, `tokens` and `computeSecs` on the step are the SUM of these
+   * rows — a retried step spent every attempt's money, and the run's spend,
+   * the flow's `budget:` and the platform's bill all read the step's
+   * figure, so the figure is the total. Before this the step carried only
+   * the last attempt's cost and a `retry: 2` step could spend three shares
+   * of the budget while reporting one. A loop cycle that re-runs the step
+   * appends here too, so its earlier cycles are not lost from the bill.
+   */
+  tries?: StepAttempt[];
+  /** The sandbox this step is executing in, while it is: which executor,
+   *  its handle (a pod name), and how many of its output lines the driver
+   *  has already applied to this record. What a driver that inherits the
+   *  run — after a deploy rolled the last one, or it crashed — needs to
+   *  re-attach and carry on rather than run the step again. Cleared when
+   *  the step settles. */
+  sandbox?: { kind: string; ref: string; consumed: number; since: string } | null;
+  /** A size class a retry moved the step up to (an evicted or OOM-killed
+   *  attempt), overriding the agent's own `size:` for the attempts after. */
+  sizeUp?: "large" | "heavy";
+  /** Which runner image the step's sandbox ran: `full` (browsers in it) or
+   *  `slim`, why, and `pod` when a browsing step ran slim and browsed
+   *  through the account's browser pod. The last attempt's; absent where
+   *  the executor has one image (docker, in-process). */
+  image?: { variant: "full" | "slim"; why?: string; pod?: boolean } | null;
+  /** Which model credential the step ran on, by its variable — "API key
+   *  (ANTHROPIC_API_KEY)", "Claude login token (CLAUDE_CODE_OAUTH_TOKEN)",
+   *  "provider: …" — or "none set" (model-credential.ts). */
+  credential?: string;
+  /** Slim browsing through the account's pod (browser-pod.ts): reconnect
+   *  tries and how many got through; when the pod was lost, why and what
+   *  the step had written by then; and what happened — `fallback` (the
+   *  step had only read and ran again on the full image) or `failure` (it
+   *  had written, so it was not re-run). */
+  browserPod?: (BrowserPodOutcome & { fallback?: string; failure?: string }) | null;
+  /** The slim go a lost browser pod ended, set aside while the step re-runs
+   *  on full; recordAttempt makes it a `lost` row of `tries` and clears it. */
+  podLostTry?: Omit<StepAttempt, "n" | "attempt" | "startedAt"> | null;
+  /** When the step actually started and finished executing — not when the
+   *  run reached it. A step's events approximate this (first and last), but
+   *  a model can think for minutes before its first tool call, and a step
+   *  parked at a gate has events long before it runs. Kept across retries:
+   *  startedAt is the first attempt's, finishedAt the last's. Absent on
+   *  records from before this existed; readers fall back to the events. */
+  startedAt?: string;
+  finishedAt?: string;
+  /** Every model call the step made, in order (FOL-54 step 4). Absent before
+   *  19 Oct 2026. */
+  calls?: ModelCall[];
+  /** Why a step was skipped, shown in the trace. */
+  skipReason?: string;
+  /** Evaluator loop, carried from the flow — see FlowStep. `loopRemaining`
+   *  counts down on the record so a resumed run knows how many cycles are
+   *  left rather than starting the budget over. */
+  loop?: number;
+  until?: string;
+  loopRemaining?: number;
+  /** Fan-out, carried from the flow — see FlowStep. */
+  each?: "lines" | "rows" | "items";
+  eachPath?: string;
+  max?: number;
+  /** Carried from the flow — see FlowStep. */
+  output?: "json";
+  schema?: Record<string, unknown> | boolean;
+  schemaPath?: string;
+  parallel?: number;
+  maxTurns?: number;
+  limits?: Record<string, number>;
+  /** The parsed JSON an `output: json` step returned. Kept beside the prose
+   *  result rather than instead of it: the reply is still what a person
+   *  reads on the run page, and the data is what the next step computes on. */
+  data?: unknown;
+  /** Set on the instances a fan-out step expanded into: the item this one
+   *  works on. The template step itself becomes status "expanded". */
+  item?: string;
+  /** Carried from the flow — see FlowStep for each. */
+  onFail?: string;
+  waitSecs?: number;
+  /** Stamped when the run reaches the step; the queue holds it until then.
+   *  On the record so a restart resumes the same deadline, not a new one. */
+  waitUntil?: string;
+  /** Carried from the flow — see FlowStep. */
+  waitFor?: "event";
+  /** What the outside world POSTed to release a `wait: event` step. Rides
+   *  into the step's prompt the way an approval note does. */
+  eventPayload?: string;
+  ask?: string;
+  /** Carried from the flow — see FlowStep. */
+  preview?: string[];
+  /** `preview:` resolved against storage/ at the moment the run parked —
+   *  the files the gate renders, relative to storage/. */
+  previewFiles?: string[];
+  delegate?: string[];
+  /** Set once a delegate step's picks have been expanded — the guard that
+   *  a loop rewind cannot fan the same choice out twice. */
+  delegated?: boolean;
+  /**
+   * When a person approved this step. Set by the approval API and never
+   * cleared, because approval is a fact about the past.
+   *
+   * Status alone cannot carry it: approving flips the step back to `pending`,
+   * which is indistinguishable from never having been asked. A run that was
+   * approved and then abandoned could not be resumed without asking the same
+   * person the same question again.
+   */
+  approvedAt?: string;
+  /** What the approver said while approving — carried into the step's prompt
+   *  as operator guidance. This turns the gate from a yes/no button into a
+   *  place to steer: "approve, but skip the Sydney batch". */
+  approvalNote?: string;
+  status:
+    | "pending"
+    | "awaiting-approval"
+    | "running"
+    | "completed"
+    | "failed"
+    | "skipped";
+  events: RunEvent[];
+  result: string | null;
+  /** The model's final text block — its answer, without the narration that
+   *  preceded the tool calls. Absent on steps recorded before this existed,
+   *  which is why every reader falls back to `result`. */
+  conclusion?: string | null;
+  costUsd: number | null;
+  /** Set on steps copied into a re-run from an earlier run: the run they
+   *  actually executed in. Carried steps provide context and are never
+   *  billed again — the original run's ledger line already paid for them. */
+  carriedFrom?: string;
+  /** Set on an on-fail rescue record (runner.ts rescueStep): the agent of the
+   *  failed step it took over. A rescue is not a step of the flow: a resumed
+   *  drive must not launch it as one of its group, and a re-run must not
+   *  copy it as work (21 Oct 2026: one rerun carried 77 fixers as pending
+   *  steps). Records written before this field are recognised by their
+   *  instruction's `<rescue>` block instead — see isRescueRecord. */
+  rescueOf?: string;
+  /** Set on an isolated sub-agent's run (`sandbox: own`, delegate-tools.ts):
+   *  the agent of the step that delegated to it. It ran in its own sandbox
+   *  inside that step; only its reply went back. Like a rescue it is not a
+   *  step of the flow — see isSplicedRecord. */
+  subagentOf?: string;
+  /** On an isolated sub-agent's run: its job's id, as the delegating step's
+   *  `delegations[].id` names it. */
+  delegation?: string;
+  /** On a step that delegated to isolated sub-agents: each job, in order. */
+  delegations?: StepDelegation[];
+  /** On an isolated sub-agent's run: the workspace paths its sandbox's
+   *  changes were applied to — what its delegating step is told it wrote. */
+  wrote?: string[];
+  /**
+   * Sandbox seconds this step rented, and how many of them were cold start.
+   * Set only on the isolated path — an in-process step rents nothing, so
+   * `null` is the honest value and billing must read it as zero, not as
+   * "unknown, charge something".
+   *
+   * Wall time is deliberately not a substitute: a step parked at an approval
+   * gate has no pod, and billing a customer for a person taking the weekend
+   * to click approve is charging them for their own deliberation.
+   */
+  computeSecs?: number | null;
+  startupSecs?: number | null;
+  /** When each start-up phase ended, in seconds since the executor began
+   *  the step — `services`, `applied`, `ready`, `files`, `go`, `shim`,
+   *  `system`, `driver`, `imports`, `tools`, `model` (run-container.ts
+   *  #STARTUP_PHASES). Only the phases this step went through; null from
+   *  an executor that marks none, absent on steps from before 17 Oct 2026. */
+  startup?: Record<string, number> | null;
+  /** Which reservation class the sandbox held (small | large), and the
+   *  actual limits it held, as numbers. Facts of the step: a price is per
+   *  core-second, so what was reserved must come from the record, never
+   *  from what the config says when the bill is computed. Absent on steps
+   *  from before sizes existed — billing falls back to the flat rate. */
+  size?: "small" | "large" | "heavy";
+  reserved?: { cpus: number; memGiB: number } | null;
+  /** Token counts behind costUsd, kept so usage reports can say "how many"
+   *  and not only "how much" — the price of a token changes, the count is
+   *  the fact. Absent on steps recorded before this existed. */
+  tokens?: TokenUsage | null;
+  /** Model turns, summed across attempts, and the system prompt's length in
+   *  characters — every turn sends it again. With the tool events' `bytes`,
+   *  what says where a step's input tokens went. Absent before 18 Oct 2026. */
+  turns?: number | null;
+  systemPromptChars?: number;
+  /** The system prompt's layers — name, length and hash of each, stable
+   *  ones first, the ones that change between runs marked. Two steps of
+   *  one agent compared layer by layer say why the model's cache missed
+   *  (prompt-layers.ts). Absent before 20 Oct 2026. */
+  promptLayers?: PromptLayerRecord[];
+  /** Why the model's last turn ended (end_turn, max_tokens, tool_use…), as
+   *  the SDK's closing result says. */
+  stopReason?: string | null;
+  /** What the sandbox actually touched, against what it reserved: CPU
+   *  busy-seconds and peak memory from the pod's own cgroup, bytes on the
+   *  wire from /proc/net/dev. Null per-field where the kernel interface
+   *  wasn't readable in the sandbox — never estimated. */
+  actual?: {
+    busyCpuSecs: number | null;
+    peakMemBytes: number | null;
+    rxBytes: number | null;
+    txBytes: number | null;
+  } | null;
+}
+
+export interface RunRecord {
+  id: string;
+  flow: string; // flow name, or "adhoc:<agent>" for direct agent runs
+  /** Tags supplied when the run started — skills can require one. */
+  tags?: string[];
+  status: "queued" | "running" | "awaiting-approval" | "completed" | "failed";
+  startedAt: string;
+  finishedAt: string | null;
+  /** Set when a worker parked this run at an approval gate and returned its
+   *  slot to the queue. The approval API re-enqueues exactly when this is
+   *  set — without the marker it would also re-enqueue runs whose starting
+   *  process is still alive and polling, and two drivers would race. */
+  parkedAt?: string | null;
+  /** Set when a person stopped this run. Kept on the record rather than
+   *  expressed only as a status, because "failed" and "someone stopped it"
+   *  are different facts and the trace should not conflate them. */
+  stopRequested?: boolean;
+  /**
+   * What this run concluded, in one line — the first line of the last step
+   * that produced a result, captured when the run finishes.
+   *
+   * A run has always recorded its status and its cost but never its outcome,
+   * so "what did this actually do" could only be answered by opening it and
+   * reading. That does not scale past a couple of flows, and the sentence was
+   * already sitting in the record: agents are asked to lead with it.
+   *
+   * Deliberately NOT a schema the author has to fill in. Nothing new goes in
+   * the folder, nothing new is learned, and an agent that writes no headline
+   * simply gets its first line — which is still better than a status.
+   */
+  summary?: string | null;
+  /**
+   * What the run's work concluded, when its summary leads with one of the
+   * four verdict words every desk ends on: GOOD, BAD, QUIET, BLOCKED.
+   *
+   * `status` says whether the machine ran — a step crashed, a budget ran
+   * out. The verdict says what the agents found when it did. They are
+   * different facts: a publisher that checks, sees the wrong change in
+   * front of it and refuses to push has run perfectly, and its run is
+   * `completed`. Until this field, that run was a green tick beside a line
+   * reading BLOCKED (run-mu4sdg8z-1otr, 2026-09-17) — the one outcome a
+   * person most needed to see, drawn as success. Null: the summary does
+   * not lead with a verdict, and the run reads exactly as it always did.
+   */
+  verdict?: Verdict | null;
+  /** The flow's per-run `budget:` at the time this run started, so the cap
+   *  a run was held to is on its record rather than read from a file that
+   *  may since have changed. Null: none. */
+  budgetUsd?: number | null;
+  /** Memory files this run created or changed, workspace-relative — what
+   *  the agents decided was worth remembering, listed so a person can review
+   *  the lesson without diffing the folder. */
+  memoryWrites?: string[];
+  /** The workspace's deployed commit when the run was created — which
+   *  version of the files it ran (FOL-54 step 4). Absent for a workspace
+   *  never deployed, and before 19 Oct 2026. */
+  revision?: string | null;
+  /** When a worker first picked the run up: startedAt is when it was
+   *  created, so the gap is its time in the queue. */
+  drivenAt?: string | null;
+  /** A re-run's source (FOL-72 step 6): which run, the 1-based step it
+   *  started from, and the instruction it was given there when a person
+   *  edited it for this re-run alone. */
+  rerunOf?: { run: string; step: number; instruction?: string };
+  /** Who asked for this run, when a person did: their email address. A
+   *  schedule, a webhook and a chained flow have no one, and leave it unset.
+   *  Kept so a gate can refuse the one approval nobody should be able to
+   *  give — your own. */
+  startedBy?: string | null;
+  /** When this run's gate stops waiting, stamped the moment it parks from
+   *  the flow's `approve_within:`. A gate nobody answers by then is rejected
+   *  and the run fails, rather than holding a concurrency slot forever. */
+  approveBy?: string | null;
+  /** A test run: every step runs for real, against the real files and the
+   *  real read APIs, but nothing outward happens — sends are refused or
+   *  sunk at the egress proxy, send-capable secrets never enter the
+   *  sandbox, and state/ and storage/ writes land under this run's own
+   *  directory. On the record, not in an env var, so a script cannot turn
+   *  it off; carried onto every rerun of this run. See test-mode.ts. */
+  test?: boolean;
+  /** Digests of the emailed approval links that have already decided a
+   *  step of this run — never the tokens. A link is good once; the second
+   *  click is a 409, not a second approval. Written by approvals.ts. */
+  approvalLinksUsed?: string[];
+  steps: StepRecord[];
+}
+
+// ---------------------------------------------------------------- captured calls
+//
+// What each tool call took and gave (FOL-54 step 4), beside the run under
+// runs/<run>/calls/<call>.json — out of the run record, which every list
+// and every page reads whole, and gone with the run (deleteRun removes
+// runs/<run>/). The runner writes them, secrets already masked.
+
+const SAFE_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+
+function capturedCallFile(workspaceRoot: string, runId: string, callId: string): string | null {
+  if (!SAFE_ID.test(runId) || !SAFE_ID.test(callId) || callId.startsWith(".") || runId.startsWith(".")) return null;
+  return path.join(workspaceRoot, "runs", runId, "calls", `${callId}.json`);
+}
+
+/** Merge one part (the input, on the call; the output, on its completion)
+ *  into the call's file. */
+export function writeCapturedCall(workspaceRoot: string, runId: string, part: CapturedCall): void {
+  const file = capturedCallFile(workspaceRoot, runId, part.id);
+  if (!file) return;
+  let prev: Partial<CapturedCall> = {};
+  try {
+    prev = JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
+  } catch {
+    /* the first part */
+  }
+  const next: CapturedCall = { ...prev, ...part, truncated: Boolean(prev.truncated || part.truncated) || undefined };
+  if (!next.truncated) delete next.truncated;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(next));
+  fs.renameSync(tmp, file);
+}
+
+/** One recorded call of a run, or null (not recorded, or not a call). */
+export function readCapturedCall(tenant: string, workspace: string, runId: string, callId: string): CapturedCall | null {
+  const file = capturedCallFile(workspaceDir(tenant, workspace), runId, callId);
+  if (!file) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
+  } catch {
+    return null;
+  }
+}
+
+export function runFilePath(tenant: string, workspace: string, runId: string) {
+  assertSafeName(runId, "run id");
+  return path.join(workspaceDir(tenant, workspace), "runs", `${runId}.json`);
+}
+
+/**
+ * Erase a run from history: its record and the outputs archived under its
+ * id.
+ *
+ * The ledger line stays, and that is settled rather than provisional: if
+ * deleting a run voided its charge, deletion would be a refund button — run
+ * the expensive extraction, read the result, delete, never pay. Money is
+ * not deleted because a trace was.
+ *
+ * What deletion *does* owe the books is an explanation. A charge pointing
+ * at a run that no longer exists reads as unexplained forever, so the
+ * deletion writes itself down: a zero-value adjustment naming the run, on
+ * the same append-only file the charge lives in. The balance is untouched;
+ * the story is complete.
+ */
+export function deleteRun(tenant: string, workspace: string, runId: string): boolean {
+  const file = runFilePath(tenant, workspace, runId);
+  if (!fs.existsSync(file)) return false;
+  fs.rmSync(file, { force: true });
+  fs.rmSync(path.join(workspaceDir(tenant, workspace), "runs", runId), {
+    recursive: true,
+    force: true,
+  });
+  noteRunDeleted(path.dirname(file), runId);
+  onRunDeleted?.(tenant, workspace, runId);
+  return true;
+}
+
+/** ledger.ts registers here — store cannot import it without a cycle, and
+ *  money must not depend on one. */
+let onRunDeleted: ((tenant: string, workspace: string, runId: string) => void) | undefined;
+export function registerRunDeletionListener(fn: typeof onRunDeleted) {
+  onRunDeleted = fn;
+}
+
+export interface RunOutputFile {
+  agent: string;
+  /** Relative to that agent's outputs/ — the name the agent wrote. */
+  path: string;
+  bytes: number;
+}
+
+/**
+ * What a run archived: every file its agents left in outputs/, copied under
+ * runs/<id>/outputs/<agent>/ when the run finished (runner.ts, archive()).
+ *
+ * Per agent, not per step — the archive is a copy of each agent's folder,
+ * and the record cannot say which step wrote which file. An agent that
+ * steps twice in one run shows the same files against both steps.
+ */
+export function listRunOutputs(tenant: string, workspace: string, runId: string): RunOutputFile[] {
+  const root = path.join(workspaceDir(tenant, workspace), "runs", runId, "outputs");
+  if (!fs.existsSync(root)) return [];
+  const out: RunOutputFile[] = [];
+  const walk = (agent: string, dir: string, rel: string) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(agent, full, r);
+      else if (e.isFile()) out.push({ agent, path: r, bytes: fs.statSync(full).size });
+    }
+  };
+  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+    if (e.isDirectory()) walk(e.name, path.join(root, e.name), "");
+  }
+  return out.sort((a, b) => a.agent.localeCompare(b.agent) || a.path.localeCompare(b.path));
+}
+
+/** The absolute path of one archived output, or null when the name escapes
+ *  the archive or names nothing — the API serves only what this returns. */
+export function runOutputPath(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  agent: string,
+  rel: string,
+): string | null {
+  if (!agent || !rel || agent.includes("/") || agent.includes("\\") || agent.startsWith(".")) return null;
+  const root = path.resolve(workspaceDir(tenant, workspace), "runs", runId, "outputs", agent);
+  const full = path.resolve(root, rel);
+  if (full !== root && !full.startsWith(root + path.sep)) return null;
+  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+  return full;
+}
+
+export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
+  const p = runFilePath(tenant, workspace, runId);
+  // EFS/NFS: writeRun() replaces this file by rename, so an open()+read()
+  // here can land on the just-unlinked inode and come back ESTALE (errno
+  // -116, surfaced by Node as "Unknown system error -116", syscall read).
+  // That isn't corruption — the next open() by path sees the committed new
+  // inode — so re-read a few times on ESTALE and rethrow anything else.
+  // (On dev-aws this surfaced as a CLI `--wait` call returning HTTP 500
+  // from waitForRun's poll while the run itself completed fine.)
+  const attempts = 5;
+  for (let i = 1; ; i++) {
+    try {
+      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if ((err.code === "ESTALE" || err.errno === -116) && i < attempts) continue;
+      throw e;
+    }
+  }
+}
+
+export function writeRun(tenant: string, workspace: string, run: RunRecord) {
+  const p = runFilePath(tenant, workspace, run.id);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  // Atomic write — runs are re-read while running (dashboard polls, CLI
+  // tails), and a plain writeFileSync can be caught half-written.
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(run, null, 2));
+  fs.renameSync(tmp, p);
+  noteRunWritten(path.dirname(p), run, p);
+}
+
+/**
+ * The workspace's live runs — queued, running, or parked at a gate — read
+ * whole, newest first. Off the run index: only the live records are opened,
+ * where listRuns parses every record the workspace ever kept. What the
+ * periodic sweeps want (reconcile, the watchdog), and on a box that keeps
+ * ninety days of runs that is a handful of files instead of thousands.
+ */
+export function liveRuns(tenant: string, workspace: string): RunRecord[] {
+  const out: RunRecord[] = [];
+  for (const s of listRunSummaries(tenant, workspace)) {
+    if (!LIVE_STATUSES.has(s.status)) continue;
+    const run = readRun(tenant, workspace, s.id);
+    if (run) out.push(run);
+  }
+  return out;
+}
+
+// Every run in an account, each tagged with the workspace it belongs to —
+// the observability surface.
+export interface RunWithWorkspace extends RunRecord {
+  workspace: string;
+}
+
+/**
+ * Every run in the account, newest first, off the per-workspace index.
+ *
+ * A finished run comes back as the index knows it: id, flow, status,
+ * summary, times, and each step's agent, group, status, cost, tokens,
+ * seconds, skip reason and last error — with `instruction` empty, `events`
+ * holding only that error, and `result` null. That is what every list and
+ * every rollup reads (runCost, runFailure, runDurationSecs, the usage
+ * window, the graph's stats). A run that is still live — queued, running,
+ * or parked at a gate — is read whole, because the gate's question and its
+ * events are what the approvals list shows. Anything wanting a finished
+ * run's reply or trace opens it with readRun.
+ *
+ * This used to parse every run file of every workspace on every call, and
+ * the dashboard calls it every twenty seconds per open tab.
+ */
+export function listAllRuns(tenant: string): RunWithWorkspace[] {
+  return listWorkspaces(tenant)
+    .flatMap((p) =>
+      listRunSummaries(tenant, p.name).map((s) => {
+        const whole = LIVE_STATUSES.has(s.status) ? readRun(tenant, p.name, s.id) : null;
+        return { ...(whole ?? runFromSummary(s)), workspace: p.name };
+      }),
+    )
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+// ------------------------------------------------------------ the run index
+//
+// runs/.index.json: one row per run with what a list needs — never a reply,
+// never a trace — kept up to date by writeRun and deleteRun, and repaired
+// from the directory by any reader that finds it missing or stale. Stale is
+// decided per file: a row remembers the mtime of the record it was made
+// from, and a record whose mtime moved (another process wrote it, a copy
+// restored it) is re-read on its own. So the index is never trusted over the
+// directory, and never costs more than the files that actually changed.
+//
+// Writers of one run are one process; two processes writing different runs
+// of a workspace can each save a copy that lacks the other's newest row,
+// and the next reader mends it by mtime. No lock beyond the atomic rename.
+
+/** What a list knows about one step. */
+export interface RunSummaryStep {
+  agent: string;
+  group: number;
+  status: StepRecord["status"];
+  costUsd: number | null;
+  tokens?: TokenUsage | null;
+  computeSecs?: number | null;
+  skipReason?: string;
+  /** The last error event, for a failed step — what runFailure reads. */
+  error?: string;
+  item?: string;
+  waitFor?: "event";
+  ask?: string;
+  /** The step's instruction, kept for a parked step so the approvals banner can show the question without the record. */
+  instruction?: string;
+  /** When a parked step last spoke — the moment the banner sorts by. */
+  waitingSince?: string;
+  /** For search (FOL-72 step 9): the tools it called, how many of its calls
+   *  errored, and its model. Absent on rows written before 19 Oct 2026. */
+  tools?: string[];
+  toolErrors?: number;
+  model?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+/** What a list knows about one run. */
+export interface RunSummary {
+  id: string;
+  flow: string;
+  status: RunRecord["status"];
+  summary: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  stopRequested?: boolean;
+  test?: boolean;
+  budgetUsd?: number | null;
+  tags?: string[];
+  startedBy?: string | null;
+  parkedAt?: string | null;
+  /** The revision it ran (RunRecord.revision), for issues' "since". */
+  revision?: string | null;
+  /** A step is parked for a person — what the approvals banner counts. */
+  awaitingApproval: boolean;
+  steps: RunSummaryStep[];
+}
+
+interface RunIndexRow extends RunSummary {
+  /** mtime of the record this row was made from; a moved mtime means re-read. */
+  mtimeMs: number;
+  /** mtime, inode and size together (fileStamp) — what freshness is decided
+   *  on now. A row from before it has none and is re-read once. */
+  stamp?: string;
+}
+
+/**
+ * Which version of a file this is. mtime alone missed a rewrite inside one
+ * mtime tick (coarse on some NFS servers), leaving a stale row that the
+ * sweeps act on; every write here is a rename to a new file, so the inode
+ * moves on each write whatever the clock says, and the size usually does.
+ */
+const fileStamp = (st: fs.Stats) => `${st.mtimeMs}:${st.ino}:${st.size}`;
+interface RunIndex {
+  v: 1;
+  runs: Record<string, RunIndexRow>;
+}
+
+const RUN_INDEX = ".index.json";
+const LIVE_STATUSES = new Set<RunRecord["status"]>(["queued", "running", "awaiting-approval"]);
+
+/** One run's row. */
+export function summarizeRun(run: RunRecord): RunSummary {
+  return {
+    id: run.id,
+    flow: run.flow,
+    status: run.status,
+    summary: run.summary ?? null,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt ?? null,
+    ...(run.stopRequested ? { stopRequested: true } : {}),
+    ...(run.test ? { test: true } : {}),
+    ...(run.budgetUsd !== undefined ? { budgetUsd: run.budgetUsd } : {}),
+    ...(run.tags?.length ? { tags: run.tags } : {}),
+    ...(run.startedBy ? { startedBy: run.startedBy } : {}),
+    ...(run.parkedAt ? { parkedAt: run.parkedAt } : {}),
+    ...(run.revision ? { revision: run.revision } : {}),
+    awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
+    steps: run.steps.map((s) => {
+      const error = s.status === "failed" ? s.events.filter((e) => e.type === "error").at(-1)?.text : undefined;
+      return {
+        agent: s.agent,
+        group: s.group,
+        status: s.status,
+        costUsd: s.costUsd,
+        ...(s.tokens !== undefined ? { tokens: s.tokens } : {}),
+        ...(s.computeSecs !== undefined ? { computeSecs: s.computeSecs } : {}),
+        ...(s.skipReason ? { skipReason: s.skipReason } : {}),
+        ...(error ? { error: error.slice(0, 500) } : {}),
+        ...(s.item ? { item: s.item } : {}),
+        ...(s.waitFor ? { waitFor: s.waitFor } : {}),
+        ...(s.ask ? { ask: s.ask } : {}),
+        ...(s.status === "awaiting-approval" ? { instruction: s.instruction, waitingSince: s.events.at(-1)?.t ?? run.startedAt } : {}),
+        ...(s.startedAt ? { startedAt: s.startedAt } : {}),
+        ...(s.finishedAt ? { finishedAt: s.finishedAt } : {}),
+        ...searchFacts(s),
+      };
+    }),
+  };
+}
+
+/** What a step's row carries for search: the tools it called (once each),
+ *  how many tool calls errored, and its model. */
+function searchFacts(s: StepRecord): { tools?: string[]; toolErrors?: number; model?: string } {
+  const tools = new Set<string>();
+  let errors = 0;
+  for (const e of s.events) {
+    if (e.type !== "tool") continue;
+    if (e.ms == null) tools.add(e.text);
+    else if (e.err) errors++;
+  }
+  return {
+    ...(tools.size ? { tools: [...tools].slice(0, 40) } : {}),
+    ...(errors ? { toolErrors: errors } : {}),
+    ...(s.model ? { model: s.model } : {}),
+  };
+}
+
+/** A RunRecord with the shape a list reads and nothing else — see listAllRuns. */
+export function runFromSummary(s: RunSummary): RunRecord {
+  const { awaitingApproval: _awaiting, ...run } = s;
+  return {
+    ...run,
+    steps: s.steps.map((st) => {
+      const { error, ...rest } = st;
+      return {
+        ...rest,
+        instruction: "",
+        optional: false,
+        events: error ? [{ t: st.finishedAt ?? s.finishedAt ?? s.startedAt, type: "error" as const, text: error }] : [],
+        result: null,
+      };
+    }),
+  };
+}
+
+const runIndexCache = new Map<string, { index: RunIndex; stamp: string }>();
+
+function readRunIndex(dir: string): RunIndex | null {
+  const file = path.join(dir, RUN_INDEX);
+  let stamp: string;
+  try {
+    stamp = fileStamp(fs.statSync(file));
+  } catch {
+    runIndexCache.delete(dir);
+    return null;
+  }
+  const cached = runIndexCache.get(dir);
+  if (cached && cached.stamp === stamp) return cached.index;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as RunIndex;
+    if (parsed?.v !== 1 || typeof parsed.runs !== "object" || !parsed.runs) return null;
+    runIndexCache.set(dir, { index: parsed, stamp });
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeRunIndex(dir: string, index: RunIndex) {
+  const file = path.join(dir, RUN_INDEX);
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(index));
+  fs.renameSync(tmp, file);
+  try {
+    runIndexCache.set(dir, { index, stamp: fileStamp(fs.statSync(file)) });
+  } catch {
+    runIndexCache.delete(dir);
+  }
+}
+
+const sameRow = (a: RunIndexRow | undefined, b: RunSummary) => {
+  if (!a) return false;
+  const { mtimeMs: _m, stamp: _s, ...row } = a;
+  return JSON.stringify(row) === JSON.stringify(b);
+};
+
+/** writeRun just saved `run` at `file`: bring its row up to date. The file
+ *  is rewritten only when the row's content moved — a live step appends an
+ *  event several times a second, and the row does not change for that;
+ *  the mtime it remembers goes stale instead, and a reader re-reads that
+ *  one record, which is the cheap and correct thing. */
+function noteRunWritten(dir: string, run: RunRecord, file: string) {
+  try {
+    const index = readRunIndex(dir);
+    if (!index) return; // no index yet — the first reader builds it whole
+    const row = summarizeRun(run);
+    if (sameRow(index.runs[run.id], row)) return;
+    const st = fs.statSync(file);
+    index.runs[run.id] = { ...row, mtimeMs: st.mtimeMs, stamp: fileStamp(st) };
+    writeRunIndex(dir, index);
+  } catch {
+    // the index is a cache; the record is the truth and it is already on disk
+  }
+}
+
+function noteRunDeleted(dir: string, runId: string) {
+  try {
+    const index = readRunIndex(dir);
+    if (!index || !(runId in index.runs)) return;
+    delete index.runs[runId];
+    writeRunIndex(dir, index);
+  } catch {
+    // ditto
+  }
+}
+
+/**
+ * The workspace's runs as the index knows them, newest first — the call a
+ * list makes. Reconciled against the directory on every read: rows for
+ * records that are gone are dropped, records with no row or a moved mtime
+ * are re-read, and the index is rewritten if anything changed. A missing
+ * or unreadable index is a full scan that leaves one behind.
+ */
+export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "runs");
+  if (!fs.existsSync(dir)) return [];
+  const index: RunIndex = readRunIndex(dir) ?? { v: 1, runs: {} };
+  const present = new Set<string>();
+  let changed = false;
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith(".json") || f.startsWith(".")) continue;
+    const id = f.slice(0, -".json".length);
+    present.add(id);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(path.join(dir, f));
+    } catch {
+      continue; // pruned between the listing and the stat
+    }
+    const stamp = fileStamp(st);
+    const row = index.runs[id];
+    if (row && row.stamp === stamp) continue;
+    try {
+      const run = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord;
+      index.runs[id] = { ...summarizeRun(run), mtimeMs: st.mtimeMs, stamp };
+      changed = true;
+    } catch {
+      // a torn or foreign file is not a run; leave whatever row it had
+    }
+  }
+  for (const id of Object.keys(index.runs)) {
+    if (present.has(id)) continue;
+    delete index.runs[id];
+    changed = true;
+  }
+  if (changed) {
+    try {
+      writeRunIndex(dir, index);
+    } catch {
+      // a read-only or racing directory still gets its answer
+    }
+  }
+  return Object.values(index.runs)
+    .map(({ mtimeMs: _m, stamp: _s, ...row }) => row)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/** Every workspace's runs as summaries, tagged with the workspace. */
+export function listAllRunSummaries(tenant: string): (RunSummary & { workspace: string })[] {
+  return listWorkspaces(tenant)
+    .flatMap((p) => listRunSummaries(tenant, p.name).map((s) => ({ ...s, workspace: p.name })))
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/**
+ * The status a person should see. "failed" and "someone stopped it" are
+ * different facts — the record keeps them apart (stopRequested), and the
+ * display must too: a run a person chose to end is not a run that broke,
+ * and showing it red teaches people that stopping things is dangerous.
+ */
+export function runDisplayStatus(run: Pick<RunRecord, "status" | "stopRequested">): string {
+  return run.status === "failed" && run.stopRequested ? "stopped" : run.status;
+}
+
+export function runCost(run: RunRecord): number {
+  return run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
+}
+
+/**
+ * What a finished run consumed, in the units the format itself has — the
+ * shape ledger.ts prices. Structural, not an import, because ledger.ts
+ * imports this module and money must not depend on a cycle.
+ *
+ * Only steps that actually ran count. A pending step never happened, a
+ * skipped one was skipped by the flow's own `when`, and an `expanded`
+ * fan-out template is a row in the trace rather than work — billing any of
+ * them would charge for steps the customer can see never executed, which is
+ * the fastest way to lose an argument about an invoice.
+ *
+ * Tokens count only for steps that ran on the platform's own model
+ * credential. A step on the account's own key (`credential` "provider: …" —
+ * a provider: block, or Settings → Model) was paid for at the provider, and
+ * billing it again here charged a BYOK customer twice. And a carried step's
+ * tokens were billed where it ran, like its compute.
+ */
+export function runMeter(run: RunRecord): {
+  tokenCostUsd: number;
+  steps: number;
+  computeSecs: number;
+  /** The subset of computeSecs held at the small reservation. Steps from
+   *  before sizes existed count as large — they held the large limits. */
+  smallSecs: number;
+  netBytes: number;
+} {
+  let steps = 0;
+  let computeSecs = 0;
+  let smallSecs = 0;
+  let netBytes = 0;
+  let tokenCostUsd = 0;
+  for (const s of run.steps) {
+    if (s.status !== "completed" && s.status !== "failed") continue;
+    // A carried step ran — and was billed — in the run it was carried from.
+    if (s.carriedFrom) continue;
+    steps += 1;
+    if (!(s.credential ?? "").startsWith("provider:")) tokenCostUsd += s.costUsd ?? 0;
+    const secs = s.computeSecs ?? 0;
+    computeSecs += secs;
+    if (s.size === "small") smallSecs += secs;
+    netBytes += (s.actual?.rxBytes ?? 0) + (s.actual?.txBytes ?? 0);
+  }
+  return { tokenCostUsd, steps, computeSecs, smallSecs, netBytes };
+}
+
+/**
+ * The compute meter for hold+work pricing: core-seconds and GiB-seconds
+ * actually reserved (from each step's own recorded reservation), and CPU
+ * seconds actually burned (from the sandbox's cgroup, where readable).
+ * Steps with no recorded reservation contribute plain seconds only — the
+ * flat-rate fallback prices those.
+ */
+export function runComputeMeter(run: RunRecord): {
+  coreSecs: number;
+  gibSecs: number;
+  busyCpuSecs: number;
+  flatSecs: number;
+} {
+  let coreSecs = 0, gibSecs = 0, busyCpuSecs = 0, flatSecs = 0;
+  for (const s of run.steps) {
+    if (s.status !== "completed" && s.status !== "failed") continue;
+    if (s.carriedFrom) continue;
+    const secs = s.computeSecs ?? 0;
+    if (secs <= 0) continue;
+    if (s.reserved) {
+      coreSecs += secs * s.reserved.cpus;
+      gibSecs += secs * s.reserved.memGiB;
+    } else {
+      flatSecs += secs;
+    }
+    busyCpuSecs += s.actual?.busyCpuSecs ?? 0;
+  }
+  return { coreSecs, gibSecs, busyCpuSecs, flatSecs };
+}
+
+export function runDurationSecs(run: RunRecord): number | null {
+  if (!run.finishedAt) return null;
+  return (new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000;
+}
+
+/**
+ * Why a failed run failed, said in one line: the failing step and its last
+ * error event. The journal has the whole story; a runs *list* needs the
+ * sentence — "failed" with no reason makes every diagnosis start by opening
+ * the run, and the answer was sitting in the record all along.
+ */
+export function runFailure(run: RunRecord): { agent: string; reason: string } | null {
+  if (run.status !== "failed") return null;
+  const step = run.steps.find((s) => s.status === "failed");
+  if (!step) return null;
+  const errors = step.events.filter((e) => e.type === "error");
+  const last = errors[errors.length - 1];
+  return { agent: step.agent, reason: last?.text ?? "failed without an error event" };
+}
+
+/**
+ * The one-line outcome, pulled out of the reply that already says it.
+ *
+ * The last step with a result, because that is the one that concluded —
+ * a reporter at the end of a flow, or on a failed run whatever got furthest,
+ * which is the most informative line available either way.
+ *
+ * Markdown decoration is stripped rather than rendered: this lands in an
+ * email subject and a table cell, where `## ` and `**` are noise. Sibling of
+ * runFailure, which puts the reason for a failure on the list for the same
+ * reason — the sentence was in the record all along.
+ */
+export const VERDICTS = ["GOOD", "BAD", "QUIET", "BLOCKED"] as const;
+export type Verdict = (typeof VERDICTS)[number];
+
+/**
+ * The verdict a headline leads with, or null. Leading, whole-word and
+ * upper-case only — "GOOD — 6 links applied", "**BLOCKED**: nothing
+ * pushed", "BAD: 3 pages dropped". A summary that merely contains the word
+ * ("no BLOCKED items") has no verdict, for the reason markerPresent gives.
+ */
+export function verdictOf(summary: string | null | undefined): Verdict | null {
+  if (!summary) return null;
+  const line = summary.replace(/^[\s#>*_`\-]+/, "");
+  const m = /^(GOOD|BAD|QUIET|BLOCKED)(?![A-Za-z0-9_])/.exec(line);
+  return m ? (m[1] as Verdict) : null;
+}
+
+/** A run's verdict: recorded when it finished, else read from its summary,
+ *  so runs from before the field existed show one too. */
+export function runVerdict(run: Pick<RunRecord, "verdict" | "summary">): Verdict | null {
+  return run.verdict !== undefined ? run.verdict : verdictOf(run.summary);
+}
+
+export function runSummary(run: RunRecord): string | null {
+  for (let i = run.steps.length - 1; i >= 0; i--) {
+    // A sandbox: own job is appended after every step of the flow; its reply
+    // went to the step that asked, which speaks for the run.
+    if (run.steps[i].subagentOf) continue;
+    const line = stepHeadline(run.steps[i]);
+    if (line) return line;
+  }
+  return null;
+}
+
+/**
+ * What one step concluded, in a line.
+ *
+ * The model's ANSWER first, falling back to the whole reply. `result` is every
+ * text block joined, and a model that narrates before calling a tool puts
+ * "Now let me read the outputs…" at the top of it — so reading the joined
+ * text reported the plan of every step that used a tool, which is most of
+ * them. Steps recorded before `conclusion` existed have only `result`, and
+ * for those this is exactly what it always was.
+ */
+export function stepHeadline(step: StepRecord): string | null {
+  return headlineOf(step.conclusion) ?? headlineOf(step.result);
+}
+
+/**
+ * The first line of a reply that a person would recognise as its point.
+ *
+ * Markdown decoration is stripped rather than skipped, so a reply that opens
+ * with `## Done: 4 findings` still has a headline. A line that is only
+ * punctuation — a bare `#`, a rule, a row of asterisks — is decoration, and a
+ * code fence is the shape of an `output: json` reply, not its headline.
+ *
+ * Exported because a run's summary and one agent's step both want it, and two
+ * copies would be two answers to the same question.
+ */
+export function headlineOf(result: string | null | undefined): string | null {
+  if (!result) return null;
+  for (const raw of result.split("\n")) {
+    const line = raw
+      .replace(/^\s*#{1,6}\s+/, "") // heading
+      .replace(/^\s*[-*+]\s+/, "") // bullet
+      .replace(/^\s*>\s?/, "") // quote
+      .replace(/\*\*/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    // A line that is only markdown punctuation — a bare `#`, a `---` rule,
+    // a row of asterisks — is decoration, not a headline. Checked after the
+    // strips above rather than folded into them, because `#{1,6}\s*` would
+    // also eat the hash in a line that legitimately opens "#1 priority".
+    // A code fence, or a line that is only brackets, is the shape of an
+    // `output: json` reply, not its headline either.
+    if (!line || /^[#>\-*_=\s`{}\[\],]*$/.test(line) || line.startsWith("```")) continue;
+    return line.length > 200 ? `${line.slice(0, 197)}…` : line;
+  }
+  return null;
+}
+
+/** One step this agent ran, with the run it belongs to. */
+export interface AgentStep {
+  runId: string;
+  flow: string;
+  status: RunRecord["status"];
+  startedAt: string;
+  /** The step's own first line — what THIS agent concluded, which is not
+   *  the run's summary unless it happened to run last. */
+  headline: string | null;
+  instruction: string;
+  stepStatus: StepRecord["status"];
+  costUsd: number | null;
+  /** Set on a fan-out instance: the item this one worked on. */
+  item?: string;
+  /** Path refusals in this step — see deniedPaths. */
+  denied: number;
+}
+
+/**
+ * Everything one agent has done, newest first.
+ *
+ * The runs list answers "what ran"; it is keyed by flow, so an agent that
+ * appears in four flows has its work scattered across four filters and an
+ * agent used by none is invisible unless someone remembers the `adhoc:`
+ * prefix. This is the other axis, and the one you want when the question is
+ * "is this agent any good" rather than "did Monday's flow finish".
+ */
+/** Path refusals in a step — see deniedPaths in the dashboard's
+ *  step-io-model, which is the pure copy the client can import. */
+export function deniedPaths(step: Pick<StepRecord, "events">): number {
+  return (step.events ?? []).filter((e) => / was denied: /.test(e.text ?? "")).length;
+}
+
+export function listAgentSteps(tenant: string, workspace: string, agent: string): AgentStep[] {
+  const out: AgentStep[] = [];
+  for (const run of listRuns(tenant, workspace)) {
+    for (const step of run.steps) {
+      if (step.agent !== agent) continue;
+      // A fan-out template expands into instances and produces nothing
+      // itself; listing it would be a row that never has a result.
+      if (step.status === ("expanded" as StepRecord["status"])) continue;
+      out.push({
+        runId: run.id,
+        flow: run.flow,
+        status: run.status,
+        startedAt: run.startedAt,
+        headline: stepHeadline(step),
+        instruction: step.instruction,
+        stepStatus: step.status,
+        costUsd: step.costUsd,
+        item: step.item,
+        denied: deniedPaths(step),
+      });
+    }
+  }
+  return out;
+}
+
+/** Every run of the workspace, whole, newest first. Parses every record;
+ *  a list that needs only what a list needs reads listRunSummaries. */
+export function listRuns(tenant: string, workspace: string): RunRecord[] {
+  const dir = path.join(workspaceDir(tenant, workspace), "runs");
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".json") && !f.startsWith("."))
+    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+// ------------------------------------------------------------------ provider
+
+/**
+ * `provider:` — which endpoint the model calls run against, and the two
+ * knobs that make a non-Anthropic gateway usable rather than merely
+ * reachable.
+ *
+ *   provider:
+ *     base_url: https://openrouter.ai/api
+ *     token: ${OPENROUTER_API_KEY}
+ *     models:
+ *       fast: google/gemini-2.5-flash
+ *       max: anthropic/claude-opus-4.1
+ *     headers:
+ *       X-Title: foldrun
+ *
+ * `models:` is what makes tiers portable rather than merely renamed-proof:
+ * without it `model: fast` means the literal string "haiku" on every
+ * endpoint, which is only true on one of them. `headers:` is the escape
+ * hatch for whatever a gateway wants that our schema will never have —
+ * routing preferences, attribution, tags. Both are the gateway's business,
+ * so neither grows a per-vendor branch in here.
+ */
+export interface ProviderSpec {
+  /** The preset this block was built from, when `name:` named one. */
+  name: string | null;
+  /** What the endpoint speaks. `anthropic` is reached directly; `openai`
+   *  through the runtime's own translator on localhost (translator.ts). */
+  format: WireFormat;
+  /** Which header carries the key on an Anthropic-format endpoint. */
+  auth: AuthShape;
+  baseUrl: string;
+  /** May still contain `${SECRET}` — resolving needs a tenant. */
+  token: string;
+  /** Tier → the id this gateway calls that tier. Absent tiers keep ours. */
+  models: Partial<Record<Tier, string>>;
+  /** Header name → value; values may contain `${SECRET}`. */
+  headers: Record<string, string>;
+  /** Extra request fields for a translated (`format: openai`) endpoint,
+   *  merged into the outgoing body verbatim. `null` removes a field the
+   *  translation would otherwise send. The escape hatch for every knob this
+   *  format deliberately does not model. */
+  params: Record<string, unknown>;
+  /** Things wrong enough to say out loud but not to fail a run over. */
+  warnings: string[];
+  /** A second endpoint, tried once when the first refuses over money, auth
+   *  or limits (not when the work itself fails). Same shape, one level deep
+   *  — a fallback with its own fallback is a routing table, and that lives
+   *  in a gateway, not in frontmatter. */
+  fallback?: ProviderSpec | null;
+}
+
+// RFC 9110 field-name characters. Anything else is not a header, and a
+// gateway would reject it — better to say so here than to have the run fail
+// with someone else's error message.
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+export function parseProvider(raw: unknown): ProviderSpec | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const block = raw as Record<string, unknown>;
+  const warnings: string[] = [];
+
+  // A name resolves to defaults; anything spelled out beside it wins. An
+  // unknown name is a warning and the block reads as if it were absent,
+  // because guessing a URL from a name is how a key ends up at a stranger.
+  const preset = providerPreset(block.name);
+  if (block.name !== undefined && !preset) {
+    warnings.push(`provider.name: "${String(block.name)}" is not a provider this runtime knows — spell out base_url, format and auth instead`);
+  }
+  const baseUrl = (typeof block.base_url === "string" ? block.base_url.trim() : "") || preset?.baseUrl || "";
+  const token = typeof block.token === "string" ? block.token.trim() : "";
+  const formatRaw = typeof block.format === "string" ? block.format.trim().toLowerCase() : "";
+  let format: WireFormat = preset?.format ?? "anthropic";
+  if (formatRaw === "anthropic" || formatRaw === "openai" || formatRaw === "responses") format = formatRaw;
+  else if (formatRaw) warnings.push(`provider.format: "${formatRaw}" is not anthropic, openai or responses — using ${format}`);
+  const authRaw = typeof block.auth === "string" ? block.auth.trim().toLowerCase() : "";
+  let auth: AuthShape = preset?.auth ?? "bearer";
+  if (authRaw === "bearer" || authRaw === "x-api-key") auth = authRaw;
+  else if (authRaw === "api-key" || authRaw === "key" || authRaw === "header") auth = "x-api-key";
+  else if (authRaw) warnings.push(`provider.auth: "${authRaw}" is not bearer or x-api-key — using ${auth}`);
+  if (preset && !baseUrl) {
+    warnings.push(`provider.name: ${preset.name} needs a base_url — ${preset.note ?? "its address is per account"}`);
+  }
+  // A pasted Chat-Completions URL with no format: the runtime would speak
+  // Anthropic at it and get a 404 from the wrong path. Said here, at the
+  // file, not there.
+  if (format === "anthropic" && !preset && baseUrl && looksOpenAiShaped(baseUrl)) {
+    warnings.push(`provider.base_url looks like a Chat-Completions endpoint — add \`format: openai\` to reach it through the translator`);
+  }
+
+  const models: Partial<Record<Tier, string>> = {};
+  if (block.models && typeof block.models === "object" && !Array.isArray(block.models)) {
+    for (const [key, value] of Object.entries(block.models as Record<string, unknown>)) {
+      const tier = resolveTier(key);
+      if (!tier) {
+        warnings.push(
+          `provider.models: "${key}" is not a tier — use ${Object.keys(MODEL_TIERS).join(", ")}. Ignored.`,
+        );
+        continue;
+      }
+      const id = typeof value === "string" ? value.trim() : "";
+      if (!id) {
+        warnings.push(`provider.models.${key}: empty — ignored`);
+        continue;
+      }
+      models[tier] = id;
+    }
+  } else if (block.models !== undefined) {
+    warnings.push("provider.models: expected a map of tier → model id — ignored");
+  }
+
+  // `params:` — the provider's own request fields, passed through as
+  // written. Not validated against any vendor's schema: the endpoint is the
+  // authority on what it accepts, and a list here would be stale in a month.
+  const params: Record<string, unknown> = {};
+  if (block.params && typeof block.params === "object" && !Array.isArray(block.params)) {
+    for (const [key, value] of Object.entries(block.params as Record<string, unknown>)) {
+      const name = key.trim();
+      if (!name) continue;
+      if ((PROTECTED_PARAMS as readonly string[]).includes(name)) {
+        warnings.push(`provider.params.${name}: that is the conversation, not a setting — ignored`);
+        continue;
+      }
+      params[name] = value;
+    }
+  } else if (block.params !== undefined) {
+    warnings.push("provider.params: expected a map of field → value — ignored");
+  }
+  if (Object.keys(params).length && format === "anthropic") {
+    warnings.push(
+      "provider.params only reaches a `format: openai` or `format: responses` endpoint — an Anthropic-shaped one is spoken to directly, so set its knobs at the provider (an OpenRouter preset, say) instead",
+    );
+  }
+
+  const headers: Record<string, string> = {};
+  if (block.headers && typeof block.headers === "object" && !Array.isArray(block.headers)) {
+    for (const [name, value] of Object.entries(block.headers as Record<string, unknown>)) {
+      const key = name.trim();
+      if (!HEADER_NAME_RE.test(key)) {
+        warnings.push(`provider.headers: "${name}" is not a valid header name — ignored`);
+        continue;
+      }
+      const text = value == null ? "" : String(value);
+      // A newline in a value would end the header and start another one —
+      // the whole point of a separator-delimited blob is that nothing in it
+      // may contain the separator.
+      if (/[\r\n]/.test(text)) {
+        warnings.push(`provider.headers.${key}: value contains a line break — ignored`);
+        continue;
+      }
+      headers[key] = text.trim();
+    }
+  } else if (block.headers !== undefined) {
+    warnings.push("provider.headers: expected a map of name → value — ignored");
+  }
+
+  // One level only: the nested block's own `fallback:` is dropped, with a
+  // word about it, rather than followed.
+  let fallback: ProviderSpec | null = null;
+  if (block.fallback !== undefined) {
+    const inner = parseProvider(block.fallback);
+    if (!inner || !inner.baseUrl) warnings.push("provider.fallback: needs a base_url — ignored");
+    else {
+      if (inner.fallback) warnings.push("provider.fallback.fallback: only one level of fallback is followed — ignored");
+      fallback = { ...inner, fallback: null };
+      warnings.push(...inner.warnings.map((w) => `fallback: ${w}`));
+    }
+  }
+
+  return { name: preset?.name ?? null, format, auth, baseUrl, token, models, headers, params, warnings, fallback };
+}
+
+/** The env the SDK reads for a tier remap. Our tier names are ours; these
+ *  are the SDK's, and this function is the only place the two meet. */
+const TIER_ENV: Record<Tier, string> = {
+  fast: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  default: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  max: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+};
+
+/**
+ * The whole of a provider block as the env the Agent SDK reads. The one
+ * place our format meets the SDK's, so the mapping is testable without a
+ * vault: the caller resolves `${SECRET}` first and passes values.
+ *
+ * The token goes to ANTHROPIC_AUTH_TOKEN (a bearer credential) and
+ * ANTHROPIC_API_KEY is explicitly blanked. Both matter. A key left in the
+ * environment is sent as `x-api-key` and treated as a direct-Anthropic
+ * credential, so a gateway that wants `Authorization: Bearer` gets the
+ * wrong header — and worse, an *unset* key lets the SDK fall back to
+ * authenticating against Anthropic directly, which fails somewhere far from
+ * the file that caused it. A gateway that genuinely wants the key header
+ * asks for it by name: `headers: { x-api-key: ${TOKEN} }`.
+ */
+export function providerEnvFor(spec: {
+  baseUrl?: string;
+  /** Already secret-substituted. */
+  token?: string;
+  /** Which header the key rides in. Bearer unless the endpoint says
+   *  otherwise: the SDK sends ANTHROPIC_API_KEY as x-api-key and
+   *  ANTHROPIC_AUTH_TOKEN as a bearer, and blanks the other so it cannot
+   *  fall back to Anthropic's own endpoint with the wrong credential. */
+  auth?: AuthShape;
+  models: Partial<Record<Tier, string>>;
+  headers: Record<string, string>;
+}): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (spec.baseUrl) env.ANTHROPIC_BASE_URL = spec.baseUrl;
+  if (spec.token) {
+    if (spec.auth === "x-api-key") {
+      env.ANTHROPIC_API_KEY = spec.token;
+      env.ANTHROPIC_AUTH_TOKEN = "";
+    } else {
+      env.ANTHROPIC_AUTH_TOKEN = spec.token;
+      env.ANTHROPIC_API_KEY = "";
+    }
+  }
+  for (const [tier, id] of Object.entries(spec.models)) {
+    if (id) env[TIER_ENV[tier as Tier]] = id;
+  }
+  const lines = Object.entries(spec.headers).map(([k, v]) => `${k}: ${v}`);
+  if (lines.length) env.ANTHROPIC_CUSTOM_HEADERS = lines.join("\n");
+  return env;
+}
+
+// The workspace tree, for history's first commit — see registerTreeReader.
+registerTreeReader((tenant, scope) => {
+  if (scope === "@library" || !fs.existsSync(workspaceDir(tenant, scope))) return null;
+  const dir = workspaceDir(tenant, scope);
+  return listWorkspaceFiles(tenant, scope).flatMap((rel) => {
+    try {
+      return [{ path: rel, before: null, after: fs.readFileSync(path.join(dir, rel), "utf8") }];
+    } catch {
+      return [];
+    }
+  });
+});

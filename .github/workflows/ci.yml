@@ -1,0 +1,42 @@
+name: ci
+
+# Every push and every pull request. The tests are the specification here —
+# `foldrun check`'s rules, the grammar, the runner's contracts — so a red
+# build is a broken promise, not a style complaint.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # release-pr.yml starts it on release/next: its own push starts nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref; a newer push/PR update cancels the older one (FOL-62, box runner).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # GitHub's hosted runner: this repository is public (25 Oct 2026), and a
+    # public repository never runs on our own machines — a pull request from
+    # a fork would run its code there. Hosted minutes are free for public
+    # repositories.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full matrix on push to main; the supported floor only on PRs (FOL-62).
+        node: ${{ github.event_name == 'pull_request' && fromJSON('["22"]') || fromJSON('["22", "24"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npm test

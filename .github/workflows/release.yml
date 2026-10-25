@@ -1,0 +1,161 @@
+name: release
+
+# Publishes a version that main carries and npm does not have yet.
+#
+#   - The usual way: merge the "release X.Y.Z" pull request release-pr.yml
+#     keeps open. That push to main lands here with a version that has no
+#     tag: test, publish, then tag it and make the GitHub release.
+#   - By hand: `npm run release -- --yes` and `git push --follow-tags`. The
+#     tag push lands here too; whichever of the two runs comes second finds
+#     the version on npm and publishes nothing.
+#
+# Any other push to main finds its version already tagged and stops after
+# one step. Runs are serial (concurrency), never cancelled mid-publish.
+#
+# The build runs here rather than on a laptop so what reaches npm is what is
+# in the tag. No provenance: the repository is private (since 17 Oct 2026),
+# and npm refuses a provenance statement from a private repository, so
+# NPM_CONFIG_PROVENANCE=false stops trusted publishing adding one by default.
+#
+# AUTHENTICATION IS TRUSTED PUBLISHING, NOT A TOKEN. npm disabled classic
+# (non-expiring) tokens in November 2025 and capped write-enabled granular
+# ones at 90 days, so any stored secret here would be a calendar reminder
+# that eventually fails a release at the worst moment. Instead npm trusts
+# this repository and this workflow file by name, and each run mints its
+# own short-lived credential from the OIDC token `id-token: write` grants.
+# Nothing is stored, nothing rotates, nothing can leak.
+#
+# One-time setup, per package, on npmjs.com → the package → Settings →
+# Trusted Publisher: GitHub Actions, this org, this repo, `release.yml`.
+# Until that exists the publish step fails saying so — which is the right
+# failure, because the alternative is a token nobody remembers renewing.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # What this run would release: the tag's version, or main's when main
+      # carries one with no tag yet. The tag and the manifest must agree —
+      # they can disagree only when a tag is pushed by hand, and then the
+      # failure would be a version on npm that no tag points at.
+      - name: what to release
+        id: what
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            [ "$v" = "$pkg" ] || { echo "tag $v != package.json $pkg"; exit 1; }
+          elif git rev-parse -q --verify "refs/tags/v$pkg" >/dev/null; then
+            echo "v$pkg is already tagged — nothing to release"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            v="$pkg"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "go=true" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$v" version --prefer-online >/dev/null 2>&1; then
+            echo "$name@$v is already on npm — tag only"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.what.outputs.go == 'true'
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+        if: steps.what.outputs.go == 'true'
+      - run: npx tsc --noEmit -p .
+        if: steps.what.outputs.go == 'true'
+      - run: npm test
+        if: steps.what.outputs.go == 'true'
+
+      # Trusted publishing needs npm 11.5.1 or newer; the one bundled with
+      # Node 22 is older than that.
+      - run: npm install -g npm@latest
+        if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
+
+      # Idempotent: the registry can answer "not found" for a few minutes
+      # after a version lands, so the check above may miss one this repo just
+      # published. npm then refuses to publish over it, and that refusal
+      # means the version is out: carry on and tag it.
+      - name: publish
+        if: steps.what.outputs.go == 'true' && steps.what.outputs.published == 'false'
+        env:
+          V: ${{ steps.what.outputs.version }}
+        run: |
+          # A pre-release (1.3.0-rc.1) goes to the `next` dist-tag, so
+          # `npm install` keeps resolving to the last stable release.
+          tag=latest
+          case "$V" in *-*) tag=next ;; esac
+          if NPM_CONFIG_PROVENANCE=false npm publish --access public --tag "$tag" 2> publish.err; then
+            cat publish.err >&2
+          elif grep -q "cannot publish over the previously published versions" publish.err; then
+            cat publish.err >&2
+            echo "already on npm — tagging it"
+          else
+            cat publish.err >&2
+            exit 1
+          fi
+
+      # Tagged after the publish, not before: a tag is the record that the
+      # version shipped. If the tag push fails, the next run finds the
+      # version on npm and only tags.
+      - name: tag it
+        if: steps.what.outputs.go == 'true' && github.ref_type == 'branch'
+        env:
+          V: ${{ steps.what.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "$(node -p "require('./package.json').name") $V"
+          # Without the repository's git hooks: `npm ci`/`npm install` ran
+          # `prepare`, which installs the pre-push hook meant for a laptop.
+          # Its checks are the steps above, already passed for this commit;
+          # in CI it only fails where its laptop assumptions do not hold.
+          git -c core.hooksPath=/dev/null push origin "v$V"
+
+      # The release notes are the changelog section for this version, taken
+      # verbatim: one description of the change, not two that drift.
+      - name: notes for this version
+        if: steps.what.outputs.go == 'true'
+        env:
+          V: ${{ steps.what.outputs.version }}
+        run: |
+          awk -v v="$V" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md." > RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        if: steps.what.outputs.go == 'true'
+        with:
+          tag_name: v${{ steps.what.outputs.version }}
+          name: v${{ steps.what.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(steps.what.outputs.version, '-') }}
+          make_latest: ${{ !contains(steps.what.outputs.version, '-') }}

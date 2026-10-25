@@ -1,0 +1,106 @@
+name: release-pr
+
+# Every push to main keeps one pull request open: "release X.Y.Z", made by
+# scripts/release.mjs on the release/next branch — the bump inferred from
+# the commit subjects, the changelog entry drafted from them and shown as
+# the body. Merging it is the decision to publish: release.yml sees a
+# version on main with no tag yet, tests, publishes to npm and tags it.
+#
+# Nothing is drafted while a release is in flight (main's version has no
+# tag yet): that is the merged pull request on its way out, and drafting
+# then would fold its commits into a second release.
+#
+# The pull request's own CI run, started by this workflow's token, waits
+# for approval ("action_required"), and the required checks are its jobs —
+# so the pull request stays blocked until a person clicks. This approves
+# that run, once it appears, for the head it just pushed. Should approving
+# be refused, ci.yml is started on release/next instead, which puts the
+# same checks on the same commit.
+# Opening the pull request needs the repository setting "Allow GitHub
+# Actions to create and approve pull requests" (foldrun-infra
+# github/repo-settings.sh).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: true
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: a release in flight?
+        id: flight
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$v is merged and not tagged yet — release.yml is publishing it; nothing to draft"
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: draft on release/next
+        id: draft
+        if: steps.flight.outputs.pending == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B release/next
+          node scripts/release.mjs --yes --no-tag --notes "$RUNNER_TEMP/notes.md"
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "nothing since the last release"
+            exit 0
+          fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          git push --force origin release/next
+
+      - name: open or update the pull request
+        if: steps.draft.outputs.version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.draft.outputs.version }}
+        run: |
+          body="$RUNNER_TEMP/body.md"
+          {
+            echo "Merging this publishes **$VERSION** to npm (release.yml), then tags it."
+            echo
+            echo "Redrafted on every push to main. To reword a line, edit CHANGELOG.md on this branch just before merging."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$body"
+          n="$(gh pr list --head release/next --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$n" ]; then
+            gh pr edit "$n" --title "release $VERSION" --body-file "$body"
+          else
+            gh pr create --base main --head release/next --title "release $VERSION" --body-file "$body"
+          fi
+          head="$(git rev-parse HEAD)"
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$head" \
+              --jq '[.workflow_runs[] | select(.name == "ci" and .conclusion == "action_required")][0].id // empty')"
+            if [ -n "$id" ]; then
+              if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null 2>&1; then
+                echo "approved the pull request's ci run $id"
+                exit 0
+              fi
+              break
+            fi
+            sleep 10
+          done
+          echo "could not approve the pull request's ci run — starting ci.yml on release/next instead"
+          gh workflow run ci.yml --ref release/next

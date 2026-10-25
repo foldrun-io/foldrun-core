@@ -1,0 +1,476 @@
+// Deploying a workspace from a directory.
+//
+// The pitch for a markdown platform is that there is no build step, so deploy
+// is a copy. The two things a copy cannot do are what this file is about:
+// checking the whole workspace before any of it is live, and refusing to swap
+// files under a run that is already reading them.
+//
+//   node --test tests/deploy.test.ts
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  readTree,
+  deployIssues,
+  deployWarnings,
+  planDeploy,
+  deployWorkspace,
+  deployedCommit,
+  runsInFlight,
+} from "../src/deploy.ts";
+import type { DeployFile } from "../src/store.ts";
+
+function withData(body: (root: string) => void) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-deploy-"));
+  const previous = process.env.FOLDRUN_DATA;
+  const previousWs = process.env.FOLDRUN_WORKSPACE;
+  process.env.FOLDRUN_DATA = root;
+  delete process.env.FOLDRUN_WORKSPACE;
+  try {
+    body(root);
+  } finally {
+    if (previous === undefined) delete process.env.FOLDRUN_DATA;
+    else process.env.FOLDRUN_DATA = previous;
+    if (previousWs !== undefined) process.env.FOLDRUN_WORKSPACE = previousWs;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const AGENT = "---\nname: writer\ndescription: writes things\n---\n\nWrite.\n";
+const FLOW = "---\nname: publish\ntrigger: manual\n---\n\n1. [[writer]] — write it\n";
+
+const workspace = (over: Record<string, string> = {}): DeployFile[] =>
+  Object.entries({
+    "AGENTS.md": "---\nname: desk\n---\n\nA desk.\n",
+    "agents/writer/agent.md": AGENT,
+    "flows/publish.md": FLOW,
+    ...over,
+  }).map(([p, content]) => ({ path: p, content }));
+
+// ── reading a tree ───────────────────────────────────────────────────────────
+
+// A workspace usually lives in a repo next to things that are not the
+// workspace. Those are skipped, not rejected — refusing to deploy a repo
+// because it has a README would make the feature useless.
+test("reading a tree takes workspace files and ignores the rest of the repo", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-src-"));
+  try {
+    const write = (rel: string, body = "x\n") => {
+      fs.mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), body);
+    };
+    write("AGENTS.md");
+    write("agents/writer/agent.md", AGENT);
+    write("flows/publish.md", FLOW);
+    write("README.md"); // not a workspace file
+    write("package.json"); // not a workspace file
+    write(".github/workflows/ci.yml");
+    write("node_modules/left-pad/index.js");
+    write(".git/config");
+    write("runs/run-1.json"); // the platform's, never git's
+    write("agents/writer/outputs/draft.md"); // produced, not authored
+    write("secrets.json", '{"TOKEN":"hunter2"}');
+
+    const got = readTree(dir).map((f) => f.path).sort();
+    assert.deepEqual(got, ["AGENTS.md", "agents/writer/agent.md", "flows/publish.md"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The one file that must never make the trip. A workspace is meant to be a git
+// repo, so if someone commits their secrets despite the shipped .gitignore, a
+// deploy must not carry them into the platform's own secret store.
+test("secrets.json is never read out of a source tree", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-src-"));
+  try {
+    fs.writeFileSync(path.join(dir, "AGENTS.md"), "x\n");
+    fs.writeFileSync(path.join(dir, "secrets.json"), '{"TOKEN":"hunter2"}');
+    assert.ok(!readTree(dir).some((f) => f.path === "secrets.json"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the check that runs before anything is live ──────────────────────────────
+
+test("a workspace that checks out has no issues", () => {
+  assert.deepEqual(deployIssues(workspace()), []);
+});
+
+// The most common way a push breaks a schedule: rename an agent, forget the
+// flow that names it. At 3am the schedule fires and the step has nowhere to go.
+// Everything here is declarative, so this is free to catch at push time.
+test("a flow naming an agent the push does not ship is rejected", () => {
+  const issues = deployIssues(
+    workspace({ "flows/publish.md": "---\nname: publish\n---\n\n1. [[ghost]] — do it\n" }),
+  );
+  assert.equal(issues.length, 1);
+  assert.match(issues[0].message, /\[\[ghost\]\] does not exist/);
+});
+
+test("a workspace with no agents yet deploys, with a warning", () => {
+  // "Create workspace" makes a blank one; refusing its first push would make
+  // the empty state a dead end. A flow naming a missing agent still fails.
+  const blank = workspace().filter((f) => !f.path.startsWith("agents/") && !f.path.startsWith("flows/"));
+  assert.equal(deployIssues(blank).length, 0, JSON.stringify(deployIssues(blank)));
+  assert.ok(deployWarnings(blank).some((i) => /no agents yet/.test(i.message)));
+  const orphanFlow = workspace().filter((f) => !f.path.startsWith("agents/"));
+  assert.ok(deployIssues(orphanFlow).some((i) => /does not exist/.test(i.message)));
+});
+
+// Case matters on Linux and does not on macOS, so `Agents.md` deploys happily
+// from a laptop and then vanishes on the runtime.
+test("a standard filename with the wrong case is rejected", () => {
+  const files = workspace().map((f) =>
+    f.path === "AGENTS.md" ? { ...f, path: "Agents.md" } : f,
+  );
+  assert.ok(deployIssues(files).some((i) => /spelled exactly "AGENTS.md"/.test(i.message)));
+});
+
+test("a path escaping the workspace is rejected", () => {
+  const files = [...workspace(), { path: "../../etc/passwd", content: "x" }];
+  assert.ok(deployIssues(files).some((i) => /illegal path/.test(i.message)));
+});
+
+// A memory file that would fail the OKF validator should not become live —
+// this is the same question `foldrun check` asks, asked earlier.
+test("a non-conformant memory file is rejected", () => {
+  const issues = deployIssues(
+    workspace({ "memory/a-fact.md": "no frontmatter at all, so no type\n" }),
+  );
+  assert.ok(issues.length > 0, "a typeless concept should not deploy");
+  assert.ok(issues.every((i) => i.where.startsWith("memory/")));
+});
+
+// Every problem at once. A push that reports one error, gets fixed, and then
+// reports the next one wastes a round trip per mistake.
+test("all the problems are reported together", () => {
+  const issues = deployIssues([
+    { path: "flows/a.md", content: "---\nname: a\n---\n\n1. [[nobody]] — go\n2. [[ghost]] — go\n" },
+    { path: "Agents.md", content: "x" },
+  ]);
+  assert.ok(issues.length >= 2, `expected several issues, got ${JSON.stringify(issues)}`);
+});
+
+// ── planning ─────────────────────────────────────────────────────────────────
+
+test("a plan says what would change, without changing it", () => {
+  withData(() => {
+    deployWorkspace("acme", "desk", workspace());
+
+    const next = workspace({
+      "agents/writer/agent.md": `${AGENT}\nBe brief.\n`,
+      "agents/editor/agent.md": "---\nname: editor\n---\n\nEdit.\n",
+    }).filter((f) => f.path !== "flows/publish.md");
+
+    const plan = planDeploy("acme", "desk", next);
+    assert.deepEqual(plan.added, ["agents/editor/agent.md"]);
+    assert.deepEqual(plan.updated, ["agents/writer/agent.md"]);
+    assert.deepEqual(plan.removed, ["flows/publish.md"]);
+    // and nothing happened
+    assert.ok(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/flows/publish.md")));
+  });
+});
+
+// state/ and agent-written memory are the platform's, not git's. Reporting
+// them as removals would be a lie, and the alarming kind — it would read as
+// "this push deletes everything your agents learned".
+test("what a deploy keeps is not reported as a removal", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const ws = path.join(root, "acme/workspaces/desk");
+    fs.mkdirSync(path.join(ws, "state"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "state/cursor.json"), '{"last":7}\n');
+    fs.mkdirSync(path.join(ws, "memory"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "memory/learned.md"), "---\ntype: Memory\n---\n\nA fact.\n");
+
+    const plan = planDeploy("acme", "desk", workspace());
+    assert.deepEqual(plan.removed, []);
+  });
+});
+
+// ── applying ─────────────────────────────────────────────────────────────────
+
+test("a deploy applies, and records the commit it came from", () => {
+  withData((root) => {
+    const out = deployWorkspace("acme", "desk", workspace(), { commit: "abc1234" });
+    assert.equal(out.applied, true);
+    assert.deepEqual(out.issues, []);
+    assert.ok(fs.existsSync(path.join(root, "acme/workspaces/desk/agents/writer/agent.md")));
+    assert.equal(deployedCommit("acme", "desk")?.commit, "abc1234");
+  });
+});
+
+// The marker cannot live inside the workspace: saveWorkspace replaces that
+// directory wholesale, so the next deploy would delete the record of the one
+// before it.
+test("the commit marker survives the next deploy", () => {
+  withData(() => {
+    deployWorkspace("acme", "desk", workspace(), { commit: "aaa" });
+    deployWorkspace("acme", "desk", workspace({ "flows/x.md": FLOW }), { commit: "bbb" });
+    assert.equal(deployedCommit("acme", "desk")?.commit, "bbb");
+  });
+});
+
+test("a deploy that does not check out changes nothing", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const before = fs.readFileSync(
+      path.join(root, "acme/workspaces/desk/agents/writer/agent.md"),
+      "utf8",
+    );
+
+    const out = deployWorkspace("acme", "desk", [
+      { path: "AGENTS.md", content: "x\n" },
+      { path: "agents/writer/agent.md", content: "rewritten\n" },
+      { path: "flows/publish.md", content: "---\nname: publish\n---\n\n1. [[ghost]] — go\n" },
+    ]);
+
+    assert.equal(out.applied, false);
+    assert.ok(out.issues.length > 0);
+    assert.equal(
+      fs.readFileSync(path.join(root, "acme/workspaces/desk/agents/writer/agent.md"), "utf8"),
+      before,
+      "a refused deploy must not half-apply",
+    );
+  });
+});
+
+// A removal list a person confirmed is a promise about what the deploy will
+// delete. Between the dry run they read and the deploy that follows,
+// someone else can add a source file (the editor, the source API, another
+// deploy); without this, the deploy deletes that too.
+test("expectRemoved: a deploy that would remove anything unconfirmed is refused", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const ws = path.join(root, "acme/workspaces/desk");
+    const next = workspace();
+    const confirmed = planDeploy("acme", "desk", next).removed;
+    assert.deepEqual(confirmed, ["flows/old.md"]);
+
+    // a file appears after the confirmation
+    fs.writeFileSync(path.join(ws, "flows/added-meanwhile.md"), FLOW);
+
+    const out = deployWorkspace("acme", "desk", next, { expectRemoved: confirmed });
+    assert.equal(out.applied, false);
+    assert.deepEqual(out.unexpectedRemovals, ["flows/added-meanwhile.md"]);
+    assert.deepEqual(out.removed, ["flows/added-meanwhile.md", "flows/old.md"]);
+    assert.ok(fs.existsSync(path.join(ws, "flows/added-meanwhile.md")), "nothing deleted");
+    assert.ok(fs.existsSync(path.join(ws, "flows/old.md")), "nothing deleted");
+  });
+});
+
+test("expectRemoved: a subset of what was confirmed applies", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const out = deployWorkspace("acme", "desk", workspace(), {
+      expectRemoved: ["flows/old.md", "flows/gone-already.md"],
+    });
+    assert.equal(out.applied, true);
+    assert.deepEqual(out.unexpectedRemovals ?? [], []);
+    assert.ok(!fs.existsSync(path.join(root, "acme/workspaces/desk/flows/old.md")));
+  });
+});
+
+test("expectRemoved: [] refuses any removal; absent keeps the old behaviour", () => {
+  withData(() => {
+    deployWorkspace("acme", "desk", workspace({ "flows/old.md": FLOW }));
+    const refused = deployWorkspace("acme", "desk", workspace(), { expectRemoved: [] });
+    assert.equal(refused.applied, false);
+    assert.deepEqual(refused.unexpectedRemovals, ["flows/old.md"]);
+    assert.equal(deployWorkspace("acme", "desk", workspace()).applied, true);
+  });
+});
+
+// A flow reads its agents step by step. Replacing them mid-run means step 3
+// runs against a definition step 1 never saw, and the trace becomes a record of
+// two different workspaces.
+test("a deploy is refused while a run is in flight", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const runs = path.join(root, "acme/workspaces/desk/runs");
+    fs.mkdirSync(runs, { recursive: true });
+    fs.writeFileSync(
+      path.join(runs, "r1.json"),
+      JSON.stringify({
+        id: "r1",
+        flow: "publish",
+        status: "running",
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        steps: [],
+      }),
+    );
+
+    assert.deepEqual(runsInFlight("acme", "desk"), ["r1"]);
+    const out = deployWorkspace("acme", "desk", workspace({ "flows/x.md": FLOW }));
+    assert.equal(out.applied, false);
+    assert.deepEqual(out.blockedBy, ["r1"]);
+    assert.deepEqual(out.issues, [], "the workspace is fine — the moment is wrong");
+
+    // and it goes through once nothing is reading the files
+    assert.equal(deployWorkspace("acme", "desk", workspace({ "flows/x.md": FLOW }), { force: true }).applied, true);
+  });
+});
+
+// Someone waiting to approve a step is about to approve work against a
+// definition the deploy would silently replace.
+test("a run waiting for a person also blocks a deploy", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const runs = path.join(root, "acme/workspaces/desk/runs");
+    fs.mkdirSync(runs, { recursive: true });
+    fs.writeFileSync(
+      path.join(runs, "r2.json"),
+      JSON.stringify({
+        id: "r2",
+        flow: "publish",
+        status: "awaiting-approval",
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        steps: [],
+      }),
+    );
+    assert.equal(deployWorkspace("acme", "desk", workspace()).applied, false);
+  });
+});
+
+// The whole reason deploys route through here rather than writing files: what
+// an agent produced is not in git and must outlive a push that never knew
+// about it.
+test("a deploy does not destroy what the agents produced", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const ws = path.join(root, "acme/workspaces/desk");
+    fs.mkdirSync(path.join(ws, "state"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "state/cursor.json"), '{"last":7}\n');
+    fs.mkdirSync(path.join(ws, "memory"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "memory/learned.md"), "---\ntype: Memory\n---\n\nA fact.\n");
+    fs.writeFileSync(path.join(ws, "secrets.json"), '{"TOKEN":"x"}');
+    fs.mkdirSync(path.join(ws, "runs"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "runs/old.json"), '{"id":"old","status":"completed","startedAt":"2026-01-01T00:00:00Z","steps":[]}');
+
+    assert.equal(deployWorkspace("acme", "desk", workspace()).applied, true);
+
+    for (const kept of ["state/cursor.json", "memory/learned.md", "secrets.json", "runs/old.json"]) {
+      assert.ok(fs.existsSync(path.join(ws, kept)), `a deploy destroyed ${kept}`);
+    }
+  });
+});
+
+
+// ── findings 1, 5, 6, 2 ──────────────────────────────────────────────────────
+
+test("schedule: on an agent is refused by deploy, not carried in dead", () => {
+  const files = workspace({ "agents/writer/agent.md": "---\nname: writer\ndescription: t\nschedule: \"0 9 * * 1\"\n---\n\nWrite.\n" });
+  assert.ok(deployIssues(files).some((i) => /only a flow runs on a clock/.test(i.message)));
+});
+
+test("a flow enum typo and a malformed step target are deploy issues", () => {
+  const overlap = workspace({ "flows/publish.md": "---\nname: publish\noverlap: que\n---\n\n1. [[writer]] — write it\n" });
+  assert.ok(deployIssues(overlap).some((i) => /overlap: que/.test(i.message)));
+  const target = workspace({ "flows/publish.md": "---\nname: publish\n---\n\n1. [[Writer_One]] — write it\n" });
+  // The step never resolves as a step, so both the malformed-target problem
+  // and (because the flow now has no steps) "no steps" are reported.
+  assert.ok(deployIssues(target).some((i) => /named in lower case/.test(i.message)));
+});
+
+test("an outward step without a gate is a deploy WARNING, not a blocking issue", () => {
+  const files = workspace({
+    "tools/mailer.md": "---\nname: mailer\ntransport: http\nbase: https://api.example.com\nmethods: [POST]\noutward: true\n---\n\nSends.\n",
+    "agents/writer/agent.md": "---\nname: writer\ndescription: t\ntools: [mailer]\n---\n\nWrite.\n",
+    "flows/publish.md": "---\nname: publish\n---\n\n1. [[writer]] — send it\n",
+  });
+  // Not blocking:
+  assert.ok(!deployIssues(files).some((i) => /act outside this workspace/.test(i.message)));
+  // But surfaced as a warning naming the step:
+  const warns = deployWarnings(files);
+  assert.ok(warns.some((w) => /act outside this workspace/.test(w.message)), warns.map((w) => w.message).join(" | "));
+});
+
+test("a gated outward step raises no deploy warning", () => {
+  const files = workspace({
+    "tools/mailer.md": "---\nname: mailer\ntransport: http\nbase: https://api.example.com\nmethods: [POST]\noutward: true\n---\n\nSends.\n",
+    "agents/writer/agent.md": "---\nname: writer\ndescription: t\ntools: [mailer]\n---\n\nWrite.\n",
+    "flows/publish.md": "---\nname: publish\n---\n\n1! [[writer]] — send it\n",
+  });
+  assert.deepEqual(deployWarnings(files), []);
+});
+
+// The plan and the save share one rule (store.ts#keptOnDeploy): what a
+// deploy keeps is never reported as removed. storage/ outputs were always
+// kept but listed as deletions; the trigger log was listed AND erased.
+test("storage/ outputs and the trigger log are neither listed as removed nor deleted", () => {
+  withData((root) => {
+    deployWorkspace("acme", "desk", workspace());
+    const ws = path.join(root, "acme/workspaces/desk");
+    fs.mkdirSync(path.join(ws, "storage/reports"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "storage/reports/out.md"), "a run wrote this\n");
+    fs.writeFileSync(path.join(ws, "trigger-log.jsonl"), '{"flow":"x"}\n');
+    fs.mkdirSync(path.join(ws, "state"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "state/seen.json"), "[]\n");
+
+    assert.deepEqual(planDeploy("acme", "desk", workspace()).removed, []);
+    const out = deployWorkspace("acme", "desk", workspace(), { expectRemoved: [] });
+    assert.equal(out.applied, true);
+    assert.deepEqual(out.removed, []);
+    assert.ok(fs.existsSync(path.join(ws, "storage/reports/out.md")));
+    assert.ok(fs.existsSync(path.join(ws, "trigger-log.jsonl")), "the trigger log survives a deploy");
+    assert.ok(fs.existsSync(path.join(ws, "state/seen.json")));
+  });
+});
+
+test("readTree leaves out an agent's .cache: never source, never shipped, never checked", async () => {
+  const { readTree, isSourcePath } = await import("../src/deploy.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-cache-tree-"));
+  try {
+    fs.mkdirSync(path.join(dir, "agents/a/.cache/claude-cli-nodejs"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "agents/a/agent.md"), "---\nname: a\n---\nGo.\n");
+    fs.writeFileSync(path.join(dir, "agents/a/.cache/claude-cli-nodejs/log.jsonl"), "{}\n");
+    assert.deepEqual(readTree(dir).map((f) => f.path), ["agents/a/agent.md"]);
+    assert.equal(isSourcePath("agents/a/.cache/claude-cli-nodejs/log.jsonl"), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the checks' reader bounds data (state/, memory/, an agent's own) and refuses oversized source whole; a deploy's reader is unbounded", async () => {
+  const { checkTree, CHECK_LIMITS } = await import("../src/workspace-check.ts");
+  const { readTree: read, TreeTooLarge } = await import("../src/deploy.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-big-tree-"));
+  try {
+    for (const d of ["agents/a/state", "state", "memory"]) fs.mkdirSync(path.join(dir, d), { recursive: true });
+    fs.writeFileSync(path.join(dir, "agents/a/agent.md"), "---\nname: a\n---\nGo.\n");
+    fs.writeFileSync(path.join(dir, "state/index.jsonl"), Buffer.alloc(CHECK_LIMITS.maxDataFileBytes + 1, "x"));
+    fs.writeFileSync(path.join(dir, "agents/a/state/big.json"), Buffer.alloc(CHECK_LIMITS.maxDataFileBytes + 1, "x"));
+    fs.writeFileSync(path.join(dir, "state/seen.json"), "{}");
+    const skipped: string[] = [];
+    assert.deepEqual(checkTree(dir, (p) => skipped.push(p)).map((f) => f.path), ["agents/a/agent.md", "state/seen.json"]);
+    assert.deepEqual(skipped, ["agents/a/state/big.json", "state/index.jsonl"], "an agent's own state/ is data too");
+    assert.ok(readTree(dir).some((f) => f.path === "state/index.jsonl"), "no bounds unless asked for");
+
+    // Many files each under the per-file cap stop at the total.
+    const left: string[] = [];
+    fs.writeFileSync(path.join(dir, "memory/a.md"), "aaaa");
+    fs.writeFileSync(path.join(dir, "memory/b.md"), "bbbb");
+    fs.writeFileSync(path.join(dir, "memory/c.md"), "cccc");
+    const got = read(dir, { maxDataBytes: 8, onSkip: (p) => left.push(p) }).map((f) => f.path);
+    assert.ok(got.includes("memory/a.md") && got.includes("memory/b.md") && !got.includes("memory/c.md"));
+    assert.ok(left.includes("memory/c.md"));
+    assert.equal(read(dir, { maxDataFiles: 1 }).filter((f) => /^(?:agents\/a\/)?(?:state|memory)\//.test(f.path)).length, 1);
+
+    // Source over its budget is not returned in part; a vendor subagent counts.
+    assert.throws(() => read(dir, { maxSourceBytes: 4 }), TreeTooLarge);
+    const size = fs.statSync(path.join(dir, "agents/a/agent.md")).size;
+    assert.doesNotThrow(() => read(dir, { maxSourceBytes: size }));
+    fs.mkdirSync(path.join(dir, ".agents/agents"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".agents/agents/b.md"), "x".repeat(100));
+    assert.throws(() => read(dir, { maxSourceBytes: size + 50 }), TreeTooLarge, "the import is read under the same budget");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

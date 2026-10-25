@@ -1,0 +1,162 @@
+// Where data lives. One declaration, resolved late.
+//
+// This was nine declarations resolved early. Every module that needed the data
+// directory wrote `process.env.FOLDRUN_DATA ?? path.join(process.cwd(), "data")`
+// into a module-level const, which has two costs:
+//
+//   Duplication — the same fallback path in nine places is the bug this
+//   codebase keeps producing, and the one its consistency tests exist to
+//   catch. Four of the nine had already drifted: they read `process.cwd()`
+//   directly and ignored FOLDRUN_DATA entirely, so pointing the platform at
+//   another directory moved the workspaces but left the scheduler state, the
+//   runtime cache, the build scratch directory and the webhook key behind.
+//
+//   Import-order coupling — a const captures the environment at *import* time.
+//   Anything that sets FOLDRUN_DATA after importing core silently reads the
+//   wrong directory, and nothing errors: you get an empty result, which reads
+//   as "no data" rather than "wrong root". Tests hit this first, but so does
+//   any embedder that configures the library before calling it.
+//
+// Resolving on each call costs a string join and removes both. Nothing here
+// caches: the whole point is that the answer can change between calls.
+
+import fs from "node:fs";
+import path from "node:path";
+import { accountRootFor } from "./layout.ts";
+
+/**
+ * The nearest enclosing project root, found by walking up from `from` looking
+ * for a `.git` directory. Null when there is none — an installed package in
+ * someone's node_modules, or a bare directory.
+ */
+function projectRoot(from: string): string | null {
+  let dir = path.resolve(from);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
+/**
+ * The data directory: every account, workspace, run and secret lives under it.
+ *
+ * `FOLDRUN_DATA` wins. Otherwise it is `data/` at the project root, found by
+ * walking up for a `.git` — falling back to the working directory when there
+ * is no project to find.
+ *
+ * It used to be `data/` beside the *working directory*, which meant the
+ * location was decided by whichever directory you happened to start the
+ * process in. The dashboard runs from `web/`, so the platform's live data —
+ * every workspace, secret and run — sat inside the app's own folder. Nobody
+ * chose that; it fell out of cwd. And it inverted the dependency the code is
+ * careful about everywhere else: the runtime works with no app, but its data
+ * was a child of one, so moving `web/` took the accounts with it.
+ *
+ * Anchoring to the project instead makes the answer the same whether it is the
+ * CLI, a test or a cron job asking.
+ *
+ * The walk stops at the *nearest* `.git`, which is a nested repository's own
+ * when there is one — `web/` is a submodule here, so a process started inside
+ * it would still anchor to the app. That is why the dashboard sets
+ * FOLDRUN_DATA explicitly rather than relying on this: an inferred default is
+ * a good fallback and a bad contract.
+ */
+export function dataRoot(): string {
+  if (process.env.FOLDRUN_DATA) return process.env.FOLDRUN_DATA;
+  return path.join(projectRoot(process.cwd()) ?? process.cwd(), "data");
+}
+
+/**
+ * The single workspace this process is pinned to, or null for the multi-tenant
+ * layout.
+ *
+ * Set by the CLI, which points the runtime at one folder on a laptop — there is
+ * no account and no tenant there, so the wrapper directories collapse away.
+ */
+export function singleWorkspace(): string | null {
+  return process.env.FOLDRUN_WORKSPACE ?? null;
+}
+
+/**
+ * The account scope in single-workspace mode: where `AGENTS.md` and
+ * `library/` live for the workspace this process is pinned to. Null in the
+ * multi-tenant layout, where the account is a tenant directory under the data
+ * root and nothing has to be inferred.
+ *
+ * It used to be, everywhere, `path.resolve(single, "..")`. That is right for a
+ * flat workspace and wrong for one inside an account folder, where the parent
+ * is `workspaces/` — a directory with no AGENTS.md and no library in it. Every
+ * `skills:`, `tools:` and `scripts:` that named something shared then resolved
+ * against an empty directory and came back missing. `accountRootFor` knows the
+ * difference; `FOLDRUN_ACCOUNT` overrides both, for an embedder that has
+ * already decided.
+ */
+export function singleAccountRoot(): string | null {
+  const single = singleWorkspace();
+  if (!single) return null;
+  if (process.env.FOLDRUN_ACCOUNT) return path.resolve(process.env.FOLDRUN_ACCOUNT);
+  return accountRootFor(path.resolve(single));
+}
+
+// ------------------------------------------------------- linear trimming
+//
+// `s.replace(/\/+$/, "")` is the obvious way to drop trailing slashes and
+// it is quadratic: the engine tries `\/+` from every position and fails at
+// `$` each time, so a string of ten thousand slashes is fifty million
+// steps. Several of these strings come from a customer's own files — a
+// base_url, a tool's base, a storage prefix — which is exactly the input
+// that must not be able to stall a worker. A loop is linear and reads the
+// same.
+
+/** Without leading and/or trailing slashes. */
+export function trimSlashes(s: string, where: "start" | "end" | "both" = "end"): string {
+  let a = 0;
+  let b = s.length;
+  if (where !== "end") while (a < b && s[a] === "/") a++;
+  if (where !== "start") while (b > a && s[b - 1] === "/") b--;
+  return s.slice(a, b);
+}
+
+/** Without any of `chars` at the ends — the linear form of
+ *  `.replace(/^[chars]+/, "").replace(/[chars]+$/, "")`. */
+export function trimChars(s: string, chars: string): string {
+  let a = 0;
+  let b = s.length;
+  while (a < b && chars.includes(s[a])) a++;
+  while (b > a && chars.includes(s[b - 1])) b--;
+  return s.slice(a, b);
+}
+
+/** The largest file a person (or the gallery) writes into a workspace or the
+ *  library through the store: 512 KB. A folder tool's program is one file,
+ *  and the gallery browser's passed 256 KB on 2026-09-29. */
+export const MAX_EDITABLE_FILE = 512 * 1024;
+
+/**
+ * Every entry under `dir`, relative, like `fs.readdirSync(dir, { recursive:
+ * true })` — except that a link to a directory is listed and NOT entered.
+ * Node's recursive readdir follows directory links, so a link back up the
+ * tree (the `workspace` link a step holds in its agent folder, confine.ts)
+ * is walked about forty levels deep before the kernel stops it, each level
+ * a full copy of the workspace.
+ */
+export function entriesNoFollow(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (abs: string, rel: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      out.push(r);
+      if (e.isDirectory()) walk(path.join(abs, e.name), r);
+    }
+  };
+  walk(dir, "");
+  return out;
+}

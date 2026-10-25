@@ -1,0 +1,30 @@
+name: Bug
+description: Something behaves differently from what it says it does
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: The difference between the two is the bug.
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: The smallest workspace that shows it
+      description: >
+        The agent.md / flow / tool that reproduces it, and the command you
+        ran. A run id helps if this is on the hosted platform.
+      render: markdown
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`npx foldrun --version`, or the @foldrun/core version"
+    validations: { required: true }
+  - type: input
+    id: node
+    attributes:
+      label: Node and OS
+      placeholder: node 22.14 / macOS 15
