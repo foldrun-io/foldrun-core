@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.12.1] — 2026-10-25
+
+### deps
+
+- claude-agent-sdk 0.3.309 (#1) ([62d8b02](https://github.com/foldrun-io/foldrun-core/commit/62d8b02))
+
 ## [2.12.0] — 2026-10-25
 
 ### ci
