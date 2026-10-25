@@ -1,0 +1,275 @@
+// Egress: the run sandbox never holds a credential it only ever puts in a
+// header.
+//
+// Until now a step's secrets were decrypted host-side and copied into the
+// sandbox as environment variables. The model never saw a value — only the
+// names — but every program in the pod could read them: a script tool, a
+// bash grant, a dependency `runtime:` installed. The pod was the blast
+// radius, and the credential was inside it.
+//
+// The egress proxy moves the credential to the boundary. The pod is handed
+// a per-step address (`http://<worker>/e/<lease>`) and a set of
+// placeholders (`${RESEND_API_KEY}`), and sends every API request through
+// that address with the placeholder still in the header. The worker holds
+// the lease, swaps the placeholder for the value on the way out — for the
+// host that secret was granted to, and no other — forwards the request, and
+// streams the answer back. The value exists in the worker's memory and on
+// the wire to the provider. Never in the pod.
+//
+// Three consumers, in the pod:
+//   - the http tools (api-tools.ts): every declared API
+//   - the translator (translator.ts): the model key, for Chat Completions
+//     and Responses providers
+//   - the Agent SDK itself, for Anthropic-shaped providers: its base URL is
+//     pointed through the proxy and its key IS the placeholder
+//
+// Script tools are the exception, on purpose: a script reads secrets from
+// its environment and may need the real value in process (a browser seeding
+// cookies, an ssh key). A step that grants such a script materialises its
+// secrets into the pod as before, and the run record says so. A script that
+// declares `secrets: proxied` in its tool file gets the placeholders and
+// `FOLDRUN_EGRESS` instead, and sends through the proxy like everything
+// else.
+//
+// A secret BOUND to sites in the vault (`foldrun secrets set NAME --site
+// api.example.com`) is never materialised, whatever the step grants: the
+// pod's programs all send through the proxy's forward door (HTTPS_PROXY),
+// and for a bound site the door terminates TLS with the platform's egress CA
+// — which the sandbox trusts — and fills `${NAME}` in the URL and headers on
+// the way out, the way Anthropic's cloud sandboxes attach a network secret.
+// Every other site is a tunnel the proxy does not read.
+//
+// This file is the vocabulary both sides share. The server is the
+// platform's (it needs a long-lived process and a Service); the pod side is
+// here in core, because it is what the runner image runs.
+
+import type { DelegationResult, PeerInfo } from "./operator.ts";
+import { trimSlashes } from "./paths.ts";
+import type { TestEffect } from "./test-mode.ts";
+import type { NetworkLevel } from "./network.ts";
+
+/** `${NAME}` — the shape a secret reference takes everywhere in foldrun. */
+export const PLACEHOLDER = /\$\{([A-Z][A-Z0-9_]*)\}/g;
+
+/** The env var the pod reads to know it should send through a proxy. */
+export const EGRESS_ENV = "FOLDRUN_EGRESS";
+
+/** The placeholder name the platform's own model key travels under. */
+export const MODEL_KEY_NAME = "FOLDRUN_MODEL_KEY";
+
+/**
+ * The address a request to `target` should actually be sent to. With no
+ * proxy configured, the target itself — every caller works unchanged on a
+ * machine with no worker, which is the CLI and every test.
+ */
+export function viaEgress(egress: string | undefined | null, target: string): string {
+  if (!egress) return target;
+  return `${trimSlashes(egress)}/${target}`;
+}
+
+/** The names referenced by placeholders in a string. */
+export function placeholderNames(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(PLACEHOLDER)) out.add(m[1]);
+  return [...out];
+}
+
+/** Replace the placeholders in `text` whose names `values` knows. Unknown
+ *  names stay literal, so a wrong grant fails loudly at the provider
+ *  instead of silently sending nothing. */
+export function substitutePlaceholders(text: string, values: Record<string, string>): string {
+  return text.replace(PLACEHOLDER, (whole, name: string) => (name in values ? values[name] : whole));
+}
+
+/** The host a granted secret may be sent to. Compared case-insensitively;
+ *  a port is part of the host. */
+export function hostOf(url: string): string | null {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What one step is allowed to send, and where. The runner builds this
+ * from the step's declared secrets and the hosts its tools and provider
+ * name; the proxy enforces it per request.
+ */
+/** Which workload a lease is for — the runner's word, never the pod's: what
+ *  an identity token's subject is built from (oidc-issuer.ts). */
+export interface LeaseWho {
+  workspace: string;
+  agent: string;
+  flow?: string;
+}
+
+export interface EgressGrant {
+  /** Secret name → the hosts that secret may be substituted for. */
+  secrets: Record<string, { value: string; hosts: string[] }>;
+  /** Secret name → the vault entry it came from, as secret-health keys it:
+   *  "account:NAME" or "workspace:<ws>:NAME". Two workspaces each holding an
+   *  API_KEY are two credentials, and one's refusal must not paint the
+   *  other red. Absent for a secret whose origin the runner did not know. */
+  healthKeys?: Record<string, string>;
+  /** The step's own timezone, from the clock cascade. The proxy is the only
+   *  party that sees an upstream response's headers, so it is the party
+   *  that has to put a rate-limit reset into words — and a reset time is
+   *  only useful in the calendar the step works to. See refusal.ts. */
+  timezone?: string;
+  /** Which sites the step may reach through the proxy's forward door
+   *  (network.ts). Absent on a grant from a runner that predates it: the
+   *  forward door then allows only the hosts the secrets were granted to. */
+  network?: { level: NetworkLevel; hosts: string[] };
+  /** Refuse a site off the list (true), or allow it and name it in the
+   *  trace (false: report only). Set by the platform when it leases. */
+  enforce?: boolean;
+  /** Identity name → the audience its tokens are for: the only identities
+   *  this step may ask the proxy's /identity door to mint (oidc-issuer.ts). */
+  identities?: Record<string, { audience: string }>;
+}
+
+export interface EgressLease {
+  /** The base the pod sends through: `http://…/e/<token>`. */
+  url: string;
+  /** The forward-proxy address for HTTP_PROXY / HTTPS_PROXY —
+   *  `http://foldrun:<token>@host:port` — when the platform's proxy has the
+   *  forward door. Absent on an older proxy: programs then go direct. */
+  proxy?: string;
+  /** The PEM of the CA the forward door signs with for a host a secret is
+   *  bound to, so the sandbox can trust exactly those interceptions. */
+  ca?: string;
+  /** Whether a site off the step's list is refused (true) or only named
+   *  in the trace (false). */
+  enforce?: boolean;
+  /** The grant is finished being built — publish it. The runner keeps
+   *  adding grants after the lease exists (the model key's host needs the
+   *  lease URL first), so a store that is not this process's memory has
+   *  to be told when the grant is complete. Call before every attempt. */
+  commit(): Promise<void>;
+  /** One line per request, for the run trace. Drained by the runner. A
+   *  line may carry a test-mode effect beside its text — what the proxy
+   *  refused or redirected on a test lease — for the run page to list. */
+  drainLog(): Promise<EgressLogLine[]>;
+  /** The step is over: the lease is void and its values are dropped. */
+  release(): Promise<void>;
+}
+
+export type EgressLogLine = string | { text: string; effect: TestEffect };
+
+/**
+ * The seam the platform fills. `null` from `lease` (or no `egress` at all)
+ * means "no proxy here" and the runner falls back to materialising, exactly
+ * as it always did.
+ */
+
+export interface EgressHooks {
+  /** `test` — the run is a test run: the proxy applies the outward-write
+   *  policy in test-mode.ts to every request on this lease. Carried on the
+   *  lease, not the request, because the pod is the party not trusted to
+   *  say so. */
+  /** `step` — the step's index in run.steps; keys that step's operator inbox.
+   *  `agent` and `peers` — this step's agent and the other steps of its
+   *  parallel group (tools: [peers]): the proxy serves the roster and
+   *  addresses a colleague's message to the right inbox.
+   *  `delegates` — the `sandbox: own` sub-agents this step may hand a job
+   *  to over the delegate door (delegate-tools.ts); the proxy refuses any
+   *  other name. */
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[] }): Promise<EgressLease | null>;
+  /** The run is still being driven: renew its leases' heartbeat. Optional —
+   *  an install without leases has nothing to renew. */
+  renew?(runId: string): Promise<number>;
+  /** The step is over — every attempt, however it ended (tools: [peers]).
+   *  A lease comes and goes per attempt, so it cannot say this: a sibling
+   *  between retries, or waiting for a slot, holds none and is not done.
+   *  Optional: a platform without it keeps every sibling reachable. */
+  stepEnded?(args: { tenant: string; runId: string; step: number }): Promise<void>;
+  /** Serve the jobs a step posts to the delegate door while it runs
+   *  (`sandbox: own` sub-agents): each is handed to `run`, whose result the
+   *  door then answers the step's long-poll with. `close()` stops serving
+   *  and settles anything unfinished as skipped. Optional: a platform
+   *  without it offers no delegate tools, and the runner says so. */
+  delegations?(
+    args: { tenant: string; runId: string; step: number; resuming?: boolean },
+    run: (job: DelegationJob) => Promise<DelegationResult>,
+  ): { close(): Promise<void> };
+}
+
+/** One job posted to the delegate door. */
+export interface DelegationJob {
+  id: string;
+  agent: string;
+  job: string;
+  /** Set when the step cancelled it (the delegate tool timed out). */
+  cancelled?: () => boolean;
+}
+
+/** Strip a header set of the proxy's own and hop-by-hop headers. */
+export const HOP_BY_HOP = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+  "transfer-encoding", "upgrade", "host", "content-length",
+]);
+
+const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
+
+/**
+ * A model env (the SDK's ANTHROPIC_* variables) rewritten to send through
+ * a lease: the base URL goes via the proxy, and whichever credential is
+ * set becomes the `${FOLDRUN_MODEL_KEY}` placeholder — the SDK only ever
+ * puts it in a header, and the proxy fills it for that one host. Provider
+ * headers that carried a secret's value get the value swapped back for
+ * its `${NAME}`, so the pod holds the name and the proxy holds the value.
+ * Adds the grants it needs to `grant`. Pure apart from that.
+ */
+export function proxyModelEnv(
+  env: Record<string, string | undefined>,
+  leaseUrl: string,
+  grant: EgressGrant,
+  knownSecrets: Record<string, string> = {},
+  name: string = MODEL_KEY_NAME,
+): Record<string, string | undefined> {
+  const base = env.ANTHROPIC_BASE_URL || ANTHROPIC_DEFAULT_BASE;
+  const host = hostOf(base);
+  if (!host) return env;
+  const out: Record<string, string | undefined> = { ...env, ANTHROPIC_BASE_URL: viaEgress(leaseUrl, base) };
+  const credentialKeys = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+  for (const key of credentialKeys) {
+    const value = env[key];
+    if (typeof value === "string" && value.length) {
+      addGrant(grant, name, value, host);
+      out[key] = `\${${name}}`;
+    }
+  }
+  if (typeof env.ANTHROPIC_CUSTOM_HEADERS === "string") {
+    out.ANTHROPIC_CUSTOM_HEADERS = unsubstitute(env.ANTHROPIC_CUSTOM_HEADERS, knownSecrets, host, grant);
+  }
+  return out;
+}
+
+/** Put the `${NAME}` back where a known secret's value sits in `text`,
+ *  granting the name to `host`. Longest values first, so one that contains
+ *  another is replaced whole. */
+export function unsubstitute(text: string, knownSecrets: Record<string, string>, host: string, grant: EgressGrant): string {
+  let out = text;
+  const entries = Object.entries(knownSecrets).filter(([, v]) => v.length >= 8).sort((a, b) => b[1].length - a[1].length);
+  for (const [name, value] of entries) {
+    if (!out.includes(value)) continue;
+    out = out.split(value).join(`\${${name}}`);
+    addGrant(grant, name, value, host);
+  }
+  return out;
+}
+
+export function addGrant(grant: EgressGrant, name: string, value: string, host: string): void {
+  const h = host.toLowerCase();
+  const existing = grant.secrets[name];
+  if (existing) {
+    if (!existing.hosts.includes(h)) existing.hosts.push(h);
+    // A name granted again with a different value is a rotation: the
+    // runner re-grants the model key after awaitRotatedCredential, on the
+    // same grant object the lease holds by reference. Keeping the first
+    // value here meant the "retry on the new one" sent the revoked token —
+    // every 4-hourly refresh on 2026-09-18..22 failed the step it landed on.
+    existing.value = value;
+  } else grant.secrets[name] = { value, hosts: [h] };
+}

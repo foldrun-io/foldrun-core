@@ -1,0 +1,6105 @@
+// Flow orchestration. Steps sharing a group number run in parallel; the next
+// group receives every prior result, labeled per agent. Optional steps ("2?")
+// fail without failing the flow. A direct agent run is a one-step ad-hoc
+// flow, so there is a single execution path.
+
+import { latestRevisionId } from "./history.ts";
+import { recordCallIo, redactionsFor } from "./capture.ts";
+import { AUTH_REFUSAL, platformCause } from "./issues.ts";
+import { hookNames } from "./hooks.ts";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import matter, { parseLenient, configMatter } from "./matter.ts";
+import { spawn } from "node:child_process";
+import {
+  knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
+import { cascadeLimits, toolOwners } from "./limits.ts";
+import { resolveAgentPath } from "./confine.ts";
+import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
+import { eventUrl } from "./webhook.ts";
+import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
+import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
+import { parseJudge } from "./judge-verdict.ts";
+import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
+import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
+import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
+import { platform } from "./platform.ts";
+import { healthKey } from "./secret-health.ts";
+import { TEST_WRITES_DIR, overlayTestWrites, restoreDivertedDirs, snapshotDivertedDirs, testHeadline, testModeEnv, withholdSecrets } from "./test-mode.ts";
+
+/** Does this process run steps in a sandbox — the container core ships, or
+ *  one the platform registered (a pod)? */
+const isolatedRun = () => {
+  const mode = process.env.FOLDRUN_RUN_ISOLATION;
+  return mode === "container" || (!!mode && mode in platform.isolation);
+};
+import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
+import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentTools, type DelegateSpec, type SubagentSpec } from "./subagents.ts";
+import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNames, localDelegateChannel, readCopyBack } from "./delegate-tools.ts";
+import type { DelegationResult } from "./operator.ts";
+import type { StepDelegation } from "./store.ts";
+import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
+import { sendPlainNotification } from "./notify.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
+import { refNames } from "./refs.ts";
+import {
+  accountDir,
+  workspaceDir,
+  buildMemoryIndex,
+  workspaceMemoryIndex,
+  knowledgeIndex,
+  workspaceKnowledgeIndex,
+  workspaceTools,
+  brokenToolReport,
+  listWorkspaces,
+  listTenants,
+  listRuns,
+  liveRuns,
+  syncBundleFor,
+  parseToolDef,
+  type ToolDef,
+  parseFlow,
+  readFlow,
+  markerPresent,
+  whenRowsPath,
+  parseApis,
+  resolveModel,
+  parseProvider,
+  providerEnvFor,
+  resolveEffort,
+  isEffortWord,
+  EFFORT_LEVELS,
+  checkFormatVersion,
+  readRun,
+  writeRun,
+  isSplicedRecord,
+  runSummary,
+  verdictOf,
+  type FlowStep,
+  type McpSpec,
+  type RunRecord,
+  type StepRecord,
+  type StepAttempt,
+  sumAttempts,
+  tokensOf,
+  parseSchemaText,
+  STORAGE_DIR,
+  adoptLegacyVersionKey,
+  listAgents,
+  runCost,
+} from "./store.ts";
+import { canReadBack } from "./tool-output.ts";
+import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
+import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
+import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
+import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, EGRESS_CA_ENV } from "./network.ts";
+import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
+import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
+import { attachOperations, prefetchOpenApi } from "./openapi.ts";
+import { buildSearchTools, buildHistoryTools, buildDeskTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
+import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
+import { providerPreset } from "./providers.ts";
+import { buildScriptTools, parseScripts, type ExecutionContext, type ScriptSpec } from "./script-tools.ts";
+import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
+import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, stepInstallEnv, type PreparedRuntime, type RuntimeSpec } from "./runtime.ts";
+import { buildInstallTool, INSTALL_TOOL } from "./install-tool.ts";
+import { dataRoot } from "./paths.ts";
+import { materializeFiles, harvestFiles, storageBaseline } from "./storage.ts";
+import { chooseExecutor, ensureImage } from "./container.ts";
+import { stampBundle } from "./okf.ts";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, browseSessionProblems } from "./providers.ts";
+import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
+import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
+import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
+import { trimChars } from "./paths.ts";
+import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
+
+export { localDate } from "./clock.ts";
+
+// An MCP tool definition becomes an SDK server config. ${SECRET} placeholders
+// in env and headers resolve server-side, so a credential reaches the server
+// process without ever entering the model's context.
+/** Remote MCP servers with each bound secret's value put back as its
+ *  `${NAME}`, granted to that server's host — the sandbox then holds the
+ *  name and the proxy fills it, as for an http tool. */
+function unbindMcpHeaders(
+  servers: Record<string, McpServerConfig>,
+  bound: string[],
+  values: Record<string, string>,
+  grant: EgressGrant,
+): Record<string, McpServerConfig> {
+  const known = Object.fromEntries(bound.filter((n) => n in values).map((n) => [n, values[n]]));
+  const out: Record<string, McpServerConfig> = {};
+  for (const [name, server] of Object.entries(servers)) {
+    if (server.type !== "http" || !server.headers) {
+      out[name] = server;
+      continue;
+    }
+    const host = hostOf(server.url);
+    out[name] = host
+      ? { ...server, headers: Object.fromEntries(Object.entries(server.headers).map(([k, v]) => [k, unsubstitute(v, known, host, grant)])) }
+      : server;
+  }
+  return out;
+}
+
+function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerConfig {
+  const fill = (values: Record<string, string>) => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(values)) {
+      out[k] = v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
+        const hit = getSecret(tenant, secretName, workspace);
+        return hit ? hit.value : whole;
+      });
+    }
+    return out;
+  };
+  // alwaysLoad: the SDK defers MCP tools behind tool search by default, which
+  // hides them from an agent whose toolset we've already narrowed. A server
+  // the author explicitly granted should be present from turn one.
+  return spec.url
+    ? { type: "http", url: spec.url, headers: fill(spec.headers), alwaysLoad: true }
+    : {
+        type: "stdio",
+        command: spec.command!,
+        args: spec.args,
+        env: fill(spec.env),
+        alwaysLoad: true,
+      };
+}
+
+
+/** How much of the earlier groups' output a step is handed, in characters.
+ *  Newest groups are kept when the total is over it. */
+export const CONTEXT_CHARS = 30_000;
+/** tools: [desks] — how many other-workspace runs cross into a step, in all. */
+export const DESK_RUNS_CAP = 100;
+
+/**
+ * What a group is handed from the groups before it: all of them, oldest
+ * first, so a group-3 reporter sees what group 1 measured and not only what
+ * group 2 diagnosed. When the total is over the cap, the oldest groups are
+ * dropped whole before anything is cut mid-text — the newest is the one the
+ * step is most likely to be about.
+ */
+export function joinEarlierGroups(groupResults: (string | null)[], gi: number, cap = CONTEXT_CHARS): string | null {
+  const parts: string[] = [];
+  for (let i = 0; i < gi; i++) if (groupResults[i]) parts.push(groupResults[i]!);
+  if (parts.length === 0) return null;
+  while (parts.length > 1 && parts.reduce((n, t) => n + t.length + 2, 0) > cap) parts.shift();
+  return parts.join("\n\n");
+}
+
+/**
+ * `parallel: N` — a pool of N slots the instances of one fan-out share.
+ * Fan-out always ran every instance at once, and still does unless the
+ * step says otherwise: twenty browser steps against one site, or one
+ * vendor's rate limit, is what the cap is for. Nothing is rented while an
+ * instance waits for a slot.
+ */
+export function slotPool(size: number): { acquire: () => Promise<void>; release: () => void } {
+  let free = Math.max(1, size);
+  const waiting: (() => void)[] = [];
+  return {
+    acquire: () =>
+      new Promise<void>((resolve) => {
+        if (free > 0) {
+          free -= 1;
+          resolve();
+        } else waiting.push(resolve);
+      }),
+    release: () => {
+      const next = waiting.shift();
+      if (next) next();
+      else free += 1;
+    },
+  };
+}
+
+/** Steps whose model has begun its first response — the step's executor
+ *  says so the moment the stream starts (EventExtra.responding). Memory
+ *  only: it is scheduling, not something the run record needs. */
+const respondingSteps = new WeakSet<StepRecord>();
+export function markResponding(step: StepRecord): void {
+  respondingSteps.add(step);
+}
+
+/**
+ * Is this step's prompt in the cache yet? An entry is readable from the
+ * moment the response to the request that wrote it begins streaming
+ * (Anthropic's prompt-caching docs), which is what `responding` marks.
+ * The first text, tool call or recorded model call says the same a little
+ * later, for an executor that cannot see the stream (the stub, an older
+ * driver). Resolves on the first of those, or when the step is over
+ * without one (a refusal before the first turn, a failed start).
+ */
+export function untilFirstReply(step: StepRecord, done: Promise<unknown>, pollMs = 250): Promise<void> {
+  const replied = () =>
+    respondingSteps.has(step) || step.events.some((e) => e.type === "text" || e.type === "tool") || (step.calls?.length ?? 0) > 0;
+  return new Promise<void>((resolve) => {
+    let finished = false;
+    const stop = () => {
+      finished = true;
+      resolve();
+    };
+    done.then(stop, stop);
+    const tick = () => {
+      if (finished) return;
+      if (replied()) return stop();
+      setTimeout(tick, pollMs).unref?.();
+    };
+    tick();
+  });
+}
+
+/**
+ * Steps of one agent launched together share a prompt prefix — tools and
+ * system prompt — and that is what the model's cache keeps. The cache is
+ * written by the first request that carries a prefix and readable only
+ * once that response has begun, so N copies started at once all write it
+ * and none reads: a fan-out of twenty paid twenty cold prefixes. The gate
+ * lets the first instance of each agent go alone and holds its siblings
+ * until its first response has begun (or it ended); then they all start
+ * and read what it wrote — Claude Code holds a workflow's fan-out the same
+ * way. Not a fixed delay: a sandbox takes seconds to start before its
+ * first model call, so a timer from launch would release the siblings
+ * before there was anything to read. Keyed by agent and model, since a
+ * cache is per model.
+ */
+export function warmGate(launching: StepRecord[], pollMs = 250) {
+  const key = (s: StepRecord) => `${s.agent}\u0000${s.model ?? ""}`;
+  const counts = new Map<string, number>();
+  for (const s of launching) counts.set(key(s), (counts.get(key(s)) ?? 0) + 1);
+  const leads = new Map<string, { opened: Promise<void>; open: () => void }>();
+  const isLead = new WeakSet<StepRecord>();
+  return {
+    /** Claim the step's place — synchronously, before anything awaits, or
+     *  the copies that reach their first await together would all find no
+     *  lead and all go (a `parallel:` pool's acquire was exactly that).
+     *  The first of its agent leads and gets null; a later one gets the
+     *  lead's gate to await before it starts; a lone step gets null too. */
+    claim(step: StepRecord): Promise<void> | null {
+      const k = key(step);
+      if ((counts.get(k) ?? 0) < 2) return null;
+      const lead = leads.get(k);
+      if (lead) return lead.opened;
+      let open!: () => void;
+      const opened = new Promise<void>((r) => (open = r));
+      leads.set(k, { opened, open });
+      isLead.add(step);
+      return null;
+    },
+    /** A lead that will not run after all (the run was stopped while it
+     *  waited for a pool slot) still opens its gate — or its siblings,
+     *  which also wake to the stop, would wait on it forever. */
+    release(step: StepRecord): void {
+      if (isLead.has(step)) leads.get(key(step))!.open();
+    },
+    /** Run the step; a lead opens its agent's gate on its first reply (or
+     *  its end), whatever else happens to it. */
+    async run(step: StepRecord, launch: () => Promise<void>): Promise<void> {
+      if (!isLead.has(step)) return launch();
+      const { open } = leads.get(key(step))!;
+      const done = launch();
+      try {
+        await untilFirstReply(step, done, pollMs);
+      } finally {
+        open();
+      }
+      await done;
+    },
+  };
+}
+
+export interface DiscoveredSkill {
+  name: string;
+  description: string;
+  /** Tags that must be present on the run for this skill to load. A skill
+   *  with none always loads. Mirrors "apply when this check failed". */
+  when: string[];
+  /** Path to SKILL.md (or the flat .md), relative to the agent directory. */
+  path: string;
+  /** Skill folder relative to the agent directory, or null for flat skills. */
+  dir: string | null;
+  hasScripts: boolean;
+  /** The rest of the Agent Skills layout: references/ and assets/. */
+  hasReferences: boolean;
+  hasAssets: boolean;
+}
+
+const toTags = (v: unknown): string[] =>
+  Array.isArray(v) ? v.map(String) : typeof v === "string" && v.trim() ? [v.trim()] : [];
+
+// gray-matter throws on invalid YAML. Skills authored for another client
+// sometimes ship YAML that that client's parser happened to accept — most
+// often an unquoted value containing a colon (`description: Use when: ...`).
+// The Agent Skills client guide recommends quoting such values and retrying
+// rather than dropping the skill, so a cross-client skill still loads here.
+function safeMatter(raw: string): { data: Record<string, unknown> } {
+  // gray-matter caches a *failed* parse as a hollow success; ./matter.ts
+  // parses every call, so the strict read throws every time and the lenient
+  // one (shared with check, which warns about it) fires every time.
+  return { data: parseLenient(raw).data };
+}
+
+// Both layouts: <root>/<name>/SKILL.md (Agent Skills standard) and the flat
+// <root>/<name>.md convenience form. `subdir` is the skills root under the
+// scanned directory — "skills" (foldrun-native) or ".agents/skills" (the
+// cross-client convention other skills-compatible tools read and write).
+export function discoverSkills(agentDir: string, subdir = "skills"): DiscoveredSkill[] {
+  const skillsDir = path.join(agentDir, subdir);
+  if (!fs.existsSync(skillsDir)) return [];
+  const out: DiscoveredSkill[] = [];
+
+  for (const entry of fs.readdirSync(skillsDir).sort()) {
+    const full = path.join(skillsDir, entry);
+    const stat = fs.statSync(full);
+
+    if (stat.isDirectory()) {
+      const skillMd = path.join(full, "SKILL.md");
+      if (!fs.existsSync(skillMd)) continue;
+      const { data } = safeMatter(fs.readFileSync(skillMd, "utf8"));
+      const description = typeof data.description === "string" ? data.description.trim() : "";
+      // The spec makes description essential — it is the only thing the model
+      // sees before activating the skill. Without one there is nothing to
+      // disclose, so the skill is skipped rather than offered blind. `check`
+      // reports it; here it is simply not loaded.
+      if (!description) continue;
+      out.push({
+        name: typeof data.name === "string" && data.name ? data.name : entry,
+        description,
+        when: toTags(data.when),
+        path: `${subdir}/${entry}/SKILL.md`,
+        dir: `${subdir}/${entry}`,
+        hasScripts: fs.existsSync(path.join(full, "scripts")),
+        hasReferences: fs.existsSync(path.join(full, "references")),
+        hasAssets: fs.existsSync(path.join(full, "assets")),
+      });
+    } else if (entry.endsWith(".md")) {
+      const { data } = safeMatter(fs.readFileSync(full, "utf8"));
+      const description = typeof data.description === "string" ? data.description.trim() : "";
+      if (!description) continue;
+      out.push({
+        name: typeof data.name === "string" && data.name ? data.name : entry.replace(/\.md$/, ""),
+        description,
+        when: toTags(data.when),
+        path: `${subdir}/${entry}`,
+        dir: null,
+        hasScripts: false,
+        hasReferences: false,
+        hasAssets: false,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * AGENTS.md, at both scopes it can live at.
+ *
+ * `AGENTS.md` is the Linux Foundation name; `project.md` is still read so
+ * nothing written before the rename breaks.
+ *
+ * Returns null rather than throwing on unparseable YAML: a broken shared file
+ * must not take down every agent under it.
+ */
+/**
+ * AGENTS.md without the block a coding tool reads.
+ *
+ * AGENTS.md is two things in a foldrun folder: the account's (or
+ * workspace's) own context, which every running agent is given, and — the
+ * convention Next.js set — the file a coding agent (Claude Code, Cursor,
+ * Codex) reads before it edits the folder. The CLI writes a short managed
+ * block for the second reader between these markers; it is about editing
+ * the files, not about doing the work, so no running agent is shown it.
+ */
+export const AGENT_RULES_START = "<!-- BEGIN:foldrun-agent-rules -->";
+export const AGENT_RULES_END = "<!-- END:foldrun-agent-rules -->";
+export function withoutAgentRules(body: string): string {
+  let out = body;
+  for (;;) {
+    const start = out.indexOf(AGENT_RULES_START);
+    if (start === -1) return out;
+    const end = out.indexOf(AGENT_RULES_END, start);
+    if (end === -1) return out;
+    out = out.slice(0, start) + out.slice(end + AGENT_RULES_END.length);
+  }
+}
+
+export function readAgentsMd(dir: string): { data: Record<string, unknown>; body: string } | null {
+  // Convert a pre-rename `mdagent_version:` before parsing. One name in the
+  // code, one on disk — the reader no longer knows two spellings, so a file
+  // written before the rename is migrated here rather than tolerated forever.
+  adoptLegacyVersionKey(dir);
+  for (const name of ["AGENTS.md", "project.md"]) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file)) continue;
+    try {
+      const parsed = configMatter(fs.readFileSync(file, "utf8"));
+      return { data: parsed.data as Record<string, unknown>, body: withoutAgentRules(parsed.content).trim() };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+const workspaceRootOf = (agentDir: string) => path.join(agentDir, "..", "..");
+
+/**
+ * Configuration from AGENTS.md, nearest-wins: the workspace's overrides the
+ * account's, key by key.
+ *
+ * Config overrides and prose accumulates — see sharedInstructions. A workspace
+ * naming its own `provider:` means *instead of* the account's; a workspace
+ * writing instructions means *as well as*, because an account rule nobody can
+ * silently drop is the point of having one.
+ */
+/** An agent's own `runtime:` block, else its workspace's (AGENTS.md, the
+ *  Linux Foundation standard name; project.md stays accepted so nothing
+ *  that already exists breaks). */
+function ownRuntime(front: Record<string, unknown>, agentDir: string, tenant: string): RuntimeSpec | null {
+  return parseRuntime(front.runtime) ?? parseRuntime(workspaceFrontmatter(agentDir, tenant).runtime);
+}
+
+/** What one granted script tool's program needs. */
+function toolRuntime(def: ToolDef): RuntimeSpec | null {
+  return def.kind === "script" ? parseRuntime((def.spec as { runtime?: unknown }).runtime) : null;
+}
+
+/**
+ * The runtime one agent's steps are built with: its own declaration (else its
+ * workspace's), merged with every script tool it grants. The runner builds
+ * exactly this for a step; the platform builds it ahead of time when the
+ * workspace is deployed, so a package that will not install is reported at
+ * deploy and a scheduled step finds its environment ready. One function, so
+ * the two can never disagree about what an agent needs.
+ */
+export function agentRuntimeSpec(tenant: string, workspace: string, agentDir: string): RuntimeSpec | null {
+  const file = path.join(agentDir, "agent.md");
+  if (!fs.existsSync(file)) return null;
+  const front = safeMatter(fs.readFileSync(file, "utf8")).data;
+  const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
+  const tools = ownToolNames(front)
+    .map((name) => available[name])
+    .filter((def): def is ToolDef => Boolean(def))
+    .map(toolRuntime);
+  return mergeRuntimes(ownRuntime(front, agentDir, tenant), ...tools);
+}
+
+/** Every distinct runtime a workspace's agents need, with who needs it. */
+export function workspaceRuntimePlan(
+  tenant: string,
+  workspace: string,
+): { fingerprint: string; spec: RuntimeSpec; agents: string[] }[] {
+  const byFp = new Map<string, { fingerprint: string; spec: RuntimeSpec; agents: string[] }>();
+  const agentsRoot = path.join(workspaceDir(tenant, workspace), "agents");
+  if (!fs.existsSync(agentsRoot)) return [];
+  for (const name of fs.readdirSync(agentsRoot).sort()) {
+    const spec = agentRuntimeSpec(tenant, workspace, path.join(agentsRoot, name));
+    if (!spec) continue;
+    const fp = fingerprint(spec);
+    const entry = byFp.get(fp) ?? { fingerprint: fp, spec, agents: [] };
+    entry.agents.push(name);
+    byFp.set(fp, entry);
+  }
+  return [...byFp.values()];
+}
+
+/** The most tool content one step records (FOL-54 step 4): about 60 calls
+ *  at the per-part cap; past it, metadata only. */
+const STEP_CAPTURE_LIMIT = 4_000_000;
+
+function workspaceFrontmatter(agentDir: string, tenant: string): Record<string, unknown> {
+  return {
+    ...(readAgentsMd(accountDir(tenant))?.data ?? {}),
+    ...(readAgentsMd(workspaceRootOf(agentDir))?.data ?? {}),
+  };
+}
+
+/**
+ * The calendar a set of frontmatter asks for, with no cascade around it —
+ * one merged record in, one zone out. The full cascade lives in
+ * `agentClock` below and in clock.ts; this is what the account-level parts
+ * of the platform (a wallet's month, a budget window) call.
+ */
+export function resolveTimezone(front: Record<string, unknown>): string {
+  return resolveClock([{ level: "workspace", value: front.timezone }]).timezone;
+}
+
+/**
+ * The clock this step works to: agent, then flow, then workspace, then
+ * account, then FOLDRUN_TIMEZONE, then UTC. Nearest wins, and a value that
+ * is not a zone falls through to the next level with a line to say so —
+ * see clock.ts for why this exists at all.
+ */
+export function agentClock(
+  agentDir: string,
+  tenant: string,
+  agentFront: Record<string, unknown>,
+  flowTimezone?: string | null,
+): ClockChoice {
+  return resolveClock([
+    { level: "agent", value: agentFront.timezone },
+    { level: "flow", value: flowTimezone },
+    { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.timezone },
+    { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.timezone },
+  ]);
+}
+
+/**
+ * The language this step works in: agent, then workspace, then account, then
+ * FOLDRUN_LANGUAGE, then English. The flow level is not read yet — a flow's
+ * timezone: travels through three signatures to get here, and this will
+ * take the same road when a flow needs it.
+ */
+export function agentLanguage(agentDir: string, tenant: string, agentFront: Record<string, unknown>): LanguageChoice {
+  return resolveLanguage([
+    { level: "agent", value: agentFront.language },
+    { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.language },
+    { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.language },
+  ]);
+}
+
+/**
+ * The country this step works for, on the same road as the language, then
+ * FOLDRUN_REGION, then whatever the language tag carried (`en-AU` says AU).
+ * Everything a country changes — currency, units, calendar, weekend, text
+ * direction — is derived from it in locale.ts; the three overrides
+ * (`currency:`, `calendar:`, `units:`) are read at the nearest level that
+ * wrote them.
+ */
+export function agentRegion(agentDir: string, tenant: string, agentFront: Record<string, unknown>, languageTag: string): RegionChoice {
+  return resolveRegion([
+    { level: "agent", value: agentFront.region },
+    { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.region },
+    { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.region },
+  ], languageTag);
+}
+
+export function agentLocaleOverrides(agentDir: string, tenant: string, agentFront: Record<string, unknown>): { currency?: unknown; calendar?: unknown; units?: unknown } {
+  const levels = [agentFront, readAgentsMd(workspaceRootOf(agentDir))?.data ?? {}, readAgentsMd(accountDir(tenant))?.data ?? {}];
+  const pick = (k: string) => levels.map((l) => l[k]).find((v) => v !== undefined && v !== null && v !== "");
+  return { currency: pick("currency"), calendar: pick("calendar"), units: pick("units") };
+}
+
+/**
+ * The prose from AGENTS.md, outermost first.
+ *
+ * This was written by every scaffold, shown in the dashboard, described in the
+ * template as "context every agent here shares" — and never read. Only the
+ * frontmatter was, so the instructions people actually wrote reached no model.
+ */
+/**
+ * The sub-agents a step may delegate to (`subagents:`), as the SDK will get
+ * them: each resolved through agentContext exactly as its own step would be
+ * (grants only — no runtime; it runs inside its parent's), then cut to what
+ * the parent holds. Problems are lines on the step, never a failed step.
+ */
+export function buildSubagentSpecs(o: {
+  names: unknown;
+  self: string;
+  workspaceRoot: string;
+  tenant: string;
+  tags?: string[];
+  runId?: string;
+  flowTimezone?: string | null;
+  parentAllowed: string[];
+  push: (type: "info" | "error", text: string) => void;
+}): SubagentSpec[] {
+  const out: SubagentSpec[] = [];
+  const { found, missing } = gatherSubagents(o.workspaceRoot, o.names);
+  for (const m of missing) o.push("error", `subagents: "${m}" is not an agent in this workspace — not delegated to`);
+  for (const sub of found) {
+    if (sub.name === o.self) {
+      o.push("error", `subagents: "${sub.name}" is this agent itself — an agent does not delegate to itself`);
+      continue;
+    }
+    try {
+      const tags = o.tags ?? [];
+      const own = agentContext(sub.dir, o.tenant, tags, { runId: o.runId, agent: sub.name }, o.flowTimezone, true);
+      // sandbox: own — delegated to as a step of its own, not inside this
+      // one (buildDelegateSpecs).
+      if (ownSandbox(own.front)) continue;
+      const description = typeof own.front.description === "string" ? own.front.description.trim() : "";
+      if (!description) {
+        o.push("error", `subagents: "${sub.name}" has no description — the model picks a sub-agent by it; not delegated to`);
+        continue;
+      }
+      const tools = subagentTools(own.allowed, o.parentAllowed);
+      if (!tools.length) {
+        o.push("error", `subagents: "${sub.name}" holds none of its tools inside this step — it can only answer from its prompt (use agents: for that)`);
+      }
+      const body = withoutAgentRules(matter(fs.readFileSync(path.join(sub.dir, "agent.md"), "utf8")).content);
+      out.push({
+        name: sub.name,
+        description,
+        prompt: subagentPrompt({
+          body: resolveDocLinks(body, o.workspaceRoot),
+          name: sub.name,
+          parent: o.self,
+          workspace: path.basename(o.workspaceRoot),
+          shared: sharedInstructions(sub.dir, o.tenant),
+        }),
+        tools,
+        disallowedTools: refNames(own.front.disallowedTools),
+        model: own.front.model ? resolveModel(own.front.model) : "inherit",
+      });
+    } catch (err) {
+      o.push("error", `subagents: "${sub.name}" could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The `sandbox: own` sub-agents a step may hand jobs to: a name and a
+ * description each, all the parent's sandbox needs. What they may hold is
+ * read from their own file when a job arrives — never cut to the parent's,
+ * and never seen by it. `canRun` is false where nothing can start their
+ * sandbox (a sub-agent's own step: depth one; a step outside a run).
+ */
+export function buildDelegateSpecs(o: {
+  names: unknown;
+  self: string;
+  workspaceRoot: string;
+  canRun: boolean;
+  push: (type: "info" | "error", text: string) => void;
+  /** Told, per offered sub-agent, whether a tool it holds acts outside the
+   *  workspace — a delegating step whose job may have sent something must
+   *  not be re-run as if it had only read (launchStep's retry policy). */
+  outward?: (name: string, outward: boolean) => void;
+  tenant?: string;
+  tags?: string[];
+}): DelegateSpec[] {
+  const out: DelegateSpec[] = [];
+  for (const sub of gatherSubagents(o.workspaceRoot, o.names).found) {
+    if (sub.name === o.self) continue; // buildSubagentSpecs says so
+    let front: Record<string, unknown>;
+    try {
+      front = matter(fs.readFileSync(path.join(sub.dir, "agent.md"), "utf8")).data as Record<string, unknown>;
+    } catch {
+      continue; // buildSubagentSpecs says so
+    }
+    if (!ownSandbox(front)) continue;
+    const description = typeof front.description === "string" ? front.description.trim() : "";
+    if (!description) {
+      o.push("error", `subagents: "${sub.name}" has no description — the model picks a sub-agent by it; not delegated to`);
+      continue;
+    }
+    if (!o.canRun) {
+      o.push("info", `subagents: "${sub.name}" runs in its own sandbox, which nothing here can start (a sub-agent cannot delegate again, and a step outside a run has no room for it) — not offered`);
+      continue;
+    }
+    if (o.outward) {
+      let acts = true; // unreadable is treated as able to act: the safe side
+      const tags = o.tags ?? [];
+      try {
+        acts = agentContext(sub.dir, o.tenant ?? "default", tags, { agent: sub.name }, null, true).outward;
+      } catch {
+        /* as above */
+      }
+      o.outward(sub.name, acts);
+    }
+    out.push({ name: sub.name, description });
+  }
+  return out;
+}
+
+export function sharedInstructions(agentDir: string, tenant: string): string | null {
+  const sections = [
+    ["Everyone in this account", readAgentsMd(accountDir(tenant))?.body],
+    ["Everyone in this workspace", readAgentsMd(workspaceRootOf(agentDir))?.body],
+  ].filter(([, body]) => body) as [string, string][];
+  if (!sections.length) return null;
+
+  return (
+    `# Shared context\n\nThis applies to you in addition to your own instructions ` +
+    `above. Where it is more specific than they are, it is not optional.\n\n` +
+    sections.map(([label, body]) => `## ${label}\n\n${body}`).join("\n\n")
+  );
+}
+
+/**
+ * Which of an agent's in-scope skills load for this run.
+ *
+ * Two independent gates: `skills:` in the agent's frontmatter is an allowlist
+ * (absent means everything in scope), and a skill's own `when:` names the run
+ * tags it is for (absent means every run).
+ *
+ * Note what an empty `tags` means — a skill with `when:` matches nothing, so
+ * an untagged run gets none of them. That is the intent, and it is also why
+ * failing to thread the run's tags this far made every `when:` skill
+ * permanently invisible instead of conditionally loaded.
+ */
+export function applicableSkills<T extends { name: string; when: string[] }>(
+  skills: T[],
+  only: string[],
+  tags: string[],
+): T[] {
+  return skills
+    .filter((s) => only.length === 0 || only.includes(s.name))
+    .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
+}
+
+/**
+ * [[name]] as a reference to a document or file — the Obsidian instinct,
+ * honoured where it is safe. A prompt is text the model acts on, and a
+ * model cannot open "[[sources-of-conveyancers]]"; it can open
+ * `../../knowledge/sources-of-conveyancers.md`. So links resolve to real
+ * agent-relative paths BEFORE the prompt is built, matching by filename or
+ * OKF title, hyphen/underscore/case-blind. Anything unmatched — agent
+ * names, flow links, prose in brackets — passes through untouched: this is
+ * sugar over paths, never a gate in front of them.
+ */
+/**
+ * Whether an evaluator's reply actually carries its `until:` marker.
+ *
+ * Not a substring test. A reviewer that writes "APPROVED once the tribunal
+ * sentence is corrected" contains the word, and a substring match reads that
+ * conditional as a pass — the loop ends, the correction is never made, and the
+ * step after it inherits the problem the loop existed to catch. That happened:
+ * a factual error rode a conditional approval past the gate.
+ *
+ * So the marker has to stand alone on its own line, which is a thing a model
+ * does deliberately and cannot do by accident mid-sentence. Trailing
+ * punctuation is allowed ("APPROVED." is still a decision), and the line may
+ * sit anywhere in the reply, so an approval followed by notes still passes —
+ * the point is that the word is a switch, not a clause.
+ */
+export function saysUntilMarker(result: string | null, until: string): boolean {
+  const marker = until.trim().toLowerCase();
+  if (!marker) return true;
+  return (result ?? "")
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        // Strip markdown emphasis and punctuation from BOTH ends: "**APPROVED.**"
+        // is a decision written by someone using bold, not a sentence.
+        // trimChars, not a `[…]+$` regex: that one is quadratic on a
+        // line of tabs, and this is a line an agent wrote.
+        trimChars(trimChars(line.trim(), "#>-*_`"), ".!:,*_`").trim()
+          .toLowerCase() === marker,
+    );
+}
+
+export function resolveDocLinks(text: string, workspaceRoot: string): string {
+  if (!text.includes("[[")) return text;
+  const map = new Map<string, string>();
+  const norm = (v: string) =>
+    v.toLowerCase().replace(/\.md$/, "").replace(/\/+$/, "").replace(/[^a-z0-9/]+/g, "-");
+
+  // Folders resolve too: a reference to "the file store" is as real as a
+  // reference to one file in it, and an agent told to read whatever its
+  // instruction names needs to say WHERE without naming a file. Added
+  // first, so a document that happens to share a folder's name still wins.
+  for (const dir of [STORAGE_DIR, "state", "knowledge", "memory", "skills", "outputs"]) {
+    // storage/ and state/ by the one spelling that works in every tool,
+    // the shell included; the rest as they always were.
+    if (fs.existsSync(path.join(workspaceRoot, dir))) map.set(norm(dir), dir === STORAGE_DIR || dir === "state" ? `workspace/${dir}/` : `../../${dir}/`);
+  }
+  for (const kind of ["knowledge", "memory"] as const) {
+    const dir = path.join(workspaceRoot, kind);
+    if (!fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { recursive: true }).map(String)) {
+      if (!entry.endsWith(".md")) continue;
+      const rel = `../../${kind}/${entry.split(path.sep).join("/")}`;
+      map.set(norm(entry), rel);
+      map.set(norm(`${kind}/${entry}`), rel);
+      try {
+        const data = matter(fs.readFileSync(path.join(dir, entry), "utf8")).data as Record<string, unknown>;
+        // `title:` is OKF v0.2's word; `name:` is the older spelling still
+        // read, never written. A link should match what the file says it
+        // is, in either era's vocabulary.
+        for (const key of ["title", "name"] as const) {
+          const v = data?.[key];
+          if (typeof v === "string" && v) map.set(norm(v), rel);
+        }
+      } catch {
+        // unparseable frontmatter still resolves by filename
+      }
+    }
+  }
+  // state/ — the cursors, snapshots and histories a scheduled desk reads from
+  // itself every run. Individual files here were not linkable for a long time
+  // while the folder was, so the one directory a recurring flow reads MOST was
+  // the one that could only be reached by typing `../../state/x.md` by hand.
+  // Indexed by path like storage/ rather than by frontmatter like knowledge/:
+  // these are data files, often .json or .csv, and many carry no frontmatter.
+  const stateDir = path.join(workspaceRoot, "state");
+  if (fs.existsSync(stateDir)) {
+    for (const entry of fs.readdirSync(stateDir, { recursive: true }).map(String)) {
+      try {
+        if (!fs.statSync(path.join(stateDir, entry)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const fwd = entry.split(path.sep).join("/");
+      const rel = `workspace/state/${fwd}`;
+      map.set(norm(`state/${fwd}`), rel);
+      map.set(norm(fwd), rel);
+    }
+  }
+  try {
+    // The hosted store's index lives at <tenant>/storage/<workspace>/ — beside
+    // the workspaces, not inside one. workspaceRoot is <tenant>/…/<ws>, so
+    // up two and across. Single-workspace installs have no index and fall
+    // through to the plain-directory walk below.
+    const index = JSON.parse(
+      fs.readFileSync(
+        path.join(workspaceRoot, "..", "..", STORAGE_DIR, path.basename(workspaceRoot), "index.json"),
+        "utf8",
+      ),
+    ) as { files?: { path: string }[] };
+    for (const f of index.files ?? []) map.set(norm(`${STORAGE_DIR}/${f.path}`), `workspace/${STORAGE_DIR}/${f.path}`);
+  } catch {
+    // no file store index is normal
+  }
+  // Plain files on disk under storage/ too — local installs write there directly.
+  const filesDir = path.join(workspaceRoot, STORAGE_DIR);
+  if (fs.existsSync(filesDir)) {
+    for (const entry of fs.readdirSync(filesDir, { recursive: true }).map(String)) {
+      try {
+        if (!fs.statSync(path.join(filesDir, entry)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      const fwd = entry.split(path.sep).join("/");
+      if (fwd.startsWith(".store/")) continue;
+      map.set(norm(`${STORAGE_DIR}/${fwd}`), `workspace/${STORAGE_DIR}/${fwd}`);
+      map.set(norm(fwd), `workspace/${STORAGE_DIR}/${fwd}`);
+    }
+  }
+  // `[` excluded from the name: with it allowed, a run of `[[` makes the
+  // engine re-scan to the end from every opening — quadratic on a result
+  // an agent wrote.
+  return text.replace(/\[\[([^\]\[\n]+)\]\]/g, (whole, name: string) => {
+    const hit = map.get(norm(name.trim()));
+    return hit ? `\`${hit}\`` : whole;
+  });
+}
+
+export function agentContext(
+  agentDir: string,
+  tenant: string,
+  tags: string[] = [],
+  /** Who is running, so scripts can stamp what they write with its provenance. */
+  identity: { runId?: string; agent?: string } = {},
+  /** The flow's own `timezone:`, when this step belongs to one. Between the
+   *  agent's frontmatter and the workspace's AGENTS.md in the cascade. */
+  flowTimezone?: string | null,
+  /** Only what the agent is granted — no runtime prepared. For a sub-agent,
+   *  whose tools are cut to its parent's and run in the parent's runtime. */
+  grantsOnly = false,
+) {
+  // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
+  // workspace a secret should resolve against is two levels up.
+  const workspace = path.basename(path.resolve(agentDir, "..", ".."));
+  const { data: front, content: body } = configMatter(
+    fs.readFileSync(path.join(agentDir, "agent.md"), "utf8"),
+  );
+  // The prompt's sections, by name and by how often they change. Added in
+  // the order they are computed; assembled stable first, so the model's
+  // cache keeps the agent's half across steps and runs (prompt-layers.ts).
+  const parts = new PromptLayers();
+  parts.add("persona", resolveDocLinks(body.trim(), path.resolve(agentDir, "..", "..")));
+
+  // Where the agent is standing. Every path below this line is relative to the
+  // agent's own directory, and a run showed why that has to be said rather
+  // than implied: told to read `../../knowledge/index.md`, the model asked for
+  // `/knowledge/index.md` twice before working it out. Two denials and a turn,
+  // for want of one sentence.
+  // The language this step works in, resolved before the prompt is built:
+  // its sentence goes in here, the env the tools read is set below, and the
+  // step prints any level that wrote something unreadable.
+  const language = agentLanguage(agentDir, tenant, front);
+  const region = agentRegion(agentDir, tenant, front, language.language);
+  // The clock is resolved further down for the env; the locale needs its
+  // zone now so "today" in a Jalali or Hijri calendar is today where the
+  // step works, not in UTC.
+  const localeZone = agentClock(agentDir, tenant, front, flowTimezone).timezone;
+  const locale: LocaleFacts = deriveLocale(language.language, region.region, agentLocaleOverrides(agentDir, tenant, front), localeZone);
+  // Said only when someone set it: an agent that never mentions a language
+  // or a region reads exactly the prompt it always did.
+  const languageSet = language.from !== "default" && language.from !== "env";
+  const regionSet = region.from !== "none" && region.from !== "env" && region.from !== "language";
+  if (languageSet || regionSet) {
+    parts.add("locale",
+      `# Locale\n\n${localeProse(locale, languageName(language.language), regionName(region.region))} ` +
+        `Write in ${languageName(language.language)} unless the step you are given says otherwise; ` +
+        `use these currency, units and calendar conventions in anything you produce. ` +
+        `Your tools already know: a search asks in it and for this country, the browser reports it, a fetch requests it.`,
+    );
+  }
+  parts.add("where",
+    `# Where you are\n\n` +
+      `Your working directory is \`agents/${path.basename(agentDir)}/\` inside the ` +
+      `\`${workspace}\` workspace. Every path in this prompt is relative to it — ` +
+      `\`outputs/\` is yours, and \`workspace/\` is the workspace root, in every tool ` +
+      `and in the shell: the shared file store is \`workspace/storage/\`, what runs ` +
+      `carry forward is \`workspace/state/\`, its knowledge \`workspace/knowledge/\`. ` +
+      `Absolute paths are outside the workspace and will be refused.\n\n` +
+      // A flow's whole point is that a later step works on what an earlier one
+      // produced, and each agent writes to its own outputs/. A run showed what
+      // omitting this costs: the checker looked in its own empty outputs/ and
+      // reported the draft missing — reviewing nothing, and saying so
+      // confidently — while the publisher only found it by guessing at a glob.
+      `Each agent writes to its own \`outputs/\`, so a file an earlier step produced is ` +
+      `at \`../<that-agent>/outputs/\`, not in yours. If a previous step says it wrote ` +
+      `something, look there before concluding it does not exist.\n\n` +
+      // The distinction agents kept getting wrong, said where they can read
+      // it: outputs/ is working text between steps and never leaves the
+      // source tree; storage/ is the store the dashboard's Storage page lists.
+      // A 100-row CSV written to outputs/ is delivered nowhere — a person
+      // looking for it on the Storage page finds it empty and concludes the run
+      // produced nothing.
+      // The path here MUST be the one harvestFiles reads. It said
+      // `../../files/` after the rename, and nothing recovered from that:
+      // materializeFiles always creates `storage/` before the step, so
+      // adoptLegacyFilesDir's "move files/ to storage/" is a no-op by the time
+      // the run ends — a deliverable written where this text pointed was
+      // harvested from nowhere and silently never appeared.
+      `\`workspace/storage/\` is the workspace file store: anything you leave there is kept ` +
+      `after the run and shown on the Storage page for people to download. Write ` +
+      `deliverables people asked for — CSVs, reports, PDFs, images — to \`workspace/storage/\`; ` +
+      `use \`outputs/\` for working text the next step reads. ` +
+      // A Glob PATTERN that climbs (`../../storage/draft/*.md`) always answered
+      // "No files found", even when the file was there. On blog-desk that made
+      // every loop pass look like a first pass: the illustrator never saw the
+      // fact-check report, re-picked the cover, and 2 of 3 publish runs failed
+      // (run-munef2am-439a, 2026-09-30). checkPaths now splits such a pattern
+      // into Glob's `path` and the rest; the advice stays, as the plain form.
+      `To look for files there, open a known file with Read by its exact path, or ` +
+      `Glob with \`path: "workspace/storage/..."\` and a pattern like \`*.md\`.`,
+  );
+
+  // Shared context before anything derived — an account or workspace rule is
+  // background the rest of the prompt is read against, not an afterthought.
+  const sharedContext = sharedInstructions(agentDir, tenant);
+  if (sharedContext) parts.add("agents.md", sharedContext);
+
+  // Skills follow the open Agent Skills format (agentskills.io): a folder
+  // with SKILL.md, optionally bundling its own scripts/ and references/. The
+  // flat `skills/<name>.md` form is also accepted for small skills.
+  //
+  // Progressive disclosure, as the standard prescribes: only each skill's
+  // name and description go into context up front. The agent reads the full
+  // SKILL.md when a task actually calls for it — so an agent can carry many
+  // skills for a few tokens each.
+  // Own skills, then the workspace's, then the workspace library — nearest
+  // definition of a name wins, so a team default can be overridden locally.
+  const skills = skillsInScope(agentDir, tenant);
+
+  // A skill with `when:` only loads when the run carries a matching tag —
+  // so an agent with 119 skills costs 119 lines of context only when every
+  // one is genuinely relevant.
+  // `skills:` is Claude Code's field for naming which skills an agent gets.
+  // Absent, an agent inherits every skill in scope — knowledge cascades. Named,
+  // it's an allowlist, which is how you keep a focused agent focused.
+  const only: string[] = refNames(front.skills);
+  const applicable = applicableSkills(skills, only, tags);
+  const withheld = skills.length - applicable.length;
+
+  if (applicable.length) {
+    const lines = applicable.map((s) => {
+      // The rest of the Agent Skills layout, named so the agent knows to look
+      // rather than guessing that a skill folder holds only SKILL.md.
+      const bundles = [
+        s.hasScripts && `scripts in \`${s.dir}/scripts/\``,
+        s.hasReferences && `reference docs in \`${s.dir}/references/\``,
+        s.hasAssets && `assets in \`${s.dir}/assets/\``,
+      ].filter(Boolean);
+      return (
+        `- **${s.name}** — ${s.description || "(no description)"} ` +
+        `Full instructions: \`${s.path}\`` +
+        (bundles.length ? ` (also bundles ${bundles.join(", ")})` : "")
+      );
+    });
+    parts.add("skills",
+      `# Skills\n\nCapabilities available to you. Each line is a summary — when a task matches one, ` +
+        `read its file for the full instructions before proceeding:\n\n${lines.join("\n")}` +
+        (withheld ? `\n\n(${withheld} further skills exist but do not apply to this run.)` : ""),
+    );
+  }
+
+  // Memory: the index is loaded every run, and the agent is told how to add
+  // to it. Writing is only possible if it has the `files` tool.
+  const canWrite = refNames(front.tools).includes("files");
+  const memoryDir = path.join(agentDir, "memory");
+  const memoryIndex = buildMemoryIndex(memoryDir);
+  if (memoryIndex || canWrite) {
+    const howTo = canWrite
+      ? `\n\nTo remember something durable, write one fact per file to memory/<slug>.md with ` +
+        `frontmatter: type (e.g. Fact, Decision, Preference), name and description — these ` +
+        `bundles follow the Open Knowledge Format. The index above maintains itself — you do not ` +
+        `need to edit it. Read a memory file before relying on it, update an existing file ` +
+        `rather than duplicating it, and don't record what this workspace's files already say.`
+      : "";
+    const projectMem = workspaceMemoryIndex(tenant, workspace);
+    const shared = libraryMemoryIndex(tenant);
+    // Dynamic: agents write memory, so the index moves between runs.
+    parts.add("memory",
+      `# Memory — what you have learned\n\n${memoryIndex ? `Your own (files under memory/):\n\n${memoryIndex}` : "You have no memories of your own yet."}` +
+        (projectMem ? `\n\nShared across this workspace:\n\n${projectMem}` : "") +
+        (shared ? `\n\nShared across every workspace:\n\n${shared}` : "") +
+        howTo,
+      { dynamic: true },
+    );
+  }
+
+  // Knowledge — reference material the agent was given. Same three scopes and
+  // the same nearest-wins reading order as memory, but never written back:
+  // an agent that edits the price list it was handed has corrupted its own
+  // source of truth.
+  const ownKnowledge = knowledgeIndex(path.join(agentDir, "knowledge"), "knowledge/");
+  const projectKnowledge = workspaceKnowledgeIndex(tenant, workspace);
+  const sharedKnowledge = knowledgeIndex(libraryDir(tenant, "knowledge"), "../../../../library/knowledge/");
+  if (ownKnowledge || projectKnowledge || sharedKnowledge) {
+    const sections = [
+      ownKnowledge && `Your own (files under knowledge/):\n\n${ownKnowledge}`,
+      projectKnowledge && `Shared across this workspace:\n\n${projectKnowledge}`,
+      sharedKnowledge && `Shared across every workspace:\n\n${sharedKnowledge}`,
+    ].filter(Boolean);
+    parts.add("knowledge",
+      `# Knowledge — what you were given\n\nReference material. Open a file when a task depends ` +
+        `on it rather than guessing at its contents. This is read-only: it is maintained by ` +
+        `people, not by you — if you learn something new, write it to memory/ instead.\n\n` +
+        sections.join("\n\n"),
+    );
+  }
+  // Scripts an agent can run with bash: its own scripts/, plus the
+  // workspace-level shared scripts/ exposed at shared/ in its working dir.
+  const listDir = (dir: string, prefix: string) => {
+    if (!fs.existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { recursive: true })) {
+      const rel = String(entry);
+      if (fs.statSync(path.join(dir, rel)).isFile()) out.push(`- ${prefix}${rel}`);
+    }
+    return out.sort();
+  };
+
+  const own = listDir(path.join(agentDir, "scripts"), "scripts/");
+  const shared = listDir(path.join(agentDir, "..", "..", "scripts"), "workspace/scripts/");
+  // The library's path depends on where this run executes: isolated runs see
+  // it at /library, host runs at its real location. Printing the host path
+  // into a container's prompt handed the model files it could never open.
+  const libraryScriptsRoot = isolatedRun() ? "/library/scripts" : libraryDir(tenant, "scripts");
+  const global = listDir(libraryDir(tenant, "scripts"), `${libraryScriptsRoot}/`);
+
+  if (own.length || shared.length || global.length) {
+    const sections = [
+      own.length ? `Your own scripts:\n${own.join("\n")}` : null,
+      shared.length ? `Shared across this workspace:\n${shared.join("\n")}` : null,
+      global.length ? `From the account library (read-only):\n${global.join("\n")}` : null,
+    ].filter(Boolean);
+    parts.add("scripts",
+      `# Scripts\n\nTooling you can run with bash from your working directory:\n\n${sections.join("\n\n")}\n\n` +
+        `Read a script before running it if you are unsure what it does. Credentials your ` +
+        `scripts need are already in the environment as the secrets listed below.`,
+    );
+  }
+
+  // State — data a run carries to the next one. It was a directory in the
+  // workspace list, preserved across deploys, and nothing else: never named to
+  // an agent, never loaded, never written. A promise with no implementation.
+  //
+  // Listed rather than inlined, for the same reason knowledge and memory are:
+  // an agent that needs a cursor opens it, and one that doesn't shouldn't pay
+  // for it. The difference is that state is small enough that inlining would
+  // usually be free — that is a threshold worth adding once there is a real
+  // file to size it against, not before.
+  const state = listDir(path.join(agentDir, "..", "..", "state"), "workspace/state/");
+  if (state.length) {
+    // Dynamic: runs add and remove state files.
+    parts.add("state",
+      `# State — what you carry between runs\n\n` +
+        `What this workspace keeps across runs: a count, a cursor, where you got to. ` +
+        `Read and write these directly, and update them before you finish so the next ` +
+        `run starts where you left off.\n\n${state.join("\n")}\n\n` +
+        `Keep a file in the format it is already in, and write markdown for anything new. ` +
+        `A count reads as well in a sentence as in JSON, and a person edits these in the ` +
+        `same editor as everything else — data formats are allowed here, not preferred.\n\n` +
+        `This is not memory. A fact you learned goes in memory/, where it is indexed and ` +
+        `its provenance recorded — state is the bookmark, not the lesson.`,
+      { dynamic: true },
+    );
+  }
+
+  // APIs — the agent's own definitions, plus workspace tools it granted by
+  // name. Library tools are defined once and reused.
+  const apis = parseApis(front.apis);
+  // Scripts declared inline on the agent, plus any script-type tool it
+  // granted — one list grants both kinds.
+  const scriptSpecs = parseScripts(front.scripts);
+  // Workspace tools shadow account tools of the same name (nearest wins).
+  const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
+  // Resolved in one place (tool-names.ts) so nothing downstream can disagree
+  // about which names are the author's.
+  const requested = ownToolNames(front);
+  const legacyUse = legacyUseNames(front);
+  const missingTools: string[] = [];
+  // MCP servers an agent connects to. `mcpServers:` is Claude Code's spelling
+  // for the inline form; a `type: mcp` tool file is the shared form. Both end
+  // up here, and both reach the model as ordinary MCP tools.
+  const mcpServers: Record<string, McpServerConfig> = {};
+  const mcpNames: string[] = [];
+
+  // What the granted tools' programs need — merged into this step's runtime
+  // below. The tool is the unit of code, so its dependencies live in tool.md
+  // and travel with it; the agent should not have to repeat them.
+  const toolRuntimes: RuntimeSpec[] = [];
+  // The secrets a granted script tool's file lists (`secrets: [RESEND_API_KEY,
+  // EMAIL_FROM]`): granting the tool grants them, the way an API tool's
+  // referenced credentials always travelled with it. Before, only the
+  // agent's own `secrets:` counted, so an agent that granted desk_email and
+  // declared nothing failed with "RESEND_API_KEY is not set" (a customer desk,
+  // 1 Oct). `proxied` / `materialised` say how, not what, and add nothing.
+  const toolSecrets: string[] = [];
+  // Does any granted tool act outside the workspace (`outward: true`)? The
+  // retry policy reads it: see launchStep.
+  let outward = false;
+  const grantOwnTool = (name: string) => {
+    const def = available[name];
+    if (!def) {
+      missingTools.push(name);
+      return;
+    }
+    if (def.outward) outward = true;
+    if (def.kind === "http") apis.push(def.spec);
+    else if (def.kind === "script") {
+      scriptSpecs.push(...parseScripts([def.spec]));
+      const listed = (def.spec as { secrets?: unknown }).secrets;
+      if (Array.isArray(listed)) toolSecrets.push(...listed.map(String).filter((n) => /^[A-Z][A-Z0-9_]*$/.test(n)));
+      const rt = toolRuntime(def);
+      if (rt) toolRuntimes.push(rt);
+    }
+    else {
+      mcpServers[def.name] = mcpConfig(def.spec, tenant, workspace);
+      mcpNames.push(def.name);
+    }
+  };
+
+  for (const name of requested) grantOwnTool(name);
+
+  // Inline servers, Claude Code's field name and shape.
+  if (front.mcpServers && typeof front.mcpServers === "object") {
+    for (const [name, raw] of Object.entries(front.mcpServers as Record<string, unknown>)) {
+      const def = parseToolDef({ ...(raw as object), type: "mcp" }, name);
+      if (def?.kind === "mcp") {
+        mcpServers[name] = mcpConfig(def.spec, tenant, workspace);
+        mcpNames.push(name);
+      }
+    }
+  }
+  // An `openapi:` document turns one generic HTTP tool into typed ones, one
+  // per operation. Resolved here, host-side, so the operations cross into a
+  // container as values like the rest of the spec.
+  const attached = attachOperations(apis, tenant, path.resolve(agentDir, "..", ".."));
+  const apiWarnings = attached.warnings;
+  apis.splice(0, apis.length, ...attached.specs);
+  // A long tool result is kept in a file only for an agent that can read it
+  // back (tool-output.ts). The grants are settled further down, after the
+  // tools are built, so the tools ask when they are called.
+  let readsFiles = false;
+  const keepIn = { dir: agentDir, readable: () => readsFiles };
+  const apiTools = buildApiTools(tenant, apis, workspace, undefined, keepIn);
+  if (apiTools.promptLines.length) {
+    parts.add("apis", `# APIs you can call\n\n${apiTools.promptLines.join("\n")}`);
+  }
+
+  // Secrets an agent declared become env vars for its scripts and bash.
+  //
+  // Plus the credentials its API tools reference. An agent that opted into
+  // `tools: [email]` has said nothing about RESEND_API_KEY and should not have
+  // to: the whole point of a tool definition is that the capability travels
+  // with its credential and the agent never learns the name. The in-process
+  // path always worked this way — buildApiTools resolves what the specs
+  // reference — so without this the isolated path substituted nothing and
+  // sent `Bearer ${RESEND_API_KEY}` literally, which the provider answers
+  // with a 4xx the agent then reports as "the credential is missing".
+  //
+  // Declared-and-absent is still an error; referenced-and-absent is the API
+  // tool's own missingSecrets, reported where the tool is described.
+  // `web: {search: …, fetch: …}` name who answers; resolved here, early,
+  // because three later things hang off the answer — the secret the step
+  // must hold, the env the tool reads, and the egress grant for the host.
+  // `web.search` carries the account engine's settings (engines, categories,
+  // safesearch, …) beside the provider name, read off first the way
+  // browse's are, so the provider resolver sees only its own part.
+  const web = webConfig(front as Record<string, unknown>, workspaceFrontmatter(agentDir, tenant));
+  const searchRead = readSearchSettings(web.raw.search);
+  const searchChoice = resolveSearch(searchRead.rest, "search");
+  if (searchRead.error) searchChoice.error = searchChoice.error ?? searchRead.error;
+  const fetchChoice = resolveSearch(web.raw.fetch, "fetch");
+  // A remote browser's key is materialised, not proxied: CDP is a websocket
+  // and the wrapper opens the session itself, the way it seeds a cookie.
+  // `web.browse` carries two things in one key: how the browser presents
+  // itself (engine, user agent, device, locale, timezone) and, optionally,
+  // which remote vendor renders the page. Settings are read off first so the
+  // vendor resolver sees only the vendor part, and a block of settings alone
+  // means the account's own browser with those defaults. Nearest wins: the
+  // agent's block, else the workspace's, else the account's — the shape
+  // `provider:` already uses.
+  const browseRead = readBrowseSettings(web.raw.browse);
+  const browseSettings = browseRead.settings;
+  const browseChoice = resolveSearch(browseRead.rest, "browse");
+  if (browseRead.error) browseChoice.error = browseChoice.error ?? browseRead.error;
+  // What the vendor's own session is asked for, checked against what that
+  // vendor offers; a problem is on the record and the session is not sent.
+  const sessionProblems = browseChoice.error ? [] : browseSessionProblems(browseSettings, browseChoice.provider);
+  const browseSession = browseChoice.shape === "direct" && browseChoice.provider && !sessionProblems.length ? browseSettings.vendor_session : undefined;
+  // crawl, map, extract, answer, monitor: a provider each, or foldrun's own.
+  // Same three consequences as a search API — the secret the step holds, the
+  // env the web tool reads, the one host the key may reach.
+  const actionChoices = NEWER_ACTIONS.map((action) => ({ action, ...resolveActionApi(action, web.raw[action]) }));
+  const builtins = [
+    ...(searchChoice.provider && searchChoice.shape !== "direct" && !searchChoice.error ? ["search=WebSearch"] : []),
+    ...(fetchChoice.provider && fetchChoice.shape !== "direct" && !fetchChoice.error ? ["fetch=WebFetch"] : []),
+  ];
+  const webBuiltin: Record<string, string> = builtins.length ? { FOLDRUN_WEB_BUILTIN: builtins.join(",") } : {};
+  // A direct search API is paid for with the customer's own key, stored
+  // under a fixed vault name (EXA_API_KEY, BRAVE_SEARCH_API_KEY, …). Naming
+  // the API in frontmatter is declaring that secret — nobody should have to
+  // write it twice, and a run that forgot the second line would search
+  // nothing and say so only at the provider.
+  const declared: string[] = [
+    ...(Array.isArray(front.secrets) ? front.secrets.map(String) : []),
+    ...toolSecrets,
+    ...actionChoices.flatMap((c) => (c.provider ? [c.secret] : [])),
+    // Your own proxy for a vendor's session: its URL is a secret, declared by
+    // naming it, like a provider's key.
+    ...(browseSession && typeof browseSession.proxy === "object" && browseSession.proxy.own ? [browseSession.proxy.own] : []),
+    ...[searchChoice, fetchChoice, browseChoice].flatMap((c) => {
+      if (c.shape !== "direct" || !c.secret) return [];
+      // Jina's reader answers without a key. Declaring an absent optional
+      // key would fail the step for a credential it never needed.
+      if (c.secretOptional && !getSecret(tenant, c.secret, workspace)) return [];
+      return [c.secret];
+    }),
+  ];
+  // One name once, however many places asked for it.
+  declared.splice(0, declared.length, ...new Set(declared));
+  const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
+  const {
+    env: secretEnv,
+    from: secretScopes,
+  } = resolveSecrets(tenant, [...new Set([...declared, ...referenced])], workspace);
+  const { missing: missingDeclared } = resolveSecrets(tenant, declared, workspace);
+
+  // The step's pod size. Three classes, not a dial: a size is a price and a
+  // promise, and three of each is a menu while ten is a support queue. Default
+  // is large — the install's configured limits — so existing agents change
+  // nothing. `size: small` is the opt-in for agents that wait on APIs more
+  // than they work; `size: heavy` for a rendered browser or real data in
+  // memory. Memory is a hard ceiling per class; CPU bursts uncapped and bills
+  // at the class rate, so heavy both may use more and costs more. The actuals
+  // line in any trace is the evidence for right-sizing.
+  const size: "small" | "large" | "heavy" =
+    front.size === "small" ? "small" : front.size === "heavy" ? "heavy" : "large";
+
+  // Provider: which endpoint the model calls run against. Anthropic by
+  // default; an Anthropic-compatible gateway (z.ai, LiteLLM, OpenRouter) by
+  // declaring one. The format is portable — this is where the runtime stops
+  // being tied to one vendor's endpoint.
+  //
+  //   provider:
+  //     base_url: https://api.z.ai/api/anthropic
+  //     token: ${ZAI_TOKEN}
+  //
+  // The URL sits in git; the token is a ${SECRET} resolved server-side. An
+  // agent's own block wins over the workspace's, like everything else here.
+  // Then the account's own model key (Settings → Model), when it set one:
+  // an account that brings its key need not write a block anywhere.
+  const fileBlock =
+    (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
+  const providerBlock = fileBlock ?? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
+  let providerEnv: Record<string, string> = {};
+  let providerLabel: string | null = null;
+  // Secret values pulled into the provider block, name → value. Kept apart
+  // from providerEnv because a header blob is a poor redaction key: what
+  // must never reach the journal is the credential inside it, not the blob.
+  const providerSecrets: Record<string, string> = {};
+  const providerWarnings: string[] = [];
+  // The declared second supply, resolved the same way. Null when the block
+  // names none; the platform's own fallback still applies to a step that
+  // rides the platform credential.
+  let fallbackEnv: Record<string, string> | null = null;
+  // A Chat-Completions endpoint is reached through the runtime's own
+  // translator; these are its instructions, as values, or null when the
+  // block speaks Anthropic. One for the primary, one for the fallback.
+  let translator: TranslatorSpec | null = null;
+  let fallbackTranslator: TranslatorSpec | null = null;
+  const spec = parseProvider(providerBlock);
+  if (spec) {
+    providerWarnings.push(...spec.warnings);
+    const substitute = (text: string) =>
+      text.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
+        const hit = getSecret(tenant, secretName, workspace);
+        if (!hit) return whole;
+        providerSecrets[secretName] = hit.value;
+        return hit.value;
+      });
+    const resolved = substitute(spec.token);
+    if (spec.baseUrl) {
+      const headers = Object.fromEntries(
+        Object.entries(spec.headers).map(([k, v]) => [k, substitute(v)]),
+      );
+      providerEnv = providerEnvFor({
+        baseUrl: spec.baseUrl,
+        token: resolved,
+        auth: spec.auth,
+        models: spec.models,
+        headers,
+      });
+      const preset = providerPreset(spec.name);
+      translator = translatorSpecFor({
+        format: spec.format,
+        baseUrl: spec.baseUrl,
+        token: resolved,
+        headers,
+        params: spec.params,
+        name: spec.name,
+        maxTokensParam: preset?.maxTokensParam,
+        reasoningEffort: preset?.reasoningEffort,
+        // The agent's prompts share an opening; the key says so to an
+        // endpoint that routes its cache by one. Only where the preset
+        // says the parameter is understood — elsewhere it is a 400.
+        cacheKey: preset?.promptCacheKey ? promptCacheKey(tenant, workspace, path.basename(agentDir)) : undefined,
+      });
+      // What the run is actually pointed at, in one line: the endpoint, the
+      // tiers this gateway renames, and whether the credential landed.
+      const remapped = Object.entries(spec.models).map(([tier, id]) => `${tier}→${id}`);
+      providerLabel = (spec.name ? `${spec.name} ` : "") + spec.baseUrl + (translator ? " via translator" : "");
+      if (remapped.length) providerLabel += ` (${remapped.join(", ")})`;
+      // An unresolved ${SECRET} would silently fall back to Anthropic's
+      // endpoint with the host's key — say so instead.
+      if (spec.token && resolved === spec.token && spec.token.includes("${")) {
+        providerLabel += " — token secret not set";
+      }
+    }
+    if (spec.fallback?.baseUrl) {
+      const fb = spec.fallback;
+      const headers = Object.fromEntries(Object.entries(fb.headers).map(([k, v]) => [k, substitute(v)]));
+      const fbToken = substitute(fb.token);
+      fallbackEnv = providerEnvFor({ baseUrl: fb.baseUrl, token: fbToken, auth: fb.auth, models: fb.models, headers });
+      const fbPreset = providerPreset(fb.name);
+      fallbackTranslator = translatorSpecFor({
+        format: fb.format,
+        baseUrl: fb.baseUrl,
+        token: fbToken,
+        headers,
+        params: fb.params,
+        name: fb.name,
+        maxTokensParam: fbPreset?.maxTokensParam,
+        reasoningEffort: fbPreset?.reasoningEffort,
+      });
+      providerLabel = `${providerLabel ?? "platform"} (fallback: ${fb.name ?? fb.baseUrl})`;
+    }
+  }
+
+  // Runtime: an agent's own `runtime:` block, else its workspace's. Built once
+  // per declaration and cached, so scripts get their dependencies without
+  // polluting the host.
+  // Plus whatever the tools this agent granted declared for themselves.
+  let runtimeSpec = mergeRuntimes(ownRuntime(front, agentDir, tenant), ...toolRuntimes);
+  // Execution: a container per run when Docker is available (real isolation),
+  // otherwise the host venv path so local development still works.
+  const executor = chooseExecutor();
+  const runtimeLog: string[] = [];
+  let runtimeError: string | null = null;
+  let exec: ExecutionContext | null = null;
+  let runtime: PreparedRuntime = { interpreters: {}, env: {}, log: [], error: null };
+
+  if (executor === "docker" && !grantsOnly) {
+    // The script image also carries what the scripts' own languages need: a
+    // .mjs tool with no runtime: block still needs node in its container.
+    // Here only — the run container and the host have node already, and a
+    // spec there sets off the runtime build for nothing.
+    const image = ensureImage(mergeRuntimes(runtimeSpec, scriptLanguages(scriptSpecs)));
+    runtimeLog.push(...image.log);
+    runtimeError = image.error;
+    if (!image.error) {
+      exec = {
+        executor: "docker",
+        image: image.tag,
+        mounts: scriptMounts(agentDir, tenant),
+        // Only agents that granted something reaching out — an `apis:` entry
+        // or one of their own tools — get egress.
+        network: parseApis(front.apis).length > 0 || ownToolNames(front).length > 0,
+      };
+    }
+  } else if (isolatedRun() || grantsOnly) {
+    // (A sub-agent's grants are all that is asked of it: it runs inside its
+    // parent's step and runtime.)
+    // The sandbox builds it (run-container.ts, beside pip's network and the
+    // mounted cache); building it here as well was pure waste, and on a
+    // worker image without python it was worse than waste — it logged
+    // "python3 is not available on this host" as an error on every Python
+    // step, above a sandbox build that had succeeded, and sent every reader
+    // of the trace after the wrong machine.
+  } else {
+    runtime = prepareRuntime(tenant, runtimeSpec);
+    runtimeLog.push(...runtime.log);
+    runtimeError = runtime.error;
+  }
+
+  // What day it is, in the calendar this step works to — the agent's own
+  // `timezone:`, else its flow's, else the workspace's, else the account's.
+  // Not a secret, so it travels beside secretEnv rather than inside it — a
+  // value in there is redacted from every log line that quotes it.
+  const clock = agentClock(agentDir, tenant, front, flowTimezone);
+  const timezone = clock.timezone;
+  const clockEnv = {
+    // The language the agent works in — what the search asks in, the locale
+    // the browser reports, the Accept-Language a fetch sends. Not a secret.
+    FOLDRUN_LANGUAGE: language.language,
+    // The country and what follows from it — web search's gl, a script's
+    // currency. Unset where nobody said, so nothing is invented.
+    ...(region.region ? { FOLDRUN_REGION: region.region } : {}),
+    ...(locale.currency ? { FOLDRUN_CURRENCY: locale.currency } : {}),
+    FOLDRUN_UNITS: locale.units,
+    FOLDRUN_CALENDAR: locale.calendar,
+    ...(locale.dateLocal ? { FOLDRUN_DATE_LOCAL: locale.dateLocal } : {}),
+    FOLDRUN_RTL: locale.direction === "rtl" ? "1" : "0",
+    // TZ is the form the sandbox's shell and Node both read; for a fixed
+    // offset that is not the same string Intl was given (see clock.ts).
+    TZ: clock.tz,
+    FOLDRUN_DATE: localDate(timezone),
+    // Where the account's own search engine answers, when the install runs
+    // one — the `websearch` library tool reads it. Not a secret; rides with
+    // the clock so it reaches scripts, the sandbox and verify alike.
+    ...(process.env.FOLDRUN_SEARCH_URL ? { FOLDRUN_SEARCH_URL: process.env.FOLDRUN_SEARCH_URL } : {}),
+    // Where this install's own API answers (host-env.ts platformApiUrl), so a
+    // script calls `$FOLDRUN_API_URL/workspaces/…` instead of naming a host.
+    ...(platformApiUrl() ? { FOLDRUN_API_URL: platformApiUrl()! } : {}),
+    // Whose index our web search asks when the agent named a search API.
+    // Unset means the account's own engine. The name, never the key.
+    ...(searchChoice.shape === "direct" && searchChoice.provider
+      ? { FOLDRUN_WEB_SEARCH_VIA: searchChoice.provider, FOLDRUN_WEB_SEARCH_SECRET: searchChoice.secret ?? "" }
+      : {}),
+    // The `web.search` block's SearXNG settings, as defaults the tool reads.
+    ...searchSettingsEnv(searchRead.settings),
+    ...(fetchChoice.shape === "direct" && fetchChoice.provider
+      ? { FOLDRUN_WEB_FETCH_VIA: fetchChoice.provider, FOLDRUN_WEB_FETCH_SECRET: fetchChoice.secret ?? "" }
+      : {}),
+    ...Object.fromEntries(actionChoices.flatMap((c) => (c.provider
+      ? [[`FOLDRUN_WEB_${c.action.toUpperCase()}_VIA`, c.provider], [`FOLDRUN_WEB_${c.action.toUpperCase()}_SECRET`, c.secret]]
+      : []))),
+    // Which actions the web tool may take (`web: {actions: [...]}`); unset is all.
+    ...(web.actions ? { FOLDRUN_WEB_ACTIONS: web.actions.join(",") } : {}),
+    // A model provider's own search or fetch, which the web tool hands over to.
+    ...webBuiltin,
+    // A remote browser: the wrapper connects over CDP to this vendor with
+    // the named key, and the platform leaves the account's pod alone.
+    ...(browseChoice.shape === "direct" && browseChoice.provider
+      ? { FOLDRUN_BROWSER_VENDOR: browseChoice.provider, FOLDRUN_BROWSER_SECRET: browseChoice.secret ?? "" }
+      : {}),
+    // The vendor session's settings (`web.browse.vendor_session:`), as JSON
+    // the tool maps onto that vendor's own option names. Under both names
+    // for one release: a web tool from before the rename reads the old one.
+    ...(browseSession ? { FOLDRUN_BROWSER_VENDOR_SESSION: JSON.stringify(browseSession), FOLDRUN_BROWSER_SESSION: JSON.stringify(browseSession) } : {}),
+    // The `web.browse` block, as defaults the tool reads when the call did
+    // not say otherwise. Env rather than arguments because the tool is a
+    // script the model calls: a default nobody typed should not have to be
+    // typed by the model either.
+    ...(browseSettings.engine ? { FOLDRUN_BROWSER_ENGINE: browseSettings.engine } : {}),
+    ...(browseSettings.user_agent ? { FOLDRUN_BROWSER_USER_AGENT: browseSettings.user_agent } : {}),
+    ...(browseSettings.device ? { FOLDRUN_BROWSER_DEVICE: browseSettings.device } : {}),
+    ...(browseSettings.locale ? { FOLDRUN_BROWSER_LOCALE: browseSettings.locale } : {}),
+    ...(browseSettings.timezone ? { FOLDRUN_BROWSER_TIMEZONE: browseSettings.timezone } : {}),
+    ...(browseSettings.cookies ? { FOLDRUN_BROWSER_COOKIES: browseSettings.cookies } : {}),
+    ...(browseSettings.cookie_domain ? { FOLDRUN_BROWSER_COOKIE_DOMAIN: browseSettings.cookie_domain } : {}),
+    ...(browseSettings.storage ? { FOLDRUN_BROWSER_STORAGE: browseSettings.storage } : {}),
+    ...(browseSettings.storage_origin ? { FOLDRUN_BROWSER_STORAGE_ORIGIN: browseSettings.storage_origin } : {}),
+    // The named identities, as one JSON map the tool picks from by name.
+    ...(browseSettings.identities ? { FOLDRUN_BROWSER_IDENTITIES: JSON.stringify(browseSettings.identities) } : {}),
+    // Only the non-default travels: a window, on a virtual screen if need be.
+    ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
+    ...(browseSettings.version ? { FOLDRUN_BROWSER_VERSION: browseSettings.version } : {}),
+    ...(browseSettings.live ? { FOLDRUN_BROWSER_LIVE: "1" } : {}),
+    // What the agent may do, from its file: a lock the call cannot widen.
+    ...(browseSettings.allowed_domains ? { FOLDRUN_BROWSER_ALLOWED_DOMAINS: browseSettings.allowed_domains.join(",") } : {}),
+    ...(browseSettings.deny ? { FOLDRUN_BROWSER_DENY: browseSettings.deny.join(",") } : {}),
+    ...(browseSettings.boundaries ? { FOLDRUN_BROWSER_BOUNDARIES: "1" } : {}),
+    ...(browseSettings.init ? { FOLDRUN_BROWSER_INIT: browseSettings.init.join(",") } : {}),
+    ...(browseSettings.extensions ? { FOLDRUN_BROWSER_EXTENSIONS: browseSettings.extensions.join(",") } : {}),
+    ...(browseSettings.webgpu ? { FOLDRUN_BROWSER_WEBGPU: "1" } : {}),
+    ...(browseSettings.ignore_https_errors ? { FOLDRUN_BROWSER_IGNORE_HTTPS_ERRORS: "1" } : {}),
+    ...(browseSettings.state_key ? { FOLDRUN_BROWSER_STATE_KEY: browseSettings.state_key } : {}),
+    ...(browseSettings.state ? { FOLDRUN_BROWSER_STATE: browseSettings.state } : {}),
+    ...(browseSettings.video ? { FOLDRUN_BROWSER_VIDEO: "1" } : {}),
+    ...(browseSettings.live_view === false ? { FOLDRUN_BROWSER_LIVE_VIEW: "0" } : {}),
+  };
+
+  // Scripts declared as tools — callable by name, no bash required.
+  const scriptTools = buildScriptTools(
+    agentDir,
+    scriptSpecs,
+    // A script can say where its work came from. Without this, anything a
+    // tool writes into another system lands anonymous: you can see 100 new
+    // contacts and have no way back to the run that made them. The run id,
+    // the agent, and the date the platform believes it is.
+    {
+      ...runtime.env,
+      // An unexported client certificate is the proxy's, never a script's.
+      ...withoutHeldCerts(secretEnv),
+      ...(identity.runId ? { FOLDRUN_RUN_ID: identity.runId } : {}),
+      ...(identity.agent ? { FOLDRUN_AGENT: identity.agent } : {}),
+      // And the workspace: a commit or a record made by a shared library
+      // tool should say which desk made it, and the pod's own paths
+      // (/workspace/agents/<agent>) do not carry the name.
+      FOLDRUN_WORKSPACE: workspace,
+      ...clockEnv,
+    },
+    libraryDir(tenant, "scripts"),
+    runtime.interpreters,
+    exec,
+    keepIn.readable,
+  );
+  // Dynamic: the date moves daily, and would otherwise invalidate every
+  // layer behind it once a day.
+  parts.add("clock",
+    `# Clock\n\nToday is ${clockEnv.FOLDRUN_DATE} (${timezone}). Use this date for anything you ` +
+    `write or check — it is the workspace's calendar, not the container's clock.`,
+    { dynamic: true },
+  );
+  if (scriptTools.promptLines.length) {
+    parts.add("script-tools",
+      `# Tools from scripts\n\nCall these directly — they run workspace scripts for you. Each is called by its full name, ` +
+        `\`mcp__foldrun_scripts__<name>\` (\`web\` is \`mcp__foldrun_scripts__web\`); a bare name is refused:\n\n${scriptTools.promptLines.join("\n")}`,
+    );
+  }
+  // The web tool's own description lists every action, so an agent whose
+  // search or fetch a model provider answers called web action=search,
+  // was refused, and only then used WebSearch — eight refusals in one
+  // reddit-desk validator step on 6 Oct 2026. Say it before the first call.
+  if (builtins.length) {
+    const named = builtins.map((b) => b.split("="));
+    parts.add("web",
+      `# Web search and fetch on this run\n\n` +
+        named.map(([action, tool]) => `- To ${action}, call **${tool}** directly. \`web\` with action=${action} is switched off on this run.`).join("\n") +
+        `\n\nThe web tool's other actions work as usual.`,
+    );
+  }
+  if (declared.length) {
+    parts.add("secrets",
+      `# Secrets\n\nAvailable to your scripts as environment variables: ${declared.join(", ")}. ` +
+        `Never print, echo, or write them to a file.`,
+    );
+  }
+
+  parts.add("rules",
+    "Write deliverables for people to workspace/storage/ (kept and downloadable); write working text for later steps to outputs/; " +
+      "what the next run needs goes to workspace/state/. Paths are relative to your agent directory, or start with workspace/ " +
+      "for the workspace root (workspace/storage/ and the older ../../storage/ are the same place). There is no /tmp for you: a " +
+      "directory a tool made outside the workspace, such as a checkout, is reached only through that tool. " +
+      // 45 refusals in 34 runs (6–7 Oct 2026), nearly all an agent rewriting
+      // a plan or draft an earlier run left: the Write tool refuses a file
+      // that exists and has not been Read in this step, before any hook of
+      // ours can see the call. Said once here instead of learned per step.
+      "To replace a file that already exists, Read it first — Write refuses a file you have not Read in this step (a new file needs no Read). " +
+      "Built-in tools are capitalised: Read, Write, Edit, Glob, Grep, Bash.",
+  );
+
+  // The run's one-line summary is the first meaningful line of the last step
+  // that produced a result — read, never declared (runSummary in store.ts).
+  // That convention was load-bearing and unstated: it decides the runs-list
+  // row, the notification subject, and what `recall_runs()` shows a later
+  // run, and an agent that opened with "I'll start by cloning the repo" made
+  // all three useless. Asking here rather than in each agent.md means every
+  // agent obeys it, including the ones written before the summary existed.
+  parts.add("rules",
+    "Open your reply with one sentence saying what you concluded or produced — the outcome, " +
+      "not your plan. Everything else follows it. That sentence is what a person sees in the " +
+      "run list and in the notification, without opening the run.",
+  );
+
+  // One list. `tools:` grants anything: a built-in group, an exact SDK tool
+  // name, or a tool defined in this workspace or account.
+  //
+  // The split used to be ours, not the author's: they don't care whether a
+  // capability comes from the SDK or a file, only what the agent may do. Two
+  // lists meant two places to look for the blast radius.
+  const allowed: string[] = [];
+  const disabled: string[] = [];
+  const unknownTools: string[] = [];
+  const shadowed: string[] = [];
+  // `web: {search: …, fetch: …}` name who answers. Unset means ours — the
+  // account's own engine, and our own fetch, both inside the run's sandbox
+  // and both on the run record. A model provider's name adds the SDK's
+  // server-side tool beside ours, which the run's endpoint executes: point
+  // the run at z.ai and z.ai's index answers the search. The web tool hands
+  // the action over to it (FOLDRUN_WEB_BUILTIN).
+  const providerWebTools: string[] = [];
+  if (browseChoice.error) providerWarnings.push(browseChoice.error);
+  providerWarnings.push(
+    ...sessionProblems,
+    ...web.problems,
+    ...actionChoices.flatMap((c) => (c.error ? [c.error] : [])),
+  );
+  for (const [choice, builtin] of [
+    [searchChoice, "WebSearch"],
+    [fetchChoice, "WebFetch"],
+  ] as const) {
+    if (choice.error) {
+      providerWarnings.push(choice.error);
+    } else if (choice.provider && choice.shape !== "direct") {
+      // A provider's server-side tool replaces ours. A direct search API
+      // does not: our tool stays, and reads FOLDRUN_WEB_SEARCH_VIA to know
+      // whose index to ask — through the egress proxy, with the customer's
+      // own key, on the run record.
+      providerWebTools.push(builtin);
+    }
+  }
+  let wantSearch = false;
+  let wantHistory = false;
+  let wantDesks = false;
+  let wantAsk = false;
+  let wantPeers = false;
+
+  for (const ref of toolRefs(front)) {
+    const toolName = ref.name;
+    if (ref.mode === "ask") {
+      disabled.push(toolName);
+      continue;
+    }
+    // `web` is our own tool, granted with the rest of them above. A model
+    // provider answering search or fetch on its own side (`web: {search:
+    // zai}`) adds that provider's tool beside it; the web tool's search then
+    // names it (FOLDRUN_WEB_BUILTIN) rather than asking our engine.
+    if (toolName === "web" && !ref.linked) {
+      allowed.push(...providerWebTools);
+      // web writes what it found to files and says "Read that file" — a
+      // screenshot, a crawl, a page saved whole. An agent granted web alone
+      // was told to Read and refused it (blog-desk claim-checker, 7 Oct
+      // 2026: "Read is disabled for this session"). Reading is confined to
+      // the workspace like every file tool; disallowedTools still removes it.
+      if (!allowed.includes("Read")) allowed.push("Read");
+      continue;
+    }
+
+    // Resolution order: built-in group, exact SDK name, then your own tools.
+    // Built-ins win a bare name, because their names are a small fixed set —
+    // but a tool hidden by one is worth saying out loud rather than silently
+    // ignoring. A `[[link]]` skips the built-ins entirely: the brackets mean
+    // "my file", which is how a tool named `search` is granted at all.
+    if (ref.linked) {
+      // Granted above through ownToolNames, or reported missing there.
+    } else if (TOOL_MAP[toolName]) {
+      allowed.push(...TOOL_MAP[toolName]);
+      if (available[toolName]) shadowed.push(toolName);
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers") {
+      // The platform's own groups, served in-process — built below, once
+      // the roots and the records are known.
+      if (toolName === "search") wantSearch = true;
+      else if (toolName === "history") wantHistory = true;
+      else if (toolName === "ask") wantAsk = true;
+      else if (toolName === "peers") wantPeers = true;
+      else wantDesks = true;
+      if (available[toolName]) shadowed.push(toolName);
+    } else if (toolName === "install") {
+      // Granted to every agent anyway (below); naming it is harmless.
+    } else if (BUILTIN_TOOLS.has(toolName)) {
+      allowed.push(toolName);
+      if (available[toolName]) shadowed.push(toolName);
+    } else if (available[toolName]) {
+      // Already granted above — nothing to do here.
+    } else if (!missingTools.includes(toolName)) {
+      unknownTools.push(toolName);
+    }
+  }
+  allowed.push(...apiTools.toolNames, ...scriptTools.toolNames);
+
+  // tools: [search] — every place a fact of this agent's could be, in the
+  // same nearest-wins order the prompt lists them. tools: [history] — the
+  // workspace's finished runs, minus the one being driven. Both are values
+  // by the time they leave here, so the container can rebuild the servers.
+  const wsRoot = path.resolve(agentDir, "..", "..");
+  const searchRoots: SearchRoot[] = wantSearch
+    ? [
+        { label: "knowledge/", dir: path.join(agentDir, "knowledge") },
+        { label: "memory/", dir: path.join(agentDir, "memory") },
+        { label: "workspace/knowledge/", dir: path.join(wsRoot, "knowledge") },
+        { label: "workspace/memory/", dir: path.join(wsRoot, "memory") },
+        { label: "workspace/state/", dir: path.join(wsRoot, "state") },
+        { label: `workspace/${STORAGE_DIR}/`, dir: path.join(wsRoot, STORAGE_DIR) },
+        { label: "outputs/", dir: path.join(agentDir, "outputs") },
+        { label: "[library] knowledge/", dir: libraryDir(tenant, "knowledge") },
+        { label: "[library] memory/", dir: libraryDir(tenant, "memory") },
+      ]
+    : [];
+  const historyDigest: RunDigest[] = wantHistory ? digestRuns(listRuns(tenant, workspace), 30, identity.runId) : [];
+  // tools: [desks] — the account's OTHER workspaces, ten runs each. A run
+  // pod cannot reach the platform's API and the library is read-only, so
+  // this is the only way one desk sees what another concluded — and it
+  // stays a value the host chose to send, not a door the sandbox opened.
+  const deskDigest: RunDigest[] = wantDesks
+    ? listWorkspaces(tenant)
+        .filter((w) => w.name !== workspace)
+        .flatMap((w) => digestRuns(listRuns(tenant, w.name), 10).map((d) => ({ ...d, workspace: w.name })))
+        .sort((a, b) => (b.startedAt > a.startedAt ? 1 : -1))
+        .slice(0, DESK_RUNS_CAP)
+    : [];
+  const searchTools = buildSearchTools(searchRoots);
+  const historyTools = wantHistory ? buildHistoryTools(historyDigest) : { server: null, toolNames: [], promptLines: [] };
+  const deskTools = wantDesks ? buildDeskTools(deskDigest) : { server: null, toolNames: [], promptLines: [] };
+  allowed.push(...searchTools.toolNames, ...historyTools.toolNames, ...deskTools.toolNames);
+  // tools: [ask] — ask_person. Its server is built where the step runs (it
+  // needs the step's emit, and in a pod the proxy's address); here only the
+  // grant, the wait and the prompt's line.
+  const ask = wantAsk ? { timeoutSec: askTimeoutSec(front) } : null;
+  if (ask) {
+    allowed.push(ASK_TOOL);
+    parts.add("ask", `# Asking a person\n\n${askPromptLine(ask.timeoutSec)}`);
+  }
+  // tools: [peers] — peers_list and peers_message, to the other steps of
+  // this step's parallel group. Who they are is known only when the group
+  // launches, so the grant is here and the roster, the server and the
+  // prompt's line are the step's (runStep).
+  const peers = wantPeers;
+  if (peers) allowed.push(...PEER_TOOLS);
+  if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
+    parts.add("finding", `# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
+  }
+  // An MCP server declares its tools when it connects, so they can't be listed
+  // ahead of time. Server-level specs cover them: granting the server grants
+  // what it exposes, which is the unit a person actually reasons about anyway.
+  for (const name of mcpNames) allowed.push(`mcp__${name}`, `mcp__${name}__*`);
+
+  // install — every agent may install what it finds it needs mid-step (apt,
+  // pip, npm), declared or not (install-tool.ts). Granted by default; taken
+  // away by disallowedTools: [install], and absent in plan mode (read-only).
+  allowed.push(INSTALL_TOOL);
+
+  // Claude Code's spellings, so an agent written for it mostly runs here.
+  // `permissionMode: plan` is its read-only mode; ours is the `read` group.
+  if (front.permissionMode === "plan") {
+    allowed.length = 0;
+    allowed.push(...TOOL_MAP.read, ...apiTools.toolNames, ...scriptTools.toolNames);
+  }
+  const denied: string[] = refNames(front.disallowedTools);
+  if (denied.includes("install")) denied.push(INSTALL_TOOL);
+  const finalAllowed = allowed.filter((t) => !denied.includes(t));
+  readsFiles = canReadBack(finalAllowed);
+  const prompt = parts.assemble();
+
+  return {
+    front,
+    clockEnv,
+    /** The zone, where it came from, and anything unreadable on the way —
+     *  reported by the step, not here, so it lands in the run's trace. */
+    clock,
+    systemPrompt: prompt.text,
+    /** What the record keeps of each layer of that prompt. */
+    promptLayers: prompt.layers,
+    allowed: finalAllowed,
+    disabled,
+    unknownTools,
+    shadowed,
+    legacyUse,
+    retiredTools: retiredToolNames(front),
+    mcpServers,
+    mcpNames,
+    apiTools,
+    scriptTools,
+    // The merged spec lists — inline plus tools:-granted — for the isolated
+    // path, which serialises specs across the container boundary rather
+    // than using the servers built here.
+    apiSpecs: apis,
+    scriptSpecs,
+    outward: outward || scriptSpecs.some((sc) => sc.outward),
+    searchRoots,
+    historyDigest,
+    deskDigest,
+    searchTools,
+    historyTools,
+    deskTools,
+    ask,
+    peers,
+    // `spec` is the MERGED declaration — the agent's own block or its
+    // workspace's, plus every granted tool's. The isolated path builds its
+    // runtime from this; passing the agent's frontmatter alone silently drops
+    // what the tools declared, and a tool whose program needs a package it
+    // asked for by name fails inside the container with "cannot find" while
+    // the host path, which uses this same merged spec, works fine.
+    runtime: { log: runtimeLog, error: runtimeError, executor, spec: runtimeSpec, dispose: runtime.dispose },
+    // Whole: a bound client certificate goes from here into the egress
+    // grant (runStep), which is where it is presented. Programs get theirs
+    // filtered (withoutHeldCerts) where their environments are built.
+    secretEnv: { ...runtime.env, ...secretEnv },
+    formatWarning: checkFormatVersion(workspaceFrontmatter(agentDir, tenant).foldrun_version).warning,
+    providerEnv,
+    providerLabel,
+    providerSecrets,
+    providerWarnings,
+    fallbackEnv,
+    region,
+    // Who answers web search and fetch, resolved once up top. The step
+    // needs them again to grant a direct API's key to its host.
+    searchChoice,
+    fetchChoice,
+    actionChoices,
+    web,
+    language,
+    // Stamped with the step's own zone: when one of these refuses, the
+    // reset time it reports is told in the calendar the step works to,
+    // not in the pod's UTC.
+    translator: translator && { ...translator, timezone },
+    fallbackTranslator: fallbackTranslator && { ...fallbackTranslator, timezone },
+    apiWarnings,
+    secretScopes,
+    missingTools,
+    size,
+    // Definitions that exist but could not be read. Carried alongside the
+    // missing ones so the step can tell "you never made this" apart from
+    // "it's right there with a typo in it".
+    brokenTools: brokenToolReport(tenant, workspace),
+    missingSecrets: [...new Set([...missingDeclared, ...apiTools.missingSecrets])],
+  };
+}
+
+/**
+ * The SDK prices a step off Anthropic's table; through a gateway to a
+ * routed model that number is fiction. When the catalogue can price the
+ * tokens itself, its number replaces the SDK's, and the trace says so —
+ * a silently different bill is the one kind nobody forgives.
+ */
+/**
+ * Publish whatever this step left in `storage/public/` and record the URLs.
+ *
+ * Runs after every step, on both execution paths, because the file has to be
+ * on the host (copy-back has happened) and the manifest has to be in place
+ * before the next step's sandbox is filled from that same workspace. A step
+ * generates an image; the step after it reads the URL from a plain file.
+ *
+ * Never fails a step: a link is bookkeeping, and a run that did its work must
+ * not be marked failed because a URL could not be minted.
+ */
+async function publishPublicDir(
+  tenant: string,
+  workspace: string,
+  push: (type: "info" | "error", text: string) => void,
+): Promise<void> {
+  try {
+    const { added } = await platform.syncPublicShares(tenant, workspace);
+    if (added.length) push("info", `shared: ${added.join(", ")}`);
+  } catch (err) {
+    push("error", `shares: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export function repriced(
+  catalog: Catalog | null,
+  model: string,
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | null,
+  sdkCost: number | null,
+  push: (type: "info" | "error", text: string) => void,
+  /** The step's turns each priced at its own model — set when a sub-agent
+   *  ran on a different model (ExecOutcome.turnsCostUsd). The lump `usage`
+   *  priced at the step's model would bill those turns at the wrong rate. */
+  turnsCostUsd?: number | null,
+): number | null {
+  const known = usage ? catalogCost(catalog, model, usage) : null;
+  if (known === null) return sdkCost;
+  if (typeof turnsCostUsd === "number") {
+    push("info", `cost from each model turn at its own model's rate: $${turnsCostUsd.toFixed(6)} (sub-agents ran on other models)`);
+    return turnsCostUsd;
+  }
+  if (sdkCost !== null && Math.abs(known - sdkCost) > 0.000001) {
+    push("info", `cost repriced from the gateway's catalogue: $${known.toFixed(6)} (sdk said $${sdkCost.toFixed(6)})`);
+  }
+  return known;
+}
+
+/**
+ * Write one attempt onto the step's history and re-total the step.
+ *
+ * runStep reports the attempt it just ran — its cost, tokens and sandbox
+ * seconds — by assigning the step's fields. Those become this attempt's row;
+ * the step's fields then become the sum of every row, which is what the
+ * run's spend, the flow's budget: and the platform's bill read. A retried
+ * step used to carry only its last attempt's cost, so a `retry: 2` step
+ * could spend three shares while reporting one.
+ */
+export function recordAttempt(
+  step: StepRecord,
+  /** The step's attempt (`attempts`) these rows belong to. */
+  attempt: number,
+  status: "completed" | "failed",
+  startedAt: string,
+  eventsBefore: number,
+  /** The attempt re-attached to a sandbox a previous driver left: same
+   *  attempt, so its row is replaced rather than repeated. */
+  reattach = false,
+) {
+  const tries = step.tries ?? [];
+  const lastError = step.events
+    .slice(eventsBefore)
+    .filter((e) => e.type === "error")
+    .at(-1)?.text;
+  // Re-attached: the same attempt, so its rows — the last one, and the lost
+  // slim go before it — are replaced, not repeated.
+  const kept = [...tries];
+  const attemptOf = (t: StepAttempt) => t.attempt ?? t.n;
+  if (reattach && kept.length && attemptOf(kept.at(-1)!) === attempt) {
+    kept.pop();
+    if (kept.length && attemptOf(kept.at(-1)!) === attempt && kept.at(-1)!.status === "lost") kept.pop();
+  }
+  // Tries are numbered in the order they ran: a full re-run after a lost
+  // slim go is the next try, not the same number again (live, 2026-10-01,
+  // both rows read n: 1). `attempt` says which attempt a row belongs to
+  // when its number no longer does.
+  let next = (kept.at(-1)?.n ?? 0) + 1;
+  const numbered = () => {
+    const n = next++;
+    return n === attempt ? { n } : { n, attempt };
+  };
+  // A slim go the browser pod was lost under, before this attempt re-ran
+  // on the full image: its own row, first (runStep set it aside).
+  const lost: StepAttempt[] = step.podLostTry ? [{ ...numbered(), ...step.podLostTry, startedAt }] : [];
+  const row: StepAttempt = {
+    ...numbered(),
+    status,
+    costUsd: step.costUsd,
+    tokens: step.tokens ?? null,
+    ...(typeof step.turns === "number" ? { turns: step.turns } : {}),
+    computeSecs: step.computeSecs ?? null,
+    startedAt: step.podLostTry?.finishedAt ?? startedAt,
+    finishedAt: step.finishedAt ?? new Date().toISOString(),
+    ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
+    ...(step.image?.variant ? { image: step.image.variant } : {}),
+    ...(step.browserPod ? { browserPod: browserPodLine(step.browserPod) } : {}),
+  };
+  delete step.podLostTry;
+  step.tries = [...kept, ...lost, row];
+  const totals = sumAttempts(step.tries);
+  step.costUsd = totals.costUsd;
+  step.tokens = totals.tokens;
+  step.computeSecs = totals.computeSecs;
+  if (totals.turns !== undefined) step.turns = totals.turns;
+}
+
+/** A question an agent asked mid-step goes where approvals go (the
+ *  workspace's notify:, `awaiting-approval` events), with the way to answer. */
+async function notifyQuestion(tenant: string, workspace: string, runId: string, agent: string, question: string, options?: string[]): Promise<void> {
+  const origin = (process.env.FOLDRUN_PUBLIC_URL ?? "").replace(/\/+$/, "");
+  const where = origin ? `${origin}/dashboard/${encodeURIComponent(workspace)}/runs/${encodeURIComponent(runId)}${tenant !== "default" ? `?tenant=${encodeURIComponent(tenant)}` : ""}` : `run ${runId}`;
+  await sendPlainNotification(tenant, workspace, {
+    event: "awaiting-approval",
+    headline: `${agent} is asking you something`,
+    detail: `${question}${options?.length ? `\n\nOptions: ${options.join(" · ")}` : ""}\n\nAnswer it on ${where}, or \`foldrun answer ${runId} "…"\`.`,
+    runId,
+  }).catch(() => false);
+}
+
+/** The local stand-in for a person: the terminal, when there is one. */
+async function terminalAsk(question: string, options?: string[]): Promise<string | null> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const list = options?.length ? `\n${options.map((o, i) => `  ${i + 1}. ${o}`).join("\n")}\n` : "";
+    const raw = (await rl.question(`\n  the agent asks: ${question}${list}\n  your answer: `)).trim();
+    const n = Number(raw);
+    return options?.length && Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : raw || null;
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * What the person at the gate said, framed for the step's prompt — or "".
+ *
+ * The note is the freshest instruction the step has — later than the flow
+ * file, aimed at this exact run. When the gate asked a question (ask:), the
+ * note IS the answer and is framed as one.
+ *
+ * Both halves go through resolveDocLinks for the same reason the
+ * instruction does: this is authored text on its way to becoming a prompt,
+ * and the rule is that ALL of it expands. A person answering "which list?"
+ * with [[dead-ends]] was sending the model two literal brackets — the one
+ * reference syntax the workspace teaches, and the one place it silently did
+ * nothing. The previous step's results are NOT resolved, deliberately: that
+ * is model output, and a model that happens to emit [[brackets]] must not
+ * thereby name a file.
+ *
+ * An ask: gate approved with no note still says so. It used to add nothing,
+ * so the step never learned its question had been answered: gbp-desk's
+ * rivals sender, told "a plain approval means all offices", saw no answer
+ * at all and stopped BLOCKED (run-muu6r18y-417e, 2026-10-05).
+ */
+export function operatorBlock(step: Pick<StepRecord, "ask" | "approvalNote" | "approvedAt">, workspaceRoot: string): string {
+  const ask = step.ask ? resolveDocLinks(step.ask, workspaceRoot) : "";
+  if (step.approvalNote) {
+    const note = resolveDocLinks(step.approvalNote, workspaceRoot);
+    return step.ask
+      ? `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer:\n${note}\n</operator_answer>`
+      : `\n\n<operator_guidance>\nThe human who approved this step added:\n${note}\n</operator_guidance>`;
+  }
+  if (step.ask && step.approvedAt) {
+    return `\n\n<operator_answer>\nThis step asked a human: ${ask}\nTheir answer: they approved it with no note — a plain yes.\n</operator_answer>`;
+  }
+  return "";
+}
+
+
+async function runStep(
+  agentDir: string,
+  tenant: string,
+  step: StepRecord,
+  context: string | null,
+  save: () => void,
+  modelOverride?: string | null,
+  tags: string[] = [],
+  effortOverride?: string | null,
+  runId?: string,
+  /** What the previous group returned as DATA (an `output: json` step's
+   *  value), beside the prose in `context`. Undefined when nothing did. */
+  priorData?: unknown,
+  /** The most this step may spend before it is stopped mid-turn: the run's
+   *  remaining `budget:`, shared across the steps launched with it. Null
+   *  means the flow set no budget. */
+  stepBudgetUsd: number | null = null,
+  /** Which line set that ceiling, for the error that names it. */
+  stepBudgetNote?: string,
+  /** The run is a test run — see test-mode.ts. Read off the run record by
+   *  the caller, never from anything the sandbox could have written. */
+  testRun = false,
+  /** Has a person asked for the run to stop? Read on a clock by the
+   *  in-process model loop, so a stop lands mid-step and not at the next
+   *  group. The isolated path needs none: stopRun destroys the sandbox. */
+  stopRequested?: () => boolean,
+  /** The flow's `timezone:`, for the clock cascade. Undefined for a step
+   *  run outside any flow, which still gets agent → workspace → account. */
+  flowTimezone?: string | null,
+  /** The step's index in run.steps, carried on its egress lease so a
+   *  person's message to this step reaches this step's own inbox and not a
+   *  sibling's running in the same group. Undefined outside a flow. */
+  stepIndex?: number,
+  /** The other steps launched with this one (its parallel group), for
+   *  tools: [peers]. Empty when it runs alone. */
+  siblings: PeerInfo[] = [],
+  /** The in-process colleagues' bus for this group (localPeerBus), when
+   *  the step runs in this process rather than a pod. */
+  peerBus?: ReturnType<typeof localPeerBus>,
+  /** Runs one job for a `sandbox: own` sub-agent as a step of its own and
+   *  answers with its reply (the drive loop's delegateFor). Absent for a
+   *  step that is itself a sub-agent's: depth one. */
+  delegateJob?: (agent: string, job: string, cancelled: () => boolean) => Promise<DelegationResult>,
+) {
+  // Secret values are injected into scripts as environment variables and
+  // substituted into API headers, so a model that reads one back — from a
+  // script that prints it, an API error that echoes it, or its own `env` —
+  // can put a live credential into its reply. Everything a step says is
+  // written to runs/<id>.json and rendered in the dashboard, which would make
+  // that credential permanent and visible to anyone who can read a run.
+  //
+  // So values are scrubbed on the way into the journal, at the one place every
+  // event passes through. The name survives, because "the token was here" is
+  // the part worth keeping.
+  //
+  // This is the last line of defence, not the only one: the model is never
+  // given the values in the first place, and checkBash already refuses the
+  // obvious `echo $SOMETHING_TOKEN`. It exists because neither of those can
+  // cover a script's own stdout.
+  let redactions: [string, string][] = [];
+  let fileDir: string | null = null;
+  let installDir: string | null = null;
+  let disposeRuntime: (() => void) | undefined;
+  /** The delegate door served for this step (sandbox: own sub-agents), held
+   *  here so the finally can close it however the step ends. */
+  let serving: { close(): Promise<void> } | null = null;
+  // Can this step's tools act outside the workspace? Set once its context is
+  // read; the verdict at the end of this function reads it.
+  let canActOutward = false;
+  const eventsAtStart = step.events.length;
+  const redact = (text: string) => {
+    let out = text;
+    for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
+    return out;
+  };
+
+  // The reply, the conclusion and an `output: json` value land on the same
+  // record the events do, and a model that quotes a script's stdout puts
+  // the credential in its answer rather than in a tool event. Same scrub,
+  // same place. The JSON value goes through its text form: a secret inside
+  // a nested field is still a secret, and the key name survives either way.
+  const redactText = <T extends string | null | undefined>(text: T): T =>
+    (typeof text === "string" ? redact(text) : text) as T;
+  const redactData = (value: unknown): unknown => {
+    if (value === undefined || redactions.length === 0) return value;
+    try {
+      return JSON.parse(redact(JSON.stringify(value)));
+    } catch {
+      return value;
+    }
+  };
+
+  // What this workspace records of each step (FOL-54 step 4): `capture:` in
+  // AGENTS.md — every model call always; each tool call's input and output
+  // unless it says `metadata`.
+  const capture: "metadata" | "full" = workspaceFrontmatter(agentDir, tenant).capture === "metadata" ? "metadata" : "full";
+  // `judge:` (AGENTS.md): the model and effort every `verify: judge:` here
+  // grades with — field by field, the workspace's else the account's.
+  const { judgeModel, judgeEffort } = (() => {
+    const ws = parseJudge(readAgentsMd(workspaceRootOf(agentDir))?.data?.judge);
+    const account = parseJudge(readAgentsMd(accountDir(tenant))?.data?.judge);
+    const model = ws.model ?? account.model;
+    const effort = resolveEffort(ws.effort ?? account.effort ?? "");
+    return { judgeModel: model ? resolveModel(model) : undefined, judgeEffort: effort ?? undefined };
+  })();
+  // A step that pours out content stops being recorded past this — its
+  // calls keep their names, sizes and times (FOL-54 step 4).
+  let capturedChars = 0;
+  let captureFull = false;
+  const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
+    const t = new Date().toISOString();
+    // The model has begun its first response: held only in memory, for
+    // the fan-out gate (warmGate). Not a line in the trace.
+    if (extra?.responding) {
+      markResponding(step);
+      return;
+    }
+    // A model call is a span on the step, not a line in its trace.
+    // Numbered here, across attempts: a retry's calls follow the first
+    // attempt's, and an id-less turn of one attempt never overwrites
+    // another's. No save of its own — a turn's blocks arrive as several
+    // messages, and the next event saves them all.
+    if (extra?.turn) {
+      const calls = (step.calls ??= []);
+      // The loop counts attempts from 1; a call of the first carries none.
+      const attempt = Math.max(1, step.attempts ?? 1);
+      const at = calls.findIndex((c) => c.id === extra.turn!.id && (c.attempt ?? 1) === attempt);
+      const call = { ...extra.turn, n: at >= 0 ? calls[at]!.n : calls.length + 1, ...(attempt > 1 ? { attempt } : {}) };
+      if (at >= 0) calls[at] = call;
+      else calls.push(call);
+      return;
+    }
+    // A tool call's content goes beside the run, masked (capture.ts), and the
+    // event keeps only that it was recorded.
+    let rest: EventExtra | undefined = extra;
+    if (extra?.io) {
+      const { io, ...others } = extra;
+      rest = others;
+      const size = (io.input?.length ?? 0) + (io.output?.length ?? 0);
+      if (runId && extra.call && capture === "full" && capturedChars + size > STEP_CAPTURE_LIMIT && !captureFull) {
+        captureFull = true;
+        step.events.push({ t, type: "info", text: `capture: this step recorded ${Math.round(capturedChars / 1000)}k characters of tool content — the rest of its calls keep only their names, sizes and times` });
+      }
+      if (runId && extra.call && capture === "full" && !captureFull && recordCallIo(path.resolve(agentDir, "..", ".."), runId, extra.call, text, io, redact)) {
+        capturedChars += size;
+        rest = { ...others, captured: true };
+      }
+    }
+    step.events.push({ t, type, text: redact(text), ...rest });
+    // A person in the loop: the question, its answer, a message delivered —
+    // onto the step, so the run page, the API and history show them.
+    if (extra?.operator) {
+      applyOperatorEvent(step, extra.operator, t);
+      if (extra.operator.kind === "asked" && runId && !testRun) {
+        void notifyQuestion(tenant, path.basename(path.resolve(agentDir, "..", "..")), runId, step.agent, extra.operator.question, extra.operator.options);
+      }
+    }
+    save();
+  };
+
+  // The clock on the step itself. `??=` so a retry extends the first
+  // attempt's span rather than starting a new one; finishedAt is stamped on
+  // every exit below and the last attempt's stands.
+  step.startedAt ??= new Date().toISOString();
+
+  // The test seam: FOLDRUN_STUB_STEP=1 completes the step from a canned
+  // script instead of a model, so the orchestration around steps — loops,
+  // fan-out, gates — is testable at zero cost. An agent's `stub.md` holds
+  // the answers, `\n---\n`-separated, consumed one per call; the last one
+  // repeats. Never set outside a test.
+  if (process.env.FOLDRUN_STUB_STEP === "1") {
+    const stubFile = path.join(agentDir, "stub.md");
+    const answers = fs.existsSync(stubFile)
+      ? fs.readFileSync(stubFile, "utf8").split(/\n---\n/)
+      : [`stub result from ${step.agent}`];
+    const call = step.events.filter((e) => e.text.startsWith("stub call")).length;
+    // The ceiling it was given rides on the line, so the budget arithmetic
+    // around fan-out is testable without a model to stop.
+    push("info", `stub call ${call + 1}${stepBudgetUsd !== null ? ` (ceiling $${stepBudgetUsd.toFixed(2)})` : ""}`);
+    step.status = "completed";
+    // A stub answer may open with `cost: 0.25` — a pretend price, so the
+    // parts of orchestration that watch money (budget:) are testable too.
+    let answer = (answers[Math.min(call, answers.length - 1)] ?? "").trim();
+    // `call: <tool> <input> => <output>` lines: a pretend tool call, sent
+    // through the same push a real step's events take — with its model call
+    // and its content — so what the runner records of a step is testable.
+    answer = answer
+      .split("\n")
+      .filter((line) => {
+        const m = /^call: (\S+) (.*?) => (.*)$/.exec(line);
+        if (!m) return true;
+        const id = `toolu_stub${(step.calls?.length ?? 0) + 1}`;
+        // Twice under one id, as the SDK sends a turn's blocks: one row.
+        const turn = { id: `msg_stub${(step.calls?.length ?? 0) + 1}`, n: 0, at: new Date().toISOString(), ms: 5, model: "stub", tokens: { input: 100, output: 10, cacheRead: 80, cacheWrite: 0 }, tools: 0 };
+        push("info", "", { turn });
+        push("info", "", { turn: { ...turn, stop: "tool_use", tools: 1 } });
+        push("tool", m[1]!, { call: id, ...(capture ? { io: { input: m[2]!, inputChars: m[2]!.length } } : {}) });
+        push("tool", m[1]!, { call: id, ms: 3, io: { output: m[3]!, outputChars: m[3]!.length } });
+        return false;
+      })
+      .join("\n")
+      .trim();
+    const priced = answer.match(/^cost:\s*([\d.]+)\n?/);
+    const body = (priced ? answer.slice(priced[0].length) : answer).trim();
+    // A `===` line inside an answer separates earlier turns from the final
+    // one, so the handoffs that read a conclusion rather than a transcript
+    // are testable: result is everything joined, conclusion the last part.
+    const turns = body.split(/\n===\n/);
+    step.result = turns.join("\n").trim() + (step.item ? ` [item: ${step.item}]` : "");
+    step.conclusion = turns.length > 1 ? turns.at(-1)!.trim() : null;
+    step.costUsd = priced ? Number(priced[1]) : 0;
+    // The stub honours the output contract too, so fan-out over data and
+    // the failure of a step that returned no JSON are testable at no cost.
+    if (step.output === "json") {
+      const extracted = extractJson(step.result);
+      if (extracted.ok) {
+        step.data = extracted.value;
+        const schema = step.schema ?? (step.schemaPath ? readSchemaFile(path.resolve(agentDir, "..", ".."), step.schemaPath) : null);
+        const errors = schema && looksLikeSchema(schema) ? validateSchema(step.data, schema) : [];
+        if (errors.length) {
+          push("error", `schema: the value does not fit — ${describeSchemaErrors(errors)}`);
+          step.status = "failed";
+        }
+      } else {
+        push("error", `output: json — ${extracted.reason}`);
+        step.status = "failed";
+      }
+    }
+    step.finishedAt = new Date().toISOString();
+    save();
+    return;
+  }
+
+  try {
+    // An `openapi:` URL is fetched (and cached a day) before the context is
+    // assembled, because assembling it is synchronous and the document has
+    // to be on disk by then. Failures are lines in the trace, not a failed
+    // step: the generic HTTP tool still works without the typed ones.
+    for (const w of await prefetchOpenApi(tenant, openApiSources(agentDir, tenant))) push("error", `openapi: ${w}`);
+    const {
+      front, clockEnv, clock, systemPrompt, promptLayers, allowed, disabled, apiTools, scriptTools,
+      secretEnv, secretScopes, missingSecrets, missingTools, runtime,
+      unknownTools, shadowed, legacyUse, retiredTools, mcpServers, mcpNames,
+      apiSpecs, scriptSpecs, brokenTools, size: agentSize,
+      providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
+      searchChoice, fetchChoice, actionChoices, web, language, region,
+      fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
+      ask,
+      peers,
+      translator, fallbackTranslator,
+      outward,
+    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
+    disposeRuntime = runtime.dispose;
+    canActOutward = outward;
+    // Sent again on every turn; with turns and the tools' result sizes, what
+    // a token report reads to say where a step's input went.
+    step.systemPromptChars = systemPrompt.length;
+    // And each layer's size and hash, so a later reader can say which part
+    // of the prompt changed between this step and the agent's last.
+    step.promptLayers = promptLayers;
+    // A retry that moved the step up a class (an evicted or OOM-killed
+    // attempt) wins over the agent's own `size:` for the attempts after.
+    const size = step.sizeUp ?? agentSize;
+
+    // oauth2 secrets become live access tokens here — the one async moment
+    // in secret resolution, at the last host-side point before anything is
+    // injected or substituted. The refresh recipes never leave this process:
+    // what crosses into containers, headers and env files is the token. A
+    // failed refresh fails the step naming the secret and the provider's
+    // reason, which beats a 401 three layers later.
+    const liveSecrets = await materializeSecrets(secretEnv, { tenant, workspace: path.basename(workspaceRootOf(agentDir)) });
+    // @file values (SSH keys, certs) still carry their content at this point.
+    // The in-process branch materialises them to 0600 paths on this host
+    // below; the container branch passes the content across and the driver
+    // materialises inside, because a host path is meaningless in there.
+
+    // Populate before the first push: everything after this point may quote a
+    // credential. Short values are skipped — a two-character secret would
+    // redact half the English language, and anything that short is not one.
+    redactions = redactionsFor({ ...liveSecrets, ...providerSecrets, ...providerEnv });
+
+    // One line for the clock: which zone this step works to, and which level
+    // set it. "Why is this dated yesterday" should be answerable from the run.
+    push("info", `clock: ${clock.timezone} (${clock.source}) — today is ${clockEnv.FOLDRUN_DATE}`);
+    // And one more only when something written could not be read as a zone.
+    for (const problem of clock.problems) push("error", problem);
+    if (providerLabel) push("info", `provider: ${providerLabel}`);
+    // Which credential the model is called with, on the record: an agent
+    // that names a provider uses its own; otherwise the platform's (in a
+    // run container) or this process's — never a login that just happens
+    // to be on the machine (model-credential.ts).
+    // An account refused the platform's credential (below) is never shown
+    // running on it: the record said "Claude login token" on a step that
+    // was then refused for having no key (FOL-14, 18 Oct 2026).
+    const noKey = !providerLabel && !platform.platformKeyAllowed(tenant);
+    const credential = providerLabel || noKey ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
+    step.credential = credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
+    if (credential) {
+      const line = credentialLine(credential);
+      push(line.type, line.text);
+    }
+    // A hosted platform runs only its operator's accounts on its own model
+    // credential; every other account brings its own API key. Refused here,
+    // before a sandbox is rented, with what to do about it — not run on the
+    // operator's key, and not failed later by a provider.
+    if (!platform.platformKeyAllowed(tenant)) {
+      const own = Object.values(providerSecrets).concat(Object.values(providerEnv));
+      if (!providerLabel) {
+        push(
+          "error",
+          `no model key: this account runs on its own API key, and none is set. Add one in Settings → Model ` +
+            `(or \`foldrun account model set <provider> --key …\`), or write a provider: block in AGENTS.md`,
+        );
+        step.status = "failed";
+        save();
+        return;
+      }
+      if (own.some((v) => isClaudeLoginToken(v))) {
+        push("error", "model key: a Claude login token (sk-ant-oat…) cannot be used here — use an API key from your provider");
+        step.status = "failed";
+        save();
+        return;
+      }
+    }
+    for (const w of providerWarnings) push("error", w);
+    // A level that wrote a language nobody can read was skipped, not obeyed.
+    for (const l of language.lines) push("info", l);
+    for (const l of region.lines) push("info", l);
+    for (const w of apiWarnings) push("error", `openapi: ${w}`);
+    if (formatWarning) push("error", formatWarning);
+    if (legacyUse.length) push("error", legacyUseError(legacyUse));
+    for (const t of retiredTools) push("error", retiredToolError(t));
+    for (const t of unknownTools) {
+      push(
+        "error",
+        `tools: "${t}" is not a tool group (read, write, code, search, history, desks), an SDK tool name, or a tool in this workspace's library — nothing was granted for it`,
+      );
+    }
+    for (const name of mcpNames) push("info", `mcp server connected: ${name}`);
+    for (const name of shadowed) {
+      push("error", `tools: "${name}" is a built-in, so your tool of the same name was not granted — write it as [[${name}]] to mean yours`);
+    }
+    for (const t of disabled) push("info", `tool ${t}: ask-mode is disabled for platform runs`);
+    for (const s of missingSecrets) {
+      push("error", `secret ${s} is not set in this workspace — add it in Settings → Secrets`);
+    }
+    // Say which store each secret came from: a workspace quietly falling back
+    // to an account credential is the kind of thing you want to see, not infer.
+    for (const [name, scope] of Object.entries(secretScopes)) {
+      push("info", `secret ${name} ← ${scope} scope`);
+    }
+    for (const t of missingTools) {
+      // "Not found" is the wrong sentence when the file is right there with a
+      // typo in it, and it sends the author to the wrong place. Say which.
+      const broken = brokenTools.filter((b) => b.startsWith(`${t}:`));
+      push(
+        "error",
+        broken.length
+          ? `tool "${t}" exists but could not be read — ${broken[0].slice(t.length + 2)}`
+          : `tool "${t}" is not in the workspace library — add it under Library → Tools`,
+      );
+    }
+    for (const line of runtime.log) push("info", line);
+    push("info", `script executor: ${runtime.executor}`);
+    if (runtime.error) push("error", `runtime: ${runtime.error}`);
+    // Nearest wins, for both halves of model selection: the step names one,
+    // else the flow does, else the agent's own frontmatter. Which level won
+    // goes in the trace — "why did this run on haiku" should be answerable
+    // from the run, not by opening three files.
+    const modelSource = step.model ? "step" : modelOverride ? "flow" : "agent";
+    const model = resolveModel(step.model ?? modelOverride ?? front.model);
+    const rawEffort = step.effort ?? effortOverride ?? front.effort;
+    const effortSource = step.effort ? "step" : effortOverride ? "flow" : "agent";
+    let effort = resolveEffort(rawEffort);
+    if (isEffortWord(rawEffort)) {
+      push(
+        "error",
+        `effort: "${String(rawEffort).trim()}" is not a level — use ${EFFORT_LEVELS.join(", ")}. ` +
+          `Running at the model's default instead.`,
+      );
+    }
+    push(
+      "info",
+      `step started (agent: ${step.agent}, model: ${model} — ${modelSource}` +
+        `${effort ? `, effort: ${effort} — ${effortSource}` : ""}` +
+        // Say it every time, so a limit is never a surprise and its absence
+        // is a choice on the record, not an accident.
+        `${step.timeout ? `, timeout: ${step.timeout}s` : ", no timeout"})`,
+    );
+
+    // The run-start gate, when a gateway is in play. "Any model they want"
+    // is only an offer if a wrong pick fails here, in one line naming the
+    // fix — not minutes in, as an agent narrating tool calls into prose
+    // because its model cannot make them. The catalogue only ever fails a
+    // step on knowledge; unknown ids, presets and offline all pass through
+    // to the model call, which stays the authority of last resort.
+    let catalog: Catalog | null = null;
+    let tokenPrice: TokenPrice | null = null;
+    // The env this run's model calls actually ride: the workspace's own
+    // provider block when one is declared, otherwise the platform's — the
+    // "models included" path, where the host env points every run at the
+    // platform's gateway and users only ever pick a model. The gate, the
+    // effort fit and the repricing follow the credential, not the file:
+    // keying them off the provider block alone left the platform-provided
+    // path — the main one — without any of them.
+    const rideEnv: Record<string, string | undefined> =
+      Object.keys(providerEnv).length > 0 ? providerEnv : process.env;
+    // Through the translator the endpoint is localhost and the model id is
+    // the provider's own, sent as written; there is no catalogue to ask.
+    if (translator) push("info", `translator: ${translator.label} — Anthropic Messages in, Chat Completions out`);
+    // What actually goes on the wire: a tier the gateway remapped is sent
+    // as the gateway's id, and that id — not our tier word — is what the
+    // catalogue can have an opinion about.
+    const wireModel =
+      { haiku: rideEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+        sonnet: rideEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
+        opus: rideEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
+    if (rideEnv.ANTHROPIC_BASE_URL && !translator) {
+      catalog = await loadCatalog(rideEnv.ANTHROPIC_BASE_URL);
+      const needsTools = allowed.length > 0 || mcpNames.length > 0;
+      const verdict = checkModel(catalog, wireModel, { tools: needsTools });
+      // Also what a token costs here, so a step can count its own spend
+      // turn by turn against its ceiling instead of learning at the end.
+      tokenPrice = tokenPriceOf(findModel(catalog, wireModel));
+      if (!verdict.ok) {
+        push("error", verdict.reason!);
+        step.status = "failed";
+        save();
+        return;
+      }
+      // Effort, fitted to what this model actually takes: unchanged when the
+      // level is supported, the nearest supported level when it isn't, gone
+      // when the model doesn't reason — each departure said aloud. This is
+      // what makes `effort:` portable rather than Anthropic-only: the word
+      // in the file stays the intent, the wire carries what the model has.
+      const fitted = clampEffort(catalog, wireModel, effort);
+      if (fitted.note) push("info", fitted.note);
+      effort = fitted.effort;
+    }
+    // No catalogue — the platform's own Anthropic key, or a gateway that
+    // publishes no prices — but the model's NAME is often enough. Without
+    // this the in-pod meter priced haiku and sonnet at Opus rates and a
+    // step was stopped at up to fifteen times what it had spent.
+    tokenPrice ??= knownPrice(wireModel);
+
+    fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
+    fs.mkdirSync(path.join(agentDir, "memory"), { recursive: true });
+
+    // Expose the workspace's shared scripts/ as ./shared so every agent reaches
+    // them by the same path, without each one carrying a copy.
+    // No permanent symlinks into the agent directory — they would recurse
+    // into the workspace's own file listing. Shared paths are resolved by the
+    // script tool layer and described to the agent below; the one link there
+    // is, `workspace` → the root for the shell, lives only for the length of
+    // a step (executeStep, confine.ts#linkWorkspace).
+
+    // The confinement boundary: agents in a workspace are one team, but the
+    // workspace is where isolation is enforced.
+    const workspaceRoot = path.resolve(agentDir, "..", "..");
+    // Where a test run's state/ and storage/ writes go, and the line each
+    // one leaves: under the run, beside its archived outputs.
+    const divertFor = (id: string) => ({
+      to: path.join(workspaceRoot, "runs", id, TEST_WRITES_DIR),
+      note: (rel: string, summary: string) =>
+        push("info", `test: ${summary}`, { effect: { kind: "diverted" as const, path: rel, summary } }),
+    });
+
+    let prompt = step.instruction
+      ? resolveDocLinks(step.instruction, workspaceRoot)
+      : "Begin your run now, following your instructions.";
+    if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, CONTEXT_CHARS)}\n</previous_step_results>`;
+    if (priorData !== undefined) {
+      // The value itself, beside the prose that mentioned it. This is the
+      // lossless half of a handoff: a URL step 1 returned reaches step 3 as
+      // the URL, not as whatever a re-reading of step 1's paragraph yields.
+      const json = JSON.stringify(priorData, null, 2);
+      prompt +=
+        `\n\n<previous_step_data>\n${json.length > 60000 ? `${json.slice(0, 60000)}\n…[truncated]` : json}\n</previous_step_data>`;
+    }
+    if (step.output === "json") {
+      // The contract the runner parses back out — stated in the prompt so
+      // the instruction and the parser agree by construction, like delegate:.
+      // The schema, when there is one, is quoted whole: the model that has
+      // to satisfy it should not have to guess it from the field names.
+      const schema = step.schema ?? (step.schemaPath ? readSchemaFile(path.resolve(agentDir, "..", ".."), step.schemaPath) : null);
+      prompt +=
+        `\n\n<output>\nThis step returns data. End your reply with exactly one JSON value inside a ` +
+        "```json fenced block — the value the next step will compute on. Prose before it is " +
+        `welcome (lead with a one-line headline); nothing may follow the block. If the instruction ` +
+        `names fields, use exactly those names.` +
+        (schema && looksLikeSchema(schema)
+          ? ` The value must satisfy this JSON Schema, and the step fails if it does not:\n${JSON.stringify(schema, null, 2).slice(0, 20_000)}`
+          : "") +
+        `\n</output>`;
+    }
+    if (step.waitFor === "event" && step.eventPayload !== undefined) {
+      // Not resolved for links, like the previous step's results: it is
+      // whatever the outside world sent, and must not name a file by
+      // happening to contain brackets.
+      prompt += `\n\n<event>\nThis step waited for an external event. What arrived:\n${step.eventPayload}\n</event>`;
+    }
+    prompt += operatorBlock(step, workspaceRoot);
+    if (step.delegate?.length) {
+      // The chooser's contract. The allowed set comes from the flow file;
+      // the runner parses exactly this shape back out of the result, so the
+      // instruction and the parser agree by construction.
+      prompt +=
+        `\n\n<delegation>\nAfter your analysis, end your reply with one line per agent you are delegating to, ` +
+        `chosen ONLY from: ${step.delegate.join(", ")}.\nFormat, one per line (at most 5):\n` +
+        `agent-name: the instruction for that agent\n` +
+        `Lines naming any other agent are ignored.\n</delegation>`;
+    }
+    if (step.item) {
+      // A fan-out instance: same instruction as its siblings, one item each.
+      prompt += `\n\n<item>\nOf everything above, this instance of the step handles exactly one item — this one:\n${step.item}\n</item>`;
+    }
+
+    // Colleagues this agent may consult mid-turn — declared, like every
+    // other capability.
+    const { consults, missing: missingConsults } = gatherConsults(workspaceRoot, front.agents);
+    for (const m of missingConsults) {
+      push("error", `agents: "${m}" is not an agent in this workspace — no consult tool granted`);
+    }
+    const consultNames = [
+      ...mcpNames,
+      ...(consults.length ? ["foldrun_agents"] : []),
+      ...(ask ? ["foldrun_ask"] : []),
+      ...(peers ? ["foldrun_peers"] : []),
+    ];
+    if (peers) {
+      // The colleagues' contract, in the prompt the step reads: who runs
+      // beside it this time (none, when it runs alone), and that a message
+      // is a request, never a hand-over.
+      prompt += `\n\n<colleagues>\n${peersPromptLine(siblings)}\n</colleagues>`;
+    }
+
+    // Colleagues this agent may DELEGATE to: each with its own context and
+    // its own tools — resolved exactly as its own step's would be, then cut
+    // to what THIS step holds (subagents.ts). Built host-side, like consults.
+    // A sandbox: own job is a sub-agent already: depth one, so neither kind
+    // of delegation is offered to it.
+    if (step.subagentOf && refNames(front.subagents).length) {
+      push("info", `subagents: not offered — ${step.agent} is running a job for ${step.subagentOf}, and a sub-agent does not delegate again`);
+    }
+    const subagents = buildSubagentSpecs({
+      names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, flowTimezone,
+      parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], push,
+    });
+    if (subagents.length) {
+      // The delegation tool itself, granted only when there is someone to
+      // delegate to.
+      allowed.push(DELEGATE_TOOL);
+      for (const s of subagents) push("info", `subagent: ${s.name} — ${s.tools.length ? s.tools.join(", ") : "no tools"}`);
+    }
+    // sandbox: own sub-agents: a delegate_<name> tool each. Their jobs run as
+    // steps of their own (delegate-tools.ts); dropped again below where no
+    // door to the worker exists.
+    let delegates = buildDelegateSpecs({
+      names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, canRun: !!delegateJob && stepIndex !== undefined && stepIndex >= 0, push,
+      tenant,
+      tags,
+      outward: (_name, acts) => void (canActOutward ||= acts),
+    });
+    const offerDelegates = (specs: DelegateSpec[]) => {
+      for (const n of delegateToolNames(delegates)) if (allowed.includes(n)) allowed.splice(allowed.indexOf(n), 1);
+      if (consultNames.includes(DELEGATE_SERVER)) consultNames.splice(consultNames.indexOf(DELEGATE_SERVER), 1);
+      delegates = specs;
+      if (!specs.length) return;
+      allowed.push(...delegateToolNames(specs));
+      consultNames.push(DELEGATE_SERVER);
+    };
+    offerDelegates(delegates);
+    const delegateLine = delegates.length ? `\n\n${delegatePromptLine(delegates)}` : "";
+    if (delegates.length) {
+      prompt += delegateLine;
+      for (const d of delegates) push("info", `subagent: ${d.name} — own sandbox, its own tools, secrets and network`);
+    }
+
+    // The last provider refusal this step saw, for the fallback decision —
+    // watched on both paths, because a refusal reads the same from a pod
+    // and from this process.
+    let lastRefusal = "";
+    // The step's model connection was cut (isModelConnectionLost): the
+    // platform's side going away under the step, not the step failing.
+    let lastDrop = "";
+    // And WHY it refused, in words, when anything on the way saw the
+    // headers that say so: the translator here, the egress proxy over
+    // there. Kept apart from `lastRefusal` — that one decides whether to
+    // fall back, this one is what a person reads afterwards.
+    let refusalWhy = "";
+    const pushWatching: typeof push = (type, text, extra) => {
+      if (type === "error" && isProviderRefusal(text)) lastRefusal = text;
+      if (type === "error" && isModelConnectionLost(text)) lastDrop = text;
+      const why = refusalFromLine(text);
+      if (why) refusalWhy = why;
+      push(type, text, extra);
+    };
+    // The second supply: the block's own fallback when it declared one (a
+    // BYOK step's provider is the customer's arrangement, and so is its
+    // fallback), else the platform's, and only for a step riding the
+    // platform credential.
+    const secondSupply = fallbackEnv ?? (Object.keys(providerEnv).length === 0 ? platformFallbackEnv() : null);
+    // Where this step stands on a second supply, for the refusal sentence.
+    // It starts as the truth before anything has run and becomes
+    // "exhausted" the moment the fallback has had its turn — the owner is
+    // about to remove the OpenRouter fallback, so "none" becomes the normal
+    // reading and has to look like a decision on the page.
+    let supplyState: SupplyState = secondSupply ? "trying" : "none";
+    // The line a person reads when this step ends failed: the reason, if
+    // anything on the way learned one, else the status put into words, and
+    // in every case where the step could go next. Pushed last so it is the
+    // last error event — which is what runFailure, the desks' headlines and
+    // `foldrun report` read.
+    const sayWhy = (status: StepRecord["status"]) => {
+      if (status !== "failed" || !lastRefusal) return;
+      const said = Number(lastRefusal.match(/API Error: (\d{3})/)?.[1] ?? NaN);
+      const why =
+        refusalWhy ||
+        explainRefusal({
+          status: Number.isFinite(said) && isRefusalStatus(said) ? said : 402,
+          timezone: clock.timezone,
+        });
+      push("error", `${why}${supplyNote(supplyState)}`);
+    };
+
+    // `schema:` — inline on the step, or a file under the workspace read
+    // now, host-side, so both executors are handed the same document. A
+    // file that cannot be read is a failed step before any model runs:
+    // the contract the author wrote down cannot be checked.
+    const resolvedSchema: Record<string, unknown> | boolean | null = step.schema ?? (step.schemaPath ? readSchemaFile(workspaceRoot, step.schemaPath) : null);
+    if (step.schemaPath && resolvedSchema === null) {
+      throw new Error(`schema: ${step.schemaPath} — not a readable JSON or YAML schema under the workspace`);
+    }
+    if (step.maxTurns) push("info", `max_turns: ${step.maxTurns}`);
+    // `limits:` — account, workspace, agent, then this step's option;
+    // nearest wins per key. Enforced in the model loop's hook, on either
+    // path (step-exec.ts), so it is resolved here as plain values.
+    const stepLimits = cascadeLimits([
+      readAgentsMd(accountDir(tenant))?.data?.limits,
+      readAgentsMd(workspaceRootOf(agentDir))?.data?.limits,
+      front.limits,
+      step.limits,
+    ]);
+    const limitOwners = toolOwners(apiTools.owners, scriptSpecs);
+    const limitOpts = Object.keys(stepLimits).length ? { limits: stepLimits, toolOwners: limitOwners } : {};
+    if (limitOpts.limits) push("info", `limits: ${Object.entries(stepLimits).map(([k, n]) => `${k} ${n}`).join(", ")} — per step; a call past one is refused`);
+    // `hooks:` — the account's, the workspace's, then the agent's own, each
+    // once; resolved and run inside the step (hooks.ts, step-exec.ts).
+    const stepHookNames = [...new Set([
+      ...hookNames(readAgentsMd(accountDir(tenant))?.data?.hooks),
+      ...hookNames(readAgentsMd(workspaceRootOf(agentDir))?.data?.hooks),
+      ...hookNames(front.hooks),
+    ])];
+    const hookOpts = stepHookNames.length
+      ? { hookNames: stepHookNames, hookBase: { run_id: runId ?? null, step: stepIndex ?? null, agent: step.agent, workspace: path.basename(workspaceRootOf(agentDir)) } }
+      : {};
+    if (stepHookNames.length) push("info", `hooks: ${stepHookNames.join(", ")}`);
+
+    const isolation = process.env.FOLDRUN_RUN_ISOLATION;
+    if (isolatedRun()) {
+      // The isolated path: the whole loop — model, built-in tools, scripts —
+      // runs inside a throwaway container (a docker sibling, or a pod), and
+      // only filtered file changes come back. The vault stays out here:
+      // secrets are substituted into API headers before the specs cross,
+      // and reach scripts as env.
+      push("info", `isolation: ${isolation}`);
+      // The *merged* lists — inline declarations plus everything `tools:`
+      // granted — not a re-parse of the frontmatter. Rebuilding from `front`
+      // here silently dropped every tools:-granted http and script tool on
+      // the isolated path (mcp grants survived only because mcpServers is
+      // passed as the merged object): the agent's prompt promised a tool
+      // the function list didn't have, and the step failed as the model
+      // politely reporting the gap.
+      // The egress lease: the sandbox sends through the worker, which holds
+      // the values and fills each ${NAME} for the host that secret was
+      // granted to. Built from what this step declared — every http tool's
+      // secrets for that tool's host, the model key for the provider's —
+      // before anything is copied in. Null where no proxy is configured
+      // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
+      // everything below materialises exactly as it always did.
+      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone };
+      // A direct search API's key: granted to that API's host and no other,
+      // exactly as an http tool's key is granted to its base URL's host. The
+      // script sends the placeholder; the worker fills it on the way out.
+      for (const choice of [searchChoice, fetchChoice]) {
+        if (choice.shape === "direct" && choice.secret && choice.host && choice.secret in liveSecrets) {
+          addGrant(grant, choice.secret, liveSecrets[choice.secret], choice.host);
+        }
+      }
+      for (const c of actionChoices) {
+        if (c.provider && c.secret in liveSecrets) addGrant(grant, c.secret, liveSecrets[c.secret], c.host);
+      }
+      for (const api of apiSpecs) {
+        const host = hostOf(api.base);
+        if (!host) continue;
+        for (const v of [...Object.values(api.headers), ...Object.values(api.query)]) {
+          for (const name of placeholderNames(v)) {
+            if (!(name in liveSecrets)) continue;
+            addGrant(grant, name, liveSecrets[name], host);
+            // Which vault entry this is, so the proxy's record of what the
+            // far end said lands on the right credential.
+            (grant.healthKeys ??= {})[name] = healthKey(
+              name,
+              secretScopes[name] === "workspace" ? "workspace" : "account",
+              path.basename(path.resolve(agentDir, "..", "..")),
+            );
+          }
+        }
+      }
+      // `network:` — which sites the sandbox may reach (network.ts). Resolved
+      // before the lease, because the proxy holds the list per request. A
+      // step that may fetch or browse the open web defaults to open; every
+      // other to the trusted list plus what it declares.
+      const workspaceName = path.basename(workspaceRootOf(agentDir));
+      const readsWeb = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.some((a) => a === "fetch" || a === "browse"));
+      // Secrets bound to sites in the vault: filled by the proxy for those
+      // sites alone, never put in the sandbox (egress.ts).
+      const boundSites = secretSites(tenant, Object.keys(liveSecrets), workspaceName);
+      const network = resolveNetwork({
+        account: readAgentsMd(accountDir(tenant))?.data?.network,
+        workspace: readAgentsMd(workspaceRootOf(agentDir))?.data?.network,
+        agent: front.network,
+        readsWeb,
+        implied: [
+          ...apiSpecs.map((a) => hostOf(a.base)).filter((h): h is string => !!h),
+          ...Object.values(mcpServers).map((m) => ("url" in m && typeof m.url === "string" ? hostOf(m.url) : null)).filter((h): h is string => !!h),
+          ...Object.values(grant.secrets).flatMap((g) => g.hosts),
+          ...Object.values(boundSites).flat(),
+        ],
+      });
+      grant.network = { level: network.level, hosts: network.hosts };
+      // network_enforce: true at the account or the workspace asks the proxy
+      // to refuse; the proxy adds the install's own switch and has the last
+      // word (egress-proxy.ts), so false here never loosens anything.
+      grant.enforce = networkEnforceWanted(
+        readAgentsMd(accountDir(tenant))?.data?.network_enforce,
+        readAgentsMd(workspaceRootOf(agentDir))?.data?.network_enforce,
+      );
+      // Keyless cloud identities the step declared: the proxy may mint tokens
+      // for these audiences only, for this workload (oidc-issuer.ts).
+      // A test run withholds them as it withholds every credential
+      // (test-mode.ts): a token is a credential, however it is delivered.
+      const declaredIdentities = Object.entries(liveSecrets).filter(([, v]) => typeof v === "string" && isIdentityValue(v));
+      const identitiesHeld = testRun
+        ? withholdSecrets(Object.fromEntries(declaredIdentities), {
+            outward: scriptSpecs.some((sc) => sc.outward),
+            allow: scriptSpecs.some((sc) => sc.testMode === "allow"),
+          }).withheld
+        : [];
+      const identities = Object.fromEntries(
+        declaredIdentities.filter(([name]) => !identitiesHeld.includes(name)).map(([name, v]) => [name, { audience: identityOf(v).audience }]),
+      );
+      if (Object.keys(identities).length) grant.identities = identities;
+      const lease = await platform.egress.lease({
+        tenant,
+        runId: runId ?? "adhoc",
+        grant,
+        test: testRun,
+        who: { workspace: workspaceName, agent: step.agent },
+        ...(stepIndex !== undefined && stepIndex >= 0 ? { step: stepIndex } : {}),
+        // tools: [peers] — the roster the proxy serves, and the inboxes a
+        // colleague's message may be addressed to. Only when granted: a
+        // step without the tools has no reason to know its siblings.
+        ...(peers && stepIndex !== undefined && stepIndex >= 0 ? { agent: step.agent, peers: siblings } : {}),
+        // sandbox: own sub-agents: the only names the delegate door takes.
+        ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
+      });
+      // Serve those jobs while this step runs: each one becomes a step of
+      // its own (delegateJob), and the door answers the long-poll with its
+      // reply. No proxy, or a platform without the door: not offered — the
+      // tools would only fail.
+      if (delegates.length) {
+        // Also: the executor must be able to stop ONE job — record its
+        // sandbox (the resumable ones checkpoint it) and destroy it — or a job
+        // whose parent stopped waiting would run on, sending and writing.
+        const canStopAJob = !!platform.killSandbox && platform.sandboxResumable(isolation!);
+        if (lease && platform.egress.delegations && delegateJob && stepIndex !== undefined && canStopAJob) {
+          serving = platform.egress.delegations(
+            // Re-attaching to a sandbox that outlived its driver: what it
+            // queued before the restart is still its own, not a dead attempt's.
+            { tenant, runId: runId ?? "adhoc", step: stepIndex, resuming: !!step.sandbox && step.sandbox.kind === isolation },
+            (j) => delegateJob(j.agent, j.job, j.cancelled ?? (() => false)),
+          );
+        } else {
+          push("error", `subagents: ${delegates.map((d) => d.name).join(", ")} run in their own sandbox, and this install ${canStopAJob ? "has no door to start one from inside a step" : "cannot stop one job's sandbox on its own"} — not offered`);
+          offerDelegates([]);
+          prompt = prompt.replace(delegateLine, "");
+        }
+      }
+      // The forward door: every program in the sandbox sends through the
+      // proxy, which holds the site list and fills bound secrets. A proxy
+      // without the door (an older platform) leaves programs going direct.
+      // A step that may browse gets no proxy variables: the browser in it
+      // reads HTTPS_PROXY too, and Chromium cannot send credentials written
+      // into a proxy URL — every page failed ERR_INVALID_AUTH_CREDENTIALS
+      // (14 Oct 2026, the reel posters). Such a step is open by default,
+      // and its bound secrets materialise as they did before the door.
+      const browses = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse"));
+      const forward = lease?.proxy && !browses ? lease : null;
+      push("info", networkLine(network, forward ? forward.enforce === true : null));
+      const bound = forward ? Object.keys(boundSites).filter((name) => name in liveSecrets) : [];
+      for (const name of bound) {
+        for (const site of boundSites[name]) addGrant(grant, name, liveSecrets[name], site);
+        (grant.healthKeys ??= {})[name] = healthKey(name, secretScopes[name] === "workspace" ? "workspace" : "account", workspaceName);
+      }
+      // Which secrets must still be real inside the sandbox: a script tool
+      // reads them from its environment, and unless it says `secrets:
+      // proxied` it needs the value, not the name. bash is a script by
+      // another route. The record says which way it went, and why.
+      const materialisers = [
+        ...scriptSpecs.filter((sc) => sc.secrets !== "proxied").map((sc) => sc.name),
+        // web proxies its keys — unless it may browse: a remote browser's key
+        // goes into a websocket, and cookie and login secrets into the page.
+        ...(scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse")) ? ["web (browse)"] : []),
+        ...(allowed.includes("Bash") ? ["bash"] : []),
+      ];
+      const declared = Object.keys(liveSecrets);
+      // A bound secret is never materialised, whatever the step grants.
+      const unbound = declared.filter((name) => !bound.includes(name));
+      const materialise = (!lease || materialisers.length > 0) && unbound.length > 0;
+      if (lease) {
+        const boundNote = bound.length ? `${bound.join(", ")} bound to sites — filled by the egress proxy, never in the sandbox` : "";
+        push(
+          "info",
+          declared.length
+            ? materialise
+              ? `secrets: ${unbound.join(", ")} materialised in the sandbox for ${materialisers.join(", ")}${boundNote ? `; ${boundNote}` : ""}; api tools and the model key go through the egress proxy`
+              : `secrets: ${declared.join(", ")} proxied — nothing in the sandbox but the names${boundNote ? ` (${boundNote})` : ""}`
+            : "secrets: none declared; the model key goes through the egress proxy",
+        );
+      }
+      // Sandbox env for the declared secrets: the value, or its own name as
+      // a placeholder that the proxy fills on the way out.
+      const placeholders = Object.fromEntries(declared.map((name) => [name, `\${${name}}`]));
+      let sandboxSecrets: Record<string, string> = materialise
+        ? { ...liveSecrets, ...Object.fromEntries(bound.map((name) => [name, placeholders[name]])) }
+        : placeholders;
+      // A test run hands the sandbox no send-capable value. The env var is
+      // still there, reading TEST_MODE_WITHHELD, so a script that never
+      // checked FOLDRUN_TEST_MODE fails at the provider's door with an auth
+      // error — and sends nothing. The script tools say whether the step
+      // has a declared sender (everything withheld) or a declared reader
+      // (nothing withheld); see test-mode.ts for the order.
+      if (testRun && materialise) {
+        const held = withholdSecrets(Object.fromEntries(unbound.map((name) => [name, liveSecrets[name]])), {
+          outward: scriptSpecs.some((sc) => sc.outward),
+          allow: scriptSpecs.some((sc) => sc.testMode === "allow"),
+        });
+        // Bound secrets stay placeholders: the proxy, which holds the test
+        // policy, is the only party that ever fills them.
+        sandboxSecrets = { ...held.env, ...Object.fromEntries(bound.map((name) => [name, placeholders[name]])) };
+        for (const name of held.withheld) {
+          push("info", `test: ${name} withheld from the sandbox — TEST_MODE_WITHHELD`, { effect: { kind: "withheld", summary: `${name} withheld from the sandbox` } });
+        }
+      }
+      // A keyless identity holds nothing to hand over: the sandbox gets the
+      // path of a token file the driver keeps fresh through the proxy's
+      // /identity door. Without a lease there is no door, and so no token.
+      const identityDeclared = declared.filter((name) => typeof liveSecrets[name] === "string" && isIdentityValue(liveSecrets[name]!));
+      for (const name of identityDeclared) delete sandboxSecrets[name];
+      for (const name of identitiesHeld) {
+        push("info", `test: ${name} withheld — no identity token on a test run`, { effect: { kind: "withheld", summary: `${name} withheld from the sandbox` } });
+      }
+      const identityNames = identityDeclared.filter((name) => !identitiesHeld.includes(name));
+      if (identityNames.length) {
+        if (lease) {
+          const dir = "/tmp/foldrun-identity";
+          sandboxSecrets.FOLDRUN_IDENTITIES = identityNames.join(",");
+          sandboxSecrets.FOLDRUN_IDENTITY_DIR = dir;
+          for (const name of identityNames) sandboxSecrets[`${name}_FILE`] = `${dir}/${name.toLowerCase()}.jwt`;
+          push("info", `identity: ${identityNames.join(", ")} — a short-lived token in $NAME_FILE, renewed by the platform while the step runs`);
+        } else {
+          push("error", `identity: ${identityNames.join(", ")} needs a sandboxed step on the platform — no token here`);
+        }
+      }
+      // A client certificate is the proxy's to present, to the exact sites it
+      // is bound to; never the sandbox's, unless it was saved with `export`.
+      for (const name of declared) {
+        const v = liveSecrets[name];
+        if (typeof v !== "string" || !isClientCertValue(v) || bound.includes(name) || clientCertOf(v).export) continue;
+        delete sandboxSecrets[name];
+        push("info", `secrets: ${name} is a client certificate — the egress proxy presents it to the sites it is bound to (\`foldrun secrets sites ${name} <host>\`); unbound, it stays out of the sandbox`);
+      }
+      // On a test run the http tools always go through the proxy as
+      // placeholders, even when a script made the step materialise: the
+      // proxy is where the outward-write policy lives, and a header
+      // carrying TEST_MODE_WITHHELD would only fail where it should have
+      // been sunk or refused.
+      const apiValues = testRun && lease ? placeholders : sandboxSecrets;
+      // A declared secret named like the step's own model variables
+      // (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, …) was spread over them below
+      // and broke, or redirected, the step's model calls (FOL-19). It crosses
+      // as FOLDRUN_DECLARED_<NAME> instead: the model keeps its settings, and
+      // the driver gives the agent's API and script tools the value under its
+      // own name (run-container.ts) — never the model's key in its place.
+      const modelNamed = Object.keys(sandboxSecrets).filter(isModelEnvName);
+      if (modelNamed.length) {
+        push(
+          "info",
+          `secrets: ${modelNamed.join(", ")} kept away from the model's own settings — ${modelNamed.length === 1 ? "that name is" : "those names are"} what the step's model call uses; ` +
+            "its script and API tools and verify: get the declared value, its own shell the model's. Give the secret another name, or run the model on it with provider:",
+        );
+      }
+      const sandboxEnvSecrets = Object.fromEntries(
+        Object.entries(sandboxSecrets).map(([name, value]) => [isModelEnvName(name) ? `${DECLARED_ENV_PREFIX}${name}` : name, value]),
+      );
+      const substitutedApis = apiSpecs.map((api) => ({
+        ...api,
+        headers: Object.fromEntries(
+          Object.entries(api.headers).map(([k, v]) => [
+            k,
+            v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => apiValues[name] ?? whole),
+          ]),
+        ),
+      }));
+      // The provider's own key and headers, when the step has a lease: the
+      // key becomes ${FOLDRUN_MODEL_KEY}, the base URL goes via the proxy,
+      // and a translator's upstream request does the same. The fallback
+      // supply gets its own placeholder name — two keys, two names.
+      const proxied = <T extends Record<string, string | undefined>>(env: T, name: string): T =>
+        lease ? (proxyModelEnv(env, lease.url, grant, providerSecrets, name) as T) : env;
+      const proxiedTranslator = (spec: TranslatorSpec | null, name: string): TranslatorSpec | null => {
+        if (!spec || !lease) return spec;
+        const host = hostOf(spec.upstreamBase);
+        if (!host) return spec;
+        addGrant(grant, name, spec.upstreamKey, host);
+        return {
+          ...spec,
+          egress: lease.url,
+          upstreamKey: `\${${name}}`,
+          headers: Object.fromEntries(
+            Object.entries(spec.headers ?? {}).map(([k, v]) => [k, unsubstitute(v, providerSecrets, host, grant)]),
+          ),
+        };
+      };
+      const primaryTranslator = proxiedTranslator(translator, MODEL_KEY_NAME);
+      const secondTranslator = proxiedTranslator(fallbackTranslator, `${MODEL_KEY_NAME}_FALLBACK`);
+      const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
+      const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
+        workspaceRoot,
+        libraryRoot: libraryDir(tenant),
+        galleryRoot: platform.galleryDir() ?? undefined,
+        // Keys this step's dependency cache. Per-account by design — see
+        // run-container.ts#runtimeCacheMount for why it is not shared.
+        tenant,
+        input: {
+          agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
+          prompt,
+          model,
+          effort,
+          systemPrompt,
+          allowed,
+          mcpNames: consultNames,
+          // A remote MCP server's headers had their secrets filled host-side;
+          // a bound one goes back to its ${NAME} for the proxy to fill.
+          mcpServers: bound.length ? unbindMcpHeaders(mcpServers, bound, liveSecrets, grant) : mcpServers,
+          apis: substitutedApis,
+          scripts: scriptSpecs,
+          // The merged spec, not `front.runtime` — see the plan's `runtime`
+          // field. A tool's own `runtime:` is part of what this step needs.
+          runtime: runtime.spec,
+          consults,
+          ...(peers ? { peers: { self: step.agent, siblings } } : {}),
+          ...(subagents.length ? { subagents } : {}),
+          ...(delegates.length ? { delegates } : {}),
+          timeoutSec: step.timeout,
+          budgetUsd: stepBudgetUsd,
+          budgetNote: stepBudgetNote,
+          price: tokenPrice,
+          verify: step.verify,
+          ...(judgeModel ? { judgeModel } : {}),
+          ...(judgeEffort ? { judgeEffort } : {}),
+          output: step.output,
+          schema: resolvedSchema ?? undefined,
+          maxTurns: step.maxTurns,
+          capture,
+          ...limitOpts,
+          ...hookOpts,
+          translator: keyName === MODEL_KEY_NAME ? primaryTranslator : secondTranslator,
+          // Outward steps keep a browser of their own: an executor that
+          // could browse from the slim image through the account's pod
+          // leaves them on the full one (browser-pod.ts).
+          ...(outward ? { outward: true } : {}),
+          // The container sees the workspace at /workspace and the library
+          // at /library; the roots are named host-side and moved here.
+          search: searchRoots.map((r) => ({
+            label: r.label,
+            dir: r.dir.startsWith(libraryDir(tenant))
+              ? path.posix.join("/library", path.relative(libraryDir(tenant), r.dir).replaceAll("\\", "/"))
+              : path.posix.join("/workspace", path.relative(workspaceRoot, r.dir).replaceAll("\\", "/")),
+          })),
+          history: historyDigest,
+          desks: deskDigest,
+          ...(ask ? { ask } : {}),
+        },
+        env: Object.fromEntries(
+          Object.entries({
+            // The platform's own model credential, when the agent names no
+            // provider of its own — this is "models included": the host
+            // process holds one key, and every isolated run borrows it.
+            // A provider: block still wins, because providerEnv is spread
+            // after and carries the agent's chosen endpoint + token.
+            ...proxied(Object.keys(providerEnv).length === 0 ? modelEnv : providerEnv, keyName),
+            ...(lease ? { [EGRESS_ENV]: lease.url } : {}),
+            // Every program's HTTP(S) through the proxy's forward door, and
+            // the CA it signs bound sites with, for the sandbox to trust.
+            ...(forward ? proxyEnv(forward.proxy!) : {}),
+            // Only a step with a bound secret has a site the proxy
+            // intercepts, so only that step's TLS clients are pointed at a
+            // bundle with the egress CA in it; every other step's are as
+            // they always were.
+            ...(forward?.ca && bound.length ? { [EGRESS_CA_ENV]: Buffer.from(forward.ca).toString("base64") } : {}),
+            ...clockEnv,
+            // Who is running: the in-process path stamps scripts with these
+            // host-side, but a container rebuilds its tools from its own
+            // environment, so without them here every script and verify in
+            // the pod ran anonymous — and a verify comparing a marker to
+            // $FOLDRUN_RUN_ID compared it to nothing.
+            FOLDRUN_RUN_ID: runId,
+            FOLDRUN_AGENT: step.agent,
+            FOLDRUN_WORKSPACE: path.basename(workspaceRoot),
+            ...(testRun ? testModeEnv() : {}),
+            ...sandboxEnvSecrets,
+          }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        ),
+        emit: pushWatching,
+        // Stamps the sandbox, so stopping this run can destroy it.
+        runId,
+        // A step still waiting for room has no sandbox to destroy; the
+        // executor asks this before it creates one (pod-room.ts).
+        ...(stopRequested ? { stopRequested } : {}),
+        size,
+        // The pod's network, for the executor's own wall (the k8s tier's
+        // network policy): a filtered pod reaches the proxy and DNS only.
+        network: { level: network.level, enforced: forward?.enforce === true },
+        // A test run's state/ and storage/ changes come out under the run.
+        divert: testRun && runId ? divertFor(runId) : undefined,
+        test: testRun,
+        // Resume: a sandbox a previous driver left running, recorded on the
+        // step. Consumed once — a fresh attempt after this one (a retry, a
+        // fallback) starts its own sandbox.
+        resume: step.sandbox && step.sandbox.kind === isolation ? { ref: step.sandbox.ref, consumed: step.sandbox.consumed } : null,
+        // Checkpoint: where the executor is, on the record, so a driver
+        // that inherits this run can attach where this one left off. The
+        // executor calls it before applying each line; the line's own emit
+        // saves the record, so this only updates the fields.
+        checkpoint: (ref: string, consumed: number) => {
+          step.sandbox = { kind: isolation!, ref, consumed, since: step.sandbox?.since ?? new Date().toISOString() };
+          if (consumed === 0) save();
+        },
+      });
+
+      // A busy provider gets another moment on the SAME supply before the
+      // fallback is considered: under a fan-out, twenty steps against one
+      // key are told "too many requests" together, and failing them all is
+      // a broken run where a few seconds would have been a slow one. Each
+      // attempt holds its own sandbox, so the meter owes the sum.
+      const firstArgs = isolatedArgs(platformModelEnv());
+      await lease?.commit();
+      let credentialUsed = platformModelCredential();
+      // The arguments of the attempt whose outcome is current — what a
+      // re-run on the full image repeats, on the same model supply.
+      let lastArgs: typeof firstArgs = firstArgs;
+      const runTracked = (a: typeof firstArgs) => {
+        lastArgs = a;
+        return runIsolated(a);
+      };
+      let attemptFrom = step.events.length;
+      let outcome = await runTracked(firstArgs);
+      step.sandbox = null; // whatever happens next starts its own
+      // A 401 from a token that rotated mid-step is not a broken key: the
+      // replacement is already on its way to the mounted file. Wait for it
+      // once, then fall into the same retry the busy case uses.
+      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+        push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
+        const rotated = await awaitRotatedCredential(credentialUsed);
+        if (rotated) {
+          push("info", "the credential rotated under this step; retrying on the new one");
+          credentialUsed = rotated;
+          lastRefusal = "";
+          const previous = outcome.timing;
+          // Build first: isolatedArgs is what re-grants the model key, and
+          // commit() is what publishes the grant to Redis, where the proxy
+          // reads it. Committing first sent the revoked token again — every
+          // rotation retry on 2026-09-22/23 401'd this way.
+          const retry = isolatedArgs(platformModelEnv());
+          await lease?.commit();
+          outcome = withEarlierTiming(await runTracked(retry), previous);
+        } else {
+          push("info", "the credential did not change — this is the key itself, not a rotation");
+        }
+      }
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+        const wait = backoffMs(n, lastRefusal);
+        push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
+        await sleep(wait);
+        // Judged fresh: the next attempt's own failure decides what happens
+        // next, not the one that sent us here.
+        lastRefusal = "";
+        const previous = outcome.timing;
+        const again = isolatedArgs(platformModelEnv());
+        await lease?.commit();
+        outcome = await runTracked(again);
+        outcome = withEarlierTiming(outcome, previous);
+      }
+      // The model connection was cut under the step — the egress proxy or the
+      // worker went away (6 Oct 2026: a worker restarted every 4.5 minutes and
+      // every desk running failed on "Connection refused"). That is the
+      // platform's fault, so the step runs again, whatever its `retry:` —
+      // unless it can act outside the workspace and its tools already ran:
+      // the post may be up, and a second attempt would post it again.
+      for (let n = 1; n <= DROP_RETRIES && outcome.status === "failed" && lastDrop; n++) {
+        if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
+          push("info", `the model connection dropped after this step's tools ran — not retried: they can act outside the workspace, and another attempt could repeat what they did`);
+          break;
+        }
+        const wait = Math.round(retryBaseMs() * 2 * n);
+        push("info", `the model connection dropped (${lastDrop.slice(0, 80)}) — the platform's side, not the step's; running the step again in ${Math.round(wait / 1000)}s (${n} of ${DROP_RETRIES})`);
+        await sleep(wait);
+        lastDrop = "";
+        lastRefusal = "";
+        attemptFrom = step.events.length;
+        const previous = outcome.timing;
+        const again = isolatedArgs(platformModelEnv());
+        await lease?.commit();
+        outcome = withEarlierTiming(await runTracked(again), previous);
+      }
+      // The model wrote its tool call out as text — `<invoke name="…">` in
+      // its last message — and stopped. Nothing ran, so nothing was done:
+      // seo-digest's editor three times (27 Sep, 4 and 5 Oct 2026), its own
+      // retry included, because the retry asked the same way. Run it once
+      // more with that said plainly, on the same safety rule as a dropped
+      // connection: never again after an outward tool already ran.
+      for (let n = 1; n <= TEXT_CALL_RETRIES && wroteToolCallAsText(attemptText(outcome.result, step.events.slice(attemptFrom))); n++) {
+        if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
+          push("info", "the model wrote a tool call as text instead of making it — not run again: this step's tools can act outside the workspace and already ran");
+          break;
+        }
+        push("info", `the model wrote a tool call as text instead of making it, so nothing ran — running the step again with a note (${n} of ${TEXT_CALL_RETRIES})`);
+        attemptFrom = step.events.length;
+        lastRefusal = "";
+        const previous = outcome.timing;
+        const base = isolatedArgs(platformModelEnv());
+        const again = { ...base, input: { ...base.input, prompt: `${base.input.prompt}\n\n${TEXT_CALL_NOTE}` } };
+        await lease?.commit();
+        outcome = withEarlierTiming(await runTracked(again), previous);
+      }
+      // The second supply, tried exactly once, and only when the primary
+      // refused over money/auth/limits rather than the work failing. The
+      // retry is a fresh sandbox — the failed one is gone, and driveRun's
+      // whole contract is that re-driving is safe. A declared fallback
+      // replaces the provider block's env wholesale, so the spread order in
+      // isolatedArgs (providerEnv last) has to be overridden here.
+      if (outcome.status === "failed" && lastRefusal && secondSupply) {
+        push(
+          "info",
+          `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
+        );
+        const first = outcome.timing;
+        const fallbackName = `${MODEL_KEY_NAME}_FALLBACK`;
+        const retryArgs = isolatedArgs(secondSupply, fallbackName);
+        // The fallback's own translator, or none: a fallback that speaks
+        // Anthropic must not inherit the primary's Chat-Completions door.
+        const fallbackArgs = {
+          ...retryArgs,
+          input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null },
+          env: Object.fromEntries(
+            Object.entries({ ...retryArgs.env, ...proxied(secondSupply, fallbackName) })
+              .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+          ),
+        };
+        await lease?.commit();
+        supplyState = "exhausted";
+        outcome = await runTracked(fallbackArgs);
+        // Both attempts held sandboxes; the meter owes the sum. The first
+        // try's pod ran, was billed for by the platform, and must not
+        // vanish from the record because a second try replaced its outcome.
+        outcome = withEarlierTiming(outcome, first);
+      }
+      // Slim browsing (browser-pod.ts): the step ran on the slim image and
+      // the account's browser pod went away under it, past the web tool's
+      // reconnects. Reads only — run it again from the start on the full
+      // image, where a browser in the step is always there. Anything
+      // written — fail it, naming what, and leave retry:/on-fail:/a person
+      // to decide; a second go could send or charge twice.
+      step.image = outcome.image ?? null;
+      step.browserPod = outcome.browserPod ? { ...outcome.browserPod } : null;
+      if (step.subagentOf && outcome.applied?.length) step.wrote = [...new Set([...(step.wrote ?? []), ...outcome.applied])];
+      if (outcome.status === "failed" && outcome.browserPod?.lost) {
+        const decision = podLossDecision(outcome.browserPod);
+        if (decision.rerun) {
+          push("info", decision.note);
+          const first = outcome;
+          // The slim go is a try of its own on the record — image slim,
+          // status lost, its own cost, tokens and sandbox seconds — so the
+          // run page and `foldrun report` show two tries, slim (lost) then
+          // full, and the step's totals are the sum of both rows
+          // (recordAttempt). Live, 2026-10-01, the step showed only the
+          // full re-run.
+          step.podLostTry = {
+            status: "lost",
+            costUsd: repriced(catalog, wireModel, first.usage ?? null, first.costUsd, push, first.turnsCostUsd),
+            tokens: tokensOf(first.usage),
+            ...(typeof first.turns === "number" ? { turns: first.turns } : {}),
+            computeSecs: first.timing ? Math.round(first.timing.totalMs) / 1000 : null,
+            finishedAt: new Date().toISOString(),
+            error: decision.note.slice(0, 500),
+            image: "slim",
+            browserPod: browserPodLine(first.browserPod!),
+          };
+          const again = { ...lastArgs, input: { ...lastArgs.input, image: "full" as const }, resume: null };
+          await lease?.commit();
+          // Before the call, not after: a re-run that throws (the full
+          // sandbox never started) is still the full go on the record — its
+          // failed row read "slim" when this was set only on success.
+          step.image = { variant: "full", why: "re-run after the browser pod was lost" };
+          step.browserPod = { ...first.browserPod!, fallback: RERAN_ON_FULL };
+          outcome = await runTracked(again);
+          step.image = outcome.image ?? step.image;
+        } else {
+          push("error", decision.message);
+          step.browserPod = { ...outcome.browserPod, failure: decision.message };
+        }
+      }
+      if (lease) {
+        for (const line of await lease.drainLog()) {
+          // pushWatching, not push: a line the proxy wrote may carry the
+          // refusal mark, and that sentence is the whole reason the proxy
+          // reads response headers at all.
+          if (typeof line === "string") pushWatching("info", line);
+          else pushWatching("info", line.text, { effect: line.effect });
+        }
+        await serving?.close();
+        serving = null;
+        await lease.release();
+      }
+      // Nothing a test run left in storage/public/ reached storage/, so
+      // there is nothing to publish — and a share link is an outward act.
+      if (!testRun) await publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      sayWhy(outcome.status);
+      step.status = outcome.status;
+      step.result = redactText(outcome.result);
+      step.conclusion = redactText(outcome.conclusion);
+      step.sandbox = null;
+      // The cluster's word on why a sandbox ended without the driver saying
+      // so — OOMKilled, Evicted — on the record, where the retry reads it.
+      if (outcome.status === "failed" && outcome.reason) push("error", `sandbox ended: ${outcome.reason}`);
+      if (outcome.data !== undefined) step.data = redactData(outcome.data);
+      step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push, outcome.turnsCostUsd);
+      step.tokens = tokensOf(outcome.usage);
+      step.turns = typeof outcome.turns === "number" ? outcome.turns : null;
+      step.stopReason = outcome.stopReason ?? null;
+      step.actual = outcome.res ?? null;
+      if (outcome.res?.peakMemBytes || outcome.res?.rxBytes) {
+        const mb = (n: number | null) => (n === null ? "?" : (n / 1024 / 1024).toFixed(0));
+        push(
+          "info",
+          `resources: cpu busy ${outcome.res.busyCpuSecs?.toFixed(1) ?? "?"}s · ` +
+            `peak mem ${mb(outcome.res.peakMemBytes)}MB · ` +
+            `net ${mb(outcome.res.rxBytes)}MB in / ${mb(outcome.res.txBytes)}MB out`,
+        );
+      }
+      // The compute meter, recorded on the step rather than derived later:
+      // the sandbox is gone by the time the run settles, and its lifetime
+      // is not recoverable from the run's own timestamps.
+      const secs = (ms: number) => Math.round(ms) / 1000;
+      step.computeSecs = outcome.timing ? secs(outcome.timing.totalMs) : null;
+      step.startupSecs = outcome.timing ? secs(outcome.timing.sandboxMs) : null;
+      // Where the start-up went, phase by phase (run-container.ts#STARTUP_PHASES),
+      // in seconds — what the cold-start numbers are computed from.
+      const phases = outcome.timing?.phases;
+      step.startup = phases && Object.keys(phases).length
+        ? Object.fromEntries(Object.entries(phases).map(([k, v]) => [k, secs(v)]))
+        : null;
+      // Which reservation those seconds held — as numbers, because the bill
+      // is per core-second and per GiB-second, and what was held must come
+      // from the record, never from what the config says at billing time.
+      step.size = size;
+      const lim = sizeLimits(size);
+      const gib = (() => {
+        const m = lim.memory.match(/^(\d+(?:\.\d+)?)\s*(Gi?|Mi?|g|m)?/i);
+        const n = m ? Number(m[1]) : 2;
+        return (m?.[2] ?? "Gi").toLowerCase().startsWith("m") ? n / 1024 : n;
+      })();
+      step.reserved = { cpus: Number(lim.cpus) || 2, memGiB: gib };
+    } else {
+      // Same withholding as the sandbox path — the in-process step is what
+      // `foldrun run --test` drives on a laptop, where there is no proxy
+      // and this is the only guard there is.
+      const held = testRun
+        ? withholdSecrets(liveSecrets, {
+            outward: scriptSpecs.some((sc) => sc.outward),
+            allow: scriptSpecs.some((sc) => sc.testMode === "allow"),
+          })
+        : { env: liveSecrets, withheld: [] as string[] };
+      for (const name of held.withheld) {
+        push("info", `test: ${name} withheld from scripts — TEST_MODE_WITHHELD`, { effect: { kind: "withheld", summary: `${name} withheld from scripts` } });
+      }
+      // A client certificate not saved with `export` has no proxy here to
+      // present it: it stays out of everything this step runs — tools,
+      // consults, verify commands — not only out of the files.
+      const stepSecrets = Object.fromEntries(
+        Object.entries(held.env).filter(([name, v]) => {
+          if (typeof v === "string" && isIdentityValue(v)) {
+            push("error", `identity: ${name} needs a sandboxed step on the platform — no token here`);
+            return false;
+          }
+          if (typeof v !== "string" || !isClientCertValue(v) || clientCertOf(v).export) return true;
+          push("info", `secrets: ${name} is a client certificate — no egress proxy here to present it; save it with export to use it as files`);
+          return false;
+        }),
+      );
+      // The model credential for this machine's Claude Code — the agent's
+      // own provider when it names one. The host allowlist drops it, so
+      // without this every in-process step ran on the machine's login.
+      const localModelEnv: Record<string, string> = Object.keys(providerEnv).length ? providerEnv : resolveModelCredential().env;
+      const consultTools = buildConsultTools(
+        consults,
+        { ...hostSafeEnv(), ...stepSecrets, ...localModelEnv },
+        (type, text) => push(type, text),
+      );
+      // On this machine nobody can write in and there is no proxy: the
+      // question goes to the terminal when there is one, else unanswered.
+      const askTools = ask ? buildAskTool({ channel: null, timeoutSec: ask.timeoutSec, emit: push, local: terminalAsk }) : null;
+      // Colleagues in the same group reach each other over the run's own
+      // bus here — no proxy, so no person can write in, but a sibling can.
+      // Every grouped step gets the inbox (a pod reads the proxy's inbox
+      // whatever its tools); only tools: [peers] gets the tools to send.
+      const peerChannel = peerBus && stepIndex !== undefined && stepIndex >= 0 ? peerBus.channelFor({ agent: step.agent, step: stepIndex }, siblings) : null;
+      const peerTools = peers ? buildPeerTools({ channel: peerChannel, self: step.agent, siblings, emit: push }) : null;
+      const localInbox = peerChannel ? inboxReader(peerChannel, push) : undefined;
+      // sandbox: own sub-agents, here: no proxy between the step and this
+      // process, so the job is handed to the drive loop directly.
+      const delegateTools = delegates.length && delegateJob
+        ? buildDelegateTools({ specs: delegates, channel: localDelegateChannel(delegateJob), emit: push, timeoutSec: step.timeout })
+        : null;
+      // Said, not hidden: on this machine no step has a sandbox, so a job is
+      // its own context, tools and secrets — but the same files and network.
+      if (delegateTools?.server) {
+        push("info", `subagents: ${delegates.map((d) => d.name).join(", ")} run here in this process — their own tools and secrets, but no sandbox: the same files and network as this step (on the platform each job gets a sandbox of its own)`);
+      }
+      // @file secrets become 0600 paths here (host run), cleaned up in the
+      // finally — once, however many attempts follow.
+      const mat = materializeFileSecrets(agentDir, stepSecrets);
+      fileDir = mat.dir;
+      // install: pip and npm land in a directory of this step's own, gone in
+      // the finally; apt has no helper on a bare host and says so.
+      installDir = allowed.includes(INSTALL_TOOL) ? fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-step-")) : null;
+      const installEnv = installDir ? stepInstallEnv(installDir, { ...process.env, ...mat.env }) : {};
+      const installTools = installDir
+        ? buildInstallTool({
+            dir: installDir,
+            socket: null,
+            cacheRoot: path.join(dataRoot(), tenant, ".runtimes"),
+            python: mat.env.VIRTUAL_ENV ? path.join(mat.env.VIRTUAL_ENV, "bin", "python") : "python3",
+            env: { ...hostSafeEnv(), ...mat.env, ...installEnv },
+            emit: (type, text) => push(type, text),
+          })
+        : null;
+      const attemptInProcess = (modelEnv: Record<string, string | undefined>) => executeStep({
+        agentDir,
+        workspaceRoot,
+        libraryRoot: libraryDir(tenant),
+        ...(subagents.length ? { subagents } : {}),
+        // The colleagues' inbox, read after every tool call — the same hook
+        // a pod uses for a person's messages.
+        ...(localInbox ? { inbox: localInbox } : {}),
+        prompt,
+        model,
+        effort,
+        systemPrompt,
+        allowed,
+        mcpNames: consultNames,
+        mcpServers: {
+          ...(apiTools.server ? { foldrun_apis: apiTools.server } : {}),
+          ...(scriptTools.server ? { foldrun_scripts: scriptTools.server } : {}),
+          ...(consultTools.server ? { foldrun_agents: consultTools.server } : {}),
+          ...(searchTools.server ? { foldrun_search: searchTools.server } : {}),
+          ...(historyTools.server ? { foldrun_history: historyTools.server } : {}),
+          ...(deskTools.server ? { foldrun_desks: deskTools.server } : {}),
+          ...(askTools ? { foldrun_ask: askTools.server } : {}),
+          ...(peerTools ? { foldrun_peers: peerTools.server } : {}),
+          ...(delegateTools?.server ? { foldrun_delegate: delegateTools.server } : {}),
+          ...(installTools ? { foldrun_install: installTools.server } : {}),
+          ...mcpServers,
+        },
+        // Declared secrets reach the agent's scripts as env vars; the model
+        // only ever sees the variable names, not the values. The base is
+        // the allowlisted host environment, not process.env: the SDK's
+        // Bash tool runs with this, and on a platform process.env holds
+        // every tenant's root key and the datastore credentials.
+        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...installEnv, ...modelEnv },
+        timeoutSec: step.timeout,
+        budgetUsd: stepBudgetUsd,
+        budgetNote: stepBudgetNote,
+        price: tokenPrice,
+        verify: step.verify,
+        ...(judgeModel ? { judgeModel } : {}),
+        ...(judgeEffort ? { judgeEffort } : {}),
+        output: step.output,
+        schema: resolvedSchema ?? undefined,
+        maxTurns: step.maxTurns,
+        capture,
+        ...limitOpts,
+        ...hookOpts,
+        stopRequested,
+        // What the scripts saw, the verify sees: a flow can then check that
+        // the proof a step left names THIS run, not one that came before —
+        // copy-back never propagates a deletion, so a marker from an earlier
+        // run rides into every later sandbox.
+        verifyEnv: {
+          ...clockEnv,
+          ...(runId ? { FOLDRUN_RUN_ID: runId } : {}),
+          FOLDRUN_AGENT: step.agent,
+          FOLDRUN_WORKSPACE: path.basename(path.resolve(agentDir, "..", "..")),
+          ...(testRun ? testModeEnv() : {}),
+          ...stepSecrets,
+        },
+        emit: pushWatching,
+      });
+      // With a translator the step's endpoint is the translator: started
+      // here, pointed at by the SDK's env, closed when the attempt ends.
+      // A test run brackets each attempt with a snapshot of state/ and
+      // storage/: the step writes them for real, because there is no
+      // sandbox to write instead, and afterwards what changed is moved
+      // under the run and the originals come back.
+      const attemptThrough = async (modelEnv: Record<string, string | undefined>, spec: TranslatorSpec | null) => {
+        const before = testRun ? snapshotDivertedDirs(workspaceRoot) : null;
+        // What earlier steps of this test run wrote, laid over the real files
+        // for this attempt; restoreDivertedDirs puts the originals back.
+        const handed =
+          before && runId && overlayTestWrites(workspaceRoot, divertFor(runId).to).length ? snapshotDivertedDirs(workspaceRoot) : before;
+        const t = spec ? await startTranslator(spec) : null;
+        try {
+          return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
+        } finally {
+          if (t) {
+            for (const line of t.drainLog()) pushWatching("info", line.startsWith("translator") ? line : `translator: ${line}`);
+            await t.close();
+          }
+          if (before && runId) {
+            const d = divertFor(runId);
+            restoreDivertedDirs(workspaceRoot, before, d.to, d.note, handed ?? before);
+          }
+        }
+      };
+      let credentialUsed = platformModelCredential();
+      let outcome = await attemptThrough(localModelEnv, translator);
+      // Same rule as the isolated path: a credential that rotated under the
+      // step is waited out and retried before anything else is considered.
+      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+        push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
+        const rotated = await awaitRotatedCredential(credentialUsed);
+        if (rotated) {
+          push("info", "the credential rotated under this step; retrying on the new one");
+          credentialUsed = rotated;
+          lastRefusal = "";
+          outcome = await attemptThrough(localModelEnv, translator);
+        } else {
+          push("info", "the credential did not change — this is the key itself, not a rotation");
+        }
+      }
+      // Same rule as the isolated path: a busy provider is waited out on
+      // the supply it refused from, before any fallback is considered.
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+        const wait = backoffMs(n, lastRefusal);
+        push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
+        await sleep(wait);
+        lastRefusal = "";
+        outcome = await attemptThrough(localModelEnv, translator);
+      }
+      // Same rule as the isolated path: one retry, on a refusal, on the
+      // declared or platform second supply.
+      if (outcome.status === "failed" && lastRefusal && secondSupply) {
+        push(
+          "info",
+          `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
+        );
+        supplyState = "exhausted";
+        outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
+      }
+      if (!testRun) await publishPublicDir(tenant, path.basename(workspaceRoot), push);
+      sayWhy(outcome.status);
+      step.status = outcome.status;
+      step.result = redactText(outcome.result);
+      step.conclusion = redactText(outcome.conclusion);
+      if (outcome.data !== undefined) step.data = redactData(outcome.data);
+      // A consult's spend belongs to the step that asked.
+      const consultCost = consultTools.drainCost();
+      const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push, outcome.turnsCostUsd);
+      step.costUsd = stepCost === null && consultCost === 0 ? null : (stepCost ?? 0) + consultCost;
+      step.tokens = tokensOf(outcome.usage);
+      step.turns = typeof outcome.turns === "number" ? outcome.turns : null;
+      step.stopReason = outcome.stopReason ?? null;
+      for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
+      for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
+    }
+  } catch (err) {
+    step.status = "failed";
+    push("error", err instanceof Error ? err.message : String(err));
+  } finally {
+    // The delegate door's service, when the step ended by throwing before
+    // its lease was released: its jobs are settled, not left hanging.
+    if (serving) {
+      try {
+        await serving.close();
+      } catch {
+        // best-effort — the door's records expire on their own
+      }
+    }
+    try {
+      cleanupFileSecrets(fileDir);
+      if (installDir) fs.rmSync(installDir, { recursive: true, force: true });
+    } catch {
+      // best-effort — a leftover scratch file is swept with the run's outputs
+    }
+    try {
+      // A private runtime build (see prepareRuntime) is this step's alone.
+      disposeRuntime?.();
+    } catch {
+      // best-effort — it is in the tmpdir
+    }
+  }
+  step.finishedAt = new Date().toISOString();
+  save();
+  return { actedThenFailedCheck: canActOutward && actedThenFailedCheck(step.events.slice(eventsAtStart)) };
+}
+
+/**
+ * Did this attempt call its tools and then fail only on the check after —
+ * `verify:`, `output: json`, a schema? For a step whose tools act outward
+ * that is the one failure a retry must not answer: the email went, the post
+ * is up, and the check failing says nothing about whether they happened. A
+ * second attempt sends them again. Read off the attempt's own events, which
+ * both executors write the same way (step-exec.ts): every event a failed
+ * check writes carries `check: true`. It used to read only the LAST error's
+ * wording, and a failed shell verify or judge writes its detail after its
+ * headline — so the step was retried and the email went twice. The wording
+ * is still honoured, for a driver image older than the tag.
+ */
+export function actedThenFailedCheck(events: { type: string; text: string; check?: boolean }[]): boolean {
+  if (!events.some((e) => e.type === "tool")) return false;
+  return events.some((e) => e.type === "error" && (e.check === true || /^(verify `|output: json — |schema: the value does not fit)/.test(e.text)));
+}
+
+// Block until a human approves or rejects the pending steps. Polls the run
+// record — the same file the dashboard writes through the approval API — so
+// no in-memory queue has to survive a restart. For as long as it takes: a
+// person answering on the 25th hour used to find the run had given up on
+// them at the 24th, and no clock of the platform's gets to decide that.
+async function waitForDecision(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  indexes: number[],
+): Promise<boolean> {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const latest = readRun(tenant, workspace, runId);
+    if (!latest) return false;
+    const stillWaiting = indexes.some((i) => latest.steps[i]?.status === "awaiting-approval");
+    if (!stillWaiting) return true;
+  }
+}
+
+/**
+ * Copy a directory tree by reading and writing the bytes.
+ *
+ * Not fs.cpSync: that copies through the kernel's clone/copy_file_range
+ * path, which on a bind-mounted or network volume — exactly where a hosted
+ * install keeps its data — can report success and leave a zero-length file
+ * behind. Every archived run output was empty, and nothing failed to say
+ * so, which is the worst shape a bug can take. This works on every
+ * filesystem, and normalises the mode while it is here: what an agent
+ * produced belongs to the platform, not to the container umask that
+ * happened to create it.
+ */
+export function copyTreeBytes(from: string, to: string) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) copyTreeBytes(src, dst);
+    else if (entry.isFile()) fs.writeFileSync(dst, fs.readFileSync(src), { mode: 0o644 });
+  }
+}
+
+// Which of the host's own credentials an isolated run may borrow. Only the
+// model credential — a run gets the ability to think on the platform's
+// account, never the platform's other secrets, which is the entire reason
+// the container env is allowlisted instead of inheriting process.env.
+/**
+ * The platform's second model supply, tried when the first refuses over
+ * money or auth. Order is a cost decision: a flat-rate subscription as the
+ * engine, pay-per-token only when it runs dry —
+ *
+ *   FOLDRUN_FALLBACK_BASE_URL     e.g. https://openrouter.ai/api
+ *   FOLDRUN_FALLBACK_TOKEN        bearer for that endpoint
+ *   FOLDRUN_FALLBACK_HAIKU/SONNET/OPUS_MODEL   tier ids in ITS catalogue
+ *
+ * Empty ANTHROPIC_API_KEY on purpose: set, it goes out as x-api-key and a
+ * gateway rejects it; the fallback's whole credential is the bearer.
+ */
+/**
+ * Every `openapi:` URL the agent's API tools name — its own `apis:` and the
+ * http tools it opted into — so they can be fetched before the context is
+ * assembled. File paths need no fetching and are left out.
+ */
+function openApiSources(agentDir: string, tenant: string): string[] {
+  const out = new Set<string>();
+  try {
+    const { data } = configMatter(fs.readFileSync(path.join(agentDir, "agent.md"), "utf8"));
+    const front = data as { apis?: unknown; tools?: unknown };
+    for (const api of parseApis(front.apis)) if (api.openapi?.startsWith("https://")) out.add(api.openapi);
+    const workspace = path.basename(path.resolve(agentDir, "..", ".."));
+    const available = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
+    for (const name of ownToolNames(front)) {
+      const def = available[name];
+      if (def?.kind === "http" && def.spec.openapi?.startsWith("https://")) out.add(def.spec.openapi);
+    }
+  } catch {
+    // an unreadable agent.md fails the step properly a moment later
+  }
+  return [...out];
+}
+
+function platformFallbackEnv(): Record<string, string> | null {
+  const base = process.env.FOLDRUN_FALLBACK_BASE_URL;
+  const token = process.env.FOLDRUN_FALLBACK_TOKEN;
+  if (!base || !token) return null;
+  const out: Record<string, string> = {
+    ANTHROPIC_BASE_URL: base,
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+  };
+  for (const tier of ["HAIKU", "SONNET", "OPUS"] as const) {
+    const id = process.env[`FOLDRUN_FALLBACK_${tier}_MODEL`];
+    if (id) out[`ANTHROPIC_DEFAULT_${tier}_MODEL`] = id;
+  }
+  return out;
+}
+
+/**
+ * A 401 the token refresh caused, rather than a key that is simply wrong.
+ *
+ * The refresher on the box turns the long-lived grant into an 8h access
+ * token every four hours, and Anthropic revokes the old one the instant the
+ * new one is minted. The platform reads the credential per step from the
+ * mounted file, which fixed the boot-time copy — but not this: a step
+ * already talking to the API when the rotation lands gets a hard 401
+ * mid-turn, and the replacement does not appear in the mounted file until
+ * the kubelet syncs it, about a minute later.
+ *
+ * That window is narrow and it is not rare. Every 401 on this account in
+ * three weeks of runs fell inside it: 02:07:22 and 02:07:24 against a 02:07
+ * refresh, 22:08:12, 22:08:17, 22:08:30 and 22:09:03 against 22:08. The
+ * desks that lost a run nightly were simply the ones scheduled on the hour
+ * the refresher shares.
+ *
+ * So: on a 401, wait for the file to hold a DIFFERENT credential, then let
+ * the caller retry with it. A token that never changes inside the window is
+ * a key that is actually invalid — no waiting fixes that, and the caller
+ * falls through to the second supply exactly as before. Moving the timer
+ * cannot fix this; a run that takes forty minutes spans any minute chosen.
+ */
+const CREDENTIAL_ROTATION_WAIT_MS = 90_000;
+const CREDENTIAL_POLL_MS = 2_000;
+
+/** Platform causes a rescuer on the same model supply cannot get past. */
+const SAME_SUPPLY_WALLS = new Set(["model-cap", "model-auth"]);
+
+/** Whether two agents of one workspace call the same model supply: each
+ *  resolved the way agentContext does — its own provider: block, else the
+ *  workspace's — and compared in a stable key order. The account key is
+ *  shared by both, so two that resolve to no block share it (Codex review). */
+export function sameSupply(workspaceDir: string, tenant: string, a: string, b: string): boolean {
+  const supplyOf = (agent: string): string => {
+    const agentDir = path.join(workspaceDir, "agents", agent);
+    let own: unknown;
+    try {
+      own = matter(fs.readFileSync(path.join(agentDir, "agent.md"), "utf8")).data.provider;
+    } catch {
+      own = undefined;
+    }
+    return stableJson(own ?? workspaceFrontmatter(agentDir, tenant).provider ?? null);
+  };
+  return supplyOf(a) === supplyOf(b);
+}
+
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/** A refusal of the credential itself, in any of the wordings Claude Code
+ *  has used. "Failed to authenticate: OAuth token revoked" (9 Oct 2026, a
+ *  step started one second before the 09:07:52Z refresh) matched none of the
+ *  older two, so the step failed instead of waiting for the new token. */
+export function isAuthRefusal(text: string): boolean {
+  return AUTH_REFUSAL.test(text);
+}
+
+/**
+ * Wait, briefly, for the mounted credential to become one we have not
+ * already been refused on. Returns the new value, or null when the window
+ * passes without a change — which is the answer that means "this key is
+ * wrong", not "this key is stale".
+ */
+export async function awaitRotatedCredential(
+  before: string | undefined,
+  now: () => number = Date.now,
+  read: () => string | undefined = () => platformModelCredential(),
+  waitMs = CREDENTIAL_ROTATION_WAIT_MS,
+  pollMs = CREDENTIAL_POLL_MS,
+): Promise<string | null> {
+  if (!before) return null;
+  const until = now() + waitMs;
+  for (;;) {
+    const current = read();
+    if (current && current !== before) return current;
+    if (now() >= until) return null;
+    await sleep(pollMs);
+  }
+}
+
+/** A model-call failure the fallback can answer: the primary refusing over
+ *  credit, quota or auth — never a failure of the work itself, which would
+ *  fail identically anywhere. */
+function isProviderRefusal(text: string): boolean {
+  // Money and auth words only, plus the API's own status codes. The first
+  // version matched bare "exceed", which is also how the pod backstop
+  // phrases a timeout — and a timed-out step got retried on the paid
+  // fallback it could only time out on again. A refusal the fallback can
+  // answer is about the ACCOUNT; anything about the work or the sandbox is
+  // not, however similar the vocabulary.
+  // A subscription's own ceiling is the same kind of refusal, worded
+  // differently: Claude Code on a Max plan answers "You've hit your weekly
+  // limit · resets 5am" with no status code and none of the money words.
+  // On 2026-09-21 every opus-tier step on the account failed on exactly that
+  // sentence while sonnet steps beside them ran fine — the plan has a
+  // separate weekly cap for Opus — and nothing here recognised it, so a
+  // second supply could not have answered even if one had been configured.
+  // It is not transient (isTransientOverload is right to ignore it: the
+  // window is a week), it is the account's supply being exhausted, which is
+  // precisely what the fallback provider is for.
+  return /API Error: (401|402|403|429|5\d\d)|credits?\b|quota|billing|insufficient|overloaded|(weekly|daily|monthly|usage) limit|rate.?limit(ed)?\b.*resets?\b|limit\b.*\bresets?\b/i.test(
+    text,
+  );
+}
+
+/** A step's own model connection cut: the egress proxy or the worker it
+ *  runs through went away. Only the run's final error, never a tool's — a
+ *  WebFetch that could not connect is the step's business, not ours. */
+export function isModelConnectionLost(text: string): boolean {
+  return /^Claude Code returned an error result: API Error: (Connection (refused|dropped|error)|.*\b(ECONNREFUSED|ECONNRESET|socket hang up)\b)/i.test(text);
+}
+
+/** A tool call written out as text rather than made: the model's last
+ *  message holds `<invoke name=…>` / `<function_calls>` markup. Only the tail
+ *  counts — a reply that quotes such markup mid-way and goes on is fine. */
+export function wroteToolCallAsText(text: string): boolean {
+  const tail = text.slice(-1500);
+  const open = tail.search(/<(?:antml:)?(?:invoke|function_calls)\b[^>]*>/);
+  if (open < 0) return false;
+  // Quoted mid-reply and then the reply carries on: not a stalled call.
+  const after = tail.slice(open).replace(/<\/(?:antml:)?(?:invoke|function_calls)>/g, "\u0000");
+  const lastClose = after.lastIndexOf("\u0000");
+  return lastClose < 0 || after.slice(lastClose + 1).trim().length < 200;
+}
+
+/** What an attempt said last: its result, or — when it ended without one —
+ *  the error that carried the model's final text. */
+function attemptText(result: string | null | undefined, events: { type: string; text?: string }[]): string {
+  if (result && result.trim()) return result;
+  const lastError = [...events].reverse().find((e) => e.type === "error");
+  return lastError?.text ?? "";
+}
+
+/** Runs again after a tool call written as text. */
+export const TEXT_CALL_RETRIES = 1;
+export const TEXT_CALL_NOTE =
+  "Note from the platform: your last attempt ended by writing a tool call out as text (an <invoke …> block), so it was not run and nothing happened. " +
+  "Make every tool call as a real tool call — never type its markup into your message.";
+
+/** How many times a step whose model connection was cut runs again. */
+export const DROP_RETRIES = 2;
+
+/** May a step whose connection dropped run again? Yes, unless its tools can
+ *  act outward and one ran in this attempt (actedThenFailedCheck's rule). */
+export function dropRetrySafe(canActOutward: boolean, attemptEvents: { type: string }[]): boolean {
+  return !(canActOutward && attemptEvents.some((e) => e.type === "tool"));
+}
+
+/** How many times a busy provider is given another moment, and the longest
+ *  any one wait may be. Three is the industry's habit and the point where
+ *  waiting longer stops being kinder than failing. */
+export const OVERLOAD_RETRIES = 3;
+const MAX_BACKOFF_MS = 30_000;
+
+/**
+ * A refusal the SAME supply may answer in a moment — the provider is busy,
+ * not the account broken.
+ *
+ * The distinction is the whole point. 429 means "too many requests", and a
+ * provider says it for two unrelated reasons: the endpoint is momentarily
+ * saturated (wait, and it works), or the account is out of credit or over
+ * its quota (wait forever, it never works). Money words decide it: a 429
+ * that mentions credit, quota or billing is the account, and belongs to the
+ * fallback provider, not to a retry that can only fail again.
+ */
+export function isTransientOverload(text: string): boolean {
+  if (/credits?\b|quota|billing|insufficient|payment|401|402|403/i.test(text)) return false;
+  return /\b(429|503|529)\b|overloaded|rate.?limit|too many requests|try again/i.test(text);
+}
+
+/**
+ * How long to wait before attempt `n` (1-based). A `retry-after` the
+ * provider named wins — it knows when it will be ready. Otherwise
+ * exponential, with jitter: twenty steps of a fan-out that all failed
+ * together must not all come back together, or the second wave is the first
+ * wave again. Capped, because a step waiting half a minute is already the
+ * limit of what a slow run should cost a person watching it.
+ */
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Carry an earlier attempt's sandbox time into the outcome that replaced
+ * it. Every attempt rented a pod; the meter owes all of them, and a record
+ * that shows only the last one under-bills the platform and lies to the
+ * customer about how long their step actually took.
+ */
+function withEarlierTiming<T extends { timing?: StepTiming | null }>(outcome: T, earlier: StepTiming | null | undefined): T {
+  if (!earlier) return outcome;
+  if (!outcome.timing) return { ...outcome, timing: earlier };
+  return { ...outcome, timing: { ...outcome.timing, totalMs: outcome.timing.totalMs + earlier.totalMs } };
+}
+
+export function backoffMs(attempt: number, text = "", random: () => number = Math.random): number {
+  // retry-after, retry_after, "retryAfter": — every spelling a provider or
+  // its SDK has used for the same header.
+  const named = text.match(/retry[-_\s]?after["':\s]+(\d+)/i);
+  if (named) return Math.min(Math.max(Number(named[1]), 1) * 1000, MAX_BACKOFF_MS);
+  const base = Math.min(2 ** attempt * 1000, MAX_BACKOFF_MS);
+  return Math.round(base * (0.5 + random() * 0.5));
+}
+
+/**
+ * The platform's model credential, read at the moment a step needs it.
+ *
+ * It used to come only from this process's environment, which meant the
+ * worker held whatever token it was started with. Refreshing an OAuth token
+ * REVOKES the old one, so a refresh without a restart left every run
+ * answering 401 — on 2026-09-18 that took every desk down for two hours, and
+ * nothing said so until a person read a failed run. The refresher's own
+ * comment had named the fix years of incidents earlier: stop shipping the
+ * token as an env var.
+ *
+ * So: when `FOLDRUN_MODEL_KEY_FILE` names a file (the Kubernetes secret,
+ * mounted rather than injected), it is read fresh every time. The kubelet
+ * updates a mounted secret in place within about a minute of it changing, so
+ * a refreshed token reaches the next step on its own, with no restart, no
+ * timing window, and nothing to skip while work is in flight.
+ *
+ * A missing or empty file falls back to the environment, which is what a
+ * local install, the CLI and every compose setup use.
+ */
+export function platformModelCredential(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const file = env.FOLDRUN_MODEL_KEY_FILE;
+  if (file) {
+    try {
+      const value = fs.readFileSync(file, "utf8").trim();
+      if (value) return value;
+    } catch {
+      // Unreadable is not the same as absent: say so once, then fall back,
+      // because a running platform that cannot read its credential file is a
+      // thing an operator needs to know about before the next step fails.
+      if (!credentialFileWarned) {
+        credentialFileWarned = true;
+        console.warn(`[model] FOLDRUN_MODEL_KEY_FILE=${file} could not be read; falling back to the environment`);
+      }
+    }
+  }
+  return env.CLAUDE_CODE_OAUTH_TOKEN || undefined;
+}
+let credentialFileWarned = false;
+
+export function platformModelEnv(): Record<string, string | undefined> {
+  const {
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL,
+    CLAUDE_CODE_OAUTH_TOKEN,
+    // What the tiers mean when the platform's own provider is not Anthropic.
+    // These belong to the credential: a base URL pointing at OpenRouter with
+    // Anthropic's model ids still attached is not a working provider, it is
+    // a 404 per step. Forwarded for the same reason the base URL is — an
+    // agent that names no provider gets the platform's, whole.
+    ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL,
+  } = process.env;
+  return {
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL,
+    // The file wins when there is one: it is the live secret, and this
+    // process's copy is whatever it was handed at boot.
+    CLAUDE_CODE_OAUTH_TOKEN: platformModelCredential() ?? CLAUDE_CODE_OAUTH_TOKEN,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL,
+  };
+}
+
+/**
+ * Write a fresh run record and reset outputs — everything starting a run
+ * means *except* driving it. Split out so the queue can create a `queued`
+ * record for a worker to pick up, while `startFlowRun` keeps its promise of
+ * a run that is already going when it returns.
+ */
+/**
+ * `each: rows of <path>` — one item per CSV data row, each carrying the
+ * header so an instance reads as a one-row CSV. The path resolves the way
+ * the agent's own instructions do (relative to its folder) and is confined
+ * to the workspace: fan-out must not become a way to read past it.
+ */
+/**
+ * `each: items` — one instance per element of the previous group's data.
+ * An array is the items; an object with one array-valued field is that
+ * field (the common `{ "leads": [...] }` shape); anything else is nothing,
+ * said out loud. Each item crosses as JSON text, because `item` is what the
+ * instance's prompt quotes and what its result is labelled with.
+ */
+function jsonItems(data: unknown, step: StepRecord, take: number): string[] {
+  let list: unknown[] | null = Array.isArray(data) ? data : null;
+  if (!list && data && typeof data === "object") {
+    const arrays = Object.entries(data as Record<string, unknown>).filter(([, v]) => Array.isArray(v));
+    if (arrays.length === 1) list = arrays[0][1] as unknown[];
+    else if (arrays.length > 1) {
+      step.skipReason = `each: items — the previous data has ${arrays.length} array fields; return the list itself`;
+      return [];
+    }
+  }
+  if (!list) {
+    step.skipReason =
+      data === undefined
+        ? "each: items needs an `output: json` step before it that returned an array"
+        : "each: items — the previous data is not an array";
+    return [];
+  }
+  return list.slice(0, take).map((v) => (typeof v === "string" ? v : JSON.stringify(v)));
+}
+
+function csvItems(workspaceDir: string, step: StepRecord, take: number): string[] {
+  const raw = step.eachPath ?? "";
+  if (!raw) {
+    step.skipReason = "each: rows needs a path — `each: rows of workspace/storage/x.csv`";
+    return [];
+  }
+  const read = csvDataRows(workspaceDir, step.agent, raw);
+  if ("problem" in read) {
+    step.skipReason = `each: rows — ${read.problem}`;
+    return [];
+  }
+  return read.data.slice(0, take).map((r) => `${read.header}\n${r}`);
+}
+
+/**
+ * The data rows of a CSV, path agent-relative like every path in a flow and
+ * confined to the workspace. Shared by `each: rows of`, which fans out over
+ * them, and `when: rows of`, which asks only whether there are any.
+ */
+function csvDataRows(
+  workspaceDir: string,
+  agent: string,
+  raw: string,
+): { header: string; data: string[] } | { problem: string } {
+  // `workspace/storage/x.csv` from the workspace root, anything else from
+  // the agent's folder (`../../storage/x.csv` is the same file).
+  const resolved = resolveAgentPath(workspaceDir, path.join(workspaceDir, "agents", agent), raw);
+  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep)) {
+    return { problem: `${raw} is outside this workspace` };
+  }
+  let text: string;
+  try {
+    text = fs.readFileSync(resolved, "utf8");
+  } catch {
+    return { problem: `${raw} does not exist (yet?)` };
+  }
+  // Minimal CSV: quoted fields with embedded commas/newlines survive.
+  const rows: string[] = [];
+  let field = "", row = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '""'; i++; }
+      else if (c === '"') { field += c; quoted = false; }
+      else field += c;
+    } else if (c === '"') { field += c; quoted = true; }
+    else if (c === "\n") { rows.push(row + field); row = ""; field = ""; }
+    else if (c !== "\r") field += c;
+  }
+  if (row + field) rows.push(row + field);
+  const [header, ...data] = rows.filter((r) => r.trim() !== "");
+  if (!header || data.length === 0) return { problem: `${raw} has no data rows` };
+  return { header, data };
+}
+
+/**
+ * `schema: <path>` — the file, read and parsed, or null. Agent-relative like
+ * every other path in a flow (`workspace/schemas/lead.json`), confined to the
+ * workspace: a schema is the author's document, never something a step
+ * can point outside.
+ */
+export function readSchemaFile(workspaceRoot: string, rel: string): Record<string, unknown> | boolean | null {
+  const root = path.resolve(workspaceRoot);
+  // Written `workspace/schemas/x.json`, agent-relative (`../../schemas/x.json`)
+  // or workspace-relative (`schemas/x.json`); all land on the same file.
+  const candidates = [path.resolve(root, rel.replace(/^((\.\.\/){2}|workspace\/)/, "")), path.resolve(root, "agents", "x", rel)];
+  for (const abs of candidates) {
+    if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) continue;
+    const parsed = parseSchemaText(fs.readFileSync(abs, "utf8"));
+    return "problem" in parsed ? null : parsed.schema;
+  }
+  return null;
+}
+
+export function createFlowRun(
+  tenant: string,
+  workspace: string,
+  steps: FlowStep[],
+  flowName: string,
+  status: "queued" | "running",
+  tags: string[] = [],
+  startedBy: string | null = null,
+  opts: { test?: boolean } = {},
+): RunRecord {
+  const run: RunRecord = {
+    id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    flow: flowName,
+    tags,
+    status,
+    ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
+    ...(opts.test ? { test: true } : {}),
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    steps: steps.map((s) => ({
+      agent: s.agent,
+      instruction: s.instruction,
+      group: s.group ?? 1,
+      optional: s.optional ?? false,
+      model: s.model,
+      effort: s.effort,
+      approve: s.approve,
+      when: s.when,
+      case: s.case,
+      else: s.else,
+      retry: s.retry,
+      timeout: s.timeout,
+      verify: s.verify,
+      loop: s.loop,
+      until: s.until,
+      loopRemaining: s.loop,
+      each: s.each,
+      eachPath: s.eachPath,
+      max: s.max,
+      onFail: s.onFail,
+      waitSecs: s.waitSecs,
+      waitFor: s.waitFor,
+      ask: s.ask,
+      preview: s.preview,
+      delegate: s.delegate,
+      output: s.output,
+      schema: s.schema,
+      schemaPath: s.schemaPath,
+      parallel: s.parallel,
+      maxTurns: s.maxTurns,
+      limits: s.limits,
+      attempts: 0,
+      status: "pending",
+      events: [],
+      result: null,
+      costUsd: null,
+    })),
+  };
+  writeRun(tenant, workspace, run);
+
+  // Start every run from an empty outputs/ for each agent it will touch.
+  //
+  // Without this, `verify: test -s outputs/report.md` passes on run 2 because
+  // run 1 left the file behind — the one check that exists to catch a model
+  // claiming work it didn't do can be satisfied by a stale artifact. The
+  // previous contents aren't lost: they were archived when that run finished.
+  //
+  // This is the one thing resuming must not do: a resumed run's earlier steps
+  // already wrote there, and clearing it would delete the work being resumed.
+  const runRoot = workspaceDir(tenant, workspace);
+  for (const agent of new Set(run.steps.map((s) => s.agent))) {
+    const outputs = path.join(runRoot, "agents", agent, "outputs");
+    fs.rmSync(outputs, { recursive: true, force: true });
+    fs.mkdirSync(outputs, { recursive: true });
+  }
+
+  return run;
+}
+
+export function startFlowRun(
+  tenant: string,
+  workspace: string,
+  steps: FlowStep[],
+  flowName: string,
+  modelOverride?: string | null,
+  tags: string[] = [],
+  effortOverride?: string | null,
+  startedBy: string | null = null,
+  opts: { test?: boolean } = {},
+): RunRecord {
+  const run = createFlowRun(tenant, workspace, steps, flowName, "running", tags, startedBy, opts);
+  void driveRun(tenant, workspace, run, modelOverride, tags, { effortOverride });
+  return run;
+}
+
+/**
+ * Drive a run to completion: groups in order, approval gates, retries.
+ *
+ * Separate from starting one so a run can be picked up again. The loop reads
+ * every decision off the run record — `pending` steps are the work left, and
+ * a completed group's results are already on it — so re-entering it on a
+ * partly-finished record continues rather than restarts.
+ *
+ * `parkOnApproval` — a queue worker's slot is too expensive to spend polling
+ * a file for a person who may answer tomorrow. With it set, an approval gate
+ * saves the run as parked and returns; the approval API re-enqueues it and a
+ * worker re-enters this loop, which continues where the record says it
+ * stopped. Without it (the CLI, whose process belongs to the person waiting)
+ * the gate blocks in place exactly as before.
+ */
+/**
+ * Turn a gate's `preview:` patterns into the files under storage/ that
+ * exist right now, relative to storage/. `*` matches within a segment,
+ * `**` across segments; a pattern with no wildcard is kept only if the file
+ * is there. Sorted, deduplicated, capped — a preview is a handful of files,
+ * not a directory dump.
+ */
+export function resolvePreview(storageDir: string, patterns: string[], cap = 12): string[] {
+  const out = new Set<string>();
+  for (const pattern of patterns) {
+    if (!/[*?]/.test(pattern)) {
+      if (fs.existsSync(path.join(storageDir, pattern))) out.add(pattern);
+      continue;
+    }
+    const re = new RegExp(
+      "^" + pattern
+        .split("**").map((part) => part.split("*").map((x) => x.replace(/[.+^${}()|[\]\\?]/g, "\\$&")).join("[^/]*"))
+        .join(".*") + "$",
+    );
+    const walk = (dir: string, rel: string) => {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue;
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(path.join(dir, e.name), r);
+        else if (re.test(r)) out.add(r);
+      }
+    };
+    walk(storageDir, "");
+  }
+  return [...out].sort().slice(0, cap);
+}
+
+/** Store what a run has left in storage/ so far. Never fails the run: a
+ *  store that is down costs the gate its thumbnail, not the run its step. */
+/**
+ * Copy onto the in-memory run any gate decision that reached the record on
+ * disk while this driver was busy — status, stamps, note, the event line —
+ * so the driver's next save keeps it. Returns whether anything landed. Only
+ * steps this copy still shows as asking are touched: everything else on the
+ * record is this driver's own, and newer in memory than on disk.
+ */
+export function adoptDecisions(run: RunRecord, disk: RunRecord | null): boolean {
+  if (!disk) return false;
+  let any = false;
+  run.steps.forEach((s, i) => {
+    const d = disk.steps[i];
+    if (!d || s.status !== "awaiting-approval" || d.status === "awaiting-approval") return;
+    s.status = d.status;
+    s.events = d.events;
+    if (d.approvedAt) s.approvedAt = d.approvedAt;
+    if (d.approvalNote) s.approvalNote = d.approvalNote;
+    any = true;
+  });
+  return any;
+}
+
+async function harvestQuietly(tenant: string, workspace: string, run: RunRecord): Promise<void> {
+  try {
+    await harvestFiles(tenant, workspace, `run:${run.id}`);
+  } catch {
+    // bookkeeping only
+  }
+}
+
+/**
+ * The runs this process is driving right now. The one fact reconcile needs:
+ * a run in here is alive however quiet its step is, and a `running` run not
+ * in here has no driver — this is the only process that drives.
+ */
+export const drivingRuns = new Set<string>();
+
+export function driveRun(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  modelOverride?: string | null,
+  tags: string[] = [],
+  opts: { parkOnApproval?: boolean; effortOverride?: string | null } = {},
+): Promise<void> {
+  drivingRuns.add(run.id);
+  // The run's egress leases are renewed while it is driven, by whichever
+  // door drove it — the queue, or a reconcile that picked it back up — so an
+  // identity token is renewed for a live step however it was started.
+  const renew = platform.egress.renew;
+  const beat = renew ? setInterval(() => void renew(run.id).catch(() => undefined), 5 * 60_000) : null;
+  beat?.unref?.();
+  return driveRunInner(tenant, workspace, run, modelOverride, tags, opts).finally(() => {
+    if (beat) clearInterval(beat);
+    drivingRuns.delete(run.id);
+  });
+}
+
+function driveRunInner(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  modelOverride: string | null | undefined,
+  tags: string[],
+  opts: { parkOnApproval?: boolean; effortOverride?: string | null },
+): Promise<void> {
+  const effortOverride = opts.effortOverride ?? null;
+  // The flow's own calendar. Read from the flow file rather than passed in,
+  // so every door into a run — the queue, an eval, the CLI, a rerun, a
+  // reconcile that picks an abandoned run back up — gets the same clock
+  // without each caller having to remember it. A run that belongs to no
+  // flow (an ad-hoc agent run) finds nothing here and cascades from the
+  // agent to the workspace, which is what it should do.
+  let flowTimezone: string | null = null;
+  try {
+    flowTimezone = readFlow(tenant, workspace, run.flow)?.timezone ?? null;
+  } catch {
+    // an unreadable flow file is reported where it is parsed for real
+  }
+  const pDir = workspaceDir(tenant, workspace);
+  const runRoot = pDir;
+  /**
+   * Persist the run — carrying forward a stop that arrived while we were busy.
+   *
+   * A stop is written to the record by another process (stopRun), and this
+   * loop holds the run in memory for as long as a group takes. Without the
+   * merge below, the next save silently overwrote `stopRequested`, and the
+   * between-groups check then read back the value it had just erased. A run
+   * stopped mid-group carried on to the end of the flow as if nothing had
+   * happened — observed on 2026-09-03, when a run stopped at 04:52 published
+   * to five live Google Business Profiles at 06:05.
+   *
+   * The flag is one-way: nothing here clears it, so the read-modify-write can
+   * only ever turn a stop on, never off.
+   *
+   * And once it is on, this copy may not undo what stopRun wrote: the run
+   * stays failed, and steps that had not started stay skipped. Before
+   * 21 Oct 2026 only the flag came across, so the next save put the record
+   * back to `running` with its steps pending; a second stop then answered
+   * "failed" instead of "already failed", and the group kept starting pods
+   * (medium-desk run-mvho48wp-99e1). A step running in THIS process is left
+   * as it is: its sandbox is gone, it ends on its own, and records how.
+   */
+  const save = () => {
+    const disk = run.stopRequested ? null : readRun(tenant, workspace, run.id);
+    if (disk?.stopRequested) run.stopRequested = true;
+    if (run.stopRequested) {
+      if (run.status !== "completed" && run.status !== "failed") {
+        run.status = "failed";
+        run.finishedAt ??= disk?.finishedAt ?? new Date().toISOString();
+      }
+      run.parkedAt = null;
+      for (const s of run.steps) {
+        if (s.status === "pending" || s.status === "awaiting-approval") {
+          s.status = "skipped";
+          s.skipReason ??= "run stopped";
+        }
+      }
+    }
+    writeRun(tenant, workspace, run);
+  };
+
+  // Provenance: a memory an agent wrote gets stamped with who wrote it, per
+  // OKF v0.2. Without this a fact the model invented and a fact a person
+  // verified are indistinguishable on disk — and the reader has no way to
+  // know which one they're trusting.
+  const stampMemories = () => {
+    const agents = new Set(run.steps.map((s) => s.agent));
+
+    // Every memory bundle a run can write to, not just the agent's own. The
+    // workspace bundle is writable from any step — confine only denies
+    // knowledge/ — so a fact left there was going unstamped and untyped, and
+    // the bundle stopped conforming until someone ran `foldrun check`.
+    // The account library is not here: it is read-only from a run.
+    const dirs: { dir: string; agent: string | null }[] = [
+      // Attributable only when one agent could have written it.
+      { dir: path.join(runRoot, "memory"), agent: agents.size === 1 ? [...agents][0] : null },
+      ...[...agents].map((agent) => ({
+        dir: path.join(runRoot, "agents", agent, "memory"),
+        agent,
+      })),
+    ];
+
+    const written: string[] = [];
+    for (const { dir, agent } of dirs) {
+      // Each stamped file is a Creation in the bundle's log — that is what the
+      // log is for, and an agent's writes are exactly the changes a reader
+      // most wants dated. syncBundleFor logs the file it is given, so passing
+      // index.md logged nothing about the concept that actually appeared.
+      for (const rel of stampBundle(dir, agent)) {
+        syncBundleFor(path.join(dir, rel), "Creation");
+        written.push(path.relative(runRoot, path.join(dir, rel)).replaceAll("\\", "/"));
+      }
+    }
+    // On the record, so the run page can say "this run learned two things"
+    // and a reviewer can open exactly those files.
+    if (written.length) run.memoryWrites = [...(run.memoryWrites ?? []), ...written];
+  };
+
+  // Archive what a run produced, so history survives the next run's reset.
+  const archive = () => {
+    for (const agent of new Set(run.steps.map((s) => s.agent))) {
+      const from = path.join(runRoot, "agents", agent, "outputs");
+      if (!fs.existsSync(from) || fs.readdirSync(from).length === 0) continue;
+      copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
+    }
+  };
+
+  // A parked run is paused, not finished — the completion bookkeeping in
+  // `finally` (finishedAt, archive, memory stamps) must not touch it.
+  let parked = false;
+
+  return (async () => {
+    try {
+      // Entering the loop is what makes a run live, whatever state it was
+      // saved in: `queued` from the queue, `awaiting-approval` from a park.
+      // The first pick-up (FOL-54 step 4): startedAt to this is the time it
+      // queued; and the files it runs are the workspace's latest revision
+      // as it starts — a deploy's revision is its commit, and an edit through
+      // /source makes one too. A re-run comes through here as well.
+      run.drivenAt ??= new Date().toISOString();
+      if (run.revision === undefined) run.revision = latestRevisionId(tenant, workspace);
+      if (run.status !== "running") {
+        run.status = "running";
+        run.parkedAt = null;
+        save();
+      }
+
+      // A step still marked `running` here is an orphan: exactly one driver
+      // holds a run's job, so whatever process set that status is gone —
+      // killed mid-step by a deploy or a crash. Left alone it is worse than
+      // failed: the group loop only runs `pending` steps, so the driver
+      // would step over the unfinished work, run everything after it, and
+      // mark the run completed — a run that reports success on work that
+      // never happened, which reconcile can then never see. Reset it to
+      // pending and it simply runs again; driveRun's whole contract is that
+      // re-driving a partly-finished record is safe.
+      // Unless the step's sandbox outlived its driver AND the executor can
+      // re-attach to it: then the record carries the pod and how far the
+      // last driver got, runStep passes that as `resume`, and the step
+      // carries on from where it was — a deploy no longer costs the run.
+      let orphaned = false;
+      // A sandbox: own job whose driver went away is over: the reply it was
+      // making went to a process that no longer exists, and the step that
+      // asked is told it failed (the platform settles the door's side), so
+      // its model can hand the job over again. Never resumed or relaunched.
+      for (const step of run.steps) {
+        if (!step.subagentOf || (step.status !== "running" && step.status !== "pending")) continue;
+        // Its sandbox may still be executing — outward work included — while
+        // the parent hands the job over again: destroy it before letting go
+        // of the only reference to it.
+        if (step.sandbox?.ref) {
+          try {
+            platform.killSandbox?.(step.sandbox);
+          } catch {
+            // a sandbox we cannot reach must not stop the run from resuming
+          }
+        }
+        step.status = "failed";
+        step.sandbox = null;
+        step.events.push({ t: new Date().toISOString(), type: "error", text: "interrupted — the worker driving this job restarted; the step that asked for it was told it failed" });
+        const parent = run.steps.find((s) => s.delegations?.some((d) => d.id === step.delegation));
+        const entry = parent?.delegations?.find((d) => d.id === step.delegation);
+        if (entry && entry.status === "running") entry.status = "failed";
+      }
+      for (const step of run.steps) {
+        if (step.status !== "running") continue;
+        const resumable = !!step.sandbox && platform.sandboxResumable(step.sandbox.kind);
+        if (!resumable) {
+          orphaned = true;
+          step.sandbox = null;
+        }
+        step.status = "pending";
+        step.events.push({
+          t: new Date().toISOString(),
+          type: "info",
+          text: resumable
+            ? `driver changed mid-step — re-attaching to the running sandbox (${step.sandbox!.ref}, ${step.sandbox!.consumed} lines already applied)`
+            : "interrupted mid-step (platform restart) — running again from the start of the step",
+        });
+      }
+      if (orphaned) {
+        // The sandbox outlives the process that created it — a step with no
+        // `timeout:` carries no pod deadline at all — so the orphaned step
+        // may still be executing, non-idempotent work included, while the
+        // new attempt starts. Destroy it first; re-driving is only safe
+        // once nothing else is driving.
+        try {
+          if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+          else platform.killRunSandboxes(run.id);
+        } catch {
+          // a sandbox we cannot reach must not stop the run from resuming
+        }
+      }
+      save();
+
+      // Put the workspace's files on disk before the first step, so they are
+      // simply *there* when the step's container copy is taken. This is the
+      // whole of the agent-facing file API: a directory. Nothing here hands
+      // the model a bucket, a URL or a credential, and a run pod that has
+      // never heard of S3 reads a 200MB PDF the same way it reads AGENTS.md.
+      //
+      // Runs on resume too — a parked run's container is long gone, and the
+      // one it comes back in needs the same files the first one had.
+      //
+      // A run re-driven after its worker died is the exception to "the store
+      // is newer than the disk": a park harvests before it parks, a crash does
+      // not, so what this run's finished steps wrote to storage/ is only on
+      // disk, and materializing first wrote the store's older copy over it.
+      // On 6 Oct 2026 a worker restart put reddit-desk's 2 Oct post back over
+      // that morning's draft, and a rerun from the validator would have
+      // posted it a second time. So a run that has been here before (its
+      // baseline is on disk) stores what it changed first; files it did not
+      // touch still come fresh from the store.
+      const baselineFile = path.join(runRoot, "runs", run.id, "storage-baseline.json");
+      if (fs.existsSync(baselineFile)) {
+        try {
+          const changedFrom = JSON.parse(fs.readFileSync(baselineFile, "utf8")) as Record<string, string>;
+          const { saved } = await harvestFiles(tenant, workspace, `run:${run.id}`, { changedFrom });
+          if (saved.length) {
+            run.steps[0]?.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `files: kept ${saved.join(", ")} written before the run was picked up again`,
+            });
+          }
+        } catch {
+          // the materialize below still runs; at worst this is the old behaviour
+        }
+      }
+      try {
+        const brought = await materializeFiles(tenant, workspace);
+        if (brought.length) {
+          run.steps[0]?.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `files: ${brought.length} brought into the workspace`,
+          });
+        }
+        fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
+        fs.writeFileSync(baselineFile, JSON.stringify(storageBaseline(tenant, workspace)));
+      } catch (err) {
+        // A file store that is down must not take the run with it: most flows
+        // never touch storage/, and the ones that do will fail their own verify.
+        run.steps[0]?.events.push({
+          t: new Date().toISOString(),
+          type: "error",
+          text: `files: could not be brought in — ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      // Group steps by their group number, ascending. Rebuilt on demand
+      // because two patterns mutate the step list mid-run: fan-out expands a
+      // step into instances, and an evaluator loop winds groups back.
+      const orderedGroups = () => {
+        const groups = new Map<number, StepRecord[]>();
+        for (const s of run.steps) {
+          const list = groups.get(s.group) ?? [];
+          list.push(s);
+          groups.set(s.group, list);
+        }
+        return [...groups.entries()].sort(([a], [b]) => a - b).map(([, g]) => g);
+      };
+      let ordered = orderedGroups();
+
+      // What each finished group produced, by position — so a loop that
+      // winds back can hand the re-run the same upstream context the first
+      // pass saw, instead of its own stale output.
+      const groupResults: (string | null)[] = [];
+      const groupConclusions: (string | null)[] = [];
+      // Every earlier group, oldest first, so a group-3 reporter sees what
+      // group 1 measured and not only what group 2 diagnosed. This used to
+      // hand back the nearest earlier group alone, and a reporter two groups
+      // after the measurement went looking on disk for a feed that was
+      // already in the run. The cap (CONTEXT_CHARS, applied where the prompt
+      // is assembled) keeps the newest: when the total is over it, the
+      // oldest groups are dropped whole before anything is cut mid-text.
+      const contextBefore = (gi: number) => joinEarlierGroups(groupResults, gi);
+      // What `when:` and `case:` read: the PREVIOUS group's result alone —
+      // the nearest earlier group that produced one, so a routed-past group
+      // between is looked through rather than read as silence. The prompt
+      // gets every earlier group joined (contextBefore); routing must not,
+      // because a verdict two groups back would still open a gate a later
+      // group had overruled: a classifier's BUG line matched a `case: BUG`
+      // three groups on, after the debugger had already answered it.
+      const routingBefore = (gi: number): string | null => {
+        for (let i = gi - 1; i >= 0; i--) if (groupResults[i]) return groupResults[i];
+        return null;
+      };
+      // The data half of the same handoff: what the nearest earlier group
+      // returned through `output: json`. Rebuilt from the record rather than
+      // kept only in memory, so a resumed run hands step 3 the value step 1
+      // returned before the park.
+      const groupData: unknown[] = [];
+      const dataBefore = (gi: number): unknown => {
+        for (let i = gi - 1; i >= 0; i--) if (groupData[i] !== undefined) return groupData[i];
+        return undefined;
+      };
+      // A rescue's result already stands on the step it took over, so the
+      // three handoffs below read the flow's steps only: counting the rescue
+      // too handed the next group the same output twice, or a stale one
+      // from an evaluator loop's earlier cycle.
+      const flowStepsOf = (group: StepRecord[]) => group.filter((s) => !isSplicedRecord(s));
+      const dataOf = (all: StepRecord[]): unknown => {
+        const group = flowStepsOf(all);
+        const carrying = group.filter((s) => s.status === "completed" && s.data !== undefined);
+        if (carrying.length === 0) return undefined;
+        if (carrying.length === 1 && !carrying[0].item) return carrying[0].data;
+        return carrying.map((s) => ({ agent: s.agent, ...(s.item ? { item: s.item } : {}), data: s.data }));
+      };
+      const resultsOf = (all: StepRecord[]): string | null => {
+        const group = flowStepsOf(all);
+        const results = group
+          .filter((s) => s.status === "completed" && s.result)
+          .map((s) =>
+            s.item
+              ? `## Result for item: ${s.item.slice(0, 80)} (${s.agent})\n\n${s.result}`
+              : group.length > 1
+                ? `## Result from ${s.agent}\n\n${s.result}`
+                : s.result!,
+          );
+        return results.length ? results.join("\n\n") : null;
+      };
+      // What each step concluded — its final turn — for the handoffs that
+      // should read a conclusion rather than a transcript (`each: lines`).
+      const conclusionsOf = (all: StepRecord[]): string | null => {
+        const out = flowStepsOf(all)
+          .filter((s) => s.status === "completed" && (s.conclusion || s.result))
+          .map((s) => s.conclusion || s.result!);
+        return out.length ? out.join("\n") : null;
+      };
+      // Groups already finished before this drive (a resume, or a run picked
+      // up after a gate) still carry their results and data on the record.
+      // Rebuilding all three here is what lets the step after an approval
+      // read what came before it, not only the gate's question.
+      for (const [i, g] of ordered.entries()) {
+        if (g.every((s) => s.status !== "pending" && s.status !== "running" && s.status !== "awaiting-approval")) {
+          groupResults[i] = resultsOf(g);
+          groupConclusions[i] = conclusionsOf(g);
+          groupData[i] = dataOf(g);
+        }
+      }
+
+      // budget: — the flow's own per-run cap, stamped on the record the first
+      // time it is driven. Between groups, not mid-step: a step in flight is
+      // money already committed, and stopping it half-way keeps the cost
+      // and loses the work.
+      if (run.budgetUsd === undefined) {
+        run.budgetUsd = readFlow(tenant, workspace, run.flow)?.budget ?? null;
+        save();
+      }
+
+      let gi = 0;
+      let context: string | null = null;
+      let ctxData: unknown = undefined;
+      while (gi < ordered.length) {
+        const group = ordered[gi];
+        context = contextBefore(gi);
+        ctxData = dataBefore(gi);
+
+        // What the run has spent, not just what its tokens cost: on an
+        // install that prices sandbox seconds, a step that called no model
+        // still spent money, and a cap that ignored it capped nothing.
+        if (run.budgetUsd && platform.runSpend(run) >= run.budgetUsd && group.some((s) => s.status === "pending")) {
+          const spent = platform.runSpend(run);
+          const last = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
+          last?.events.push({
+            t: new Date().toISOString(),
+            type: "error",
+            text: `over budget — $${spent.toFixed(4)} spent of the flow's $${run.budgetUsd.toFixed(2)} (budget: in the flow file); the remaining steps were not run`,
+          });
+          for (const s of run.steps) {
+            if (s.status === "pending") {
+              s.status = "skipped";
+              s.skipReason = "over budget";
+            }
+          }
+          run.status = "failed";
+          save();
+          break;
+        }
+
+        // wait: — the clock starts when the run REACHES the step, so
+        // "wait: 3d" means three days after the previous group finished,
+        // surviving restarts because the deadline is stamped on the record.
+        for (const s of group) {
+          if (s.status === "pending" && s.waitSecs && !s.waitUntil) {
+            s.waitUntil = new Date(Date.now() + s.waitSecs * 1000).toISOString();
+            s.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `waiting until ${s.waitUntil} (wait: ${s.waitSecs}s)`,
+            });
+          }
+        }
+        const stillWaiting = group
+          .filter((s) => s.status === "pending" && s.waitUntil)
+          .map((s) => new Date(s.waitUntil!).getTime())
+          .filter((t) => t > Date.now());
+        if (stillWaiting.length) {
+          save();
+          if (opts.parkOnApproval) {
+            // Back to the queue with a not-before — a three-day wait must
+            // not hold a worker slot, a process, or survive on either. The
+            // files so far are stored first, as at an approval park.
+            await harvestQuietly(tenant, workspace, run);
+            run.status = "queued";
+            run.parkedAt = new Date().toISOString();
+            parked = true;
+            save();
+            return;
+          }
+          // Foreground (CLI) runs sleep in slices so Ctrl-C stays prompt.
+          await new Promise((r) => setTimeout(r, Math.min(Math.min(...stillWaiting) - Date.now(), 30_000)));
+          continue;
+        }
+
+        // Fan-out: a step with `each:` becomes one instance per item of the
+        // previous group's result, capped, all in this same group — the
+        // declared shape stays readable in the file, the width comes from
+        // the data. The template survives as a skipped step for the trace.
+        // `each: lines` splits what the previous group CONCLUDED — each step's
+        // final turn — not every turn joined. A translator that narrated one
+        // line per file write put the same sentence in front of eight
+        // validators; its final turn was the list. Falls back to the joined
+        // result for records made before `conclusion` existed.
+        const eachSource = gi > 0 ? (groupConclusions[gi - 1] ?? groupResults[gi - 1]) : null;
+        for (const step of [...group]) {
+          if (!step.each || step.status !== "pending" || step.item) continue;
+          const cap = Math.min(step.max ?? 10, 20);
+          const items =
+            step.each === "rows"
+              ? csvItems(pDir, step, cap + 1)
+              : step.each === "items"
+                ? jsonItems(ctxData, step, cap + 1)
+                : (eachSource ?? "")
+                    .split("\n")
+                    .map((l) => l.replace(/^[-*\d.)\s]+/, "").trim())
+                    .filter(Boolean)
+                    .slice(0, cap + 1);
+          const dropped = items.length > cap ? "at least one" : "";
+          const used = items.slice(0, cap);
+          step.status = "skipped";
+          if (used.length === 0) {
+            step.skipReason ||= "each: the previous group produced no items";
+            continue;
+          }
+          step.skipReason = `expanded into ${used.length} item${used.length === 1 ? "" : "s"}`;
+          step.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text:
+              `fan-out: ${used.length} instance${used.length === 1 ? "" : "s"}` +
+              (step.parallel && step.parallel < used.length ? `, ${step.parallel} at a time (parallel:)` : "") +
+              (dropped ? ` (more items existed — capped at ${cap})` : ""),
+          });
+          const at = run.steps.indexOf(step);
+          const instances: StepRecord[] = used.map((item) => ({
+            ...step,
+            each: undefined,
+            max: undefined,
+            skipReason: undefined,
+            item,
+            status: "pending",
+            events: [],
+            result: null,
+            costUsd: null,
+            attempts: 0,
+            tries: undefined,
+          }));
+          run.steps.splice(at + 1, 0, ...instances);
+          ordered = orderedGroups();
+        }
+        save();
+
+        // A person asked for this to stop. Checked between groups, off the
+        // record rather than in memory, because the request arrives in
+        // another process — the same way an approval decision does. The
+        // sandbox for any in-flight step was already destroyed by stopRun;
+        // this is what keeps the *next* group from starting.
+        const stopCheck = readRun(tenant, workspace, run.id);
+        if (stopCheck?.stopRequested) {
+          let skipped = 0;
+          for (const s of run.steps) {
+            if (s.status === "pending" || s.status === "running") {
+              s.status = "skipped";
+              s.skipReason = "run stopped";
+              skipped += 1;
+            }
+          }
+          // Say so on the trail. stopRun wrote "run stopped" onto the
+          // record's first step, but the save() below writes this process's
+          // copy of the record over it, so the only witness was the
+          // stopRequested flag — and a run that "failed" with no error line
+          // anywhere took a code read to explain (rank-desk, 2026-09-13).
+          const witness = run.steps.findLast((s) => s.status === "completed" || s.status === "failed") ?? run.steps[0];
+          witness?.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `run stopped by a person between groups — ${skipped} remaining step${skipped === 1 ? "" : "s"} skipped`,
+          });
+          run.status = "failed";
+          run.stopRequested = true;
+          save();
+          break;
+        }
+
+        const freshGroup = ordered[gi];
+
+        // Validate agents exist before launching the group.
+        let missing = false;
+        for (const step of freshGroup) {
+          // Only what still has work to do. This walked every step in the
+          // group regardless of status, which never showed on a fresh run
+          // because they all start pending — but on a resumed one it rewrote
+          // finished steps to `failed`, destroying the history it was
+          // resuming around.
+          if (step.status !== "pending") continue;
+          const aDir = path.join(pDir, "agents", step.agent);
+          if (!fs.existsSync(path.join(aDir, "agent.md"))) {
+            step.status = "failed";
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "error",
+              text: `agent "${step.agent}" not found in workspace`,
+            });
+            if (!step.optional) missing = true;
+          }
+        }
+        save();
+        if (missing) {
+          run.status = "failed";
+          break;
+        }
+
+        const ctx = context;
+        // The previous group's result — see routingBefore.
+        const routing = routingBefore(gi);
+
+        // `when:` — skip a step whose condition isn't met by the previous
+        // group's result.
+        for (const step of freshGroup) {
+          if (step.status !== "pending" || !step.when) continue;
+          // `when: rows of <csv>` asks the data, not the prose: run only if
+          // the file has a data row. It is the condition a fan-out's
+          // followers need — an `each:` over an empty file skips itself but
+          // leaves nothing for a marker to be read from, so the steps after
+          // it used to run on nothing.
+          const rowsOf = whenRowsPath(step.when);
+          if (rowsOf !== null) {
+            const read = csvDataRows(pDir, step.agent, rowsOf);
+            if ("problem" in read) {
+              step.status = "skipped";
+              step.skipReason = `condition not met: when rows — ${read.problem}`;
+              step.events.push({ t: new Date().toISOString(), type: "info", text: `skipped — ${read.problem}` });
+            }
+            continue;
+          }
+          // A marker at the start of a line, not a word anywhere in the
+          // prose — see markerPresent. "There are no BLOCKED items" must
+          // not open a gate keyed on BLOCKED.
+          const met = markerPresent(routing, step.when);
+          if (!met) {
+            step.status = "skipped";
+            step.skipReason = `condition not met: when "${step.when}"`;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `skipped — the previous group's result has no line beginning "${step.when}" (when: reads a marker at the start of a line of the previous result, not a word in a sentence)`,
+            });
+          }
+        }
+        save();
+
+        // `case:`/`else:` — exclusive routing. Of this group's case steps,
+        // the FIRST whose marker leads a line of the previous results runs;
+        // the rest are routed past. `else:` runs only when no case matched.
+        // (`when:` above stays independent — every matching when runs —
+        // which is why routing is its own vocabulary instead of a mode.)
+        //
+        // Same marker rule as `when:`, and it matters more here: routing is
+        // exclusive, so a label matched out of a sentence does not merely
+        // run an extra step, it sends the flow down the wrong branch and
+        // skips the right one. "This is not a COMPLAINT, it is a QUESTION"
+        // used to route to the complaints handler.
+        const caseSteps = freshGroup.filter((s) => s.status === "pending" && s.case);
+        if (caseSteps.length || freshGroup.some((s) => s.status === "pending" && s.else)) {
+          let matchedCase: StepRecord | null = null;
+          for (const step of caseSteps) {
+            if (!matchedCase && markerPresent(routing, step.case!)) {
+              matchedCase = step;
+              continue;
+            }
+            step.status = "skipped";
+            step.skipReason = matchedCase
+              ? `routed past — "${matchedCase.case}" matched first`
+              : `case not matched: the previous group's result has no line beginning "${step.case}"`;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: step.skipReason,
+            });
+          }
+          for (const step of freshGroup) {
+            if (step.status !== "pending" || !step.else) continue;
+            if (matchedCase) {
+              step.status = "skipped";
+              step.skipReason = `routed past — "${matchedCase.case}" matched`;
+              step.events.push({ t: new Date().toISOString(), type: "info", text: step.skipReason });
+            }
+          }
+          save();
+        }
+
+        // Approval gate — pause the whole run until a human decides. The run
+        // record is the queue: it sits in awaiting-approval until the API
+        // flips the step back to pending.
+        // `!s.approvedAt` — a step approved before the process went away is
+        // already answered. Filtering on status alone asked again.
+        // `wait: event` parks in the same place: the gate is the same, the
+        // key is held by a machine. A person can still release it by hand.
+        const needsApproval = freshGroup.filter(
+          (s) => s.status === "pending" && (s.approve || s.ask || s.waitFor === "event") && !s.approvedAt,
+        );
+        if (needsApproval.length) {
+          for (const step of needsApproval) {
+            step.status = "awaiting-approval";
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              // ask: is the same gate carrying a question — the answer
+              // arrives as the approval note and rides into the prompt.
+              text: step.ask
+                ? `waiting for an answer: ${step.ask}`
+                : step.waitFor === "event"
+                  ? `waiting for an external event — release it with POST ${eventUrl(tenant, workspace, run.id)}`
+                  : "waiting for approval before running",
+            });
+          }
+          run.status = "awaiting-approval";
+          // approve_within: — the deadline is stamped when the gate opens,
+          // not counted from the run's start, so "two days to answer" means
+          // two days from being asked however long the work before it took.
+          // Only a gate that asks a PERSON gets one: an external event has
+          // no one to chase.
+          const within = readFlow(tenant, workspace, run.flow)?.approveWithin ?? null;
+          // Always assigned, never only set: a run with two gates would
+          // otherwise carry the FIRST gate's deadline into the second, and
+          // a deadline already in the past expires a gate the moment it
+          // opens. Null when this gate has none.
+          run.approveBy =
+            within && needsApproval.some((s) => s.waitFor !== "event")
+              ? new Date(Date.now() + within * 1000).toISOString()
+              : null;
+          save();
+
+          // The gate's declared preview, resolved now against what the run
+          // has actually produced — a glob at park time, a list of files on
+          // the record for as long as the run waits.
+          for (const s of needsApproval) {
+            if (s.preview?.length) s.previewFiles = resolvePreview(path.join(workspaceDir(tenant, workspace), "storage"), s.preview);
+          }
+          save();
+          if (opts.parkOnApproval) {
+            // What the run has produced so far becomes stored files NOW, not
+            // at the end: the gate shows the thumbnail a step is about to
+            // publish, and the Storage page answers "what did it make" while
+            // the person decides. Unchanged files are skipped by hash, and
+            // the local copies stay for the resumed step to read.
+            await harvestQuietly(tenant, workspace, run);
+            // The gate has been on the record — and in an inbox — since the
+            // save above, so a decision can land while the harvest runs.
+            // The API wrote it to disk; it did not enqueue a resume, because
+            // parkedAt was not set yet; and the save below, from memory,
+            // would erase it. That was a lost approval and a run that waited
+            // forever (2026-09-06, approved two seconds after it parked).
+            // Take what landed, then do the enqueue the API would have done.
+            const decided = adoptDecisions(run, readRun(tenant, workspace, run.id));
+            // Hand the slot back. The approval API sees parkedAt and
+            // re-enqueues; re-entering this loop skips finished groups and
+            // lands back here with the decision already on the record.
+            run.parkedAt = new Date().toISOString();
+            parked = true;
+            save();
+            if (decided && run.steps.every((s) => s.status !== "awaiting-approval")) {
+              await platform.enqueueResume(tenant, workspace, run.id);
+            }
+            return;
+          }
+
+          const decided = await waitForDecision(tenant, workspace, run.id, needsApproval.map((s) => run.steps.indexOf(s)));
+          if (!decided) {
+            run.status = "failed";
+            break;
+          }
+          // Re-read: the API rewrote the file, so refresh statuses in place.
+          const latest = readRun(tenant, workspace, run.id);
+          if (latest) {
+            latest.steps.forEach((s, i) => {
+              run.steps[i].status = s.status;
+              run.steps[i].events = s.events;
+              // What the decision carried, not just that it happened: the
+              // note and the event payload are what the step's prompt reads,
+              // and copying status alone dropped them on the in-process path.
+              run.steps[i].approvedAt = s.approvedAt;
+              run.steps[i].approvalNote = s.approvalNote;
+              run.steps[i].eventPayload = s.eventPayload;
+            });
+          }
+          run.status = "running";
+          save();
+          if (freshGroup.every((s) => s.status !== "pending")) {
+            // everything in this group was rejected
+            if (freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s))) {
+              run.status = "failed";
+              break;
+            }
+            gi += 1;
+            continue;
+          }
+        }
+
+        // The hard cap: what is left of the flow's budget, shared evenly
+        // across the steps this group launches together. Each step stops
+        // itself mid-turn at its share, so a fan-out of twenty cannot end
+        // twenty steps over — the shares sum to what was left. Between
+        // groups the check above still refuses to start the next one.
+        // A rescue record is the on-fail of a step in this group, not a step
+        // of the flow: one left pending by a drive that died is picked up by
+        // rescueStep below, never launched alongside the group (21 Oct 2026:
+        // a resumed run launched 77 leftover fixers at once).
+        const launching = freshGroup.filter((s) => s.status === "pending" && !isSplicedRecord(s));
+        // tools: [peers] — what each step of the group is told about the
+        // others, and the bus they share when they run in this process.
+        const peerBus = localPeerBus();
+        const siblingsOf = (step: StepRecord): PeerInfo[] =>
+          launching
+            .filter((s) => s !== step)
+            .map((s) => ({ agent: s.agent, step: run.steps.indexOf(s), instruction: (s.instruction ?? "").split("\n")[0].trim().slice(0, 200) }));
+        // sandbox: own sub-agents (delegate-tools.ts): one job, run as a step
+        // of its own — its own sandbox, tools, secrets and network, from its
+        // own file — and answered with its reply. The record is APPENDED to
+        // run.steps, in the parent's group: every running step's lease and
+        // inbox are addressed by index, so nothing may shift under them.
+        // Marked subagentOf, it is never launched, handed on or reset as a
+        // step of the flow (isSplicedRecord). It gets no delegateJob of its
+        // own: depth one.
+        const delegateFor = (parent: StepRecord) => async (agent: string, job: string, cancelled: () => boolean): Promise<DelegationResult> => {
+          const dir = path.join(pDir, "agents", agent);
+          if (!fs.existsSync(path.join(dir, "agent.md"))) return { status: "failed", result: `${agent} is not an agent in this workspace` };
+          // A stable id on both records: an index into run.steps moves when a
+          // rescue or a fan-out is spliced in before the child.
+          const id = `d_${crypto.randomBytes(5).toString("hex")}`;
+          const child: StepRecord = {
+            agent,
+            subagentOf: parent.agent,
+            delegation: id,
+            instruction: job,
+            group: parent.group,
+            optional: true,
+            timeout: parent.timeout,
+            attempts: 1,
+            status: "running",
+            events: [],
+            result: null,
+            costUsd: null,
+          };
+          run.steps.push(child);
+          const at = run.steps.length - 1;
+          const entry: StepDelegation = { id, agent, status: "running" };
+          (parent.delegations ??= []).push(entry);
+          const started = Date.now();
+          // The same budget rules as a step of the flow: nothing left means
+          // not started (a zero ceiling would read as no cap at all), and
+          // what it may spend is reserved while it runs, so two jobs at once
+          // do not each get the agent's whole remaining budget.
+          // The flow's budget: what is left after what has been spent AND
+          // what every step and job running now holds — the parent's own
+          // ceiling included. ceilingFor's equal share would hand the job a
+          // second copy of an allowance its parent already holds.
+          const held = [...reserved.values()].reduce((a, b) => a + b, 0);
+          const flowLeft = run.budgetUsd && run.budgetUsd > 0 ? Math.max(0, run.budgetUsd - platform.runSpend(run) - held) : null;
+          const ceiling = stepCeilingFor(
+            flowLeft,
+            agentBudgets.get(agent),
+            run.steps
+              .filter((s) => s.agent === agent)
+              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s !== child && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
+            agent,
+            1,
+          );
+          if (ceiling.ceilingUsd === 0) {
+            child.status = "failed";
+            child.events.push({ t: new Date().toISOString(), type: "error", text: `over budget — nothing left to spend before this job (${ceiling.note}); it was not started` });
+            entry.status = "failed";
+            entry.ms = 0;
+            save();
+            return { status: "failed", result: `${agent} was not started: over budget (${ceiling.note})`, wrote: [] };
+          }
+          if (ceiling.ceilingUsd !== null) reserved.set(child, ceiling.ceilingUsd);
+          save();
+          // A running sandbox does not hear a stop flag: when the parent stops
+          // waiting (its tool timed out, or its step ended), destroy the job's
+          // sandbox, so nothing it does outlives the step that asked for it.
+          const parentGone = () => run.stopRequested === true || cancelled() || (parent.status !== "running" && parent.status !== "pending");
+          let killedIt = false;
+          const watch = setInterval(() => {
+            if (killedIt || !parentGone() || !child.sandbox?.ref) return;
+            killedIt = true;
+            child.events.push({ t: new Date().toISOString(), type: "error", text: "stopped — the step that asked for this job stopped waiting for it" });
+            try {
+              platform.killSandbox?.(child.sandbox);
+            } catch {
+              // its own deadline ends it
+            }
+          }, 2_000);
+          watch.unref?.();
+          try {
+            await runStep(
+              dir, tenant, child, null, save, modelOverride, tags, effortOverride, run.id, undefined,
+              ceiling.ceilingUsd, ceiling.note, run.test === true,
+              () => {
+                save();
+                // The parent's step ending or cancelling ends the job too —
+                // here while it waits for room; the watch above once it runs.
+                return parentGone();
+              },
+              flowTimezone, at,
+            );
+          } catch (err) {
+            child.status = "failed";
+            child.events.push({ t: new Date().toISOString(), type: "error", text: err instanceof Error ? err.message : String(err) });
+          } finally {
+            clearInterval(watch);
+            reserved.delete(child);
+          }
+          // runStep mutates child.status; widen past TS's "running" narrowing.
+          const ended: string = child.status;
+          const status = ended === "completed" ? "completed" : ended === "skipped" ? "skipped" : "failed";
+          entry.status = status;
+          entry.costUsd = child.costUsd ?? null;
+          entry.ms = Date.now() - started;
+          save();
+          const errors = child.events.filter((e) => e.type === "error").map((e) => e.text).join("\n");
+          // Its files go back with the reply, so the delegating step's
+          // sandbox has them too (delegate-tools.ts copyBackFiles).
+          const back = readCopyBack(pDir, child.wrote ?? []);
+          return {
+            status,
+            result: child.result ?? (errors || "(no reply)"),
+            wrote: child.wrote ?? [],
+            files: back.files,
+            filesOmitted: back.omitted,
+          };
+        };
+        // An agent's own `budget:` — the most it may spend in one run — is
+        // read at launch, so a cap raised mid-run applies to the next step.
+        const agentBudgets = new Map(listAgents(tenant, workspace).map((a) => [a.name, a.budget]));
+        // The ceiling each attempt now running was given. A step records its
+        // cost only when it ends, so while it runs its ceiling stands in for
+        // what it may yet spend — otherwise every fan-out copy of one agent
+        // saw none of its siblings' spend and got the agent's whole budget.
+        const reserved = new Map<StepRecord, number>();
+        // The ceiling for one attempt of one step, read NOW: what is left of
+        // the run's budget shared across the group, or the agent's own cap
+        // less what its steps have cost or hold in flight, shared with its
+        // steps in this group still waiting to start. Computed before every
+        // attempt, not once before the loop — a retry's share is what is left
+        // after the failed attempt spent, and the step's own figure already
+        // carries that spend (it is the sum of its tries).
+        const ceilingFor = (step: StepRecord) =>
+          stepCeilingFor(
+            stepCeiling(run.budgetUsd, platform.runSpend(run), launching.length),
+            agentBudgets.get(step.agent),
+            run.steps
+              .filter((s) => s.agent === step.agent)
+              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s !== step && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
+            step.agent,
+            1 + launching.filter((s) => s !== step && s.agent === step.agent && s.status === "pending" && !reserved.has(s)).length,
+          );
+        // parallel: — the instances of one fan-out template share a pool.
+        // Keyed by what the instances share (agent + instruction), since
+        // the template itself is behind them in the record as "expanded".
+        const pools = new Map<string, ReturnType<typeof slotPool>>();
+        const poolFor = (step: StepRecord) => {
+          if (!step.parallel || !step.item) return null;
+          const key = `${step.agent}\u0000${step.instruction}`;
+          let pool = pools.get(key);
+          if (!pool) pools.set(key, (pool = slotPool(step.parallel)));
+          return pool;
+        };
+        // One instance of each agent goes first so its siblings read the
+        // prompt cache it wrote — see warmGate. The claim is the callback's
+        // first statement, before any await; the wait comes before the
+        // pool, so nothing holds a slot while it waits.
+        const gate = warmGate(launching);
+        await Promise.all(
+          launching
+            .map(async (step) => {
+              const lead = gate.claim(step);
+              if (lead) {
+                step.events.push({ t: new Date().toISOString(), type: "info", text: `prompt cache: waiting for the first ${step.agent} step's reply before starting, so this one reads its prefix` });
+                save();
+                await lead;
+              }
+              const pool = poolFor(step);
+              if (pool) await pool.acquire();
+              try {
+                // A stop that arrived while this copy waited — for the
+                // lead's reply or for a slot — must not start it: the
+                // between-groups check runs only once this group is over,
+                // and save() is what carries the flag in from the record.
+                {
+                  save();
+                  if (run.stopRequested) {
+                    step.status = "skipped";
+                    step.skipReason = "run stopped";
+                    step.events.push({ t: new Date().toISOString(), type: "info", text: "run stopped by a person while this step waited to start — skipped" });
+                    save();
+                    gate.release(step);
+                    return;
+                  }
+                }
+                await gate.run(step, () => launchStep(step));
+              } finally {
+                pool?.release();
+                // Every attempt is over: off its siblings' rosters, so a
+                // message to it is not reported delivered and never read.
+                // Here, not per attempt — a step between retries is still
+                // one its colleagues can reach.
+                const index = run.steps.indexOf(step);
+                peerBus.leave(index);
+                await platform.egress.stepEnded?.({ tenant, runId: run.id, step: index }).catch(() => undefined);
+              }
+            }),
+        );
+        async function launchStep(step: StepRecord) {
+              const attempts = (step.retry ?? 0) + 1;
+              // A step re-attaching to its sandbox is still on the attempt
+              // that started it; a step re-run after a backoff picks up the
+              // count it left. Only a step nobody has touched starts at 1.
+              const interruptedInBackoff =
+                !step.sandbox && !!step.attempts && /retrying in \d+s/.test(step.events[step.events.length - 1]?.text ?? "");
+              const from = step.sandbox ? Math.max(1, step.attempts ?? 1) : interruptedInBackoff ? Math.min(attempts, step.attempts! + 1) : 1;
+              for (let attempt = from; attempt <= attempts; attempt++) {
+                const ceiling = ceilingFor(step);
+                // Nothing left is a refusal, not "no ceiling": a zero passed
+                // down would read as unset, and the one step that must not
+                // run would run with no cap at all. On a retry this is what
+                // stops the second attempt spending a share the first one
+                // already spent.
+                if (ceiling.ceilingUsd === 0) {
+                  step.status = "failed";
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "error",
+                    text:
+                      attempt === from
+                        ? `over budget — nothing left to spend before this step (${ceiling.note}); it was not started`
+                        : `over budget — nothing left to spend for attempt ${attempt} (${ceiling.note}); not retried`,
+                  });
+                  save();
+                  return;
+                }
+                // Re-attaching to a sandbox is the same attempt, so its row
+                // is replaced; anything else is a new row, a loop cycle's
+                // re-run included.
+                const reattach = !!step.sandbox;
+                const attemptStartedAt = new Date().toISOString();
+                const eventsBefore = step.events.length;
+                step.attempts = attempt;
+                step.status = "running";
+                if (ceiling.ceilingUsd !== null) reserved.set(step, ceiling.ceilingUsd);
+                save();
+                const verdict = await runStep(
+                  path.join(pDir, "agents", step.agent),
+                  tenant,
+                  step,
+                  ctx,
+                  save,
+                  modelOverride,
+                  tags,
+                  effortOverride,
+                  run.id,
+                  ctxData,
+                  ceiling.ceilingUsd,
+                  ceiling.note,
+                  run.test === true,
+                  // save() merges a stop written by another process into
+                  // this record; the model loop polls this on a clock.
+                  () => {
+                    save();
+                    return run.stopRequested === true;
+                  },
+                  flowTimezone,
+                  run.steps.indexOf(step),
+                  siblingsOf(step),
+                  peerBus,
+                  delegateFor(step),
+                ).finally(() => reserved.delete(step));
+                // runStep mutates step.status; read it through a widened local
+                // so TS doesn't keep the "running" narrowing from above.
+                const outcome: string = step.status;
+                recordAttempt(step, attempt, outcome === "completed" ? "completed" : "failed", attemptStartedAt, eventsBefore, reattach);
+                save();
+                // A stop destroys the step's sandbox, which reads here as a
+                // failed attempt. stopRun writes "stopped by a person" onto
+                // this step in the record, and the save() above writes this
+                // process's copy over it — so the trail ended on the
+                // sandbox's own last words, "sandbox ended: Error (exit 143)",
+                // and a person's stop read as the platform killing a healthy
+                // step (abandon-desk, 2026-09-29: stopped from the CLI after
+                // ten minutes, then chased as an unexplained kill). Say so,
+                // whether or not a retry was left.
+                if (outcome === "failed" && run.stopRequested) {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: "stopped by a person mid-step — its sandbox was destroyed, which is what ended this attempt; not retried",
+                  });
+                  save();
+                  break;
+                }
+                if (outcome !== "failed" || attempt === attempts) break;
+                // An outward step whose tools ran and whose check then failed
+                // is not retried: the check cannot say the send did not
+                // happen, and a retry would do it twice.
+                if (verdict?.actedThenFailedCheck) {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: `not retried — this step's tools can act outside the workspace and ran before the check failed; another attempt could repeat what they did (${attempts - attempt} left unused)`,
+                  });
+                  save();
+                  break;
+                }
+                // A failed attempt used to be retried in a fresh sandbox even
+                // after a stop, so a stopped `retry: 2` step ran twice more.
+                // The check above ends the loop on a stop; this one covers a
+                // stop that lands while the outward check was being written.
+                save();
+                if (run.stopRequested) break;
+                // A spent usage window resets in hours or days, never within
+                // the retry waits below: another attempt is refused the same
+                // way (abandon-desk's collector ran twice on 23 Oct 2026).
+                const lastError = [...step.events].reverse().find((e) => e.type === "error")?.text;
+                if (platformCause(lastError)?.key === "model-cap") {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: `not retried — the model usage cap is reached and will not reset within a retry's wait (${attempts - attempt} left unused)`,
+                  });
+                  save();
+                  break;
+                }
+                // The retry policy. An attempt the cluster ended for want of
+                // memory or disk is retried one size class up — the same
+                // size would end the same way. Every retry waits: 15 s, 30 s,
+                // 1 m, 2 m, 4 m, jittered, so a provider or a site that was
+                // struggling gets a moment, and twenty fan-out steps do not
+                // hammer it in lock-step. The wait holds a worker slot, not
+                // a sandbox — nothing is rented while it waits — and a stop
+                // ends it. The step is `pending` meanwhile, so a driver that
+                // inherits the run mid-wait simply runs the attempt.
+                const last = [...step.events].reverse().find((e) => e.type === "error")?.text ?? "";
+                let sizeNote = "";
+                if (/OOMKilled|Evicted|ephemeral-storage|out of memory/i.test(last)) {
+                  const up = step.sizeUp === "large" || (!step.sizeUp && step.size === "large") ? "heavy" : step.sizeUp === "heavy" || step.size === "heavy" ? null : "large";
+                  if (up) {
+                    step.sizeUp = up;
+                    sizeNote = ` at size: ${up}`;
+                  }
+                }
+                const waitMs = Math.round(Math.min(retryBaseMs() * 16, retryBaseMs() * 2 ** (attempt - 1)) * (0.75 + Math.random() * 0.5));
+                step.status = "pending";
+                step.events.push({
+                  t: new Date().toISOString(),
+                  type: "info",
+                  text: `attempt ${attempt} failed — retrying in ${Math.round(waitMs / 1000)}s${sizeNote} (${attempts - attempt} left)`,
+                });
+                save();
+                const until = Date.now() + waitMs;
+                while (Date.now() < until) {
+                  await sleep(Math.min(1000, until - Date.now()));
+                  save();
+                  if (run.stopRequested) break;
+                }
+                if (run.stopRequested) {
+                  step.status = "failed";
+                  break;
+                }
+              }
+        }
+
+        // on-fail: another agent takes the step over. Sequential and rare:
+        // the rescue is a second full attempt at the step's job with the
+        // failure in front of it, and its success is the step's success —
+        // the trace keeps both records, so "who actually did this" stays
+        // answerable.
+        // Not after a stop: the failure a stop leaves behind is not one a
+        // rescuer should take over. The merge in save() surfaces the flag.
+        save();
+        // One rescue of one failed step. Also used when an evaluator loop
+        // runs out of cycles below, which used to fail the run without ever
+        // reaching the step's on-fail (medium-desk's claim-trimmer was
+        // written for exactly that case and could never run).
+        // A rescue hears a stop the way a group step does: its model loop and
+        // its executor's wait for room both poll this (no sandbox exists yet
+        // for a stop to destroy while it waits).
+        const stopPoll = () => {
+          save();
+          return run.stopRequested === true;
+        };
+        const rescueStep = async (step: StepRecord): Promise<void> => {
+          if (!step.onFail) return;
+          const rescuerDir = path.join(pDir, "agents", step.onFail);
+          if (!fs.existsSync(path.join(rescuerDir, "agent.md"))) {
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "error",
+              text: `on-fail: "${step.onFail}" is not an agent in this workspace — no rescue`,
+            });
+            return;
+          }
+          // A rescuer on the same model supply hits the same wall. On 23 Oct
+          // 2026 every desk's fixer started after a spent weekly window, was
+          // refused the same way, and the issue read "fixer also failed"
+          // instead of the cap. A rescuer on a different supply still tries.
+          const lastError = [...step.events].reverse().find((e) => e.type === "error")?.text;
+          const wall = platformCause(lastError);
+          if (wall && SAME_SUPPLY_WALLS.has(wall.key) && sameSupply(pDir, tenant, step.agent, step.onFail)) {
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `not handing to [[${step.onFail}]] (on-fail): ${wall.label.toLowerCase()}, and it runs on the same model supply`,
+            });
+            save();
+            return;
+          }
+          // One rescue per failure, across drives. A worker that died
+          // mid-rescue left an unfinished record behind it; the drive that
+          // resumes picks that one up instead of splicing another — a crash
+          // loop used to add one per restart (blog-desk run-mvh1zra7-ae4k,
+          // ~80). The leftover carries the same instruction, built from the
+          // same failure, and a running one may still hold a sandbox to
+          // re-attach to, so it is THE rescue; any further unfinished copies
+          // are superseded. A FINISHED rescue is history, never reused: it
+          // answered an earlier failure — an evaluator loop's previous cycle
+          // — not this one.
+          const leftovers: StepRecord[] = [];
+          for (let j = run.steps.indexOf(step) + 1; j < run.steps.length && isSplicedRecord(run.steps[j]); j++) {
+            const r = run.steps[j];
+            if (r.subagentOf) continue;
+            if (r.agent === step.onFail && (r.rescueOf === undefined || r.rescueOf === step.agent) && (r.status === "pending" || r.status === "running")) {
+              leftovers.push(r);
+            }
+          }
+          const resumed = leftovers[0];
+          for (const r of leftovers.slice(1)) {
+            r.status = "skipped";
+            r.skipReason = "superseded on resume — one rescue per failure";
+          }
+          if (resumed) {
+            step.events.push({ t: new Date().toISOString(), type: "info", text: `resuming the rescue by [[${step.onFail}]] that an earlier drive started` });
+            resumed.rescueOf ??= step.agent;
+            resumed.attempts = Math.max(1, resumed.attempts ?? 0);
+            resumed.status = "running";
+            save();
+            await runStep(rescuerDir, tenant, resumed, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(resumed));
+            settleRescue(step, resumed);
+            return;
+          }
+          step.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: `failed — handing to [[${step.onFail}]] (on-fail)`,
+          });
+          const failure = (step.result ?? step.events.filter((e) => e.type === "error").map((e) => e.text).join("\n")).slice(0, 4000);
+          // A gated step's approval travels with it: the rescuer acts inside
+          // the same answer the failed agent had, and must be told what it
+          // was. Fixers used to dig it out of the run record, and stop when
+          // they could not (15 Oct 2026).
+          const approved = step.approvedAt
+            ? `\nA person approved this step before it ran${step.approvalNote ? " — their answer is below" : ", with no note: a plain yes"}. Act within that approval and nothing wider.`
+            : "";
+          const owesMarker = step.until ? `\nThe step's loop ended without its marker: your reply must end with a line saying ${step.until}.` : "";
+          const rescue: StepRecord = {
+            agent: step.onFail,
+            rescueOf: step.agent,
+            instruction:
+              `${step.instruction}\n\n<rescue>\nYou are taking this step over: [[${step.agent}]] attempted it and failed. ` +
+              `Its failure, for whatever it is worth:\n${failure}${approved}${owesMarker}\n</rescue>`,
+            ...(step.ask ? { ask: step.ask } : {}),
+            ...(step.approvedAt ? { approvedAt: step.approvedAt } : {}),
+            ...(step.approvalNote ? { approvalNote: step.approvalNote } : {}),
+            group: step.group,
+            optional: false,
+            model: step.model,
+            effort: step.effort,
+            timeout: step.timeout,
+            // The rescuer inherits the contract, not just the job: a step
+            // that promised data still owes data when someone else does it,
+            // and a step that had to pass a check still has to pass it — a
+            // rescue whose result stood unchecked was a way round the very
+            // check that failed (found 7 Oct 2026, adding rescuers to
+            // medium-desk).
+            output: step.output,
+            ...(step.verify ? { verify: step.verify } : {}),
+            attempts: 0,
+            status: "pending",
+            events: [],
+            result: null,
+            costUsd: null,
+          };
+          run.steps.splice(run.steps.indexOf(step) + 1, 0, rescue);
+          save();
+          rescue.attempts = 1;
+          rescue.status = "running";
+          save();
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(rescue));
+          settleRescue(step, rescue);
+        };
+        // What a rescue's end means for the step it took over.
+        const settleRescue = (step: StepRecord, rescue: StepRecord): void => {
+          // runStep mutates rescue.status; widen past TS's "running" narrowing.
+          const rescueOutcome: string = rescue.status;
+          if (rescueOutcome === "completed") {
+            step.status = "completed";
+            step.result = rescue.result;
+            step.conclusion = rescue.conclusion;
+            if (rescue.data !== undefined) step.data = rescue.data;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `rescued by [[${step.onFail}]] — its result stands as this step's`,
+            });
+          } else {
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "error",
+              text: `on-fail: [[${step.onFail}]] also failed`,
+            });
+          }
+          save();
+        };
+        for (const step of freshGroup) {
+          if (run.stopRequested) break;
+          if (step.status !== "failed" || !step.onFail) continue;
+          await rescueStep(step);
+        }
+
+        // A step carried into a re-run failed in the run it came from, not
+        // here: the person chose to start after it. Counting it stopped
+        // fix-desk's "re-run from the verifier" (run-muwfi5jn-4217) in under
+        // a second, before the one step it was asked to run.
+        // A rescue record's own failure is already on the step it took over
+        // ("also failed"); counted here it would fail a group whose step a
+        // later rescue completed.
+        const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s));
+        if (requiredFailed) {
+          run.status = "failed";
+          break;
+        }
+
+        groupResults[gi] = resultsOf(freshGroup);
+        groupConclusions[gi] = conclusionsOf(freshGroup);
+        groupData[gi] = dataOf(freshGroup);
+
+        // delegate: — the completed chooser's picks become a fresh group
+        // right after this one. The choice SET is the file's; only the
+        // picks and their instructions are the model's, and both are on
+        // the record. Once per chooser, loop rewinds included.
+        for (const chooser of freshGroup) {
+          if (!chooser.delegate?.length || chooser.status !== "completed" || chooser.delegated) continue;
+          chooser.delegated = true;
+          const allowed = new Set(chooser.delegate);
+          const picks: StepRecord[] = [];
+          const seenAgents = new Set<string>();
+          for (const line of (chooser.result ?? "").split("\n")) {
+            const m = line.match(/^\s*(?:[-*\d.)\s]*)\[?\[?([a-z0-9-]+)\]?\]?\s*:\s*(.+)$/);
+            if (!m || !allowed.has(m[1]) || seenAgents.has(m[1])) continue;
+            if (!fs.existsSync(path.join(pDir, "agents", m[1], "agent.md"))) continue;
+            seenAgents.add(m[1]);
+            picks.push({
+              agent: m[1],
+              instruction: m[2].trim(),
+              group: chooser.group,
+              optional: false,
+              attempts: 0,
+              status: "pending",
+              events: [],
+              result: null,
+              costUsd: null,
+            });
+            if (picks.length >= 5) break;
+          }
+          // Delegating to nobody is a legitimate answer, not a fault: a
+          // `delegate:` set is who the step MAY call on, and most runs of a
+          // healthy flow need none of them. Logging that as an error put a
+          // red line on a step that did exactly the right thing, which is
+          // how a person learns to stop reading red lines.
+          chooser.events.push({
+            t: new Date().toISOString(),
+            type: "info",
+            text: picks.length
+              ? `delegated to ${picks.map((p) => `[[${p.agent}]]`).join(", ")}`
+              : `delegate: chose nobody (could have called on ${chooser.delegate.join(", ")})`,
+          });
+          if (picks.length) {
+            run.steps.splice(run.steps.indexOf(chooser) + 1, 0, ...picks);
+            ordered.splice(gi + 1, 0, picks);
+          }
+          save();
+        }
+
+        // Evaluator loop: a completed step with `loop:` whose result lacks
+        // its `until:` marker sends this group and the one before it around
+        // again — at most `loop:` times, so the worst case is still readable
+        // off the flow file. Approval marks survive the rewind: a person
+        // answered, and the question has not changed.
+        const looper = freshGroup.find((s) => s.loop && s.until && s.status === "completed");
+        if (
+          looper?.until &&
+          !saysUntilMarker(looper.result ?? null, looper.until)
+        ) {
+          if ((looper.loopRemaining ?? 0) > 0 && gi > 0) {
+            looper.loopRemaining = (looper.loopRemaining ?? 0) - 1;
+            looper.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `loop: result does not say "${looper.until}" on a line of its own — winding back one group (${looper.loopRemaining} cycle${looper.loopRemaining === 1 ? "" : "s"} left)`,
+            });
+            for (const s of [...ordered[gi - 1], ...freshGroup]) {
+              if (s.status === "skipped" && s.each) continue; // an expanded template stays expanded
+              // A rescue answered its own failure and stays as it ended: reset
+              // to pending it read as an interrupted rescue, and the next
+              // cycle's failure was handed the old one's instructions.
+              if (isSplicedRecord(s)) continue;
+              s.status = "pending";
+              s.result = null;
+            }
+            groupResults[gi] = null;
+            groupResults[gi - 1] = null;
+            groupConclusions[gi] = null;
+            groupConclusions[gi - 1] = null;
+            save();
+            gi -= 1;
+            continue;
+          }
+          looper.status = "failed";
+          looper.events.push({
+            t: new Date().toISOString(),
+            type: "error",
+            text: `loop exhausted: after ${looper.loop} cycle${looper.loop === 1 ? "" : "s"} the result still does not say "${looper.until}"`,
+          });
+          save();
+          if (looper.onFail && !run.stopRequested) {
+            await rescueStep(looper);
+            // The rescuer owes what the loop owed: its marker.
+            // rescueStep mutates the status; widen past TS's "failed" narrowing.
+            if ((looper.status as string) === "completed" && !saysUntilMarker(looper.result ?? null, looper.until)) {
+              looper.status = "failed";
+              looper.events.push({
+                t: new Date().toISOString(),
+                type: "error",
+                text: `on-fail: [[${looper.onFail}]]'s result does not say "${looper.until}" either`,
+              });
+              save();
+            }
+          }
+          if ((looper.status as string) === "failed" && !looper.optional) {
+            run.status = "failed";
+            break;
+          }
+        }
+
+        gi += 1;
+      }
+
+      if (run.status === "running") run.status = "completed";
+      for (const s of run.steps) if (s.status === "pending") s.status = "skipped";
+    } catch (err) {
+      run.status = "failed";
+      const text = err instanceof Error ? err.message : String(err);
+      let told = false;
+      run.steps.forEach((s) => {
+        if (s.status === "running") {
+          s.status = "failed";
+          s.events.push({ t: new Date().toISOString(), type: "error", text });
+          told = true;
+        }
+      });
+      // Thrown between groups, with nothing running: the error still has to
+      // land on some step's trail, or the run reads as failed for no reason.
+      if (!told) {
+        const witness = run.steps.findLast((s) => s.status !== "pending") ?? run.steps[0];
+        witness?.events.push({
+          t: new Date().toISOString(),
+          type: "error",
+          text: `run failed between steps: ${text}`,
+        });
+      }
+    } finally {
+      if (!parked) {
+        run.finishedAt = new Date().toISOString();
+        // What this run concluded, in one line, captured before the record is
+        // saved for the last time. Read from the reply that already says it
+        // rather than asked for separately: the folder gains nothing to
+        // learn, and the runs list and the notification stop having to say
+        // only "completed".
+        run.summary = runSummary(run);
+        // Read before a test run's prefix goes on the summary, which would
+        // otherwise hide the word it leads with.
+        run.verdict = verdictOf(run.summary);
+        // A test run's headline says so wherever the headline goes — the
+        // runs list, the history tool, a later run's recall.
+        if (run.test && run.summary) run.summary = testHeadline(run.summary);
+        // Archive before the next run resets outputs/ — a failed run's
+        // artifacts are usually the most interesting ones, so this runs on
+        // failure too.
+        try {
+          stampMemories();
+          archive();
+        } catch {
+          // never let bookkeeping fail a run that already finished
+        }
+        // Whatever the run left in storage/ becomes a stored file, stamped with
+        // the run and the agent that wrote it — which is what lets the
+        // dashboard answer "where did this PDF come from?" without a join
+        // table. On failure too: a failed run's half-written artifact is
+        // usually the one worth looking at.
+        try {
+          const { saved, errors } = await harvestFiles(
+            tenant,
+            workspace,
+            `run:${run.id}`,
+          );
+          const last = run.steps.findLast((s) => s.status !== "pending") ?? run.steps[0];
+          if (saved.length) {
+            last?.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `files: saved ${saved.join(", ")}`,
+            });
+          }
+          for (const e of errors) {
+            last?.events.push({ t: new Date().toISOString(), type: "error", text: `files: ${e}` });
+          }
+        } catch {
+          // same rule as archive(): bookkeeping never fails a finished run
+        }
+        save();
+      }
+    }
+  })();
+}
+
+// Splice `[[flow:other]]` steps into the parent's step list, renumbering
+// groups so the nested flow's own parallelism survives. Depth-limited, and
+// a cycle raises rather than expanding forever.
+function expandSubflows(
+  tenant: string,
+  workspace: string,
+  steps: FlowStep[],
+  seen: string[] = [],
+  depth = 0,
+): FlowStep[] {
+  if (depth > 3) throw new Error("flow nesting too deep (max 3)");
+  const out: FlowStep[] = [];
+  let group = 0;
+  for (const [i, step] of steps.entries()) {
+    const startsNewGroup = i === 0 || step.group !== steps[i - 1].group;
+    if (startsNewGroup) group += 1;
+
+    if (!step.subflow) {
+      out.push({ ...step, group });
+      continue;
+    }
+    if (seen.includes(step.subflow)) {
+      throw new Error(`flow cycle: ${[...seen, step.subflow].join(" → ")}`);
+    }
+    const nested = readFlow(tenant, workspace, step.subflow);
+    if (!nested) throw new Error(`flow "${step.subflow}" not found`);
+    const nestedSteps = expandSubflows(
+      tenant,
+      workspace,
+      nested.steps,
+      [...seen, step.subflow],
+      depth + 1,
+    );
+    // Nested groups continue from here; the parent's next group follows them.
+    const base = group - 1;
+    let maxGroup = group;
+    for (const ns of nestedSteps) {
+      const g = base + ns.group;
+      maxGroup = Math.max(maxGroup, g);
+      out.push({
+        ...ns,
+        group: g,
+        optional: ns.optional || step.optional,
+        instruction: ns.instruction || step.instruction,
+      });
+    }
+    group = maxGroup;
+  }
+  return out;
+}
+
+export function loadFlow(tenant: string, workspace: string, flowName: string) {
+  const flow = readFlow(tenant, workspace, flowName);
+  if (!flow) return null;
+  if (!flow.steps.some((s) => s.subflow)) return flow;
+  return { ...flow, steps: expandSubflows(tenant, workspace, flow.steps, [flowName]) };
+}
+
+// ---------------------------------------------------------------- recovery
+
+/**
+ * How long a run may sit in `running` with nobody touching it before it is
+ * considered abandoned.
+ *
+ * Long enough that a slow model call is never mistaken for a dead process —
+ * a single step can legitimately take minutes — and short enough that a
+ * restarted server does not leave yesterday's run looking live.
+ */
+// A run this process is driving is never abandoned, however long its step
+// is quiet — a 40-minute script is work, not a fault, and the platform sets
+// no clock on work. A `running` run nobody here is driving has lost its
+// driver (a restart; this is the only process that drives) and is closed
+// once it has been quiet for two minutes — the margin is for a record
+// written a beat before its driver registered, not a judgement about pace.
+const ABANDONED_AFTER_MS = 2 * 60 * 1000;
+
+/** The first retry's wait; each one after doubles it, to sixteen times
+ *  this (15 s → 4 min by default). An env, so a test can make it small. */
+const retryBaseMs = () => Number(process.env.FOLDRUN_RETRY_BASE_MS) || 15_000;
+
+/** The most recent moment a run showed any sign of life. */
+function lastActivity(run: RunRecord): number {
+  let latest = Date.parse(run.startedAt);
+  for (const step of run.steps) {
+    for (const event of step.events) {
+      const t = Date.parse(event.t);
+      if (t > latest) latest = t;
+    }
+  }
+  return latest;
+}
+
+export interface Reconciliation {
+  runId: string;
+  tenant: string;
+  workspace: string;
+  /** What was done about it: closed as dead, or picked back up. */
+  action: "closed" | "resumed";
+  /** Steps that were mid-flight when the process went away. */
+  interrupted: string[];
+}
+
+/**
+ * Close out runs abandoned by a process that is no longer here.
+ *
+ * Runs execute in the server process, and nothing writes a terminal status
+ * when that process goes away — so a deploy, a crash or a Ctrl-C during a run
+ * leaves `status: "running"` on disk forever. The run history then contains
+ * entries that are not merely stale but false: they claim to be in progress,
+ * the dashboard renders them as live, and no one can tell them apart from a
+ * step that is genuinely still thinking.
+ *
+ * Called at startup, before anything reads run history. A run still being
+ * worked on by a live process is protected by the idle window, not by a lock —
+ * so this is safe to call while runs are in flight, and deliberately
+ * conservative about what it declares dead.
+ *
+ * A run genuinely waiting for a person is left alone: that state legitimately
+ * outlives any process. A run whose person already answered is not waiting,
+ * and is picked back up — see below.
+ */
+/** Told when a run reconcile closed, or resumed and saw to its end — so the
+ *  platform settles, notifies and chains it as it would a run its worker
+ *  drove (a run closed here had spent tokens, and nobody was charged or
+ *  told). Not told when a resumed run parks again: whatever resumes it next
+ *  goes through the worker. */
+export type ReconcileEnd = (tenant: string, workspace: string, runId: string) => void | Promise<void>;
+
+export function reconcileRuns(tenant: string, now = Date.now(), live?: ReadonlySet<string>, onEnd?: ReconcileEnd): Reconciliation[] {
+  const closed: Reconciliation[] = [];
+
+  for (const workspace of listWorkspaces(tenant)) {
+    // Live runs only, read whole — every other status is passed over below,
+    // and parsing the workspace's whole history every sweep was the cost.
+    for (const summary of liveRuns(tenant, workspace.name)) {
+      if (drivingRuns.has(summary.id)) continue;
+      // Driven by another process — a second worker pod, on a platform with
+      // more than one. The idle window protects a quiet step from THIS
+      // process's judgement only; a worker that boots beside a live one
+      // would otherwise close every long step its neighbour is driving.
+      // The caller says which runs those are (a heartbeated claim).
+      if (live?.has(summary.id)) continue;
+      if (now - lastActivity(summary) < ABANDONED_AFTER_MS) continue;
+
+      // Approved, then abandoned. Approval only writes to the run record; the
+      // loop that acts on it polls in memory, inside the process that started
+      // the run. If that process goes away between the click and the next
+      // poll, the decision is on disk with nobody left to read it — and the
+      // run sits in `awaiting-approval` with no step awaiting approval, so
+      // the dashboard cannot even offer the button again. Nothing else here
+      // rescues it: this status is exempt from being closed, by design.
+      if (summary.status === "awaiting-approval") {
+        const stillAsking = summary.steps.some((s) => s.status === "awaiting-approval");
+        const answered = summary.steps.some((s) => s.approvedAt && s.status === "pending");
+        if (stillAsking || !answered) continue;
+
+        const run = readRun(tenant, workspace.name, summary.id);
+        if (!run || run.status !== "awaiting-approval") continue;
+        run.status = "running";
+        writeRun(tenant, workspace.name, run);
+        // Park at any *later* gate rather than poll: reconcile runs inside
+        // long-lived server processes, where a 24h file-poll is exactly the
+        // slot-burning the queue exists to avoid.
+        void driveRun(tenant, workspace.name, run, null, run.tags ?? [], { parkOnApproval: true })
+          .then(() => {
+            const after = readRun(tenant, workspace.name, run.id);
+            if (onEnd && after && (after.status === "completed" || after.status === "failed")) return onEnd(tenant, workspace.name, run.id);
+          })
+          .catch((err) => console.error(`[foldrun] reconcile: ${tenant}/${workspace.name}/${run.id} after resume:`, err));
+        closed.push({
+          runId: run.id,
+          tenant,
+          workspace: workspace.name,
+          action: "resumed",
+          interrupted: [],
+        });
+        continue;
+      }
+
+      if (summary.status !== "running") continue;
+
+      const run = readRun(tenant, workspace.name, summary.id);
+      if (!run || run.status !== "running") continue;
+
+      const interrupted: string[] = [];
+      for (const step of run.steps) {
+        if (step.status === "running") {
+          interrupted.push(step.agent);
+          step.status = "failed";
+          step.events.push({
+            t: new Date(now).toISOString(),
+            type: "error",
+            text: "interrupted — the process running this step went away before it finished",
+          });
+        } else if (step.status === "pending") {
+          step.status = "skipped";
+          step.skipReason = "the run was interrupted before this step started";
+        }
+      }
+
+      run.status = "failed";
+      run.finishedAt = new Date(now).toISOString();
+      writeRun(tenant, workspace.name, run);
+      // The record is closed; make the sandbox match. A step with no
+      // `timeout:` has no pod deadline, so an orphan from a mid-step restart
+      // is reaped here, by the run that owned it, not by a clock.
+      try {
+        if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+        else platform.killRunSandboxes(run.id);
+      } catch {
+        // a sandbox we cannot reach must not stop the reconcile
+      }
+      closed.push({ runId: run.id, tenant, workspace: workspace.name, action: "closed", interrupted });
+      if (onEnd) {
+        void Promise.resolve()
+          .then(() => onEnd(tenant, workspace.name, run.id))
+          .catch((err) => console.error(`[foldrun] reconcile: ${tenant}/${workspace.name}/${run.id} after close:`, err));
+      }
+    }
+  }
+
+  return closed;
+}
+
+/**
+ * The same, for every account this installation holds.
+ *
+ * A server reconciles on boot, and it boots for everyone — reconciling only
+ * one hard-coded account left every other account's interrupted runs marked
+ * `running` forever, with no process left to finish them.
+ */
+export function reconcileAllRuns(now = Date.now(), live?: ReadonlySet<string>, onEnd?: ReconcileEnd): Reconciliation[] {
+  return listTenants().flatMap((tenant) => reconcileRuns(tenant, now, live, onEnd));
+}
+
+/**
+ * Wait for a run to stop being in progress.
+ *
+ * Runs start and return immediately, which is right for a schedule and wrong
+ * for a caller putting an agent behind their own request: they want the
+ * answer, not a receipt. Polls the run record rather than holding a callback,
+ * so it works from a different process than the one doing the work.
+ *
+ * `awaiting-approval` counts as stopping. It is not finished, but it is not
+ * going to progress without a person, and a caller blocked on it would hang
+ * for as long as the approval window allows.
+ */
+export async function waitForRun(
+  tenant: string,
+  workspace: string,
+  runId: string,
+  timeoutMs = 5 * 60_000,
+): Promise<{ run: RunRecord | null; timedOut: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const run = readRun(tenant, workspace, runId);
+    if (!run) return { run: null, timedOut: false };
+    // Queued counts as in flight — a caller asking to wait wants the result,
+    // not a report that the worker hadn't picked the job up yet.
+    if (run.status !== "running" && run.status !== "queued") return { run, timedOut: false };
+    if (Date.now() >= deadline) return { run, timedOut: true };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/**
+ * What a run produced, for a caller that wanted an answer.
+ *
+ * The last step that actually returned something: a flow's final step is the
+ * conclusion, and skipping back past steps that were skipped or produced
+ * nothing is what makes `?wait=true` useful rather than merely blocking.
+ */
+export function runResult(run: RunRecord): string | null {
+  for (let i = run.steps.length - 1; i >= 0; i--) {
+    // A sandbox: own job's reply went to the step that asked (runSummary).
+    if (run.steps[i].subagentOf) continue;
+    const r = run.steps[i].result;
+    if (r && r.trim()) return r;
+  }
+  return null;
+}
+
+/**
+ * What a Docker-run script sees of the workspace and the account: their
+ * scripts/ and their tools/, read-only. A folder tool's code lives in its
+ * tools/<name>/ folder, not in scripts/ — without those two mounts every
+ * folder tool (the hello template's wordcount among them) was handed a host
+ * path the container did not have, and failed on every call. A gallery tool
+ * nobody installed runs from the gallery's own shelf, so that is mounted too
+ * when there is one. A folder that does not exist is skipped by the copy.
+ */
+export function scriptMounts(agentDir: string, tenant: string): Record<string, string> {
+  const workspaceRoot = path.resolve(agentDir, "..", "..");
+  const mounts: Record<string, string> = {
+    [path.join(workspaceRoot, "scripts")]: "/workspace-scripts",
+    [path.join(workspaceRoot, "tools")]: "/workspace-tools",
+    [libraryDir(tenant, "scripts")]: "/library-scripts",
+    [libraryDir(tenant, "tools")]: "/library-tools",
+  };
+  const gallery = platform.galleryDir();
+  if (gallery) mounts[path.join(gallery, "tools")] = "/gallery-tools";
+  return mounts;
+}
+
+/**
+ * The skills an agent can see, nearest first, each with the path the agent
+ * is told to read it at. Own skills, then the workspace's, then the
+ * workspace's `.agents/skills/` (the cross-client convention, scanned after
+ * the native location so a foldrun-native skill wins a name clash), then the
+ * account library. The nearest definition of a name wins.
+ *
+ * The workspace's are written `workspace/skills/…`, the one spelling for the
+ * workspace root, which the file tools expand themselves. `../../skills/…`
+ * left the model to resolve it against a path it had to guess, and on the
+ * hello template it climbed one level too far and was refused.
+ */
+export function skillsInScope(agentDir: string, tenant: string): DiscoveredSkill[] {
+  const skills: DiscoveredSkill[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string, prefix: string, subdir = "skills") => {
+    for (const skill of discoverSkills(dir, subdir)) {
+      if (seen.has(skill.name)) continue;
+      seen.add(skill.name);
+      skills.push({ ...skill, path: `${prefix}${skill.path}`, dir: skill.dir ? `${prefix}${skill.dir}` : null });
+    }
+  };
+  const workspaceRoot = path.join(agentDir, "..", "..");
+  add(agentDir, "");
+  add(workspaceRoot, "workspace/");
+  add(workspaceRoot, "workspace/", ".agents/skills");
+  // The account library keeps its relative path: `account/` is expanded by
+  // the file tools only, and a skill's bundled scripts are run from the shell.
+  add(path.join(libraryDir(tenant)), "../../../../library/");
+  return skills;
+}
+
+/**
+ * The interpreters a set of scripts needs, read from what they are: the
+ * extension of `run:` (or of inline code), or an explicit `interpreter:`.
+ * Docker's script image is built from the runtime spec, and the base one is
+ * Python only, so a JavaScript tool that declared no `runtime:` (the demo's
+ * inline crm-upload, any folder tool's run.mjs) failed with no node to run
+ * it. Python is named too whenever a .py script is present, because asking
+ * for node alone builds on node:22-slim, which has no python3. Null when
+ * nothing beyond the default is needed.
+ */
+export function scriptLanguages(scripts: ScriptSpec[]): RuntimeSpec | null {
+  const kind = (sc: ScriptSpec) => {
+    const via = (sc.interpreter ?? "").split(/[\\/]/).pop() ?? "";
+    if (/^node/.test(via)) return "node";
+    if (/^python/.test(via)) return "python";
+    const ext = (sc.run ? path.extname(sc.run) : sc.codeExt ?? "").toLowerCase();
+    if ([".js", ".mjs", ".cjs", ".ts"].includes(ext)) return "node";
+    if (ext === ".py") return "python";
+    return null;
+  };
+  const kinds = new Set(scripts.map(kind));
+  if (!kinds.has("node")) return null;
+  return { node: true, ...(kinds.has("python") ? { python: true } : {}), packages: [], npm: [] };
+}

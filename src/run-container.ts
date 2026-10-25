@@ -1,0 +1,1776 @@
+// Whole-step isolation: the model loop itself inside a container.
+//
+// container.ts isolates *declared script tools* — real code the author chose
+// to ship. This isolates the rest: the agent's built-in Read/Write/Bash,
+// which otherwise run in the server process behind path checks. Path checks
+// are argument inspection; a container is an operating system saying no. The
+// hosted platform runs every step this way (FOLDRUN_RUN_ISOLATION=container);
+// the CLI keeps the in-process path, because on a laptop the "server process"
+// is the user's own shell and there is nothing to protect it from.
+//
+// Shape: copy the workspace in, run the driver, stream events out as JSONL,
+// copy changes back through a filter. Copying, not mounting, for the same
+// reasons as container.ts — and because the copy-out filter is where the
+// spec's write rules become physics: whatever happened inside, knowledge/,
+// secrets and run history cannot come back changed, because they are not
+// copied back at all (secrets and runs/ were never copied in).
+//
+// The runner image bundles @foldrun/core itself, so the driver runs the same
+// executeStep the server would — one implementation, two homes.
+
+import type { PeerInfo } from "./operator.ts";
+import { isHookRecord, type HookRecord } from "./hooks.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import { CAPTURE_CAP, isPlatformPath, type ApiSpec, type Effort, type ModelCall } from "./store.ts";
+import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
+import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
+import type { TokenPrice } from "./catalog.ts";
+import { isFileValue, fileContent } from "./secrets.ts";
+import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, type RuntimeSpec } from "./runtime.ts";
+import { egressCaSh, type NetworkLevel } from "./network.ts";
+import type { ScriptSpec } from "./script-tools.ts";
+import type { ConsultSpec } from "./agent-tools.ts";
+import type { DelegateSpec, SubagentSpec } from "./subagents.ts";
+import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
+import type { SearchRoot, RunDigest } from "./context-tools.ts";
+import type { TranslatorSpec } from "./translator.ts";
+import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
+
+/** What crosses the boundary. Everything in here is values — pre-resolved
+ *  secrets in headers, assembled prompt, serializable MCP configs. */
+export interface ContainerStepInput {
+  agentRel: string; // "agents/<name>" inside the workspace
+  prompt: string;
+  model: string;
+  effort?: Effort | null;
+  systemPrompt: string;
+  allowed: string[];
+  mcpNames: string[];
+  /** http/stdio configs only — in-process servers are rebuilt inside. */
+  mcpServers: Record<string, McpServerConfig>;
+  apis: ApiSpec[]; // headers pre-substituted from the vault, host-side
+  scripts: ScriptSpec[];
+  /** The agent's `runtime:` declaration — the driver builds the venv/npm
+   *  prefix inside the container, where the network is. Without this,
+   *  dependency-using scripts worked locally and failed only in production
+   *  isolation, which is the worst place for a difference. */
+  runtime: RuntimeSpec | null;
+  /** Colleagues this agent may consult — persona + model, gathered from
+   *  their agent.md files host-side. The driver rebuilds the consult tools
+   *  in here; the callees run toolless, so nothing else need cross. */
+  consults: ConsultSpec[];
+  /** `subagents:` — built host-side (runner.ts), plain JSON. */
+  subagents?: SubagentSpec[];
+  /** `sandbox: own` sub-agents — offered as delegate_<name> tools; their
+   *  jobs run on the worker in sandboxes of their own (delegate-tools.ts). */
+  delegates?: DelegateSpec[];
+  timeoutSec?: number;
+  /** The step's spend ceiling and the model's per-token price — see
+   *  step-exec.ts. Values, so the driver can enforce them in the pod. */
+  budgetUsd?: number | null;
+  budgetNote?: string;
+  price?: TokenPrice | null;
+  verify?: string;
+  /** The model `verify: judge:` grades with (the workspace's `judge:`). */
+  judgeModel?: string;
+  judgeEffort?: string;
+  /** `output: json` — checked inside, where the reply is. */
+  output?: "json";
+  /** `schema:` and `max_turns:`, resolved host-side — see ExecOptions. */
+  schema?: Record<string, unknown> | boolean;
+  maxTurns?: number;
+  /** `capture:` resolved host-side (FOL-54 step 4) — see ExecOptions. */
+  capture?: "metadata" | "full";
+  /** `limits:` resolved host-side, and the SDK-name → foldrun-name map the
+   *  count reads (limits.ts) — enforced in the pod by the same hook. */
+  limits?: Record<string, number>;
+  /** `hooks:` names, resolved inside the sandbox against its own roots. */
+  hookNames?: string[];
+  hookBase?: Record<string, unknown>;
+  toolOwners?: Record<string, string>;
+  /** tools: [search] — the directories to search, as paths INSIDE the
+   *  container (/workspace/…, /library/…). */
+  search?: SearchRoot[];
+  /** tools: [history] — the workspace's recent runs, gathered host-side. */
+  history?: RunDigest[];
+  /** tools: [desks] — the account's other workspaces' runs, gathered host-side. */
+  desks?: RunDigest[];
+  /** tools: [ask] — ask_person, and how long it may wait for an answer. */
+  ask?: { timeoutSec: number };
+  /** tools: [peers] — this step's agent and the other steps of its
+   *  parallel group, gathered host-side at launch. The driver rebuilds the
+   *  colleagues' tools in here over the lease's /peers door. */
+  peers?: { self: string; siblings: PeerInfo[] };
+  /** A Chat-Completions provider: the driver starts the runtime's translator
+   *  on loopback and points the SDK at it. Null or absent: the env's
+   *  ANTHROPIC_BASE_URL is spoken to directly. */
+  translator?: TranslatorSpec | null;
+  /** A granted tool acts outward (`outward: true`): an executor that could
+   *  put a browsing step on the slim image keeps this one on the full image,
+   *  where a browser in the step is always there (browser-pod.ts). */
+  outward?: boolean;
+  /** "full" — this attempt must have the full image: the re-run after the
+   *  browser pod was lost. Absent lets the executor choose. */
+  image?: "full";
+}
+
+/**
+ * How long the sandbox actually existed, measured host-side — the driver
+ * cannot time its own cold start, because it isn't running yet.
+ *
+ * The split is where the two executors differ, so read it per executor:
+ * `sandboxMs` is scheduling and admission (docker `create` returns almost
+ * at once; a gVisor pod's Ready is the real cold-start number), and
+ * `firstOutputMs` is guest boot to the driver's first line (for docker
+ * that's where the cold start actually lands, since `start` is when the
+ * container boots). `totalMs` is what the platform rented either way, and
+ * is the only one billing should ever use.
+ */
+export interface StepTiming {
+  sandboxMs: number;
+  firstOutputMs: number | null;
+  totalMs: number;
+  /** Where the start-up went, phase by phase — see STARTUP_PHASES. Absent
+   *  from an executor that marks none, and from a resumed driver (the
+   *  first driver's phases are on the record already). */
+  phases?: StartupPhases;
+}
+
+/**
+ * The start-up of one step, in the order it happens. Each is the moment the
+ * phase ENDED, in ms since the executor began the step, so the gap between
+ * two neighbours is what the later one cost (FOL-29: "pod ready" was the
+ * only number, and the six seconds after it had no names).
+ *
+ * The executor marks its own: `services` (the account's search/browser pods
+ * up), `room` (room on the cluster to start — platform pod-room.ts),
+ * `applied` (pod created), `ready`, `files` (the workspace copied in),
+ * `go` (the step released). The sandbox marks the rest as `{"e":"mark"}`
+ * lines: `shim` (the shim saw go), `system` (system packages restored),
+ * `driver` (node up), `imports` (core loaded), `tools` (runtime and tools
+ * built, the SDK about to start) and `model` (the model's first text or tool
+ * call). A worker that predates a mark ignores the line — parseDriverLine
+ * answers null for an `e` it does not know.
+ */
+export const STARTUP_PHASES = [
+  "services", "room", "applied", "ready", "files", "go",
+  "shim", "system", "driver", "imports", "tools", "model",
+] as const;
+export type StartupPhase = (typeof STARTUP_PHASES)[number];
+export type StartupPhases = Partial<Record<StartupPhase, number>>;
+
+/** A sandbox-side mark: which phase ended, and when (epoch ms, the
+ *  sandbox's clock — the same machine's as the worker's on one node). */
+export function parseDriverMark(line: string): { name: StartupPhase; at: number } | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{"e":"mark"')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed.e !== "mark" || typeof parsed.at !== "number" || !Number.isFinite(parsed.at)) return null;
+    return (STARTUP_PHASES as readonly string[]).includes(parsed.name) ? { name: parsed.name, at: parsed.at } : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface StepActuals {
+  busyCpuSecs: number | null;
+  peakMemBytes: number | null;
+  rxBytes: number | null;
+  txBytes: number | null;
+}
+
+export interface ContainerStepOutcome {
+  status: "completed" | "failed";
+  result: string | null;
+  /** Why the sandbox ended when the step did not: what the cluster said
+   *  (OOMKilled, Evicted, the pod gone). Absent when the driver finished
+   *  and said so itself. A retry policy reads this. */
+  reason?: string | null;
+  /** The model's final text block — see StepRecord.conclusion. Crosses the
+   *  boundary with the rest of the outcome; the driver spreads it. */
+  conclusion?: string | null;
+  /** The parsed JSON of an `output: json` step, crossing back as a value. */
+  data?: unknown;
+  costUsd: number | null;
+  usage?: ExecUsage | null;
+  /** Model turns, and why the last one ended — see ExecOutcome. */
+  turns?: number;
+  stopReason?: string | null;
+  /** Every turn priced at its own model, when sub-agents ran on others —
+   *  see ExecOutcome.turnsCostUsd. */
+  turnsCostUsd?: number;
+  /** What the sandbox actually touched — see the driver's readActuals. */
+  res?: StepActuals | null;
+  /** Set by the isolated executors only — an in-process step rents no
+   *  sandbox, so it has no compute seconds to bill. */
+  timing?: StepTiming | null;
+  /** Which runner image the sandbox ran, as the executor chose it: `pod`
+   *  when a browsing step ran on slim and browsed through the account's
+   *  browser pod. Absent from an executor with one image. */
+  image?: { variant: "full" | "slim"; why?: string; pod?: boolean } | null;
+  /** The pod's reconnects and, when it was lost, what the step had written —
+   *  see ExecOutcome.browserPod. */
+  browserPod?: BrowserPodOutcome;
+  /** Workspace paths the step's changes were applied to on the host — what
+   *  applyContainerChanges returned. An isolated sub-agent's reply names
+   *  them to the step that delegated (delegate-tools.ts). */
+  applied?: string[];
+}
+
+/**
+ * The one place the timing line is worded, so the docker and k8s traces
+ * read the same and a cold-start regression is greppable across both.
+ */
+export function timingLine(t: StepTiming): string {
+  const s = (ms: number) => `${(ms / 1000).toFixed(2)}s`;
+  const first = t.firstOutputMs === null ? "no output" : `first output +${s(t.firstOutputMs)}`;
+  const phases = t.phases
+    ? STARTUP_PHASES.filter((p) => typeof t.phases![p] === "number").map((p) => `${p} ${s(t.phases![p]!)}`)
+    : [];
+  return `timing: sandbox ready in ${s(t.sandboxMs)}, ${first}, ${s(t.totalMs)} total` +
+    (phases.length ? ` · start-up: ${phases.join(" → ")}` : "");
+}
+
+const cli = () => process.env.FOLDRUN_CONTAINER_CLI ?? "docker";
+
+// Paths that must never come back from a container, whatever happened in
+// there: everything platform-owned (store.ts#isPlatformPath — also never
+// copied in), plus knowledge/, which goes in for reading and is dropped on
+// the way out, and .git/.
+// hooks/: a step must not rewrite the code that guards it — for this run (the
+// code is read into memory before the model starts, hooks.ts) or the next.
+const DENY_BACK = ["knowledge/", "hooks/", ".git/"];
+// A .git ANYWHERE in the tree, not just at the root. A step that clones a
+// repository into a shared area (files/site, say) was shipping the entire
+// object store back to the workspace, where the harvest then filed thousands
+// of git internals as "files the agents produced". Git metadata is never a
+// reviewable artifact; the clone's content comes back, its plumbing does not.
+const DENY_BACK_GIT_RE = /(^|\/)\.git(\/|$)/;
+// Materialised @file secrets (SSH keys, certs) live under .secret-files/ in
+// an agent's dir while a step runs; they are live credentials and must never
+// come back to the host, whatever the step wrote there.
+const DENY_BACK_SECRET_FILES = /(^|\/)\.secret-files\//;
+// And per-agent knowledge, at any depth under agents/<name>/.
+const DENY_BACK_RE = /^agents\/[^/]+\/knowledge\//;
+// A run's caches are not workspace content either: HOME is the agent's own
+// folder, so a tool that ignores XDG_CACHE_HOME (set by the driver) still
+// writes ~/.cache or ~/.npm there. Never copied back.
+const DENY_BACK_CACHE = /^agents\/[^/]+\/\.(?:cache|npm)(?:\/|$)/;
+// A dependency tree is not workspace content. Nothing authored lives in
+// node_modules, it is enormous, and a runtime linked into a tool's directory
+// so ESM can resolve it would otherwise be copied back file by file.
+const DENY_BACK_NODE_MODULES = /(^|\/)node_modules(\/|$)/;
+
+/** Should this container-side path be applied back to the host workspace? */
+export function allowedBack(rel: string): boolean {
+  const norm = rel.replaceAll("\\", "/");
+  if (norm.includes("..")) return false;
+  if (isPlatformPath(norm)) return false;
+  if (DENY_BACK.some((d) => norm === d.replace(/\/$/, "") || norm.startsWith(d))) return false;
+  if (DENY_BACK_RE.test(norm)) return false;
+  if (DENY_BACK_GIT_RE.test(norm)) return false;
+  if (DENY_BACK_SECRET_FILES.test(norm)) return false;
+  if (DENY_BACK_NODE_MODULES.test(norm)) return false;
+  if (DENY_BACK_CACHE.test(norm)) return false;
+  return true;
+}
+
+/**
+ * Apply what the STEP changed onto the real workspace — additive and
+ * overwriting, never deleting: an agent organising its own files gains
+ * nothing from deleting on the host that it can't get by writing, and a bug
+ * in a deletion sync destroys authored work.
+ *
+ * `baseline` is the copy that was handed to the container at the start of the
+ * step. Without it this function compares the container against the HOST, and
+ * that is a different question with a worse answer: a file the step never
+ * touched, edited on the host while the step ran, differs — so it was written
+ * back from the container's stale copy and the edit vanished. It happened on
+ * 2026-09-03: a tool.md fixed mid-run was reverted eight minutes later by a
+ * step that had never read it, and the repository kept the fix while the
+ * workspace lost it.
+ *
+ * With the baseline the rule is simply: identical to what we handed in means
+ * the step did not touch it, so it is not ours to write back. Concurrent
+ * edits survive, and a step that genuinely changed a file still wins.
+ */
+/**
+ * What a workspace copy looked like when it went in: the sha256 of every
+ * file the step could hand back. Small enough to ride into the sandbox
+ * beside the input, so a driver that inherits the step can tell what the
+ * step changed without the staging copy the first driver held in /tmp.
+ */
+export function hashTree(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const abs = path.join(d, entry.name);
+      const rel = path.relative(dir, abs).replaceAll("\\", "/");
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (allowedBack(rel + "/")) walk(abs);
+        continue;
+      }
+      if (!allowedBack(rel)) continue;
+      out[rel] = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir);
+  return out;
+}
+
+/**
+ * Every file's mtime under `dir`, relative path to milliseconds — so a copy
+ * that cannot carry times can have them put back. `kubectl cp` unpacks with
+ * `tar -m`, which stamps every file with the moment it landed; on 2026-09-24
+ * gbp-desk's reply-sheet check ("pending-replies.json written in the last
+ * hour") passed on a file last written on 2026-09-13, and the poster sent
+ * nothing. Every freshness check in every flow was answering "yes".
+ */
+export function mtimeManifest(dir: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const abs = path.join(d, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) walk(abs);
+      else out[path.relative(dir, abs).replaceAll("\\", "/")] = fs.statSync(abs).mtimeMs;
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir);
+  return out;
+}
+
+/** The in-pod half of mtimeManifest: a node one-liner, run as root before `go`. */
+export const APPLY_MTIMES_JS =
+  `const fs=require("fs"),p=require("path");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));` +
+  `for(const [r,t] of Object.entries(m)){try{fs.utimesSync(p.join(process.argv[2],r),t/1000,t/1000)}catch{}}`;
+
+const sha = (b: Buffer) => crypto.createHash("sha256").update(b).digest("hex");
+
+/**
+ * Both sides changed a file the step was handed. When each is the handed-in
+ * content with lines added on the end — a ledger, history.md, a .jsonl — the
+ * answer is the base, then the host's additions, then the step's. Only the
+ * base's hash may be known, so the base is found as the longest shared
+ * leading run of whole lines whose hash matches. Anything else is null: a
+ * real conflict, which the caller must not settle by dropping one side.
+ */
+export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Buffer): Buffer | null {
+  // Both sides created the same new file: no shared base to append to, and
+  // joining two JSON documents is corruption, not a merge.
+  if (was === null) return null;
+  const h = host.toString("utf8");
+  const n = next.toString("utf8");
+  let common = 0;
+  const max = Math.min(h.length, n.length);
+  while (common < max && h.charCodeAt(common) === n.charCodeAt(common)) common++;
+  // One pass over the shared prefix. Rebuilding and hashing the prefix at
+  // every line boundary, from the longest down, was quadratic: on 6 Oct 2026
+  // a conflicted file of a few MB held the worker's event loop for minutes,
+  // the liveness probe killed it every 4.5 minutes, and every step on the box
+  // lost its model connection.
+  let end = -1;
+  if (typeof was === "string") {
+    const run = crypto.createHash("sha256");
+    if (run.copy().digest("hex") === was) end = 0;
+    let from = 0;
+    for (let nl = h.indexOf("\n"); nl !== -1 && nl < common; nl = h.indexOf("\n", nl + 1)) {
+      run.update(h.slice(from, nl + 1), "utf8");
+      from = nl + 1;
+      if (run.copy().digest("hex") === was) end = from;
+    }
+  } else {
+    // The base's bytes are known, so it can only end at their length.
+    const base = was.toString("utf8");
+    if (
+      base.length <= common &&
+      (base.length === 0 || base.endsWith("\n")) &&
+      h.startsWith(base) &&
+      Buffer.from(base, "utf8").equals(was)
+    )
+      end = base.length;
+  }
+  if (end < 0) return null;
+  const hostAdded = h.slice(end);
+  const stepAdded = n.slice(end);
+  const joined = hostAdded && !hostAdded.endsWith("\n") ? hostAdded + "\n" : hostAdded;
+  return Buffer.from(h.slice(0, end) + joined + stepAdded, "utf8");
+}
+
+export function applyContainerChanges(
+  hostWs: string,
+  containerWs: string,
+  baseline?: string | Record<string, string>,
+  note?: (message: string) => void,
+  divert?: WriteDivert,
+): string[] {
+  const applied: string[] = [];
+  // Files a sandbox: own job's reply copied into this sandbox mid-step
+  // (delegate-tools.ts copyBackFiles), path → sha256 of what was written: for
+  // those, that is what the step started from. The job's change is already on
+  // the workspace; read against the older baseline it came back as the
+  // step's own and was merged in a second time (Codex review, 23 Oct 2026).
+  let imported: Record<string, string> = {};
+  try {
+    // Read here, on the host: a link the step planted is never followed,
+    // the same rule as every file below.
+    const dir = path.join(containerWs, ".foldrun");
+    const file = path.join(dir, "copied-back.json");
+    if (fs.lstatSync(dir).isDirectory() && fs.lstatSync(file).isFile()) {
+      const m = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (m && typeof m === "object" && !Array.isArray(m)) imported = m as Record<string, string>;
+    }
+  } catch {
+    /* none copied back */
+  }
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      const rel = path.relative(containerWs, abs);
+      // Never a symlink. docker cp preserves them, and a link the step
+      // planted is resolved HERE, on the host, by the read below: `ln -s
+      // /proc/self/environ leak.txt` in the sandbox came back as a regular
+      // file holding the platform's environment — the install key included.
+      // A link to a directory threw EISDIR and aborted the whole copy-out.
+      // (kubectl cp already skips symlinks; this makes the two tiers agree.)
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (allowedBack(rel + "/")) walk(abs);
+        continue;
+      }
+      if (!allowedBack(rel)) continue;
+      let next: Buffer = fs.readFileSync(abs);
+      // What the step was handed: its bytes (a staging dir) or its hash.
+      // null when the file did not exist then; undefined when no baseline.
+      let was: Buffer | string | null | undefined;
+      if (typeof baseline === "string") {
+        const p = path.join(baseline, rel);
+        was = fs.existsSync(p) ? fs.readFileSync(p) : null;
+      } else if (baseline) {
+        was = baseline[rel.replaceAll("\\", "/")] ?? null;
+      }
+      const importedSha = imported[rel.replaceAll("\\", "/")];
+      if (typeof importedSha === "string") was = importedSha;
+      const same = (b: Buffer) =>
+        was === null || was === undefined ? false : typeof was === "string" ? sha(b) === was : b.equals(was);
+      // Untouched by this step: whatever the host says now is more current
+      // than what we handed in, including a change made while it ran.
+      if (same(next)) continue;
+      const target = path.join(hostWs, rel);
+      const hostNow = fs.existsSync(target) ? fs.readFileSync(target) : null;
+      if (hostNow && hostNow.equals(next)) continue;
+      // The host moved too since the step was handed its copy — another run
+      // or a person wrote it. Writing the step's copy over it erased the
+      // other run's ledger rows on 2026-09-14. Merge appends; keep both
+      // sides of anything else.
+      const hostMoved = was !== undefined && hostNow !== null && !same(hostNow);
+      if (hostMoved) {
+        const merged = mergeAppends(was ?? null, hostNow, next);
+        if (merged) {
+          next = merged;
+        } else {
+          const ext = path.extname(rel);
+          const stem = rel.slice(0, rel.length - ext.length);
+          const conflictRel = `${stem}.conflict-${Date.now().toString(36)}${ext}`;
+          const conflictAbs = path.join(hostWs, conflictRel);
+          fs.mkdirSync(path.dirname(conflictAbs), { recursive: true });
+          fs.writeFileSync(conflictAbs, next);
+          applied.push(conflictRel);
+          note?.(
+            `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the workspace while this step ran, ` +
+              `and not only by appending — kept the workspace's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
+          );
+          continue;
+        }
+      }
+      // A test run's state/ and storage/ writes land under the run, not on
+      // the workspace: the step ran against the real files and its output
+      // is kept where a person can read it, but the next real run starts
+      // from state a test never touched. Decided after the merge so the
+      // diverted copy is what WOULD have been written, conflicts included.
+      if (divert && isDivertedPath(rel)) {
+        const aside = path.join(divert.to, rel);
+        fs.mkdirSync(path.dirname(aside), { recursive: true });
+        fs.writeFileSync(aside, next);
+        divert.note(rel.replaceAll("\\", "/"), divertedSummary(rel.replaceAll("\\", "/"), hostNow, next));
+        continue;
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, next);
+      applied.push(rel);
+    }
+  };
+  walk(containerWs);
+  return applied;
+}
+
+// ---------- the dependency cache ----------
+
+/**
+ * Where the driver builds venvs and npm prefixes, as an absolute path *inside*
+ * the runner. Fixed, and it has to be: a venv bakes its own absolute path into
+ * every shebang and into pyvenv.cfg, so a cache reused across containers is
+ * only valid if it is mounted at the identical path every time. It is the same
+ * path prepareRuntime picks on its own — FOLDRUN_DATA is /home/agent/.foldrun
+ * in the driver, and the in-container tenant is "runner" — so mounting here
+ * turns the existing cache into a persistent one with no change to the code
+ * that fills it.
+ */
+export const RUNTIME_CACHE = "/home/agent/.foldrun/runner/.runtimes";
+
+/** Starts the install helper as root, in the background, before the drop to
+ *  the agent user: the root half of the `install` tool (install-helper.ts).
+ *  The agent reaches it only through the socket; it installs only validated
+ *  Debian package names, and dies with the container. */
+export const INSTALL_HELPER_SH = `FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET}; export FOLDRUN_INSTALL_SOCKET
+node /opt/runner/node_modules/@foldrun/core/dist/src/install-helper.js "$FOLDRUN_INSTALL_SOCKET" ${RUNTIME_CACHE} >/dev/null 2>&1 &`;
+
+/**
+ * Where the platform's shared runtime layer is mounted, read-only, in a run
+ * pod — and read-write, one entry at a time, in the pod that builds an entry
+ * for it (foldrun-platform runtime-warm.ts). A fixed path for the same reason
+ * as RUNTIME_CACHE: a venv hard-codes its own location. Laid out as
+ * <FOLDRUN_DATA>/shared/.runtimes so the builder's prepareRuntime("shared", …)
+ * lands exactly here with FOLDRUN_DATA=/opt/foldrun-runtimes.
+ */
+export const SHARED_RUNTIMES = "/opt/foldrun-runtimes/shared/.runtimes";
+
+/** Docker's own volume-name charset: a leading alphanumeric, then
+ *  alphanumerics plus `_ . -`. The mount source is handed straight to the
+ *  daemon, so it is validated against this rather than assumed. */
+const DOCKER_VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+
+/**
+ * The per-tenant runtime cache mount — a Docker NAMED volume and the fixed
+ * path it mounts at — or null when there is none.
+ *
+ * A named volume, not a host path. The run's `docker create` is issued to the
+ * host daemon over the mounted socket, and that daemon cannot resolve a path
+ * under the platform's own FOLDRUN_DATA — which under compose is itself a named
+ * volume, or a directory Docker Desktop has not shared — so `-v <hostpath>:…`
+ * failed with "mounts denied". A named volume is resolved by the daemon, needs
+ * no host sharing, and on first use is seeded from the image's mount point,
+ * which the runner image creates owned by the agent user (the DOCKERFILE below,
+ * `${RUNTIME_CACHE}`) — so the fresh cache is writable without a host-side chown.
+ *
+ * Per-tenant, not shared. A shared cache would store one copy of pandas instead
+ * of one per account, but it would also be mutable state that one tenant's step
+ * writes and another tenant's step then *executes* — a poisoned venv arriving
+ * as a trusted local file, which is precisely the path gVisor, the capability
+ * drop and the egress policy all exist to close. Disk is the cheaper thing to
+ * spend. One volume per tenant keeps that boundary; each carries a
+ * `foldrun.io/tenant` label so it can be found and pruned.
+ *
+ * The venvs inside carry the runner's own absolute paths, distinct from the
+ * host's `<tenant>/.runtimes` cache — two roots, so a hit is always a real hit.
+ */
+export function runtimeCacheMount(
+  tenant: string | undefined,
+): { source: string; target: string } | null {
+  if (process.env.FOLDRUN_RUNTIME_CACHE === "off") return null;
+  const safe = tenant ? safeTenantSegment(tenant) : null;
+  if (!safe) return null;
+  const source = `foldrun-rt-${safe}`;
+  // safeTenantSegment already yields Docker's charset and `foldrun-rt-` is a
+  // safe leading token — but the source is what the daemon binds, so prove it.
+  if (!DOCKER_VOLUME_NAME.test(source)) return null;
+  return { source, target: RUNTIME_CACHE };
+}
+
+// ---------- the runner image ----------
+
+/** The runner container's entrypoint, as JS text: written into the image as driver.mjs, so it must be plain JS — a TypeScript cast here broke every step on v2026.10.21.5 (tests/run-container.test.ts checks it). */
+export const DRIVER = `// The runner container's entrypoint. Reads one step, executes it with the
+// same core the server uses, speaks JSONL on stdout, exits.
+import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync("/opt/runner/job/input.json", "utf8"));
+// Start-up marks (run-container.ts#STARTUP_PHASES): which phase just ended,
+// on the sandbox's clock. A worker that does not know a mark skips the line.
+const mark = (name) => process.stdout.write(JSON.stringify({ e: "mark", name, at: Date.now() }) + "\\n");
+mark("driver");
+let modelSpoke = false;
+const emit = (type, text, extra) => {
+  // The model's first text or tool call is where start-up ends and the
+  // step's own work begins — runtime and tool lines before it are set-up.
+  if (!modelSpoke && (type === "text" || type === "tool")) { modelSpoke = true; mark("model"); }
+  process.stdout.write(JSON.stringify({ e: "event", type, text, ...extra }) + "\\n");
+};
+// What this sandbox actually touched, read at the last moment from the
+// kernel's own books: cgroup v2 for CPU busy-time and peak memory,
+// /proc/net/dev for bytes on the wire. Every read is best-effort — gVisor
+// exposes some of these files and not others depending on version, and a
+// metric we cannot read is null, never guessed. Reservation is what is
+// billed; these exist so the reservation can be right-sized.
+function readActuals() {
+  // fs from the module's own import — the driver is ESM, and a require()
+  // here threw on every call, silently nulling every metric it guarded.
+  const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch { return null; } };
+  // Two cgroup dialects: v2 (cpu.stat, microseconds; memory.peak) on a
+  // plain runtime, v1-style controllers under gVisor (cpuacct.usage,
+  // NANOseconds; memory.max_usage_in_bytes) — probed on the real cluster,
+  // not assumed. Whichever answers wins; both silent means null.
+  const cpuStat = read("/sys/fs/cgroup/cpu.stat");
+  const usage = cpuStat?.match(/^usage_usec (\\d+)/m);
+  const cpuacctNs = usage ? NaN : Number(read("/sys/fs/cgroup/cpuacct/cpuacct.usage")?.trim());
+  const peak =
+    read("/sys/fs/cgroup/memory.peak") ??
+    read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes") ??
+    read("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+  let rx = 0, tx = 0, sawNet = false;
+  const net = read("/proc/net/dev");
+  if (net) {
+    for (const line of net.split("\\n").slice(2)) {
+      const m = line.trim().match(/^(\\S+):\\s+(\\d+)(?:\\s+\\d+){7}\\s+(\\d+)/);
+      if (m && m[1] !== "lo") { rx += Number(m[2]); tx += Number(m[3]); sawNet = true; }
+    }
+  }
+  return {
+    busyCpuSecs: usage
+      ? Number(usage[1]) / 1e6
+      : Number.isFinite(cpuacctNs) && cpuacctNs > 0
+        ? cpuacctNs / 1e9
+        : null,
+    peakMemBytes: peak ? Number(peak.trim()) || null : null,
+    rxBytes: sawNet ? rx : null,
+    txBytes: sawNet ? tx : null,
+  };
+}
+
+try {
+  // Runtime state (venvs, npm prefixes) lands in the agent user's real home
+  // — writable, inside the container, gone with it.
+  process.env.FOLDRUN_DATA = "/home/agent/.foldrun";
+  const { executeStep } = await import("@foldrun/core/step-exec");
+  const { buildApiTools } = await import("@foldrun/core/api-tools");
+  const { buildScriptTools } = await import("@foldrun/core/script-tools");
+  const { buildConsultTools } = await import("@foldrun/core/agent-tools");
+  const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
+  const { httpChannel, buildAskTool, buildPeerTools, inboxReader } = await import("@foldrun/core/operator");
+  const { buildDelegateTools } = await import("@foldrun/core/delegate-tools");
+  const { startTranslator } = await import("@foldrun/core/translator");
+  const { prepareRuntime } = await import("@foldrun/core/runtime");
+  const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
+  const { paidWebActions } = await import("@foldrun/core/browser-pod");
+  mark("imports");
+
+  const agentDir = "/workspace/" + input.agentRel;
+  // HOME is where a bare relative path lands when anything resolves one
+  // outside cwd — and root's /root is outside the workspace, so such a read
+  // was refused by confinement with a path the agent never typed. Its own
+  // directory is both the truthful answer and the safe one.
+  // @file secrets crossed as content; materialise them to 0600 paths inside
+  // the container (a host path from the other side would not exist here).
+  const env = materializeFileSecrets(agentDir, { ...process.env, HOME: agentDir }).env;
+  // Caches go to the sandbox user's own home, not to HOME: the Claude CLI's
+  // logs, fontconfig, Mesa and gstreamer all follow XDG_CACHE_HOME, and under
+  // agents/<name>/.cache they were copied back after every step — 3,855 files
+  // across 179 agent folders on the box by 17 Oct 2026, read by nothing.
+  env.XDG_CACHE_HOME = "/home/agent/.cache";
+
+  // The declared runtime, built in here — pip and npm have the network, which
+  // the host side may not. It lands in .foldrun/runner/.runtimes, which the
+  // executors mount from a per-tenant directory (run-container.ts#RUNTIME_CACHE):
+  // the first step for a given fingerprint installs, every later one finds
+  // .ready and skips. With no mount it still works, just fresh every time —
+  // which is what this used to be unconditionally. The log says which happened.
+  const runtime = input.runtime
+    ? prepareRuntime("runner", input.runtime)
+    : { interpreters: {}, env: {}, log: [], error: null };
+  for (const line of runtime.log) emit("info", "runtime: " + line);
+  if (runtime.error) emit("error", "runtime: " + runtime.error);
+  // The step's own environment gets it too, not only the script tools: an
+  // agent that runs "python3 x.py" or a shebang script through Bash should
+  // meet the packages its runtime declared, not the image's bare python.
+  Object.assign(env, runtime.env);
+
+  // install: what the agent finds it needs mid-step. apt goes through the
+  // root start-up's helper (install-helper.ts); pip and npm land in a
+  // directory of this container's own, on the paths from the first turn.
+  const { buildInstallTool, INSTALL_TOOL } = await import("@foldrun/core/install-tool");
+  const { stepInstallEnv, INSTALL_SOCKET } = await import("@foldrun/core/runtime");
+  const installDir = "/home/agent/.foldrun/step";
+  const installing = (input.allowed ?? []).includes(INSTALL_TOOL);
+  if (installing) Object.assign(env, stepInstallEnv(installDir, env));
+  const install = installing
+    ? buildInstallTool({
+        dir: installDir,
+        socket: env.FOLDRUN_INSTALL_SOCKET || INSTALL_SOCKET,
+        cacheRoot: "${RUNTIME_CACHE}",
+        python: env.VIRTUAL_ENV ? env.VIRTUAL_ENV + "/bin/python" : "python3",
+        env,
+        emit,
+      })
+    : { server: null };
+
+  // API and script tools, rebuilt in here from their specs. Secrets were
+  // substituted into API headers before the input crossed the boundary, so
+  // buildApiTools gets an already-resolved environment. verify: gets the
+  // container's own environment, whole: it is the boundary, assembled on
+  // the host from an allowlist, and the declared secrets are in it.
+  // A long result is kept in a file only when the agent can read it back.
+  // (tool-output.ts canReadBack, inlined: the driver imports core by subpath.)
+  const keepIn = { dir: agentDir, readable: () => (input.allowed ?? []).some((t) => t === "Read" || t === "Grep") };
+  // A declared secret named like a model variable crosses as
+  // FOLDRUN_DECLARED_<NAME> (runner.ts, FOL-19): the model keeps its own
+  // settings, and the agent's API and script tools and verify: get the value
+  // back under the name it declared. Built here, after the runtime and any
+  // mid-step install have added their paths to env.
+  const toolEnv = { ...env };
+  for (const [k, v] of Object.entries(env)) if (k.startsWith("FOLDRUN_DECLARED_")) toolEnv[k.slice("FOLDRUN_DECLARED_".length)] = v;
+  const api = buildApiTools("", input.apis, undefined, { env: toolEnv, missing: [] }, keepIn);
+  const script = buildScriptTools(
+    agentDir,
+    input.scripts,
+    toolEnv,
+    "/library/scripts",
+    runtime.interpreters,
+    null,
+    keepIn.readable,
+  );
+  // The translator, when the provider speaks Chat Completions: a loopback
+  // server for the length of this step. Its env replaces the endpoint the
+  // host assembled; the provider's real URL and key stay inside it.
+  const translator = input.translator ? await startTranslator(input.translator) : null;
+  if (translator) {
+    Object.assign(env, translator.env);
+    emit("info", "translator: listening on " + translator.baseUrl + " for " + (input.translator.label ?? input.translator.upstreamBase));
+  }
+  const consult = buildConsultTools(input.consults ?? [], env, emit);
+  // The platform's own two groups, rebuilt from values like everything else.
+  const search = buildSearchTools(input.search ?? []);
+  const history = input.history?.length ? buildHistoryTools(input.history) : { server: null };
+  const desks = input.desks?.length ? buildDeskTools(input.desks) : { server: null };
+  // A person in the loop, over the proxy this step's lease already names:
+  // ask_person when tools: [ask], and the run's inbox after every tool call.
+  const channel = httpChannel(env.FOLDRUN_EGRESS);
+  const ask = input.ask ? buildAskTool({ channel, timeoutSec: input.ask.timeoutSec, emit }) : { server: null };
+  const peers = input.peers ? buildPeerTools({ channel, self: input.peers.self, siblings: input.peers.siblings, emit }) : { server: null };
+  const inbox = channel ? inboxReader(channel, emit) : undefined;
+  // sandbox: own sub-agents: a tool each, whose job runs in its own sandbox
+  // on the worker, reached over the same proxy door.
+  const delegate = input.delegates?.length ? buildDelegateTools({ specs: input.delegates, channel, emit, timeoutSec: input.timeoutSec, workspaceRoot: "/workspace" }) : { server: null };
+
+  // Keyless cloud identities (FOLDRUN_IDENTITIES): each token file kept
+  // fresh through the proxy's /identity door, which mints only what this
+  // step's lease was granted. Fetched before the step starts, renewed five
+  // minutes before it expires (with jitter); a failure is said and retried.
+  // Plain JS: this text is the driver, not TypeScript.
+  const identityNames = (env.FOLDRUN_IDENTITIES || "").split(",").filter(Boolean);
+  if (identityNames.length) {
+    // No backslashes: this sits inside a template literal, which eats them.
+    const ep = new RegExp("^(https?://[^/]+)/e/([A-Za-z0-9_-]{16,})/?$").exec(env.FOLDRUN_EGRESS || "");
+    const dir = env.FOLDRUN_IDENTITY_DIR || "/tmp/foldrun-identity";
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const keepFresh = async (name) => {
+      let wait = 30000;
+      try {
+        if (!ep) throw new Error("no egress proxy to ask");
+        const res = await fetch(ep[1] + "/identity/" + ep[2] + "/" + name, { signal: AbortSignal.timeout(15000) });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body.token) throw new Error((body.error && body.error.message) || ("proxy answered " + res.status));
+        const file = dir + "/" + name.toLowerCase() + ".jwt";
+        fs.writeFileSync(file + ".tmp", body.token, { mode: 0o600 });
+        fs.renameSync(file + ".tmp", file);
+        wait = Math.max(30000, body.expiresAt - Date.now() - 300000 + Math.floor(Math.random() * 60000) - 30000);
+      } catch (err) {
+        emit("error", "identity " + name + ": " + (err && err.message ? err.message : String(err)) + " — trying again in 30s");
+      }
+      setTimeout(() => { void keepFresh(name); }, wait).unref();
+    };
+    await Promise.all(identityNames.map(keepFresh));
+  }
+
+  mark("tools");
+  const outcome = await executeStep({
+    agentDir,
+    workspaceRoot: "/workspace",
+    libraryRoot: "/library",
+    prompt: input.prompt,
+    model: input.model,
+    effort: input.effort ?? null,
+    systemPrompt: input.systemPrompt,
+    allowed: input.allowed,
+    mcpNames: input.mcpNames,
+    mcpServers: {
+      ...(api.server ? { foldrun_apis: api.server } : {}),
+      ...(script.server ? { foldrun_scripts: script.server } : {}),
+      ...(consult.server ? { foldrun_agents: consult.server } : {}),
+      ...(search.server ? { foldrun_search: search.server } : {}),
+      ...(history.server ? { foldrun_history: history.server } : {}),
+      ...(desks.server ? { foldrun_desks: desks.server } : {}),
+      ...(ask.server ? { foldrun_ask: ask.server } : {}),
+      ...(peers.server ? { foldrun_peers: peers.server } : {}),
+      ...(delegate.server ? { foldrun_delegate: delegate.server } : {}),
+      ...(install.server ? { foldrun_install: install.server } : {}),
+      ...input.mcpServers,
+    },
+    ...(inbox ? { inbox } : {}),
+    ...(input.subagents?.length ? { subagents: input.subagents } : {}),
+    env,
+    timeoutSec: input.timeoutSec,
+    budgetUsd: input.budgetUsd,
+    budgetNote: input.budgetNote,
+    price: input.price,
+    verify: input.verify,
+    verifyEnv: toolEnv,
+    ...(typeof input.judgeModel === "string" ? { judgeModel: input.judgeModel } : {}),
+    ...(typeof input.judgeEffort === "string" ? { judgeEffort: input.judgeEffort } : {}),
+    output: input.output,
+    schema: input.schema,
+    maxTurns: input.maxTurns,
+    ...(input.capture === "metadata" || input.capture === "full" ? { capture: input.capture } : {}),
+    ...(input.limits && Object.keys(input.limits).length ? { limits: input.limits, toolOwners: input.toolOwners ?? {} } : {}),
+    ...(input.hookNames?.length ? { hookNames: input.hookNames, hookBase: input.hookBase ?? {} } : {}),
+    // Slim browsing: the platform put this step on the slim image to browse
+    // through the account's pod, and named the file the web tool logs its
+    // reconnects to. A lost pod stops the step; what it wrote decides what
+    // the runner does next (browser-pod.ts).
+    ...(env.FOLDRUN_BROWSER_POD_EVENTS ? { browserPod: { events: env.FOLDRUN_BROWSER_POD_EVENTS, methods: api.methods ?? {}, paidWeb: paidWebActions(env), ...(env.FOLDRUN_BROWSER_INIT ? { browseInit: env.FOLDRUN_BROWSER_INIT } : {}) } } : {}),
+    // The container is the boundary; the SDK's own bash sandbox here would
+    // only block declared network use (SSH, curl) for no added safety.
+    sandboxBash: false,
+    emit,
+  });
+  for (const line of api.drainLog()) emit("info", "api: " + line);
+  for (const line of script.drainLog()) emit("info", "script: " + line);
+  if (translator) {
+    for (const line of translator.drainLog()) emit("info", line.startsWith("translator") ? line : "translator: " + line);
+    await translator.close();
+  }
+  // A consult's spend belongs to the step that asked.
+  const consultCost = consult.drainCost();
+  if (consultCost > 0) outcome.costUsd = (outcome.costUsd ?? 0) + consultCost;
+  if (consultCost > 0 && typeof outcome.turnsCostUsd === "number") outcome.turnsCostUsd += consultCost;
+  process.stdout.write(JSON.stringify({ e: "done", ...outcome, res: readActuals() }) + "\\n");
+  process.exit(0);
+} catch (err) {
+  emit("error", err instanceof Error ? err.message : String(err));
+  // The failure path reports actuals too — a step that died eleven minutes
+  // in still held its slice for eleven minutes, and the failed runs are
+  // exactly the ones whose resource story gets read.
+  let res = null;
+  try { res = readActuals(); } catch { /* the reading must never mask the error */ }
+  process.stdout.write(JSON.stringify({ e: "done", status: "failed", result: null, costUsd: null, res }) + "\\n");
+  process.exit(0);
+}
+`;
+
+// Core itself is installed in a stage of its own (CORE_STAGE) and only the
+// result is copied in: the tarball and the package README — which explains
+// foldrun to a person reading the repo, and which no step reads — stay in
+// that stage and never become a layer of the image. Owner rule, 2026-10-02:
+// foldrun's own docs live in git, not in containers.
+const CORE_STAGE = `FROM base AS core
+WORKDIR /opt/runner
+COPY foldrun-core.tgz ./
+RUN npm init -y >/dev/null && npm install ./foldrun-core.tgz --omit=dev \\
+ && npm cache clean --force >/dev/null 2>&1 \\
+ && rm -f foldrun-core.tgz node_modules/@foldrun/core/README.md
+`;
+
+// docker cp writes root-owned files, so the entrypoint starts as root for
+// exactly two commands — chown the copied-in trees, drop to the agent user —
+// and the run flags grant only the three capabilities those two commands
+// need. By the time any model-directed code executes, the process is uid
+// 10001 with no capabilities at all.
+const CORE_INSTALL = `WORKDIR /opt/runner
+COPY --from=core --chown=agent:agent /opt/runner/ ./
+COPY --chown=agent:agent driver.mjs entry.sh ./
+RUN mkdir -p /workspace /library /opt/runner/job ${RUNTIME_CACHE} ${SHARED_RUNTIMES} \\
+ && chown agent:agent /opt/runner \\
+ && chown -R agent:agent /workspace /library /opt/runner/job /home/agent/.foldrun /opt/foldrun-runtimes \\
+ && chmod +x /opt/runner/entry.sh
+ENTRYPOINT ["/opt/runner/entry.sh"]
+`;
+
+/** The uv release copied into the image. Pinned: a floating uv is a floating
+ *  resolver, and the runtime cache is keyed on the declaration, not on it. */
+export const UV_VERSION = "0.11.25";
+
+/** How many times a best-effort engine download is tried before the build
+ *  gives up on it, and the wait before the second and third (15s, then 30s).
+ *  A GitHub release or Google's apt mirror that blinks for a minute used to
+ *  cost the engine outright; on x86_64 that now fails the build, so a
+ *  transient blip would fail a deploy. */
+export const ENGINE_DOWNLOAD_ATTEMPTS = 3;
+
+/** `retry <engine> <command…>`: one shell function, defined at the top of each
+ *  RUN that downloads an engine (a RUN is its own shell). Its lines start
+ *  "runner image:" like every engine line, and go to stderr so a quiet
+ *  install (>/dev/null) still shows them — the deploy greps them into the
+ *  step summary (buildFailureSummary). */
+export const RETRY_SH = `retry() { what=$1; shift; n=1; until "$@"; do if [ "$n" -ge ${ENGINE_DOWNLOAD_ATTEMPTS} ]; then echo "runner image: $what - download failed $n times, giving up" >&2; return 1; fi; echo "runner image: $what - download failed (attempt $n of ${ENGINE_DOWNLOAD_ATTEMPTS}), retrying in $((n * 15))s" >&2; sleep $((n * 15)); n=$((n + 1)); done; }`;
+
+/** The base both targets start from, pinned by digest. The tag alone floats:
+ *  `node:22-slim` is re-pushed for every Node patch and Debian point release,
+ *  and will change Debian release when the Node image decides to, so the
+ *  same runner tag — a hash of this text — could hold different bytes on two
+ *  rebuilds. With the digest in the text, new base bytes mean a new tag.
+ *
+ *  Debian 13 (trixie), not the 12 that `node:22-slim` still names: its glibc
+ *  (2.41) runs Lightpanda past 0.3.6, which wants 2.38; Debian 12 has 2.36.
+ *  Python is 3.13 here (3.11 on 12): runtime.ts checkEntry rebuilds a cached
+ *  venv whose interpreter moved, once per declaration.
+ *
+ *  Raise it on purpose (foldrun-infra/README.md, "Runner images"): read the
+ *  current digest of the tag, put it here, build both targets on both arches
+ *  and make one browse call per engine on the full image:
+ *    docker buildx imagetools inspect node:22-trixie-slim --format '{{json .Manifest}}' | jq -r .digest
+ *  The digest names the multi-arch index, so the one pin serves amd64 and
+ *  arm64 alike.
+ *
+ *  23 Oct 2026: Node 22.23.4 (the 21 Oct security release: Brotli decoder
+ *  RCE, TLS hostname bypasses); the pin before carried 22.23.3. */
+export const NODE_BASE = "node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf";
+
+// Two images from one file, as build targets.
+//
+//   full  (the default, the last stage) — everything, browsers included. The
+//         per-account browser pod runs it, and so does any step that may
+//         browse, because the tool falls back to in-pod Chromium whenever
+//         the pod is unavailable or the run is a test.
+//   slim  — the same base, core and Playwright *client*, no browsers. About
+//         a quarter of the size: the browsers were 1.4 GB of a 3.1 GB image
+//         that every step pulled and every step started, whether or not it
+//         ever opened a page. A step that grants no browsing runs this
+//         (run-k8s.ts picks), and its declared packages arrive at run time
+//         through the runtime cache — uv is in the base for exactly that.
+//
+// The browsers sit BELOW the core install in `full`, as they always have,
+// so a core change rebuilds one thin layer and not 1.4 GB of Chromium.
+export const DOCKERFILE = `FROM ${NODE_BASE} AS base
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && useradd -m -u 10001 agent
+# uv builds the declared python environments (runtime.ts): a fraction of
+# pip's time, and it can fetch a pinned python the image does not carry.
+COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
+
+${CORE_STAGE}
+FROM base AS slim
+# Fonts, because a step that draws text without a browser still needs them:
+# the full image gets 51 from Playwright's --with-deps, slim had none, so from
+# 2026-09-29 (when non-browsing steps moved to slim) every resvg/sharp diagram
+# rendered its labels as empty boxes — expert-witness-desk's validator failed
+# four passes on a post image that was "three empty boxes". DejaVu covers
+# Latin, Greek and Cyrillic in a few MB; fontconfig is how renderers find it.
+# DejaVu alone still drew emoji, Chinese, Japanese, Korean, Devanagari and
+# Thai as empty boxes (reproduced 2026-10-01 with resvg-js 2.6 and sharp
+# 0.34), so four more, the smallest set that drew all of them — 8 MB:
+#   Symbola     emoji and symbols, as outlines. NOT Noto Color Emoji (10 MB):
+#               resvg draws nothing from its bitmap glyphs, so a resvg
+#               diagram kept its empty boxes.
+#   WenQuanYi Micro Hei   Chinese, Japanese kana and Korean Hangul, one file.
+#   Lohit Devanagari, Loma   Hindi and Thai.
+# Here, not in base, so the full image's browser layers stay cached.
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends fonts-dejavu-core fontconfig fonts-symbola fonts-wqy-microhei fonts-lohit-deva fonts-tlwg-loma-otf \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && fc-cache -f >/dev/null
+# The Playwright client only, the same pinned version as the browser pod's
+# server (the wire protocol is version-locked), so a tool that imports it
+# still loads; there is nothing here for it to launch.
+# npm's download cache is dropped in the same layer: it was 190 MB of every
+# image, read by nothing after the build.
+RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null && npm cache clean --force >/dev/null 2>&1
+${CORE_INSTALL}
+FROM base AS browsers
+# Real browsers, because directories and portals increasingly render with
+# JavaScript and a plain fetch sees only the empty shell. Chromium is the one the
+# browser tool drives by default; Firefox and WebKit (Safari's engine) are
+# there for an agent asked to see a page the way those render it. Installed
+# to a fixed path the agent user can read (the default cache would be
+# root's HOME). The browsers' own sandboxes are disabled at launch time — in
+# this platform the container/gVisor IS the sandbox, and the two fight.
+# Pinned exactly, not @1: web browse's numbered elements use ariaSnapshot's
+# "ai" mode (1.59+), and the per-account browser pod runs this same image, so
+# a floating version would move both under a working tool on any rebuild.
+# Raise it on purpose, with the gallery tests and one real call.
+# axe-core beside it is web browse's mode=a11y: one file the tool injects
+# into the page; without it the mode falls back to its own shorter checks.
+# Xvfb by name: the browser pod starts it at boot and web browse starts one
+# per call for headless: false. It used to arrive only as one of Playwright's
+# --with-deps packages, so a Playwright bump that dropped it would have
+# broken every windowed browser without a word. No xauth: nothing here runs
+# xvfb-run, and Xvfb started without -auth takes the local client as it is.
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends xvfb \\
+ && rm -rf /var/lib/apt/lists/*
+# Google Chrome and Chrome beta come from Google's apt repository, which
+# Playwright adds; each is tried ENGINE_DOWNLOAD_ATTEMPTS times. Only on
+# x86_64: Google ships no Linux Chrome for arm64, so there it is not tried.
+RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null \\
+ && playwright install --with-deps chromium firefox webkit >/dev/null \\
+ && ${RETRY_SH} \\
+ && if [ "$(uname -m)" = x86_64 ]; then \\
+      retry chrome playwright install --with-deps chrome >/dev/null || echo "runner image: chrome not installed - engine: chrome would fall back to chromium" >&2; \\
+      retry chrome-beta playwright install --with-deps chrome-beta >/dev/null || echo "runner image: chrome-beta not installed" >&2; \\
+    else echo "runner image: no Google Chrome for $(uname -m) - engine: chrome falls back to chromium"; fi \\
+ && chmod -R a+rX /opt/browser \\
+ && npm cache clean --force >/dev/null 2>&1
+# Lightpanda (engine: lightpanda): a browser that runs the JavaScript and
+# never draws — a fraction of Chromium's memory for reading and filling
+# pages. Its own program, which web browse starts beside a call and drives
+# over the DevTools protocol; shipped unmodified (AGPL-3.0). Pinned by
+# checksum (GitHub's own asset digests, checked again here). 0.4.1 since the
+# move to Debian 13: 0.3.7 on wants glibc 2.38, and Debian 12's 2.36 held it
+# at 0.3.6. An arch without a build leaves the engine out, and the tool says
+# so when asked for it. Each download (with its checksum) is tried
+# ENGINE_DOWNLOAD_ATTEMPTS times before the engine is left out.
+# Raise it on purpose: the new release's two sha256s, then one
+# engine=lightpanda call on each arch.
+RUN arch=$(uname -m) \\
+ && case "$arch" in \\
+      x86_64) sum=1d40801e72c0bc61b2cbd3f3562bcfc46de7b79e0568f33f686b64f2e587610a ;; \\
+      aarch64) sum=664775c7f5ab69cc3189954c7f9345e25c167cb4dace016173e629f9a5e82c42 ;; \\
+      *) sum= ;; \\
+    esac \\
+ && mkdir -p /opt/browser/lightpanda \\
+ && ${RETRY_SH} \\
+ && fetch() { curl -fsSL -o /opt/browser/lightpanda/lightpanda "https://github.com/lightpanda-io/browser/releases/download/0.4.1/lightpanda-$arch-linux" \\
+      && echo "$sum  /opt/browser/lightpanda/lightpanda" | sha256sum -c - >/dev/null; } \\
+ && if [ -n "$sum" ] && retry lightpanda fetch; then \\
+      chmod a+rx /opt/browser/lightpanda/lightpanda && /opt/browser/lightpanda/lightpanda version; \\
+    else rm -f /opt/browser/lightpanda/lightpanda; echo "runner image: lightpanda not installed for $arch - engine: lightpanda says so when asked" >&2; fi
+# Obscura (engine: obscura): a headless browser in Rust around V8 that does
+# draw — screenshots, a raster PDF, a screencast — light like Lightpanda.
+# Apache-2.0. The plain build, not -stealth: this platform does not help a
+# page not see automation. Two binaries, obscura and obscura-worker, which
+# must sit side by side. Pinned by checksum; glibc 2.35 is its floor, so
+# Debian 13 (2.41) runs it. As above, a download is tried
+# ENGINE_DOWNLOAD_ATTEMPTS times, then a failed one leaves the engine out.
+RUN arch=$(uname -m) \\
+ && case "$arch" in \\
+      x86_64) sum=1534d1e6ddaf3d080ec4091eb41d0a4d8cc042a48b607d3c410fc13b482a9eec ;; \\
+      aarch64) sum=5ecf980bca3060236a7a86ec7ed83d943e6598ee87caa46d20325d90bc75f979 ;; \\
+      *) sum= ;; \\
+    esac \\
+ && mkdir -p /opt/browser/obscura \\
+ && ${RETRY_SH} \\
+ && fetch() { curl -fsSL -o /tmp/obscura.tgz "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.3/obscura-$arch-linux.tar.gz" \\
+      && echo "$sum  /tmp/obscura.tgz" | sha256sum -c - >/dev/null; } \\
+ && if [ -n "$sum" ] && retry obscura fetch \\
+      && tar -xzf /tmp/obscura.tgz -C /opt/browser/obscura obscura obscura-worker; then \\
+      chmod a+rx /opt/browser/obscura/obscura /opt/browser/obscura/obscura-worker && /opt/browser/obscura/obscura --version; \\
+    else rm -rf /opt/browser/obscura/*; echo "runner image: obscura not installed for $arch - engine: obscura says so when asked" >&2; fi \\
+ && rm -f /tmp/obscura.tgz
+# What this image actually has, written down: /opt/browser/engines.json, one
+# entry per engine (its path and version, or null when the install above
+# left it out) plus Xvfb. Chromium's version is its own --version (dotted,
+# so FOLDRUN_RUNNER_ENGINES carries it: a pinned user_agent on engine
+# chromium is compared with it, not with Google Chrome's) then the build.
+# web browse reads it for its "built without" answer, and the deploy reads
+# it to report the engines beside the version.
+# On x86_64 a missing engine FAILS the build: every engine ships for that
+# arch, so a gap there is a failed download, and an image that quietly lacks
+# the Chrome or Lightpanda a desk names would fail those runs instead. A
+# failed build leaves the previous image running and says why. Elsewhere
+# (arm64 has no Google Chrome) the gap is recorded and the image ships.
+RUN node -e ' \\
+  const fs = require("fs"), cp = require("child_process"), pw = require("playwright"); \\
+  const at = (p) => (p && fs.existsSync(p) ? p : null); \\
+  const ver = (bin, args) => { try { return cp.execFileSync(bin, args, { timeout: 30000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim().split("\\n")[0] || null; } catch { return null; } }; \\
+  const one = (p, v) => (p ? { path: p, version: v } : null); \\
+  const pwBuild = (p) => (p ? (p.match(/(chromium|firefox|webkit)-(\\d+)/) || [])[0] || null : null); \\
+  const lp = at("/opt/browser/lightpanda/lightpanda"); \\
+  const cr = at(pw.chromium.executablePath()); \\
+  const ob = at("/opt/browser/obscura/obscura-worker") && at("/opt/browser/obscura/obscura"); \\
+  const engines = { \\
+    chromium: one(cr, cr && [ver(cr, ["--version"]), pwBuild(cr)].filter(Boolean).join(" ")), \\
+    chrome: one(at("/opt/google/chrome/chrome"), ver("/opt/google/chrome/chrome", ["--version"])), \\
+    "chrome-beta": one(at("/opt/google/chrome-beta/chrome"), ver("/opt/google/chrome-beta/chrome", ["--version"])), \\
+    firefox: one(at(pw.firefox.executablePath()), pwBuild(pw.firefox.executablePath())), \\
+    webkit: one(at(pw.webkit.executablePath()), pwBuild(pw.webkit.executablePath())), \\
+    lightpanda: one(lp, lp && ver(lp, ["version"])), \\
+    obscura: one(ob, ob && ver(ob, ["--version"])), \\
+  }; \\
+  const xvfb = ver("sh", ["-c", "command -v Xvfb"]); \\
+  const arch = cp.execFileSync("uname", ["-m"]).toString().trim(); \\
+  const manifest = { arch, playwright: require("playwright/package.json").version, engines, xvfb }; \\
+  fs.writeFileSync("/opt/browser/engines.json", JSON.stringify(manifest, null, 2) + "\\n"); \\
+  console.log(JSON.stringify(manifest)); \\
+  const missing = ["chromium", "chrome", "firefox", "webkit", "lightpanda", "obscura"].filter((e) => !engines[e]).concat(xvfb ? [] : ["Xvfb"]); \\
+  if (missing.length && arch === "x86_64") { \\
+    console.error("runner image: MISSING ENGINES on x86_64: " + missing.join(", ")); \\
+    console.error("runner image: every engine ships for x86_64, so a missing one is a failed download (the retry lines above say which) - failing the build"); \\
+    process.exit(1); \\
+  } \\
+  if (missing.length) console.error("runner image: built without " + missing.join(", ") + " on " + arch); \\
+ ' \\
+ && chmod a+r /opt/browser/engines.json
+
+FROM browsers AS full
+${CORE_INSTALL}`;
+
+// runtime: system: — apt as root, before the drop (runtime.ts systemInstallSh).
+// set -e is off around it: a failed install is reported by the driver, which
+// reads the status file and fails the step with apt's own words.
+const ENTRY = `#!/bin/sh
+set +e
+${egressCaSh("/opt/runner/job")}
+${SYSTEM_FROM_INPUT_SH}
+${systemInstallSh(RUNTIME_CACHE)}
+${INSTALL_HELPER_SH}
+set -e
+chown -R agent:agent /workspace /library /opt/runner/job
+# The runtime cache, when one is mounted. NOT recursive: a warm cache is tens
+# of thousands of files and its contents are already agent-owned from the step
+# that built them — only the mount point itself arrives owned by root.
+chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
+exec runuser -u agent -- node /opt/runner/driver.mjs
+`;
+
+function corePackageDir(): string {
+  // This file *is* part of @foldrun/core, so its own package.json is a walk
+  // up — from src/ in the repo, from dist/src/ once built. require.resolve
+  // can't do it: the exports map rewrites "./package.json" like any subpath.
+  let dir = path.dirname(new URL(import.meta.url).pathname);
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, "package.json");
+    if (fs.existsSync(candidate)) {
+      try {
+        if (JSON.parse(fs.readFileSync(candidate, "utf8")).name === "@foldrun/core") return dir;
+      } catch {
+        // keep walking
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  throw new Error("could not locate @foldrun/core's package root");
+}
+
+/** Which build target of the runner image (see DOCKERFILE). */
+export type RunnerVariant = "full" | "slim";
+
+export function runnerImageTag(variant: RunnerVariant = "full"): string {
+  // The fingerprint hashes the *built code*, not the version — a version
+  // string that nobody bumped would pin every future run to the runner
+  // image of whatever core happened to build first.
+  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + DOCKERFILE + "\n" + ENTRY);
+  const dist = path.join(corePackageDir(), "dist");
+  if (fs.existsSync(dist)) {
+    for (const entry of fs.readdirSync(dist, { recursive: true }).sort()) {
+      const abs = path.join(dist, String(entry));
+      if (fs.statSync(abs).isFile()) hash.update(String(entry)).update(fs.readFileSync(abs));
+    }
+  }
+  return `foldrun-runner:${hash.digest("hex").slice(0, 12)}${variant === "slim" ? "-slim" : ""}`;
+}
+
+/**
+ * Build the runner image if this exact (core version, driver, dockerfile)
+ * has not been built before. `npm pack` of the installed core, so the image
+ * runs the same bytes the server does.
+ */
+/**
+ * `platform`: build for another architecture — "linux/arm64" on the amd64
+ * box, through QEMU — and name the result with the arch appended so it never
+ * shadows the native image in the daemon. Only the publisher asks for this;
+ * a step always runs the native image. Needs binfmt registered on the host
+ * (tonistiigi/binfmt); the publisher does that itself, every time, because
+ * the registration does not survive a reboot.
+ */
+/**
+ * Which image a step runs in: an explicit FOLDRUN_RUNNER_IMAGE when one is
+ * set, otherwise the content-hash tag core builds itself. `explicit` is what
+ * ensureRunnerImage checks to skip the build — an empty string is *not* an
+ * image name (it is `docker build -t ""` → "repository name must have at
+ * least one component"), so it falls through to the content-hash tag exactly
+ * as an unset value does. Pure, so the resolution is testable without docker.
+ */
+export function runnerImageRef(
+  opts: { platform?: string; variant?: RunnerVariant } = {},
+): { tag: string; explicit: boolean } {
+  // Each variant has its own override: FOLDRUN_RUNNER_IMAGE names the full
+  // image as it always has, FOLDRUN_RUNNER_SLIM_IMAGE the slim one.
+  const set = opts.variant === "slim" ? process.env.FOLDRUN_RUNNER_SLIM_IMAGE : process.env.FOLDRUN_RUNNER_IMAGE;
+  if (set) return { tag: set, explicit: true };
+  const arch = opts.platform ? `-${opts.platform.split("/").pop()}` : "";
+  return { tag: runnerImageTag(opts.variant) + arch, explicit: false };
+}
+
+export function ensureRunnerImage(
+  opts: { platform?: string; variant?: RunnerVariant } = {},
+): { tag: string; log: string[] } {
+  const { tag, explicit } = runnerImageRef(opts);
+  const log: string[] = [];
+  if (explicit) return { tag, log };
+
+  const have = spawnSync(cli(), ["image", "inspect", tag], { stdio: "ignore" });
+  if (have.status === 0) return { tag, log };
+
+  const build = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-runner-build-"));
+  try {
+    const pack = spawnSync("npm", ["pack", corePackageDir(), "--pack-destination", build], {
+      encoding: "utf8",
+    });
+    if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
+    const tarball = pack.stdout.trim().split("\n").at(-1)!;
+    fs.renameSync(path.join(build, tarball), path.join(build, "foldrun-core.tgz"));
+    fs.writeFileSync(path.join(build, "driver.mjs"), DRIVER);
+    fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
+    fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
+    log.push(`building runner image ${tag} (first run only)`);
+    const args = [
+      "build",
+      ...(opts.platform ? ["--platform", opts.platform] : []),
+      "--target",
+      opts.variant ?? "full",
+      "-t",
+      tag,
+      build,
+    ];
+    const out = spawnSync(cli(), args, { encoding: "utf8" });
+    if (out.status !== 0) {
+      const full = `${out.stdout ?? ""}\n${out.stderr ?? ""}`;
+      // The whole log beside the summary, for a person on the build machine:
+      // the error names the file; the summary is what CI shows.
+      const logFile = path.join(os.tmpdir(), "foldrun-runner-build.log");
+      try { fs.writeFileSync(logFile, full); } catch { /* the summary still says what failed */ }
+      throw new Error(`runner image build failed (full log: ${logFile}):\n${buildFailureSummary(full)}`);
+    }
+    return { tag, log };
+  } finally {
+    fs.rmSync(build, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What a failed runner build's error says: the lines that name the failure,
+ * then the end of the log. Only the last 2000 characters used to survive,
+ * and BuildKit ends a failed RUN by echoing the instruction — the engines
+ * probe is a long one — so "chrome missing" scrolled out of the very error
+ * that existed to say it. Every engine line the DOCKERFILE prints starts
+ * "runner image:" (the retries, the giving up, the MISSING ENGINES line);
+ * those are kept, from anywhere in the log, with BuildKit's "#12 3.456 "
+ * prefix taken off, and so are BuildKit's own ERROR lines (each cut short:
+ * they quote the whole instruction). Pure, so it is tested on fixtures.
+ */
+export function buildFailureSummary(log: string, opts: { tail?: number; maxLines?: number } = {}): string {
+  const tail = opts.tail ?? 1500;
+  const maxLines = opts.maxLines ?? 40;
+  const seen = new Set<string>();
+  const key: string[] = [];
+  for (const raw of log.split("\n")) {
+    const line = raw.replace(/^#\d+ \d+(\.\d+)? /, "").trim();
+    if (!/^runner image:|^ERROR\b|^error:/i.test(line) && !/did not complete successfully/.test(line)) continue;
+    const cut = line.length > 300 ? line.slice(0, 300) + " …" : line;
+    if (seen.has(cut)) continue;
+    seen.add(cut);
+    key.push(cut);
+  }
+  // The ones that say what is missing first: a reader stops at the top.
+  key.sort((a, b) => Number(/MISSING ENGINES/.test(b)) - Number(/MISSING ENGINES/.test(a)));
+  const head = key.length
+    ? key.slice(0, maxLines).map((l) => `  ${l}`).join("\n") + (key.length > maxLines ? `\n  … ${key.length - maxLines} more` : "")
+    : "  (no engine or ERROR line in the log)";
+  return `${head}\n--- the last ${tail} characters of the build log ---\n${log.slice(-tail)}`;
+}
+
+// ---------- running one step ----------
+
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+
+/** A tool call's content from the sandbox, as far as it is well-formed and
+ *  within the cap; anything else is dropped (FOL-54 step 4). */
+function callIoOf(v: unknown): CallIo | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  // The cap plus the slack the runner masks inside before it cuts.
+  const text = (x: unknown) => (typeof x === "string" ? x.slice(0, CAPTURE_CAP + 4096) : undefined);
+  const io: CallIo = {
+    ...(text(o.input) !== undefined ? { input: text(o.input) } : {}),
+    ...(text(o.output) !== undefined ? { output: text(o.output) } : {}),
+    ...(typeof o.inputChars === "number" ? { inputChars: num(o.inputChars) } : {}),
+    ...(typeof o.outputChars === "number" ? { outputChars: num(o.outputChars) } : {}),
+    ...(o.truncated === true ? { truncated: true } : {}),
+  };
+  return io.input !== undefined || io.output !== undefined ? io : null;
+}
+
+/** One model call from the sandbox, well-formed or dropped. */
+function modelCallOf(v: unknown): ModelCall | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const t = (o.tokens ?? {}) as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id || o.id.length > 128 || typeof o.at !== "string" || Number.isNaN(Date.parse(o.at))) return null;
+  return {
+    id: o.id,
+    n: Math.max(1, Math.floor(num(o.n))),
+    at: o.at,
+    ms: num(o.ms),
+    ...(typeof o.model === "string" ? { model: o.model.slice(0, 128) } : {}),
+    ...(typeof o.stop === "string" ? { stop: o.stop.slice(0, 64) } : {}),
+    tokens: { input: num(t.input), output: num(t.output), cacheRead: num(t.cacheRead), cacheWrite: num(t.cacheWrite) },
+    tools: Math.floor(num(o.tools)),
+    ...(typeof o.subagent === "string" && /^[a-z0-9-]{1,64}$/.test(o.subagent) ? { subagent: o.subagent } : {}),
+  };
+}
+
+export function parseDriverLine(
+  line: string,
+): { e: "event"; type: "text" | "tool" | "info" | "error"; text: string; call?: string; ms?: number; err?: boolean; bytes?: number; operator?: OperatorEvent; subagent?: string; check?: boolean; hook?: HookRecord; io?: CallIo; turn?: ModelCall; inCall?: string; responding?: true } | { e: "done" } & ContainerStepOutcome | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed.e === "event" && typeof parsed.text === "string") {
+      return {
+        e: "event",
+        type: parsed.type,
+        text: parsed.text,
+        ...(typeof parsed.call === "string" ? { call: parsed.call } : {}),
+        ...(typeof parsed.ms === "number" ? { ms: parsed.ms } : {}),
+        ...(parsed.err === true ? { err: true } : {}),
+        ...(typeof parsed.bytes === "number" && parsed.bytes >= 0 ? { bytes: parsed.bytes } : {}),
+        ...(isOperatorEvent(parsed.operator) ? { operator: parsed.operator } : {}),
+        ...(typeof parsed.subagent === "string" && /^[a-z0-9-]{1,64}$/.test(parsed.subagent) ? { subagent: parsed.subagent } : {}),
+        ...(parsed.check === true ? { check: true } : {}),
+        ...(isHookRecord(parsed.hook) ? { hook: parsed.hook } : {}),
+        ...(callIoOf(parsed.io) ? { io: callIoOf(parsed.io)! } : {}),
+        ...(typeof parsed.inCall === "string" && parsed.inCall.length <= 128 ? { inCall: parsed.inCall } : {}),
+        ...(modelCallOf(parsed.turn) ? { turn: modelCallOf(parsed.turn)! } : {}),
+        ...(parsed.responding === true ? { responding: true as const } : {}),
+      };
+    }
+    if (parsed.e === "done") {
+      return {
+        e: "done",
+        status: parsed.status === "completed" ? "completed" : "failed",
+        result: typeof parsed.result === "string" ? parsed.result : null,
+        conclusion: typeof parsed.conclusion === "string" ? parsed.conclusion : null,
+        ...("data" in parsed ? { data: parsed.data } : {}),
+        costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
+        ...(typeof parsed.turnsCostUsd === "number" ? { turnsCostUsd: parsed.turnsCostUsd } : {}),
+        ...(typeof parsed.turns === "number" && parsed.turns >= 0 ? { turns: parsed.turns } : {}),
+        ...(typeof parsed.stopReason === "string" ? { stopReason: parsed.stopReason.slice(0, 64) } : {}),
+        ...(parseBrowserPod(parsed.browserPod) ? { browserPod: parseBrowserPod(parsed.browserPod)! } : {}),
+        usage:
+          parsed.usage &&
+          typeof parsed.usage.inputTokens === "number" &&
+          typeof parsed.usage.outputTokens === "number"
+            ? {
+                inputTokens: parsed.usage.inputTokens,
+                outputTokens: parsed.usage.outputTokens,
+                // A driver from before the split sends neither; zero, not
+                // unknown, keeps the record's shape one thing.
+                cacheReadTokens: typeof parsed.usage.cacheReadTokens === "number" ? parsed.usage.cacheReadTokens : 0,
+                cacheWriteTokens: typeof parsed.usage.cacheWriteTokens === "number" ? parsed.usage.cacheWriteTokens : 0,
+              }
+            : null,
+        res:
+          parsed.res && typeof parsed.res === "object"
+            ? {
+                busyCpuSecs: typeof parsed.res.busyCpuSecs === "number" ? parsed.res.busyCpuSecs : null,
+                peakMemBytes: typeof parsed.res.peakMemBytes === "number" ? parsed.res.peakMemBytes : null,
+                rxBytes: typeof parsed.res.rxBytes === "number" ? parsed.res.rxBytes : null,
+                txBytes: typeof parsed.res.txBytes === "number" ? parsed.res.txBytes : null,
+              }
+            : null,
+      };
+    }
+    return null;
+  } catch {
+    return null; // interleaved non-protocol output (npm, python) is noise
+  }
+}
+
+// The network runner containers join when none is configured: a bridge with
+// inter-container traffic disabled, so two tenants' runs sharing a host
+// cannot see each other's ports — each gets the internet (the model API
+// lives there) and nothing beside it. Created once, reused forever.
+const RUN_NETWORK = "foldrun-runs";
+
+function ensureRunNetwork(): string {
+  const configured = process.env.FOLDRUN_RUNNER_NETWORK;
+  if (configured) return configured;
+  const have = spawnSync(cli(), ["network", "inspect", RUN_NETWORK], { stdio: "ignore" });
+  if (have.status !== 0) {
+    spawnSync(
+      cli(),
+      [
+        "network", "create",
+        "--opt", "com.docker.network.bridge.enable_icc=false",
+        RUN_NETWORK,
+      ],
+      { stdio: "ignore" }, // a racing worker already created it — fine
+    );
+  }
+  return RUN_NETWORK;
+}
+
+export interface RunInContainerArgs {
+  workspaceRoot: string;
+  libraryRoot: string;
+  /** The platform's gallery, staged under /library BEFORE the account library so the account's copies win. */
+  galleryRoot?: string;
+  /** The account this step belongs to — the key for its dependency cache.
+   *  Optional so an embedder that has no tenancy simply gets no cache. */
+  tenant?: string;
+  input: ContainerStepInput;
+  /** Secret + provider env — crosses as an env file, never argv. */
+  env: Record<string, string>;
+  /** The step's network (network.ts), for an executor that can wall the
+   *  sandbox in itself: the k8s tier labels a filtered pod so its policy
+   *  admits the proxy and DNS alone. `enforced` false is report-only. */
+  network?: { level: NetworkLevel; enforced: boolean };
+  emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
+  /** The run this step belongs to. Stamped on the sandbox as a label so a
+   *  person stopping the run can reach the thing actually burning money —
+   *  without it, "stop" could only mean "stop after this step", and a
+   *  browser step has fifteen minutes left to spend. */
+  runId?: string;
+  /** Whether a person has stopped the run, read from the record. A step that
+   *  waits for room before its sandbox exists asks this, since there is no
+   *  sandbox yet for the stop to destroy. */
+  stopRequested?: () => boolean;
+  /** The reservation class — which limits this step's sandbox holds. */
+  size?: "small" | "large" | "heavy";
+  /** Re-attach to a sandbox a previous driver started, instead of creating
+   *  one: its handle, and how many output lines that driver had applied.
+   *  The executor replays nothing before `consumed`, and reads the step's
+   *  files back from the sandbox's own copy-in snapshot. */
+  resume?: { ref: string; consumed: number } | null;
+  /** Called by an executor that can be resumed: when its sandbox exists
+   *  (consumed 0), and before each output line it applies. The runner
+   *  records these on the step, so the next driver knows where to attach. */
+  checkpoint?: (ref: string, consumed: number) => void;
+  /** A test run: where state/ and storage/ changes go instead of the
+   *  workspace, and who to tell about each. See test-mode.ts. */
+  divert?: WriteDivert;
+  /** The run is a test run. An isolated executor labels the sandbox so the
+   *  cluster can cut its network down to the egress proxy: a script tool
+   *  calls the network directly, not through the proxy where the test-mode
+   *  policy lives, so without this a test run's script could still send. */
+  test?: boolean;
+}
+
+/** What a test run does with a write it must not apply. */
+export interface WriteDivert {
+  /** The directory the diverted files are written under, by their
+   *  workspace-relative path: runs/<id>/test-writes/. */
+  to: string;
+  note: (rel: string, summary: string) => void;
+}
+
+/**
+ * What crosses into the container as its environment, and how.
+ *
+ * A docker --env-file is one `KEY=value` per line and cannot carry a
+ * newline. @file secrets are multi-line by nature (a PEM key, a cert), so
+ * they are staged as files NOW, into the copied-in workspace, and the env
+ * carries the container path — the one place a path is stable across the
+ * boundary. A plain secret whose value happens to hold a newline gets the
+ * same treatment, and the trace says so: it used to be dropped from the
+ * env file without a word, and the step failed later, elsewhere, on a
+ * variable that read as unset. Everything else goes through the env file.
+ */
+export function stageContainerEnv(
+  env: Record<string, string>,
+  wsIn: string,
+  agentRel: string,
+  emit: (type: "info" | "error", text: string) => void,
+): Record<string, string> {
+  const containerEnv: Record<string, string> = {};
+  const stage = (k: string, content: string) => {
+    const rel = path.join(agentRel, ".secret-files", k.toLowerCase());
+    const abs = path.join(wsIn, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(abs, content, { mode: 0o600 });
+    return `/workspace/${rel.replaceAll("\\", "/")}`;
+  };
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v !== "string") continue;
+    if (isFileValue(v)) {
+      containerEnv[k] = stage(k, fileContent(v));
+    } else if (/[\r\n]/.test(v)) {
+      containerEnv[k] = stage(k, v);
+      emit(
+        "info",
+        `${k} holds a line break and cannot cross as an environment variable — ` +
+          `passed as a file instead; $${k} is its path in the sandbox`,
+      );
+    } else {
+      containerEnv[k] = v;
+    }
+  }
+  return containerEnv;
+}
+
+/** The limits a size class reserves. Large is the install's configured
+ *  limits unchanged, so existing installs bill and behave identically;
+ *  small defaults to a quarter-ish slice and is env-tunable. */
+/**
+ * A memory figure Kubernetes will accept.
+ *
+ * `sizeLimits` speaks Docker, because that is who asked first: `--memory 2g`.
+ * Kubernetes wants a quantity — `2Gi` — and rejects the lowercase form with
+ * "quantities must match the regular expression", which names neither the
+ * field nor the value. The default size returns `2g`, so every default-size
+ * step failed to create a pod on any install that had not overridden
+ * FOLDRUN_RUNNER_MEMORY. These manifests do override it, which is why this
+ * survived: it broke for self-hosters and for nobody testing here.
+ *
+ * Docker's suffixes are binary, so `g` is `Gi` and not `G`. A value that is
+ * already a Kubernetes quantity passes through, and an unrecognised one is
+ * handed over unchanged so the cluster's own error is the one you read.
+ *
+ * Case decides, because one suffix is ambiguous: `k` is a legal Kubernetes
+ * decimal suffix AND Docker's kibibytes. Everything this is given comes from
+ * sizeLimits, which speaks Docker, so lowercase is read as Docker's — the
+ * difference is 2.4% on a memory limit and the alternative is silently
+ * misreading the default.
+ */
+export function k8sMemory(value: string): string {
+  const s = String(value).trim();
+  if (/^\d+(\.\d+)?(Ki|Mi|Gi|Ti|Pi|[KMGTP])?$/.test(s)) return s;
+  const m = s.match(/^(\d+(?:\.\d+)?)([bkmgt])$/);
+  if (!m) return s;
+  return `${m[1]}${{ b: "", k: "Ki", m: "Mi", g: "Gi", t: "Ti" }[m[2]]}`;
+}
+
+export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
+  if (size === "small") {
+    return {
+      cpus: process.env.FOLDRUN_RUNNER_CPUS_SMALL ?? "1",
+      memory: process.env.FOLDRUN_RUNNER_MEMORY_SMALL ?? "1Gi",
+    };
+  }
+  if (size === "heavy") {
+    // For steps that render a browser or hold real data. The memory figure is
+    // a hard ceiling (memory is not compressible — over it, the kernel OOM-kills
+    // the pod, which on a single-box install can take neighbours with it). The
+    // cpus figure is a billing weight, not a ceiling: on k8s the pod bursts CPU
+    // freely, and this is the rate its seconds are priced at.
+    return {
+      cpus: process.env.FOLDRUN_RUNNER_CPUS_HEAVY ?? "4",
+      memory: process.env.FOLDRUN_RUNNER_MEMORY_HEAVY ?? "8Gi",
+    };
+  }
+  return {
+    cpus: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
+    memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
+  };
+}
+
+/** The label both executors stamp, so one name means one thing. */
+export const RUN_LABEL = "foldrun-run-id";
+
+/**
+ * Destroy any sandbox still running for this run. Best effort by design:
+ * the step may have finished a moment ago, the daemon may be unreachable,
+ * and neither is a reason to refuse to stop a run. Returns how many it
+ * removed, which is what the trace reports.
+ */
+export function killRunSandboxes(runId: string): number {
+  const ids = spawnSync(cli(), ["ps", "-aq", "--filter", `label=${RUN_LABEL}=${runId}`], {
+    encoding: "utf8",
+  });
+  const list = (ids.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const id of list) spawnSync(cli(), ["rm", "-f", id], { stdio: "ignore" });
+  return list.length;
+}
+
+export async function runStepInContainer(args: RunInContainerArgs): Promise<ContainerStepOutcome> {
+  const { tag, log } = ensureRunnerImage();
+  for (const line of log) args.emit("info", line);
+
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-run-"));
+  let containerId = "";
+  try {
+    // Stage the workspace copy minus what the platform owns — the vault,
+    // hook state, run history. The container gets the trust boundary, not
+    // the bookkeeping. One definition of "platform-owned" for this filter,
+    // the k8s executor's, and deploys: store.ts#isPlatformPath.
+    const wsIn = path.join(staging, "workspace");
+    fs.cpSync(args.workspaceRoot, wsIn, {
+      recursive: true,
+      // Times too: a verify that asks "was this written in the last hour?"
+      // is asking about the step, and a copy stamped "now" answers yes for a
+      // file untouched since last week (see mtimeManifest).
+      preserveTimestamps: true,
+      filter: (src) => !isPlatformPath(path.relative(args.workspaceRoot, src)),
+    });
+    // A test run: what its earlier steps wrote, over the real files (the
+    // copy is the baseline too, so only this step's own writes come back).
+    if (args.divert) {
+      const laid = overlayTestWrites(wsIn, args.divert.to);
+      if (laid.length) args.emit("info", `test: this step sees ${laid.length} file${laid.length === 1 ? "" : "s"} earlier steps of this run wrote`);
+    }
+    const libIn = path.join(staging, "library");
+    if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });
+    if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });
+    else fs.mkdirSync(libIn, { recursive: true });
+
+    const jobIn = path.join(staging, "job");
+    fs.mkdirSync(jobIn);
+    fs.writeFileSync(path.join(jobIn, "input.json"), JSON.stringify(args.input, null, 2));
+
+    const containerEnv = stageContainerEnv(args.env, wsIn, args.input.agentRel, args.emit);
+
+    const envFile = path.join(staging, "env");
+    fs.writeFileSync(
+      envFile,
+      Object.entries(containerEnv).map(([k, v]) => `${k}=${v}`).join("\n"),
+      { mode: 0o600 },
+    );
+
+    const flags = [
+      "--security-opt", "no-new-privileges",
+      ...(args.runId ? ["--label", `${RUN_LABEL}=${args.runId}`] : []),
+      // Everything dropped except what the entrypoint's chown-and-drop
+      // needs; the exec to the agent user sheds these three too.
+      "--cap-drop", "ALL",
+      "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
+      "--pids-limit", "512",
+      // Memory is a hard ceiling (not compressible — an OOM protects the host).
+      // CPU is deliberately NOT capped, matching the k8s path: a cap only
+      // throttles work the customer pays for, and the tier's cpu figure is a
+      // billing weight, applied in usage.ts, not a docker --cpus limit here.
+      "--memory", sizeLimits(args.size).memory,
+      "--env-file", envFile,
+    ];
+    // gVisor (or kata) where the host has it: one env var, because the flag
+    // is the same docker invocation everywhere else.
+    if (process.env.FOLDRUN_RUNNER_RUNTIME) {
+      flags.push("--runtime", process.env.FOLDRUN_RUNNER_RUNTIME);
+    }
+    flags.push("--network", ensureRunNetwork());
+    // A name for the host, so the egress proxy the platform runs is reachable
+    // from inside a step as host.docker.internal on Linux as it already is on
+    // Docker Desktop. The run bridge has inter-container traffic off; the
+    // host itself stays reachable, which is the one door this needs.
+    flags.push("--add-host", "host.docker.internal:host-gateway");
+
+    // The dependency cache: this tenant's built venvs and npm prefixes, in a
+    // per-tenant Docker named volume mounted where prepareRuntime already looks.
+    // Not a host path — the daemon on the far end of the socket cannot resolve
+    // the platform's FOLDRUN_DATA (runtimeCacheMount explains).
+    const cacheMount = runtimeCacheMount(args.tenant);
+    if (cacheMount) {
+      // Create the volume WITH labels first: `docker create -v` auto-creates it
+      // but cannot label it, and an unlabelled volume is unfindable and
+      // unprunable later. Idempotent — a no-op when it already exists. The
+      // segment is the one runtimeCacheMount already validated, so the
+      // assertions below cannot fire when cacheMount is non-null.
+      const seg = safeTenantSegment(args.tenant!)!;
+      const vol = spawnSync(cli(), [
+        "volume", "create",
+        "--label", "foldrun.io/kind=runtime-cache",
+        "--label", `foldrun.io/tenant=${seg}`,
+        cacheMount.source,
+      ], { encoding: "utf8" });
+      if (vol.status !== 0) throw new Error(`docker volume create failed:\n${vol.stderr}`);
+      flags.push("-v", `${cacheMount.source}:${cacheMount.target}`);
+    }
+
+    // The rent clock starts here: staging the workspace is host work, but
+    // from `create` to `rm` the sandbox is a resource the platform pays for.
+    const t0 = Date.now();
+    const create = spawnSync(cli(), ["create", ...flags, tag], { encoding: "utf8" });
+    if (create.status !== 0) throw new Error(`container create failed:\n${create.stderr}`);
+    containerId = create.stdout.trim();
+    const sandboxMs = Date.now() - t0;
+    // Docker's phases are measured from create, its rent clock.
+    const phases: StartupPhases = { ready: sandboxMs };
+
+    const cp = (from: string, to: string) => {
+      const out = spawnSync(cli(), ["cp", from, to], { encoding: "utf8" });
+      if (out.status !== 0) throw new Error(`docker cp failed:\n${out.stderr}`);
+    };
+    cp(`${wsIn}/.`, `${containerId}:/workspace`);
+    cp(`${libIn}/.`, `${containerId}:/library`);
+    cp(`${jobIn}/input.json`, `${containerId}:/opt/runner/job/input.json`);
+    phases.files = Date.now() - t0;
+
+    // Start attached and read the driver's JSONL. The step timeout gets a
+    // backstop out here — a wedged container is killed, not waited on.
+    let firstOutputAt: number | null = null;
+    const outcome = await new Promise<ContainerStepOutcome>((resolve) => {
+      const child = spawn(cli(), ["start", "-a", containerId], { stdio: ["ignore", "pipe", "pipe"] });
+      let done: ContainerStepOutcome | null = null;
+      let buffer = "";
+      // Only when the step set a `timeout:` — no platform default. A step
+      // that names no limit runs until it finishes.
+      const backstopMs = args.input.timeoutSec ? (args.input.timeoutSec + 60) * 1000 : null;
+      const backstop = backstopMs
+        ? setTimeout(() => {
+            args.emit("error", `container exceeded its ${Math.round(backstopMs / 1000)}s backstop — killed`);
+            spawnSync(cli(), ["kill", containerId], { stdio: "ignore" });
+          }, backstopMs)
+        : null;
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        for (;;) {
+          const nl = buffer.indexOf("\n");
+          if (nl < 0) break;
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          const marked = parseDriverMark(line);
+          if (marked) {
+            phases[marked.name] ??= Math.max(0, marked.at - t0);
+            continue;
+          }
+          const parsed = parseDriverLine(line);
+          if (!parsed) continue;
+          firstOutputAt ??= Date.now();
+          if (parsed.e === "event") {
+            const { e: _e, type, text, ...extra } = parsed;
+            args.emit(type, text, extra);
+          }
+          else done = parsed;
+        }
+      });
+      let stderrTail = "";
+      child.stderr.on("data", (c: Buffer) => {
+        stderrTail = (stderrTail + c.toString()).slice(-2000);
+      });
+      child.on("close", () => {
+        if (backstop) clearTimeout(backstop);
+        if (!done && stderrTail.trim()) args.emit("error", stderrTail.trim().slice(0, 1000));
+        resolve(done ?? { status: "failed", result: null, costUsd: null });
+      });
+      child.on("error", (err) => {
+        if (backstop) clearTimeout(backstop);
+        args.emit("error", err.message);
+        resolve({ status: "failed", result: null, costUsd: null });
+      });
+    });
+
+    // What came out, through the filter. On failure too: a failed step's
+    // partial outputs are usually the interesting ones.
+    const wsOut = path.join(staging, "out");
+    fs.mkdirSync(wsOut);
+    const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
+    let applied: string[] = [];
+    if (back.status === 0) {
+      applied = applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m), args.divert);
+    } else {
+      args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
+    }
+
+    // Timed after the copy-out, because the container is still alive for it:
+    // what gets billed is the sandbox's whole life, not the model's turn.
+    const timing: StepTiming = {
+      sandboxMs,
+      firstOutputMs: firstOutputAt === null ? null : firstOutputAt - t0 - sandboxMs,
+      totalMs: Date.now() - t0,
+      phases,
+    };
+    args.emit("info", timingLine(timing));
+    return { ...outcome, timing, applied };
+  } finally {
+    if (containerId) spawnSync(cli(), ["rm", "-f", containerId], { stdio: "ignore" });
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
+}

@@ -1,0 +1,480 @@
+// Scripts declared as tools. An agent that writes
+//
+//   scripts:
+//     - name: ads_summary
+//       run: scripts/summary.py
+//       description: Pull campaign performance for the account.
+//       args:
+//         customer_id: The Google Ads customer id
+//
+// gets a real tool called `ads_summary(customer_id)` — no bash needed. The
+// platform spawns the script with the declared args as CLI flags, injects the
+// agent's secrets as environment variables, and returns stdout.
+//
+// This is safer than granting `bash`: the agent can only run the scripts you
+// declared, with the arguments you declared, and never composes a shell line.
+
+import path from "node:path";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+import { z } from "zod";
+import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { runInContainer } from "./container.ts";
+import { hostSafeEnv } from "./host-env.ts";
+import { workspaceLinkEnv } from "./confine.ts";
+import { platform } from "./platform.ts";
+import { previewOrKeep, RESULT_KEEP_CHARS } from "./tool-output.ts";
+
+// A script's only clock is the `timeout:` its own tool.md declares. There
+// was a two-minute default and a ten-minute cap here; both were the
+// platform's opinion about how long a person's script may take, and the
+// deploy watcher had to be taught to call its tool four times to outlast the
+// cap. The platform orchestrates; it does not decide that.
+const timeoutFor = (spec: ScriptSpec) => (spec.timeout ? spec.timeout * 1000 : undefined);
+// Collected up to this, then previewed and kept (tool-output.ts): the model
+// sees the head and where the rest is, instead of a cut with the rest gone.
+const MAX_OUTPUT = RESULT_KEEP_CHARS;
+
+export interface ScriptSpec {
+  name: string;
+  /** Path relative to the agent dir — or empty when `code` carries the
+   *  script inline. Exactly one of the two is the program. */
+  run: string;
+  description: string;
+  /** The tool.md body, for the model: how to call it and what it means. */
+  guide?: string;
+  args: Record<string, string>; // arg name → description
+  interpreter?: string; // optional override, e.g. "python3", "bash"
+  /** Seconds this script may run — for the crawl that legitimately takes
+   *  five minutes. Unset means no platform clock; there was a two-minute
+   *  default and a ten-minute cap here and both were removed (see the note
+   *  above `timeoutFor`). */
+  timeout?: number;
+  /** The script itself, when the tool is a single markdown file with its
+   *  code in a fenced block. Materialised to a file at call time — the
+   *  execution path is the same either way, only where the bytes start
+   *  differs. */
+  code?: string;
+  /** Extension for the materialised file, from the fence's language tag —
+   *  it picks the interpreter the same way a run: path's extension does. */
+  codeExt?: string;
+  /** `secrets: proxied` — this program sends its secrets through the egress
+   *  proxy (it reads FOLDRUN_EGRESS and sends ${NAME} placeholders), so the
+   *  step need not materialise real values into the sandbox for it. The
+   *  default, `materialised`, is a program that reads values from its
+   *  environment and needs them real — a browser seeding cookies. */
+  secrets?: "proxied" | "materialised";
+  /** `outward: true` — this program makes something happen outside (sends,
+   *  posts, orders). On a test run a step that grants it is handed no real
+   *  secret at all, whatever their names. */
+  outward?: boolean;
+  /** `test_mode: allow` — a reader that happens to use a send-capable
+   *  secret's name (a GBP reader on a GBP token): on a test run the step
+   *  still gets the real values. An `outward` tool in the same step wins. */
+  testMode?: "allow";
+}
+
+export function parseScripts(raw: unknown): ScriptSpec[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ScriptSpec[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === "string" ? e.name : null;
+    const run = typeof e.run === "string" ? e.run : null;
+    const code = typeof e.code === "string" ? e.code : null;
+    if (!name || (!run && !code)) continue;
+    const args: Record<string, string> = {};
+    if (e.args && typeof e.args === "object" && !Array.isArray(e.args)) {
+      for (const [k, v] of Object.entries(e.args as Record<string, unknown>)) {
+        if (/^[a-z][a-z0-9_]*$/i.test(k)) args[k] = String(v);
+      }
+    }
+    const timeout = Number(e.timeout);
+    out.push({
+      name: name.replace(/[^a-zA-Z0-9_]/g, "_"),
+      run: run ?? "",
+      ...(code ? { code, codeExt: typeof e.codeExt === "string" ? e.codeExt : ".mjs" } : {}),
+      description: typeof e.description === "string" ? e.description : "",
+      ...(typeof e.guide === "string" && e.guide.trim() ? { guide: e.guide } : {}),
+      args,
+      interpreter: typeof e.interpreter === "string" ? e.interpreter : undefined,
+      secrets: e.secrets === "proxied" ? "proxied" : undefined,
+      outward: e.outward === true ? true : undefined,
+      testMode: e.test_mode === "allow" ? "allow" : undefined,
+      timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
+    });
+  }
+  return out;
+}
+
+/** Interpreter names that mean a language rather than a binary, and the
+ *  extension whose prepared interpreter serves them. */
+const GENERIC_INTERPRETER: Record<string, string> = {
+  python: ".py",
+  python3: ".py",
+  "/usr/bin/python3": ".py",
+  "/usr/bin/env python3": ".py",
+};
+
+// Pick how to execute a file when no interpreter is declared.
+//
+// Exported because the tool tester has to make the same choice, and used to
+// make it from its own shorter table — which knew .js but not .mjs, so the
+// Test button spawned every .mjs tool as a program and reported EACCES for a
+// tool that runs perfectly. Two tables, one of them wrong.
+export function commandFor(
+  spec: ScriptSpec,
+  abs: string,
+  overrides: Record<string, string> = {},
+): { cmd: string; args: string[] } {
+  if (spec.interpreter) {
+    // `interpreter: python3` names the language, not a particular binary, and
+    // it is how most tool files are written. Taken literally it ran the bare
+    // system python beside a venv built for this very tool, and the tool
+    // died on its first import ("No module named openpyxl") while the log
+    // above it said the runtime was cached. A generic python name is served
+    // by the prepared venv when there is one; a path or anything else is
+    // still obeyed as written.
+    const lang = GENERIC_INTERPRETER[spec.interpreter.trim()];
+    if (lang && overrides[lang]) return { cmd: overrides[lang], args: [abs] };
+    return { cmd: spec.interpreter, args: [abs] };
+  }
+  const ext = path.extname(abs).toLowerCase();
+  // A prepared runtime (venv, npm prefix) wins over the host interpreter.
+  if (overrides[ext]) return { cmd: overrides[ext], args: [abs] };
+  const byExt: Record<string, string> = {
+    ".py": "python3",
+    ".sh": "bash",
+    ".js": "node",
+    ".mjs": "node",
+    ".ts": "node",
+    ".rb": "ruby",
+  };
+  const interp = byExt[ext];
+  return interp ? { cmd: interp, args: [abs] } : { cmd: abs, args: [] };
+}
+
+// Inside the image the interpreter is the distro's, not a host venv path.
+function containerInterpreter(abs: string): string {
+  const byExt: Record<string, string> = {
+    ".py": "python3",
+    ".sh": "bash",
+    ".js": "node",
+    ".mjs": "node",
+    ".ts": "node",
+    ".rb": "ruby",
+  };
+  return byExt[path.extname(abs).toLowerCase()] ?? abs;
+}
+
+export function runScript(
+  cwd: string,
+  spec: ScriptSpec,
+  values: Record<string, string>,
+  env: Record<string, string>,
+  libraryScripts: string,
+  interpreters: Record<string, string>,
+  exec: ExecutionContext | null,
+): Promise<{ code: number | null; out: string }> {
+  // An inline-code tool has no file yet: write it inside the agent's own
+  // directory — already an allowed root — and run it like any other script.
+  // Materialised per call rather than per build, so an edit to the tool's
+  // markdown is live on the next call with nothing to clean up but one file.
+  if (!spec.run && spec.code) {
+    const dir = path.join(cwd, ".tool-code");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${spec.name}${spec.codeExt ?? ".mjs"}`);
+    fs.writeFileSync(file, spec.code, { mode: 0o755 });
+    spec = { ...spec, run: `.tool-code/${spec.name}${spec.codeExt ?? ".mjs"}` };
+  }
+
+  return new Promise((resolve) => {
+    // Confine to the agent's own directory plus the workspace it belongs to.
+    // The workspace root is allowed because `shared/` resolves to
+    // <workspace>/scripts — a virtual prefix expanded at resolve time, not a
+    // symlink on disk. (Symlinking it was tried and reverted: the link
+    // recursed into the workspace's own file listing.)
+    const abs = resolveRunPath(cwd, spec.run, libraryScripts);
+    const workspaceRoot = path.resolve(cwd, "..", "..");
+    // The library's tools/ as well as its scripts/: a folder tool installed at
+    // the account keeps its code beside its definition, which is one directory
+    // over from where shared scripts live. Without it the containment check
+    // refuses an account tool the resolver just found.
+    const libraryTools = libraryScripts ? path.resolve(libraryScripts, "..", "tools") : "";
+    const allowedRoots = [path.resolve(cwd), workspaceRoot, libraryScripts, libraryTools]
+      .filter(Boolean)
+      .map((p) => {
+      try {
+        return fs.realpathSync(p);
+      } catch {
+        return p;
+      }
+    });
+    let real: string;
+    try {
+      real = fs.realpathSync(abs);
+    } catch {
+      return resolve({ code: null, out: `script not found: ${spec.run}` });
+    }
+    // Containment, not a string prefix. `startsWith` called
+    // `<workspace>-attacker/steal.py` a path inside `<workspace>`, because it
+    // is — as text. The question is whether one path is under another, and
+    // only path.relative answers that.
+    const within = (root: string) => {
+      const rel = path.relative(root, real);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    };
+    if (!allowedRoots.some(within)) {
+      return resolve({ code: null, out: `script path escapes the workspace: ${spec.run}` });
+    }
+
+    const { cmd, args } = commandFor(spec, abs, interpreters);
+    // Declared args become long flags: --customer_id 123
+    for (const key of Object.keys(spec.args)) {
+      if (values[key] !== undefined && values[key] !== "") {
+        args.push(`--${key}`, values[key]);
+      }
+    }
+
+    // Container path: same command, executed inside an isolated container
+    // with only the agent's directory (plus declared shared dirs) mounted.
+    if (exec && exec.executor === "docker") {
+      // `workspace/…` is the workspace root on the host (the step's link)
+      // and in a run container; here there is no link, so each such
+      // argument is staged: copied in, pointed at, and copied back after.
+      const workspaceRoot = path.resolve(cwd, "..", "..");
+      const staged: { host: string; container: string }[] = [];
+      const inContainer = (p: string) => {
+        const w = stageWorkspaceArg(p, workspaceRoot);
+        if (!w) return containerPath(p, cwd, exec.mounts);
+        if (!staged.some((s) => s.host === w.host)) staged.push(w);
+        return w.container;
+      };
+      const argv = [
+        // The interpreter inside the image, not the host's venv path.
+        spec.interpreter ?? containerInterpreter(abs),
+        ...args.map(inContainer),
+      ].filter(Boolean) as string[];
+      // Drop the host interpreter that commandFor prepended, if any.
+      if (argv[1] === argv[0]) argv.splice(1, 1);
+      runInContainer({
+        agentDir: path.resolve(cwd),
+        readOnly: exec.mounts,
+        staged,
+        image: exec.image,
+        argv,
+        env,
+        timeoutMs: timeoutFor(spec),
+        network: exec.network,
+        maxOutput: MAX_OUTPUT,
+      }).then(resolve, (err) =>
+        resolve({ code: null, out: `container error: ${err instanceof Error ? err.message : String(err)}` }),
+      );
+      return;
+    }
+
+    // Not process.env: on a platform that is every tenant's root key and
+    // the datastore credentials. The child starts from the allowlisted
+    // base and gets what the agent declared, by name — see host-env.ts.
+    // In a run container `env` already carries the container's whole
+    // environment, which is the boundary, so nothing is lost there.
+    const child = spawn(cmd, args, {
+      cwd,
+      env: workspaceLinkEnv({ ...hostSafeEnv(), ...env }, cwd),
+      timeout: timeoutFor(spec),
+    });
+    let out = "";
+    const append = (chunk: Buffer) => {
+      if (out.length < MAX_OUTPUT) out += chunk.toString();
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", (err) => resolve({ code: null, out: `failed to start: ${err.message}` }));
+    child.on("close", (code) =>
+      resolve({
+        code,
+        out:
+          out.length > MAX_OUTPUT
+            ? `${out.slice(0, MAX_OUTPUT)}\n…[truncated]`
+            : out || "(no output)",
+      }),
+    );
+  });
+}
+
+/**
+ * A host path as the script's container sees it: under the agent's own
+ * directory it is /workspace, under a mounted folder it is that mount, and
+ * anything else (an argument that only looks like a path) is left alone.
+ * Containment, not a text prefix: `<ws>/scripts-old/x.py` is not under
+ * `<ws>/scripts`. The longest mount wins, so a nested one is not shadowed.
+ */
+export function containerPath(p: string, agentDir: string, mounts: Record<string, string>): string {
+  if (!path.isAbsolute(p)) return p;
+  const under = (root: string) => {
+    const rel = path.relative(root, p);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel)) ? rel : null;
+  };
+  const own = under(path.resolve(agentDir));
+  if (own !== null) return path.posix.join("/workspace", own.split(path.sep).join("/"));
+  const hit = Object.entries(mounts)
+    .map(([host, mount]) => ({ mount, rel: under(path.resolve(host)), len: host.length }))
+    .filter((m) => m.rel !== null)
+    .sort((a, b) => b.len - a.len)[0];
+  return hit ? path.posix.join(hit.mount, hit.rel!.split(path.sep).join("/")) : p;
+}
+
+/** Where a `workspace/…` script argument is staged in a script container,
+ *  or null when it is not one (or climbs out of the workspace). */
+export function stageWorkspaceArg(arg: string, workspaceRoot: string): { host: string; container: string } | null {
+  if (arg !== "workspace" && !arg.startsWith("workspace/")) return null;
+  const rel = arg.slice("workspace".length).replace(/^\/+/, "");
+  const host = path.resolve(workspaceRoot, rel);
+  const within = path.relative(workspaceRoot, host);
+  if (within.startsWith("..") || path.isAbsolute(within)) return null;
+  return { host, container: path.posix.join("/workspace-root", within.split(path.sep).join("/")) };
+}
+
+export interface ExecutionContext {
+  /** "docker" nests each script in its own container; "sandbox" spawns it
+   *  directly inside the isolation the step already has. */
+  executor: "docker" | "sandbox";
+  image: string;
+  /** Extra read-only mounts for shared/library scripts. */
+  mounts: Record<string, string>;
+  /** Whether scripts may reach the network. */
+  network: boolean;
+}
+
+export interface ScriptToolResult {
+  server: ReturnType<typeof createSdkMcpServer> | null;
+  toolNames: string[];
+  promptLines: string[];
+  drainLog: () => string[];
+}
+
+// `run:` accepts:
+//   scripts/x.py              this agent's own script
+//   workspace/tools/<t>/x.py  a folder tool's own code, in this workspace
+//   account/tools/<t>/x.py    a folder tool's own code, in the library
+//   shared/x.py               the workspace's scripts/
+//   library/x.py              the workspace library's scripts/
+//
+// The tools/ forms are written by readToolDir rather than by hand: a folder
+// tool's definition says `run: run.mjs` and never names its own scope, which
+// is what lets the same folder be copied into a workspace or installed at the
+// account without an edit.
+export function resolveRunPath(agentDir: string, run: string, libraryScripts: string): string {
+  const workspaceRoot = path.resolve(agentDir, "..", "..");
+  // The library's tools/ sits beside its scripts/ — one mount, two shelves.
+  const libraryRoot = path.resolve(libraryScripts, "..");
+
+  if (run.startsWith("workspace/tools/")) {
+    return path.resolve(workspaceRoot, "tools", run.slice("workspace/tools/".length));
+  }
+  if (run.startsWith("account/tools/")) {
+    const rel = run.slice("account/tools/".length);
+    const own = path.resolve(libraryRoot, "tools", rel);
+    // A gallery tool nobody installed has no copy in the library. In a
+    // sandbox the gallery is laid down under the library, so the path above
+    // is it; a run on the host has no such merge, so it looks on the shelf.
+    const gallery = platform.galleryDir();
+    if (!fs.existsSync(own) && gallery) {
+      const shelf = path.resolve(gallery, "tools", rel);
+      if (fs.existsSync(shelf)) return shelf;
+    }
+    return own;
+  }
+  // Canonical prefixes, then the legacy spellings they replaced.
+  for (const p of ["workspace/scripts/", "shared/"]) {
+    if (run.startsWith(p)) {
+      return path.resolve(workspaceRoot, "scripts", run.slice(p.length));
+    }
+  }
+  for (const p of ["account/scripts/", "library/"]) {
+    if (run.startsWith(p)) return path.resolve(libraryScripts, run.slice(p.length));
+  }
+  return path.resolve(agentDir, run);
+}
+
+/**
+ * The schema a script's arguments are offered to the model under. Every
+ * argument becomes a command-line flag, so it is text on the way out — but a
+ * model reading "depth: how many results (default 20)" sends 10, the number,
+ * and the SDK refuses the call before the handler's String() ever runs; on
+ * the fast tier the model then announced a retry and ended its turn. A
+ * number or a boolean is accepted and written out as the text it would
+ * have been.
+ */
+export function scriptArgShape(args: Record<string, string>): Record<string, z.ZodTypeAny> {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [arg, desc] of Object.entries(args)) {
+    shape[arg] = z.union([z.string(), z.number(), z.boolean()]).optional().describe(desc);
+  }
+  return shape;
+}
+
+export function buildScriptTools(
+  agentDir: string,
+  scripts: ScriptSpec[],
+  env: Record<string, string>,
+  libraryScripts = "",
+  interpreters: Record<string, string> = {},
+  exec: ExecutionContext | null = null,
+  /** Whether the agent can read files back (Read or Grep): only then is a
+   *  long output kept in a file and previewed (tool-output.ts). */
+  readable: () => boolean = () => false,
+): ScriptToolResult {
+  if (scripts.length === 0) {
+    return { server: null, toolNames: [], promptLines: [], drainLog: () => [] };
+  }
+  const log: string[] = [];
+
+  const tools = scripts.map((spec) => {
+    const shape = scriptArgShape(spec.args);
+    return tool(
+      spec.name,
+      `${spec.description || `Run ${spec.run}.`} Runs the workspace script ${spec.run}; returns its output. ` +
+        `Credentials it needs are already in its environment.` +
+        (spec.guide ? `\n\nHow to use it (from its tool.md):\n${spec.guide}` : ""),
+      shape,
+      async (args) => {
+        const started = Date.now();
+        const values = Object.fromEntries(
+          Object.entries(args ?? {}).map(([k, v]) => [k, v === undefined ? "" : String(v)]),
+        );
+        const { code, out } = await runScript(agentDir, spec, values, env, libraryScripts, interpreters, exec);
+        // The arguments, on the record. Without them a run says a script was
+        // called and not what it was asked to do — and for a script that
+        // writes to someone else's system, "it ran" is not an account of what
+        // happened. Model-supplied strings only: secrets reach a script
+        // through its environment, never through these.
+        const shown = Object.entries(values)
+          .filter(([, v]) => v !== "")
+          .map(([k, v]) => `${k}=${v.length > 80 ? `${v.slice(0, 77)}…` : v}`)
+          .join(", ");
+        log.push(
+          `${spec.name}(${shown}) → exit ${code ?? "error"} ` +
+            `(${Date.now() - started}ms, ${exec?.executor ?? "sandbox"})`,
+        );
+        return {
+          content: [{ type: "text" as const, text: `exit ${code ?? "error"}\n\n${previewOrKeep(out, { dir: agentDir, readable }, spec.name)}` }],
+          isError: code !== 0,
+        };
+      },
+    );
+  });
+
+  return {
+    server: createSdkMcpServer({ name: "foldrun_scripts", version: "1.0.0", tools }),
+    toolNames: scripts.map((s) => `mcp__foldrun_scripts__${s.name}`),
+    promptLines: scripts.map(
+      (s) =>
+        `- **${s.name}** — ${s.description || `runs ${s.run}`}${
+          Object.keys(s.args).length ? ` Arguments: ${Object.keys(s.args).join(", ")}.` : ""
+        }`,
+    ),
+    drainLog: () => log.splice(0, log.length),
+  };
+}
