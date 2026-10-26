@@ -4497,12 +4497,18 @@ function driveRunInner(
         const entry = parent?.delegations?.find((d) => d.id === step.delegation);
         if (entry && entry.status === "running") entry.status = "failed";
       }
+      // The sandboxes the steps below re-attach to — the orphan sweep must
+      // leave them standing (27 Oct 2026: it deleted every pod of the run,
+      // and each sibling that was about to re-attach found its pod gone).
+      const reattaching: string[] = [];
       for (const step of run.steps) {
         if (step.status !== "running") continue;
         const resumable = !!step.sandbox && platform.sandboxResumable(step.sandbox.kind);
         if (!resumable) {
           orphaned = true;
           step.sandbox = null;
+        } else {
+          reattaching.push(step.sandbox!.ref);
         }
         step.status = "pending";
         step.events.push({
@@ -4518,9 +4524,12 @@ function driveRunInner(
         // `timeout:` carries no pod deadline at all — so the orphaned step
         // may still be executing, non-idempotent work included, while the
         // new attempt starts. Destroy it first; re-driving is only safe
-        // once nothing else is driving.
+        // once nothing else is driving. Not a stop: the run goes on, so the
+        // platform's sweep keeps the re-attaching sandboxes and leaves no
+        // stop word for the steps about to start.
         try {
           if (process.env.FOLDRUN_RUN_ISOLATION === "container") killRunSandboxes(run.id);
+          else if (platform.killOrphanSandboxes) platform.killOrphanSandboxes(run.id, reattaching);
           else platform.killRunSandboxes(run.id);
         } catch {
           // a sandbox we cannot reach must not stop the run from resuming

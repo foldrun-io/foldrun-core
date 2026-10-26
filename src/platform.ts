@@ -116,6 +116,11 @@ export interface PlatformHooks {
    *  the whole run's would take the parent too. Optional: an executor that
    *  cannot re-attach never needs it (the whole run's are killed instead). */
   killSandbox?(sandbox: { kind: string; ref: string }): void;
+  /** A restarted driver's sweep of the run's orphans: destroy its
+   *  sandboxes except `keep` (the refs its steps re-attach to). Not a stop —
+   *  the run goes on, and steps of it are about to start. Optional: without
+   *  it the whole run's are killed (killRunSandboxes). */
+  killOrphanSandboxes?(runId: string, keep: readonly string[]): void;
   /** Publish storage/public/ as share links after a run. Default: no links. */
   syncPublicShares(tenant: string, workspace: string): Promise<{ added: string[] }>;
   /** This account's own data key, or null to use the install key. */

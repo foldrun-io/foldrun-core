@@ -159,6 +159,42 @@ test("the same orphan is run again from the start when the executor cannot resum
   });
 });
 
+// 27 Oct 2026: a restart while one step of a group was still waiting for
+// room (running, no sandbox yet) swept EVERY pod of the run — the sibling
+// about to re-attach to its pod found it gone and failed.
+test("the orphan sweep keeps the sandboxes its siblings re-attach to, and is not a stop", async () => {
+  const calls: RunInContainerArgs[] = [];
+  const fake: Fake = async (args) => {
+    calls.push(args);
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  const swept: { runId: string; keep: readonly string[] }[] = [];
+  let stopped = 0;
+  const prev = { orphans: platform.killOrphanSandboxes, all: platform.killRunSandboxes };
+  registerPlatform({ killOrphanSandboxes: (runId, keep) => void swept.push({ runId, keep }), killRunSandboxes: () => void (stopped += 1) });
+  try {
+    await withFake(fake, true, async () => {
+      const run = createFlowRun("acme", "desk", [step(), step()], "f", "running");
+      run.steps[0].status = "running";
+      run.steps[0].attempts = 1;
+      run.steps[0].sandbox = { kind: "fake", ref: "pod-abc", consumed: 3, since: new Date().toISOString() };
+      run.steps[1].status = "running"; // waiting for room when the worker went: no pod yet
+      run.steps[1].attempts = 1;
+      writeRun("acme", "desk", run);
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+      const done = readRun("acme", "desk", run.id)!;
+      assert.equal(done.status, "completed");
+      assert.deepEqual(swept, [{ runId: run.id, keep: ["pod-abc"] }], "only the orphan is swept; the re-attaching pod is kept");
+      assert.equal(stopped, 0, "the whole-run kill (a stop) is not used");
+      const resumes = calls.map((c) => c.resume ?? null);
+      assert.ok(resumes.some((r) => r?.ref === "pod-abc"), "the sibling re-attached");
+      assert.ok(resumes.some((r) => r === null), "the orphan ran again from the start");
+    });
+  } finally {
+    registerPlatform({ killOrphanSandboxes: prev.orphans, killRunSandboxes: prev.all });
+  }
+});
+
 // 6 Oct 2026: a worker restart re-drove reddit-desk's run, and the storage/
 // mirror was refilled from the store before anything else — putting the
 // 2 Oct post back over the draft the finished writer step had just saved.
