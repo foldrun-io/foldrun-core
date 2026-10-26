@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.13.1] — 2026-10-26
+
+- fix(run): a docker step's record holds the cores Docker gave it ([debea64](https://github.com/foldrun-io/foldrun-core/commit/debea64))
+
 ## [2.13.0] — 2026-10-26
 
 ### Changed in the public API
