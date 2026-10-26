@@ -1262,7 +1262,8 @@ export function buildFailureSummary(log: string, opts: { tail?: number; maxLines
   const key: string[] = [];
   for (const raw of log.split("\n")) {
     const line = raw.replace(/^#\d+ \d+(\.\d+)? /, "").trim();
-    if (!/^runner image:|^ERROR\b|^error:/i.test(line) && !/did not complete successfully/.test(line)) continue;
+    // apt's own errors start "E: "; the legacy builder ends with "returned a non-zero code".
+    if (!/^runner image:|^ERROR\b|^error:|^E: /i.test(line) && !/did not complete successfully|returned a non-zero code|no space left on device/i.test(line)) continue;
     const cut = line.length > 300 ? line.slice(0, 300) + " …" : line;
     if (seen.has(cut)) continue;
     seen.add(cut);
@@ -1270,6 +1271,11 @@ export function buildFailureSummary(log: string, opts: { tail?: number; maxLines
   }
   // The ones that say what is missing first: a reader stops at the top.
   key.sort((a, b) => Number(/MISSING ENGINES/.test(b)) - Number(/MISSING ENGINES/.test(a)));
+  // A full Docker disk is the commonest cause on one machine, and the fix is
+  // not in foldrun: say it first, in plain words.
+  if (/enough free space|no space left on device/i.test(log)) {
+    key.unshift("the Docker disk is full: free space (`docker system df`, then `docker builder prune` / `docker image prune`) and run it again");
+  }
   const head = key.length
     ? key.slice(0, maxLines).map((l) => `  ${l}`).join("\n") + (key.length > maxLines ? `\n  … ${key.length - maxLines} more` : "")
     : "  (no engine or ERROR line in the log)";

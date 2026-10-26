@@ -244,3 +244,43 @@ test("a secret named like a model variable crosses under a prefix; the model kee
     assert.ok(done.steps[0].events.some((e) => /secrets: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY kept away from the model's own settings/.test(e.text)));
   });
 });
+
+test("a container step with no model credential anywhere is refused before a sandbox, saying what to set", async () => {
+  await withAccount({ allowed: true }, async (calls) => {
+    // Core's own Docker executor, as self-hosting runs it: refused before it
+    // is reached, so no Docker is needed here.
+    process.env.FOLDRUN_RUN_ISOLATION = "container";
+    const saved = { key: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN, auth: process.env.ANTHROPIC_AUTH_TOKEN };
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    try {
+      const done = await run();
+      assert.equal(done.status, "failed");
+      assert.equal(calls.length, 0, "no sandbox rented for a step that could only fail at the model");
+      const texts = done.steps[0].events.map((e) => e.text).join("\n");
+      assert.match(texts, /no model credential: .*ANTHROPIC_API_KEY.*self-hosting\/\.env.*Settings → Model/, texts);
+      assert.equal(done.steps[0].credential, "none set");
+    } finally {
+      for (const [k, v] of [["ANTHROPIC_API_KEY", saved.key], ["CLAUDE_CODE_OAUTH_TOKEN", saved.oauth], ["ANTHROPIC_AUTH_TOKEN", saved.auth]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
+test("a registered executor with no platform credential is still offered the step: it may bring its own", async () => {
+  await withAccount({ allowed: true }, async (calls) => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const done = await run();
+      assert.equal(calls.length, 1);
+      assert.equal(done.status, "completed");
+    } finally {
+      if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = saved;
+    }
+  });
+});
