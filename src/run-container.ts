@@ -190,6 +190,10 @@ export interface StepActuals {
 
 export interface ContainerStepOutcome {
   status: "completed" | "failed";
+  /** No room to start, and the step may wait in the queue rather than here
+   *  (`room.mayDefer`): why. Nothing ran and nothing was rented — not a
+   *  failure, not an attempt. `status` is not read when this is set. */
+  deferred?: string;
   result: string | null;
   /** Why the sandbox ended when the step did not: what the cluster said
    *  (OOMKilled, Evicted, the pod gone). Absent when the driver finished
@@ -1523,6 +1527,16 @@ export interface RunInContainerArgs {
    *  (consumed 0), and before each output line it applies. The runner
    *  records these on the step, so the next driver knows where to attach. */
   checkpoint?: (ref: string, consumed: number) => void;
+  /** The wait for room (27 Oct 2026), for an executor with a room gate.
+   *  `since`: when this step first found none, carried across re-drives —
+   *  its place in line. `waiting` is called when it finds none (and again
+   *  when the reason changes); `mayDefer` says whether, instead of waiting
+   *  on, it may answer `deferred` so its run goes back to the queue. */
+  room?: {
+    since: string | null;
+    waiting: (why: string) => void;
+    mayDefer: () => boolean;
+  };
   /** A test run: where state/ and storage/ changes go instead of the
    *  workspace, and who to tell about each. See test-mode.ts. */
   divert?: WriteDivert;

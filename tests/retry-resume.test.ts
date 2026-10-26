@@ -195,6 +195,200 @@ test("the orphan sweep keeps the sandboxes its siblings re-attach to, and is not
   }
 });
 
+// 27 Oct 2026: a step with no room to start waits — no time limit — and,
+// when nothing else of its group is under way, its run waits in the queue
+// instead of holding the worker. The wait is not a try.
+test("a step with no room sends its run back to the queue, spends no retry, and starts there later", async () => {
+  let full = true;
+  const calls: RunInContainerArgs[] = [];
+  const fake: Fake = async (args) => {
+    calls.push(args);
+    if (full) {
+      args.room!.waiting("the account's pool is full");
+      if (args.room!.mayDefer()) return { status: "failed", deferred: "the account's pool is full", result: null, costUsd: null };
+      throw new Error("expected to be allowed to wait in the queue");
+    }
+    args.checkpoint?.("pod-1", 0);
+    return { status: "completed", result: "ran", costUsd: 0 };
+  };
+  const prev = process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+  process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = "0";
+  try {
+    await withFake(fake, true, async () => {
+      const run = createFlowRun("acme", "desk", [step({ retry: 1 })], "f", "running");
+      writeRun("acme", "desk", run);
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      const parked = readRun("acme", "desk", run.id)!;
+      assert.equal(parked.status, "queued", "back in the queue");
+      assert.ok(parked.parkedAt);
+      const s = parked.steps[0];
+      assert.equal(s.status, "pending");
+      assert.equal(s.roomWait?.why, "the account's pool is full");
+      assert.equal(s.resumeAttempt, 1);
+      assert.equal((s.tries ?? []).length, 0, "no try on the record");
+      const since = s.roomWait!.since;
+
+      // Claimed again, still no room: the same place in line.
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      const again = readRun("acme", "desk", run.id)!;
+      assert.equal(again.status, "queued");
+      assert.equal(again.steps[0].roomWait?.since, since, "its age is kept");
+      assert.equal(calls[1].room?.since, since, "and handed to the room gate");
+
+      full = false;
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      const done = readRun("acme", "desk", run.id)!;
+      assert.equal(done.status, "completed");
+      assert.equal(done.steps[0].attempts, 1, "still its first attempt — the waits spent none of retry: 1");
+      assert.equal(done.steps[0].roomWait, null, "cleared once its sandbox existed");
+      assert.equal(done.steps[0].resumeAttempt, null);
+    });
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+    else process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = prev;
+  }
+});
+
+// A run waiting in the queue is claimed every 20 s; a look that finds no
+// room must not grow its trail by an attempt's worth of lines each time.
+test("a run claimed again with still no room looks quietly and parks again", async () => {
+  let calls = 0;
+  const fake: Fake = async () => {
+    calls += 1;
+    return { status: "completed", result: "ran", costUsd: 0 };
+  };
+  const asked: { since: string; cpus: number }[] = [];
+  let room: string | null = "8 of this account's 8 vCPU is held";
+  const prev = { check: platform.roomCheck, park: process.env.FOLDRUN_ROOM_PARK_AFTER_SEC };
+  registerPlatform({ roomCheck: async (ask) => (asked.push({ since: ask.since, cpus: ask.cpus }), room) });
+  process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = "0";
+  try {
+    await withFake(fake, true, async () => {
+      const since = new Date(Date.now() - 5 * 60_000).toISOString();
+      // Two copies of one agent: the second would wait on the first's reply
+      // (the prompt-cache gate) and say so on its trail — Codex review.
+      const run = createFlowRun("acme", "desk", [step(), step()], "f", "running");
+      for (const s of run.steps) {
+        s.roomWait = { since, why: "8 of this account's 8 vCPU is held", cpus: 2, memGiB: 4 };
+        s.resumeAttempt = 1;
+      }
+      writeRun("acme", "desk", run);
+      const before = readRun("acme", "desk", run.id)!.steps.map((s) => s.events.length);
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      const parked = readRun("acme", "desk", run.id)!;
+      assert.equal(calls, 0, "the executor was not called");
+      assert.equal(parked.status, "queued");
+      assert.deepEqual(parked.steps.map((s) => s.events.length), before, "nothing added to either trail");
+      assert.deepEqual(asked, [{ since, cpus: 2 }, { since, cpus: 2 }]);
+
+      room = null;
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      assert.equal(calls, 2);
+      assert.equal(readRun("acme", "desk", run.id)!.status, "completed");
+    });
+  } finally {
+    registerPlatform({ roomCheck: prev.check });
+    if (prev.park === undefined) delete process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+    else process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = prev.park;
+  }
+});
+
+// Seen on a local run 27 Oct 2026: an executor that cannot report its
+// sandbox (Docker) never calls checkpoint, so the step that ran — and
+// failed — still read as waiting for room.
+test("a step that ran is no longer waiting for room, on an executor with no checkpoint", async () => {
+  const fake: Fake = async () => ({ status: "failed", result: null, costUsd: 0 });
+  await withFake(fake, false, async () => {
+    const run = createFlowRun("acme", "desk", [step()], "f", "running");
+    run.steps[0].roomWait = { since: new Date().toISOString(), why: "full", cpus: 1, memGiB: 1 };
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const done = readRun("acme", "desk", run.id)!;
+    assert.equal(done.steps[0].status, "failed");
+    assert.equal(done.steps[0].roomWait, null);
+  });
+});
+
+// Codex review: a call after the first in one attempt (here a busy
+// provider's retry) must wait for room where it is — a "deferred" there
+// would have been read as the attempt's own failure.
+test("only the first sandbox call of an attempt may send the run to the queue", async () => {
+  const deferAllowed: boolean[] = [];
+  const fake: Fake = async (args) => {
+    deferAllowed.push(args.room!.mayDefer());
+    if (deferAllowed.length === 1) {
+      args.checkpoint?.("pod-1", 0);
+      args.emit("error", "API Error: 529 overloaded_error (retry-after: 1)");
+      return { status: "failed", result: null, costUsd: 0 };
+    }
+    return { status: "completed", result: "ran", costUsd: 0 };
+  };
+  const prev = process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+  process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = "0";
+  try {
+    await withFake(fake, true, async () => {
+      const run = createFlowRun("acme", "desk", [step()], "f", "running");
+      run.steps[0].roomWait = { since: new Date(Date.now() - 60_000).toISOString(), why: "full", cpus: 1, memGiB: 1 };
+      writeRun("acme", "desk", run);
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      assert.deepEqual(deferAllowed, [true, false], "the provider's retry was not allowed to defer");
+      assert.equal(readRun("acme", "desk", run.id)!.status, "completed");
+    });
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+    else process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = prev;
+  }
+});
+
+test("a waiting step stays in its driver while a sibling runs, and a foreground run never parks", async () => {
+  let release!: () => void;
+  const siblingDone = new Promise<void>((r) => (release = r));
+  const seen: boolean[] = [];
+  const fake: Fake = async (args) => {
+    if (args.input.prompt.includes("long")) {
+      args.checkpoint?.("pod-long", 0);
+      await siblingDone;
+      return { status: "completed", result: "long done", costUsd: 0 };
+    }
+    args.room!.waiting("node full");
+    seen.push(args.room!.mayDefer());
+    release();
+    // the sibling ends; then the wait may move to the queue
+    await new Promise((r) => setTimeout(r, 50));
+    const now = args.room!.mayDefer();
+    seen.push(now);
+    return now ? { status: "failed", deferred: "node full", result: null, costUsd: null } : { status: "completed", result: "short", costUsd: 0 };
+  };
+  const prev = process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+  process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = "0";
+  try {
+    await withFake(fake, true, async (ws) => {
+      // Two agents: one agent's copies wait for the first one's reply (the
+      // prompt-cache gate), which would hold the short step behind the long.
+      fs.mkdirSync(path.join(ws, "agents/helper"), { recursive: true });
+      fs.writeFileSync(path.join(ws, "agents/helper/agent.md"), "---\nname: helper\ndescription: helps\n---\n\nHelp.\n");
+      const run = createFlowRun("acme", "desk", [step({ instruction: "long work" }), step({ agent: "helper", instruction: "short work" })], "f", "running");
+      writeRun("acme", "desk", run);
+      await driveRun("acme", "desk", readRun("acme", "desk", run.id)!, null, [], { parkOnApproval: true });
+      assert.deepEqual(seen, [false, true], "held while the sibling ran, free to park once it ended");
+      const parked = readRun("acme", "desk", run.id)!;
+      assert.equal(parked.status, "queued");
+      assert.equal(parked.steps[0].status, "completed");
+      assert.equal(parked.steps[1].status, "pending");
+
+      seen.length = 0;
+      const fg = createFlowRun("acme", "desk", [step({ instruction: "short work" })], "f", "running");
+      writeRun("acme", "desk", fg);
+      await driveRun("acme", "desk", readRun("acme", "desk", fg.id)!);
+      assert.deepEqual(seen, [false, false], "a foreground run waits where it is");
+      assert.equal(readRun("acme", "desk", fg.id)!.status, "completed");
+    });
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+    else process.env.FOLDRUN_ROOM_PARK_AFTER_SEC = prev;
+  }
+});
+
 // 6 Oct 2026: a worker restart re-drove reddit-desk's run, and the storage/
 // mirror was refilled from the store before anything else — putting the
 // 2 Oct post back over the draft the finished writer step had just saved.

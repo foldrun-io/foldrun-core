@@ -2093,6 +2093,11 @@ async function runStep(
    *  answers with its reply (the drive loop's delegateFor). Absent for a
    *  step that is itself a sub-agent's: depth one. */
   delegateJob?: (agent: string, job: string, cancelled: () => boolean) => Promise<DelegationResult>,
+  /** Whether this step, finding no room to start, may go back to the queue
+   *  with its run instead of waiting in this driver (the drive loop's
+   *  mayDefer). Absent: it waits here, however long — a rescue, a step
+   *  outside a flow, a foreground run. */
+  mayDefer?: () => boolean,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -3018,6 +3023,8 @@ async function runStep(
       };
       const primaryTranslator = proxiedTranslator(translator, MODEL_KEY_NAME);
       const secondTranslator = proxiedTranslator(fallbackTranslator, `${MODEL_KEY_NAME}_FALLBACK`);
+      // Set once the first sandbox call has run (see room.mayDefer below).
+      let executed = false;
       const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
       const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
@@ -3132,7 +3139,21 @@ async function runStep(
           step.sandbox = { kind: isolation!, ref, consumed, since: step.sandbox?.since ?? new Date().toISOString() };
           // The sandbox exists: past the room gate, it now holds its figures.
           if (consumed === 0) step.holding = held;
+          if (consumed === 0) step.roomWait = null;
           if (consumed === 0) save();
+        },
+        // The wait for room: its age is the step's place in line, so it is
+        // on the record from the first "no" and survives a re-drive.
+        room: {
+          since: step.roomWait?.since ?? null,
+          waiting: (why: string) => {
+            step.roomWait = { since: step.roomWait?.since ?? new Date().toISOString(), why, cpus: held.cpus, memGiB: held.memGiB };
+            save();
+          },
+          // Only before anything ran: a later call of this attempt (a
+          // rotated credential, a busy provider, a re-run on the full
+          // image) waits for room where it is — its outcome is the step's.
+          mayDefer: () => !executed && (mayDefer?.() ?? false),
         },
       });
 
@@ -3154,20 +3175,43 @@ async function runStep(
         // its first checkpoint, after any wait for room.
         if (!platform.sandboxResumable(isolation!)) {
           step.holding = held;
+          // Started: no longer waiting for room (an executor that can
+          // report its sandbox clears this at its first checkpoint).
+          step.roomWait = null;
           save();
         }
+        let out: Awaited<ReturnType<typeof runIsolated>> | undefined;
         try {
-          return await runIsolated(a);
+          out = await runIsolated(a);
+          return out;
         } finally {
           // Saved now: the clean-up after an attempt (the log drain, the
           // lease, publishing) can take a while, and the sandbox is gone.
           step.holding = null;
+          // A call that ran, or failed, is past waiting; only a step sent
+          // back to the queue keeps its place in line.
+          if (!out?.deferred) step.roomWait = null;
           save();
         }
       };
       let attemptFrom = step.events.length;
       let outcome = await runTracked(firstArgs);
+      if (!outcome.deferred) executed = true;
       step.sandbox = null; // whatever happens next starts its own
+      // No room, and the run may wait for it in the queue: nothing ran and
+      // nothing was rented, so this is neither a failure nor a try. The
+      // step goes back to pending with its place in line (roomWait).
+      if (outcome.deferred) {
+        if (lease) {
+          await serving?.close();
+          serving = null;
+          await lease.release();
+        }
+        step.status = "pending";
+        push("info", `room: none yet — ${outcome.deferred}; the run waits in the queue and starts this step when there is`);
+        save();
+        return { actedThenFailedCheck: false, deferred: true };
+      }
       // A 401 from a token that rotated mid-step is not a broken key: the
       // replacement is already on its way to the mounted file. Wait for it
       // once, then fall into the same retry the busy case uses.
@@ -5236,9 +5280,40 @@ function driveRunInner(
         // prompt cache it wrote — see warmGate. The claim is the callback's
         // first statement, before any await; the wait comes before the
         // pool, so nothing holds a slot while it waits.
-        const gate = warmGate(launching);
+        // Room (27 Oct 2026): a step that finds no room may go back to the
+        // queue with its run — freeing the worker — only when nothing else
+        // of its group is under way (a sibling still running keeps the run
+        // here anyway), and only once the group has waited a while, so a
+        // short wait stays a short wait. Never on a foreground run.
+        const mayDefer = (step: StepRecord) => () => {
+          if (!opts.parkOnApproval) return false;
+          if (launching.some((s) => s !== step && s.status === "running" && !s.roomWait)) return false;
+          const since = Math.min(...launching.map((s) => (s.roomWait ? Date.parse(s.roomWait.since) : Infinity)));
+          return Number.isFinite(since) && Date.now() - since >= roomParkAfterMs();
+        };
+        // Steps waiting in the queue for room, the run claimed again: look
+        // first, quietly, before anything (the prompt-cache gate's line
+        // included) writes to their trails. Still none — they stay pending
+        // with their place, the run parks again below, and the trail gains
+        // nothing on each look.
+        const roomStill = new Set<StepRecord>();
+        if (platform.roomCheck) {
+          for (const step of launching) {
+            if (!step.roomWait || !mayDefer(step)()) continue;
+            const w = step.roomWait;
+            const why = await platform.roomCheck({ tenant, runId: run.id, since: w.since, cpus: w.cpus, memGiB: w.memGiB }).catch(() => null);
+            if (!why) continue;
+            roomStill.add(step);
+            if (why !== w.why) {
+              step.roomWait = { ...w, why };
+              save();
+            }
+          }
+        }
+        const starting = launching.filter((s) => !roomStill.has(s));
+        const gate = warmGate(starting);
         await Promise.all(
-          launching
+          starting
             .map(async (step) => {
               const lead = gate.claim(step);
               if (lead) {
@@ -5284,7 +5359,14 @@ function driveRunInner(
               // count it left. Only a step nobody has touched starts at 1.
               const interruptedInBackoff =
                 !step.sandbox && !!step.attempts && /retrying in \d+s/.test(step.events[step.events.length - 1]?.text ?? "");
-              const from = step.sandbox ? Math.max(1, step.attempts ?? 1) : interruptedInBackoff ? Math.min(attempts, step.attempts! + 1) : 1;
+              // A step that went back to the queue for room resumes the attempt it was on.
+              const from = step.sandbox
+                ? Math.max(1, step.attempts ?? 1)
+                : step.resumeAttempt
+                  ? Math.min(attempts, step.resumeAttempt)
+                  : interruptedInBackoff
+                    ? Math.min(attempts, step.attempts! + 1)
+                    : 1;
               for (let attempt = from; attempt <= attempts; attempt++) {
                 const ceiling = ceilingFor(step);
                 // Nothing left is a refusal, not "no ceiling": a zero passed
@@ -5312,6 +5394,7 @@ function driveRunInner(
                 const attemptStartedAt = new Date().toISOString();
                 const eventsBefore = step.events.length;
                 step.attempts = attempt;
+                step.resumeAttempt = null;
                 step.status = "running";
                 if (ceiling.ceilingUsd !== null) reserved.set(step, ceiling.ceilingUsd);
                 save();
@@ -5340,7 +5423,15 @@ function driveRunInner(
                   siblingsOf(step),
                   peerBus,
                   delegateFor(step),
+                  mayDefer(step),
                 ).finally(() => reserved.delete(step));
+                // Sent back for room: not a try. The run parks once the
+                // group is done (below) and this attempt starts again later.
+                if (verdict?.deferred) {
+                  step.resumeAttempt = attempt;
+                  save();
+                  return;
+                }
                 // runStep mutates step.status; read it through a widened local
                 // so TS doesn't keep the "running" narrowing from above.
                 const outcome: string = step.status;
@@ -5433,6 +5524,18 @@ function driveRunInner(
                   break;
                 }
               }
+        }
+
+        // Steps sent back for want of room: the run waits in the queue — its
+        // row keeps its place — and comes back to this group when it is
+        // claimed again. Nothing after the group runs meanwhile.
+        if (opts.parkOnApproval && launching.some((s) => s.status === "pending" && s.roomWait)) {
+          await harvestQuietly(tenant, workspace, run);
+          run.status = "queued";
+          run.parkedAt = new Date().toISOString();
+          parked = true;
+          save();
+          return;
         }
 
         // on-fail: another agent takes the step over. Sequential and rare:
@@ -5877,6 +5980,13 @@ const ABANDONED_AFTER_MS = 2 * 60 * 1000;
 /** The first retry's wait; each one after doubles it, to sixteen times
  *  this (15 s → 4 min by default). An env, so a test can make it small. */
 const retryBaseMs = () => Number(process.env.FOLDRUN_RETRY_BASE_MS) || 15_000;
+/** How long a group waits for room in its driver before its run goes back
+ *  to the queue to wait there: FOLDRUN_ROOM_PARK_AFTER_SEC, default 60 s. */
+const roomParkAfterMs = () => {
+  const v = process.env.FOLDRUN_ROOM_PARK_AFTER_SEC;
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n * 1000 : 60_000;
+};
 
 /** The most recent moment a run showed any sign of life. */
 function lastActivity(run: RunRecord): number {

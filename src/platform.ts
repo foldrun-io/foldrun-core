@@ -121,6 +121,12 @@ export interface PlatformHooks {
    *  the run goes on, and steps of it are about to start. Optional: without
    *  it the whole run's are killed (killRunSandboxes). */
   killOrphanSandboxes?(runId: string, keep: readonly string[]): void;
+  /** Is there room for a step waiting in the queue to start now — by the
+   *  same rules as the executor's room gate — and if not, why. Asked before
+   *  such a step is started again, so a run claimed only to find no room
+   *  yet adds nothing to its trail. Optional: without it the step goes to
+   *  its executor, which looks there. */
+  roomCheck?(ask: { tenant: string; runId: string; since: string; cpus: number; memGiB: number }): Promise<string | null>;
   /** Publish storage/public/ as share links after a run. Default: no links. */
   syncPublicShares(tenant: string, workspace: string): Promise<{ added: string[] }>;
   /** This account's own data key, or null to use the install key. */
