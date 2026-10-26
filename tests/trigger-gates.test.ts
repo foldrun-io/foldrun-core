@@ -76,6 +76,21 @@ test("durations are capped at thirty days, like every other duration in the form
 
 // ------------------------------------------------------- delivery keys
 
+// GitHub's signature has no timestamp, so a captured delivery could be
+// replayed for ever: a GitHub-signed webhook dedupes on its delivery id
+// unless the file says otherwise (FOL-94).
+test("signature: github dedupes on x-github-delivery by default; the file's own idempotency: wins; none turns it off", () => {
+  assert.equal(flowWith("signature: github\nsigning_secret: GH_SECRET").idempotency, "x-github-delivery");
+  assert.equal(flowWith("signature: github\nsigning_secret: GH_SECRET\nidempotency: body:id").idempotency, "body:id");
+  for (const off of ["none", "None", "off", "false"]) {
+    assert.equal(flowWith(`signature: github\nsigning_secret: GH_SECRET\nidempotency: ${off}`).idempotency, null, off);
+  }
+  // Only GitHub: the others sign a timestamp, and a plain hmac sender has no id to name.
+  for (const sig of ["stripe", "slack", "hmac"]) assert.equal(flowWith(`signature: ${sig}\nsigning_secret: S`).idempotency, null, sig);
+  // And the default reads the header GitHub sends.
+  assert.equal(deliveryKey("x-github-delivery", (n) => (n === "x-github-delivery" ? "72d3162e-cc78-11e3-81ab-4c9367dc0958" : null), "{}"), "72d3162e-cc78-11e3-81ab-4c9367dc0958");
+});
+
 test("idempotency reads a header, or a top-level field of a JSON body", () => {
   const headers = (h: Record<string, string>) => (name: string) => h[name] ?? null;
 
