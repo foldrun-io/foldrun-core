@@ -19,7 +19,8 @@ import { cascadeLimits, toolOwners } from "./limits.ts";
 import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
-import { runStepInContainer, sizeLimits, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { runStepInContainer, resolveResources, memoryGiB, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { readResources, hasOverride } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
 import { parseJudge } from "./judge-verdict.ts";
@@ -2312,6 +2313,13 @@ async function runStep(
     // A retry that moved the step up a class (an evicted or OOM-killed
     // attempt) wins over the agent's own `size:` for the attempts after.
     const size = step.sizeUp ?? agentSize;
+    // `resources:` over the class's figures, key by key. A value check would
+    // refuse is dropped here too (the class's figure holds) and said so, so
+    // `foldrun check` and the sandbox never disagree. After a retry moved up
+    // a class, an override never holds the step below the new class.
+    const asked = readResources(front.resources);
+    for (const p of asked.problems) push("error", `resources: ${p}`);
+    const limits = resolveResources(size, asked.value, { atLeastClass: !!step.sizeUp });
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
@@ -3102,6 +3110,7 @@ async function runStep(
         // executor asks this before it creates one (pod-room.ts).
         ...(stopRequested ? { stopRequested } : {}),
         size,
+        limits,
         // The pod's network, for the executor's own wall (the k8s tier's
         // network policy): a filtered pod reaches the proxy and DNS only.
         network: { level: network.level, enforced: forward?.enforce === true },
@@ -3349,13 +3358,8 @@ async function runStep(
       // is per core-second and per GiB-second, and what was held must come
       // from the record, never from what the config says at billing time.
       step.size = size;
-      const lim = sizeLimits(size);
-      const gib = (() => {
-        const m = lim.memory.match(/^(\d+(?:\.\d+)?)\s*(Gi?|Mi?|g|m)?/i);
-        const n = m ? Number(m[1]) : 2;
-        return (m?.[2] ?? "Gi").toLowerCase().startsWith("m") ? n / 1024 : n;
-      })();
-      step.reserved = { cpus: Number(lim.cpus) || 2, memGiB: gib };
+      if (hasOverride(asked.value)) step.resources = asked.value;
+      step.reserved = { cpus: Number(limits.cpus) || 2, memGiB: memoryGiB(limits.memory) };
     } else {
       // Same withholding as the sandbox path — the in-process step is what
       // `foldrun run --test` drives on a laptop, where there is no proxy

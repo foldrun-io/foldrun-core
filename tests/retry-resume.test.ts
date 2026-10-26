@@ -69,6 +69,43 @@ test("retry: waits with backoff, and an OOM-killed attempt comes back one size u
   });
 });
 
+test("resources: reaches the sandbox and the bill, and an OOM retry never holds it below the bigger class", async () => {
+  const seen: RunInContainerArgs["limits"][] = [];
+  const fake: Fake = async (args) => {
+    seen.push(args.limits);
+    if (seen.length === 1) return { status: "failed", result: null, costUsd: null, reason: "OOMKilled (exit 137)" };
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  const prev = { c: process.env.FOLDRUN_RUNNER_CPUS, m: process.env.FOLDRUN_RUNNER_MEMORY };
+  process.env.FOLDRUN_RUNNER_CPUS = "2";
+  process.env.FOLDRUN_RUNNER_MEMORY = "2Gi";
+  try {
+    await withFake(fake, false, async (ws) => {
+      fs.writeFileSync(
+        path.join(ws, "agents/worker/agent.md"),
+        "---\nname: worker\ndescription: works\nguardrail:\n  resources: { cpu: 1, memory: 3Gi, disk: 12Gi, gpu: 1 }\n---\n\nWork.\n",
+      );
+      const run = startFlowRun("acme", "desk", [step({ retry: 1 })], "f");
+      const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+      assert.equal(done?.status, "completed");
+      const s = done!.steps[0];
+      // First attempt at large: the agent's numbers over the class's.
+      assert.deepEqual(seen[0], { cpus: "1", memory: "3072Mi", disk: "12Gi" });
+      // After the OOM, heavy: cores, memory and disk all raised to heavy's
+      // (12Gi < heavy's 20Gi, so the class's disk — null — applies).
+      assert.deepEqual(seen[1], { cpus: "4", memory: "8Gi", disk: null });
+      assert.deepEqual(s.reserved, { cpus: 4, memGiB: 8 }, "the bill reads what was held");
+      assert.deepEqual(s.resources, { cpu: 1, memory: "3072Mi", disk: "12Gi" }, "what was asked is on the record");
+      assert.ok(s.events.some((e) => /resources: `gpu` is not one of cpu, memory, disk/.test(e.text)), "a dropped key is said");
+    });
+  } finally {
+    for (const [k, v] of [["FOLDRUN_RUNNER_CPUS", prev.c], ["FOLDRUN_RUNNER_MEMORY", prev.m]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("a step whose driver died is re-attached, not re-run, when the executor can resume", async () => {
   const calls: RunInContainerArgs[] = [];
   const fake: Fake = async (args) => {

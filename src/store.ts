@@ -3533,6 +3533,10 @@ export interface StepRecord {
    *  from before sizes existed — billing falls back to the flat rate. */
   size?: "small" | "large" | "heavy";
   reserved?: { cpus: number; memGiB: number } | null;
+  /** The agent's `resources:` as applied (resources.ts), when it set any:
+   *  why `reserved` differs from the class's figures. Absent before 26 Oct
+   *  2026 and on steps of an agent that wrote none. */
+  resources?: { cpu?: number; memory?: string; disk?: string };
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */

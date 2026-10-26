@@ -33,6 +33,7 @@ import type { TokenPrice } from "./catalog.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
 import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, type RuntimeSpec } from "./runtime.ts";
 import { egressCaSh, type NetworkLevel } from "./network.ts";
+import { anyMemoryMi, quantityMi, type ResourceOverride } from "./resources.ts";
 import type { ScriptSpec } from "./script-tools.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
 import type { DelegateSpec, SubagentSpec } from "./subagents.ts";
@@ -1439,6 +1440,30 @@ function engineCpus(): number {
   return engineCpuCount;
 }
 
+/**
+ * A memory figure Docker will accept: the mirror of k8sMemory.
+ *
+ * Docker reads b/k/m/g (binary) and refuses Kubernetes' Mi and Gi outright
+ * ("invalid suffix: 'mi'", Docker 29). The class defaults for small and
+ * heavy are Kubernetes quantities (1Gi, 8Gi), and `resources: memory` is
+ * normalised to Mi, so before 26 Oct 2026 every small and heavy step failed
+ * to start on the docker executor; only large's `2g` worked. Binary suffixes
+ * become whole bytes (1.5Gi has no Docker spelling), Docker's own pass
+ * through, and anything else is handed over for Docker's error to name.
+ */
+export function dockerMemory(value: string): string {
+  const s = String(value).trim();
+  // Lowercase only: case decides, as in k8sMemory — `1G` is Kubernetes'
+  // decimal gigabyte, and Docker would read it as binary.
+  if (/^\d+(\.\d+)?[bkmg]?$/.test(s)) return s;
+  const m = /^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)$/.exec(s);
+  if (!m) return s;
+  const pow: Record<string, number> = { Ki: 1, Mi: 2, Gi: 3, Ti: 4 };
+  const dec: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
+  const bytes = m[2] in pow ? Number(m[1]) * 1024 ** pow[m[2]] : Number(m[1]) * dec[m[2]];
+  return String(Math.round(bytes));
+}
+
 /** The `--cpus` a step's container gets: its class's billed cores, no more
  *  than the engine has. Null when the figure is not a number, so the flag is
  *  left off rather than failing the step on an install's typo. */
@@ -1475,6 +1500,9 @@ export interface RunInContainerArgs {
   stopRequested?: () => boolean;
   /** The reservation class — which limits this step's sandbox holds. */
   size?: "small" | "large" | "heavy";
+  /** The class's figures with the agent's `resources:` over them
+   *  (resolveResources). Absent: the class's own. */
+  limits?: StepLimits;
   /** Re-attach to a sandbox a previous driver started, instead of creating
    *  one: its handle, and how many output lines that driver had applied.
    *  The executor replays nothing before `consumed`, and reads the step's
@@ -1578,30 +1606,6 @@ export function k8sMemory(value: string): string {
   return `${m[1]}${{ b: "", k: "Ki", m: "Mi", g: "Gi", t: "Ti" }[m[2]]}`;
 }
 
-/**
- * A memory figure Docker will accept: the mirror of k8sMemory.
- *
- * Docker reads b/k/m/g (binary) and refuses Kubernetes' Mi and Gi outright
- * ("invalid suffix: 'mi'", Docker 29). The class defaults for small and
- * heavy are Kubernetes quantities (1Gi, 8Gi), so before 26 Oct 2026 every
- * small and heavy step failed to start on the docker executor; only large's
- * `2g` worked. Binary suffixes become whole bytes (1.5Gi has no Docker
- * spelling), Docker's own lowercase spellings pass through, and anything
- * else is handed over for Docker's error to name. Case decides, as in
- * k8sMemory: `1G` is Kubernetes' decimal gigabyte, and Docker would read it
- * as binary.
- */
-export function dockerMemory(value: string): string {
-  const s = String(value).trim();
-  if (/^\d+(\.\d+)?[bkmg]?$/.test(s)) return s;
-  const m = /^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)$/.exec(s);
-  if (!m) return s;
-  const pow: Record<string, number> = { Ki: 1, Mi: 2, Gi: 3, Ti: 4 };
-  const dec: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
-  const bytes = m[2] in pow ? Number(m[1]) * 1024 ** pow[m[2]] : Number(m[1]) * dec[m[2]];
-  return String(Math.round(bytes));
-}
-
 export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
   if (size === "small") {
     return {
@@ -1624,6 +1628,66 @@ export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; 
     cpus: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
     memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
   };
+}
+
+/** What one step's sandbox holds: cores and memory (each a hard limit and a
+ *  billing figure) and, where the agent set it, disk. */
+export interface StepLimits {
+  cpus: string;
+  memory: string;
+  /** The agent's `resources: disk`, or null for the class's (the k8s tier's
+   *  diskFor; Docker has no per-container disk cap). */
+  disk: string | null;
+}
+
+/**
+ * The class's figures with an agent's `resources:` over them, key by key.
+ *
+ * `atLeastClass` is for a retry that moved the step up a class after the
+ * cluster ended it for want of memory or disk: each override is raised to
+ * the bigger class's figure, so `memory: 3Gi` OOM-killed at large retries at
+ * heavy's 8Gi rather than the same 3Gi that already failed.
+ */
+export function resolveResources(
+  size?: "small" | "large" | "heavy",
+  override?: ResourceOverride | null,
+  opts: { atLeastClass?: boolean } = {},
+): StepLimits {
+  const base = sizeLimits(size);
+  const bigger = (mine: number, theirs: number) => (opts.atLeastClass ? Math.max(mine, theirs) : mine);
+  const baseMi = anyMemoryMi(base.memory);
+  let cpus = base.cpus;
+  if (override?.cpu !== undefined) {
+    const b = Number(base.cpus);
+    cpus = String(Number.isFinite(b) ? bigger(override.cpu, b) : override.cpu);
+  }
+  let memory = base.memory;
+  if (override?.memory !== undefined) {
+    const mi = quantityMi(override.memory);
+    memory = Number.isFinite(baseMi) && opts.atLeastClass && baseMi > mi ? base.memory : override.memory;
+  }
+  // Disk the same way: a step evicted for disk at its own `disk: 2Gi` would
+  // fail again at 2Gi, whatever class the retry moved it to.
+  let disk = override?.disk ?? null;
+  if (disk && opts.atLeastClass) {
+    const classMi = anyMemoryMi(classDisk(size));
+    if (Number.isFinite(classMi) && classMi > quantityMi(disk)) disk = null;
+  }
+  return { cpus, memory, disk };
+}
+
+/** The node disk a class may write (the k8s `ephemeral-storage` limit;
+ *  Docker has no per-container cap). Env-tunable like the cores and memory. */
+export function classDisk(size?: "small" | "large" | "heavy"): string {
+  if (size === "small") return process.env.FOLDRUN_RUNNER_DISK_SMALL ?? "2Gi";
+  if (size === "heavy") return process.env.FOLDRUN_RUNNER_DISK_HEAVY ?? "20Gi";
+  return process.env.FOLDRUN_RUNNER_DISK ?? "8Gi";
+}
+
+/** A memory figure in GiB, for the step's reservation record. */
+export function memoryGiB(memory: string): number {
+  const mi = anyMemoryMi(memory);
+  return Number.isFinite(mi) ? mi / 1024 : 2;
 }
 
 /** The label both executors stamp, so one name means one thing. */
@@ -1688,7 +1752,8 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       { mode: 0o600 },
     );
 
-    const cpus = dockerCpus(sizeLimits(args.size).cpus);
+    const lim = args.limits ?? resolveResources(args.size);
+    const cpus = dockerCpus(lim.cpus);
     const flags = [
       "--security-opt", "no-new-privileges",
       ...(args.runId ? ["--label", `${RUN_LABEL}=${args.runId}`] : []),
@@ -1701,7 +1766,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       // CPU is capped at the class's billed cores, matching the k8s path
       // (since 26 Oct 2026): a step runs on what it pays for and cannot take
       // the whole machine from the steps beside it.
-      "--memory", dockerMemory(sizeLimits(args.size).memory),
+      "--memory", dockerMemory(lim.memory),
       ...(cpus ? ["--cpus", cpus] : []),
       "--env-file", envFile,
     ];

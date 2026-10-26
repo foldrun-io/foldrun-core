@@ -490,6 +490,7 @@ owner: ana@example.com      # who answers for it; else the workspace's, else the
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
+resources: { memory: 4Gi }  # optional: cpu, memory, disk in numbers, over the size class
 tools: [web, read, ask, peers, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
