@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dockerCpus, dockerMemory, sizeLimits, resolveResources, memoryGiB } from "../src/run-container.ts";
+import { dockerCpus, dockerMemory, sizeLimits, resolveResources, memoryGiB, heldCores } from "../src/run-container.ts";
 import { readResources, resourcesProblem, quantityMi, anyMemoryMi, hasOverride, readCompute, computeProblem } from "../src/resources.ts";
 
 test("the docker CPU cap is the class's billed cores, no more than the engine has", () => {
@@ -132,4 +132,13 @@ test("an account's compute: is read as cores and GiB; anything else is said", ()
   assert.match(computeProblem({ memory: 8 }) ?? "", /write 8Gi/);
   assert.match(computeProblem({ gpus: 1 }) ?? "", /not vcpu or memory/);
   assert.match(computeProblem("lots") ?? "", /not a map/);
+});
+
+test("the record holds the cores the sandbox got: docker lowers them to the machine's, k8s does not", () => {
+  assert.equal(heldCores("4", "container", 2), 2, "heavy on a two-core self-hosted box");
+  assert.equal(heldCores("2", "container", 8), 2);
+  assert.equal(heldCores("0.5", "container", 8), 0.5);
+  assert.equal(heldCores("4", "k8s", 2), 4, "the cluster's limit is the asked-for figure");
+  assert.equal(heldCores("4", undefined, 2), 4, "in-process: no sandbox to lower it");
+  assert.equal(heldCores("lots", "container", 2), 2, "an unreadable figure keeps the old fallback");
 });
