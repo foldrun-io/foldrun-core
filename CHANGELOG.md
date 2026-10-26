@@ -13,6 +13,27 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.13.0] — 2026-10-26
+
+### Changed in the public API
+
+Declarations whose shape changed. Check that each still accepts what it did; one that does not is a break, and needs a `!` commit before this merges.
+
+- `StepRecord` from `@foldrun/core`
+
+- feat(run): a step's container is capped at its class's cores, and records throttled time ([9df43fc](https://github.com/foldrun-io/foldrun-core/commit/9df43fc))
+- fix(run): the docker executor passes memory in a spelling docker accepts ([a02ab00](https://github.com/foldrun-io/foldrun-core/commit/a02ab00))
+
+### feat
+
+- compute: in the account's AGENTS.md, and step.holding — what a sandbox holds while it exists ([267f757](https://github.com/foldrun-io/foldrun-core/commit/267f757))
+- resources: {cpu, memory, disk} on an agent, over its size class key by key ([191cc3f](https://github.com/foldrun-io/foldrun-core/commit/191cc3f))
+
+### fix
+
+- a refused credential-less container step does not also say it will fall back to a login ([cf8cc4f](https://github.com/foldrun-io/foldrun-core/commit/cf8cc4f))
+- self-hosting tells you what to set — a full Docker disk, no model credential ([0798444](https://github.com/foldrun-io/foldrun-core/commit/0798444))
+
 ## [2.12.1] — 2026-10-25
 
 ### deps
