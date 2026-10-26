@@ -3541,6 +3541,15 @@ export interface StepRecord {
    *  the room gate, cleared when the attempt ends. What an account's
    *  compute in use sums; `reserved` is the bill's record of the same. */
   holding?: { cpus: number; memGiB: number } | null;
+  /** Waiting for room to start (27 Oct 2026): since when — the first time
+   *  the room gate said no, kept across re-drives so its place in line is
+   *  its age — what it asked for, and why there was none. Set while it
+   *  waits in its driver and while its run waits in the queue; cleared the
+   *  moment its sandbox exists. A wait for room never fails the step. */
+  roomWait?: { since: string; why: string; cpus: number; memGiB: number } | null;
+  /** The attempt a step sent back to the queue for room resumes on — a
+   *  wait is not a try, so it spends none of its `retry:`. */
+  resumeAttempt?: number | null;
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */
