@@ -1544,6 +1544,30 @@ export function k8sMemory(value: string): string {
   return `${m[1]}${{ b: "", k: "Ki", m: "Mi", g: "Gi", t: "Ti" }[m[2]]}`;
 }
 
+/**
+ * A memory figure Docker will accept: the mirror of k8sMemory.
+ *
+ * Docker reads b/k/m/g (binary) and refuses Kubernetes' Mi and Gi outright
+ * ("invalid suffix: 'mi'", Docker 29). The class defaults for small and
+ * heavy are Kubernetes quantities (1Gi, 8Gi), so before 26 Oct 2026 every
+ * small and heavy step failed to start on the docker executor; only large's
+ * `2g` worked. Binary suffixes become whole bytes (1.5Gi has no Docker
+ * spelling), Docker's own lowercase spellings pass through, and anything
+ * else is handed over for Docker's error to name. Case decides, as in
+ * k8sMemory: `1G` is Kubernetes' decimal gigabyte, and Docker would read it
+ * as binary.
+ */
+export function dockerMemory(value: string): string {
+  const s = String(value).trim();
+  if (/^\d+(\.\d+)?[bkmg]?$/.test(s)) return s;
+  const m = /^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)$/.exec(s);
+  if (!m) return s;
+  const pow: Record<string, number> = { Ki: 1, Mi: 2, Gi: 3, Ti: 4 };
+  const dec: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
+  const bytes = m[2] in pow ? Number(m[1]) * 1024 ** pow[m[2]] : Number(m[1]) * dec[m[2]];
+  return String(Math.round(bytes));
+}
+
 export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
   if (size === "small") {
     return {
@@ -1642,7 +1666,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       // CPU is deliberately NOT capped, matching the k8s path: a cap only
       // throttles work the customer pays for, and the tier's cpu figure is a
       // billing weight, applied in usage.ts, not a docker --cpus limit here.
-      "--memory", sizeLimits(args.size).memory,
+      "--memory", dockerMemory(sizeLimits(args.size).memory),
       "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag
