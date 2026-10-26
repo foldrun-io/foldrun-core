@@ -71,8 +71,14 @@ test("retry: waits with backoff, and an OOM-killed attempt comes back one size u
 
 test("resources: reaches the sandbox and the bill, and an OOM retry never holds it below the bigger class", async () => {
   const seen: RunInContainerArgs["limits"][] = [];
+  const heldDuring: unknown[] = [];
   const fake: Fake = async (args) => {
     seen.push(args.limits);
+    // A resumable executor says its sandbox exists at checkpoint 0 (after
+    // any wait for room); only then does the step hold its figures.
+    heldDuring.push(readRun("acme", "desk", args.runId!)?.steps[0]?.holding ?? null);
+    args.checkpoint?.("pod-x", 0);
+    heldDuring.push(readRun("acme", "desk", args.runId!)?.steps[0]?.holding ?? null);
     if (seen.length === 1) return { status: "failed", result: null, costUsd: null, reason: "OOMKilled (exit 137)" };
     return { status: "completed", result: "done", costUsd: 0 };
   };
@@ -80,7 +86,7 @@ test("resources: reaches the sandbox and the bill, and an OOM retry never holds 
   process.env.FOLDRUN_RUNNER_CPUS = "2";
   process.env.FOLDRUN_RUNNER_MEMORY = "2Gi";
   try {
-    await withFake(fake, false, async (ws) => {
+    await withFake(fake, true, async (ws) => {
       fs.writeFileSync(
         path.join(ws, "agents/worker/agent.md"),
         "---\nname: worker\ndescription: works\nguardrail:\n  resources: { cpu: 1, memory: 3Gi, disk: 12Gi, gpu: 1 }\n---\n\nWork.\n",
@@ -97,6 +103,8 @@ test("resources: reaches the sandbox and the bill, and an OOM retry never holds 
       assert.deepEqual(s.reserved, { cpus: 4, memGiB: 8 }, "the bill reads what was held");
       assert.deepEqual(s.resources, { cpu: 1, memory: "3072Mi", disk: "12Gi" }, "what was asked is on the record");
       assert.ok(s.events.some((e) => /resources: `gpu` is not one of cpu, memory, disk/.test(e.text)), "a dropped key is said");
+      assert.deepEqual(heldDuring.slice(0, 2), [null, { cpus: 1, memGiB: 3 }], "nothing held until the sandbox exists");
+      assert.equal(s.holding, null, "nothing held once the attempt ended");
     });
   } finally {
     for (const [k, v] of [["FOLDRUN_RUNNER_CPUS", prev.c], ["FOLDRUN_RUNNER_MEMORY", prev.m]] as const) {

@@ -2320,6 +2320,9 @@ async function runStep(
     const asked = readResources(front.resources);
     for (const p of asked.problems) push("error", `resources: ${p}`);
     const limits = resolveResources(size, asked.value, { atLeastClass: !!step.sizeUp });
+    // What the sandbox holds while it exists — `step.holding`, what the
+    // account's compute in use sums (Settings, `foldrun usage compute`).
+    const held = { cpus: Number(limits.cpus) || 2, memGiB: memoryGiB(limits.memory) };
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
@@ -3127,6 +3130,8 @@ async function runStep(
         // saves the record, so this only updates the fields.
         checkpoint: (ref: string, consumed: number) => {
           step.sandbox = { kind: isolation!, ref, consumed, since: step.sandbox?.since ?? new Date().toISOString() };
+          // The sandbox exists: past the room gate, it now holds its figures.
+          if (consumed === 0) step.holding = held;
           if (consumed === 0) save();
         },
       });
@@ -3142,9 +3147,23 @@ async function runStep(
       // The arguments of the attempt whose outcome is current — what a
       // re-run on the full image repeats, on the same model supply.
       let lastArgs: typeof firstArgs = firstArgs;
-      const runTracked = (a: typeof firstArgs) => {
+      const runTracked = async (a: typeof firstArgs) => {
         lastArgs = a;
-        return runIsolated(a);
+        // An executor that cannot report its sandbox (Docker: no room gate,
+        // it starts at once) holds from the call; one that can says so at
+        // its first checkpoint, after any wait for room.
+        if (!platform.sandboxResumable(isolation!)) {
+          step.holding = held;
+          save();
+        }
+        try {
+          return await runIsolated(a);
+        } finally {
+          // Saved now: the clean-up after an attempt (the log drain, the
+          // lease, publishing) can take a while, and the sandbox is gone.
+          step.holding = null;
+          save();
+        }
       };
       let attemptFrom = step.events.length;
       let outcome = await runTracked(firstArgs);
@@ -3359,7 +3378,7 @@ async function runStep(
       // from the record, never from what the config says at billing time.
       step.size = size;
       if (hasOverride(asked.value)) step.resources = asked.value;
-      step.reserved = { cpus: Number(limits.cpus) || 2, memGiB: memoryGiB(limits.memory) };
+      step.reserved = held;
     } else {
       // Same withholding as the sandbox path — the in-process step is what
       // `foldrun run --test` drives on a laptop, where there is no proxy

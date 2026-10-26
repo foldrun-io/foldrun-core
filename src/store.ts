@@ -3537,6 +3537,10 @@ export interface StepRecord {
    *  why `reserved` differs from the class's figures. Absent before 26 Oct
    *  2026 and on steps of an agent that wrote none. */
   resources?: { cpu?: number; memory?: string; disk?: string };
+  /** What the step's sandbox holds while it exists — set once it is past
+   *  the room gate, cleared when the attempt ends. What an account's
+   *  compute in use sums; `reserved` is the bill's record of the same. */
+  holding?: { cpus: number; memGiB: number } | null;
   /** Token counts behind costUsd, kept so usage reports can say "how many"
    *  and not only "how much" — the price of a token changes, the count is
    *  the fact. Absent on steps recorded before this existed. */

@@ -111,6 +111,9 @@ test("values: what does nothing is reported, every alias and well-formed value i
   assert.match(frontmatterProblems("flow", { language: "en" }, nearestField)[0]!.message, /read in an agent or AGENTS\.md, not in a flow/);
   assert.deepEqual(p("tool", { transport: "HTTP", methods: "GET,POST", rate: "10/m" }), []);
   assert.deepEqual(p("agents-md", { budget: "50/month", priority: "high", concurrency: 2, model: "max" }), ["config/unknown-field model"]);
+  assert.deepEqual(p("agents-md", { compute: { vcpu: 4, memory: "8Gi" } }), []);
+  assert.deepEqual(p("agents-md", configMatter("---\ngovernance:\n  compute: { vcpu: 2 }\n---\n").data), [], "a governance field");
+  assert.deepEqual(p("agents-md", { compute: { vcpu: "many" } }), ["config/invalid-value compute"]);
   assert.deepEqual(p("skill", { name: "s" }), ["config/missing-field description"]);
   // Fields another function validates are left to it: no second message.
   assert.deepEqual(p("agent", { network: "wideopen", timezone: "Mars/Base", limits: { calls: "lots" } }), []);

@@ -108,3 +108,44 @@ export function resourcesProblem(v: unknown): string | null {
 export function hasOverride(o: ResourceOverride | null | undefined): o is ResourceOverride {
   return !!o && (o.cpu !== undefined || o.memory !== undefined || o.disk !== undefined);
 }
+
+/** An account's own `compute:` in AGENTS.md — the most its running steps may
+ *  hold together. It can only lower what the plan or install allows
+ *  (platform limits.ts accountCompute); here it is only read:
+ *
+ *    compute: { vcpu: 4, memory: 8Gi }
+ */
+export interface ComputeAsk {
+  vcpu?: number;
+  memGiB?: number;
+}
+
+export function readCompute(raw: unknown): { value: ComputeAsk; problems: string[] } {
+  const value: ComputeAsk = {};
+  const problems: string[] = [];
+  if (raw === undefined || raw === null) return { value, problems };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { value, problems: [`is ${shown(raw)}, not a map — write {vcpu: 4, memory: 8Gi}`] };
+  }
+  const r = raw as Record<string, unknown>;
+  for (const k of Object.keys(r)) {
+    if (k !== "vcpu" && k !== "memory") problems.push(`\`${k}\` is not vcpu or memory — it is ignored`);
+  }
+  if (r.vcpu !== undefined && r.vcpu !== null) {
+    const numeric = typeof r.vcpu === "number" || (typeof r.vcpu === "string" && /^\s*\d+(\.\d+)?\s*$/.test(r.vcpu));
+    const n = numeric ? Number(r.vcpu) : NaN;
+    if (!Number.isFinite(n) || n < 0.5 || Math.round(n * 2) !== n * 2) problems.push(`vcpu: ${shown(r.vcpu)} is not a number of cores, 0.5 or more in halves`);
+    else value.vcpu = n;
+  }
+  if (r.memory !== undefined && r.memory !== null) {
+    const mi = quantityMi(r.memory);
+    if (!Number.isFinite(mi) || mi < 256) problems.push(`memory: ${shown(r.memory)} is not a size of 256Mi or more — write 8Gi`);
+    else value.memGiB = mi / 1024;
+  }
+  return { value, problems };
+}
+
+export function computeProblem(v: unknown): string | null {
+  const { problems } = readCompute(v);
+  return problems.length ? problems.join("; ") : null;
+}
