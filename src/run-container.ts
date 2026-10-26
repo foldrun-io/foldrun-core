@@ -1473,6 +1473,17 @@ export function dockerCpus(cpus: string, available: number = engineCpus()): stri
   return String(Math.min(n, available));
 }
 
+/** The cores a step's sandbox actually holds, for its record (the bill and
+ *  the compute in use): the asked-for figure, except on the docker
+ *  executor, which lowers --cpus to what the engine has (dockerCpus). Until
+ *  26 Oct 2026 the record said heavy's 4 on a two-core machine that gave 2. */
+export function heldCores(cpus: string, isolation: string | undefined, available?: number): number {
+  const asked = Number(cpus) || 2;
+  if (isolation !== "container") return asked;
+  const given = Number(available === undefined ? dockerCpus(cpus) : dockerCpus(cpus, available));
+  return Number.isFinite(given) && given > 0 ? given : asked;
+}
+
 export interface RunInContainerArgs {
   workspaceRoot: string;
   libraryRoot: string;

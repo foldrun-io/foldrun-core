@@ -19,7 +19,7 @@ import { cascadeLimits, toolOwners } from "./limits.ts";
 import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
-import { runStepInContainer, resolveResources, memoryGiB, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, type StepTiming } from "./run-container.ts";
 import { readResources, hasOverride } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
@@ -2322,7 +2322,7 @@ async function runStep(
     const limits = resolveResources(size, asked.value, { atLeastClass: !!step.sizeUp });
     // What the sandbox holds while it exists — `step.holding`, what the
     // account's compute in use sums (Settings, `foldrun usage compute`).
-    const held = { cpus: Number(limits.cpus) || 2, memGiB: memoryGiB(limits.memory) };
+    const held = { cpus: heldCores(limits.cpus, process.env.FOLDRUN_RUN_ISOLATION), memGiB: memoryGiB(limits.memory) };
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
