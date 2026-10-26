@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dockerCpus, dockerMemory, sizeLimits, resolveResources, memoryGiB } from "../src/run-container.ts";
-import { readResources, resourcesProblem, quantityMi, anyMemoryMi, hasOverride } from "../src/resources.ts";
+import { readResources, resourcesProblem, quantityMi, anyMemoryMi, hasOverride, readCompute, computeProblem } from "../src/resources.ts";
 
 test("the docker CPU cap is the class's billed cores, no more than the engine has", () => {
   assert.equal(dockerCpus("2", 8), "2");
@@ -122,4 +122,14 @@ test("a class's memory in any spelling an install uses still floors a retry", ()
     if (prev === undefined) delete process.env.FOLDRUN_RUNNER_MEMORY_HEAVY;
     else process.env.FOLDRUN_RUNNER_MEMORY_HEAVY = prev;
   }
+});
+
+test("an account's compute: is read as cores and GiB; anything else is said", () => {
+  assert.deepEqual(readCompute({ vcpu: 4, memory: "8Gi" }), { value: { vcpu: 4, memGiB: 8 }, problems: [] });
+  assert.deepEqual(readCompute({ memory: "1536Mi" }).value, { memGiB: 1.5 });
+  assert.equal(computeProblem(undefined), null);
+  assert.match(computeProblem({ vcpu: 0.2 }) ?? "", /0.5 or more in halves/);
+  assert.match(computeProblem({ memory: 8 }) ?? "", /write 8Gi/);
+  assert.match(computeProblem({ gpus: 1 }) ?? "", /not vcpu or memory/);
+  assert.match(computeProblem("lots") ?? "", /not a map/);
 });

@@ -131,6 +131,7 @@ const AGENTS_MD: FieldSpec[] = [
   { key: "budget", type: ["number", "string"], help: "USD per month, or N/day | N/week | N/month" },
   { key: "priority", type: "string", values: ["high", "normal", "low"], help: "account: where its runs stand in the queue" },
   { key: "concurrency", type: ["number", "string"], help: "account: runs at once" },
+  { key: "compute", type: "object", help: "account: {vcpu, memory} its running steps may hold together — lowers the plan's, never raises it" },
   { key: "alerts", type: "object", validated: true, help: "thresholds that tell notify: — failure_rate (30%), min_runs, credits_day, run_minutes, stale_days, cost_spike, runs_per_hour, new_host" },
   { key: "capture", type: "string", values: ["full", "metadata"], help: "what runs record of each tool call: full (its input and output, secrets masked) or metadata (name, size and time only)" },
   { key: "network_enforce", type: "boolean", help: "true: a site off a step's network: list is refused, not only named in the trace. The account's or the workspace's true is enough" },
@@ -253,7 +254,7 @@ const JOB_FIELDS: Partial<Record<SchemaKind, Partial<Record<Job, readonly string
     observability: ["issues", "sla"],
   },
   "agents-md": {
-    governance: ["owner", "budget", "priority", "concurrency", "deploy_block"],
+    governance: ["owner", "budget", "priority", "concurrency", "compute", "deploy_block"],
     guardrail: ["limits", "network", "network_enforce", "hooks"],
     observability: ["alerts", "telemetry", "notify", "capture"],
     evaluation: ["judge"],

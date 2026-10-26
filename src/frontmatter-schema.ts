@@ -8,7 +8,7 @@ import { resolveEffort, parseDuration, parseInstant, parseRate, STEP_OPTION_KEYS
 import { budgetProblem } from "./budget.ts";
 import { cronProblem } from "./cron.ts";
 import { modelSecretCollision } from "./model-credential.ts";
-import { resourcesProblem } from "./resources.ts";
+import { resourcesProblem, computeProblem } from "./resources.ts";
 
 export { FRONTMATTER, schemaKindOf, type FieldSpec, type FieldType, type SchemaKind } from "./frontmatter-fields.ts";
 
@@ -40,6 +40,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
   "agents-md": {
     budget: (v) => budgetProblem(v, ["day", "week", "month"]),
     concurrency: (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? null : `${String(v)} is not a whole number of runs, 1 or more`),
+    compute: computeProblem,
   },
   "flow": {
     schedule: cronProblem,
