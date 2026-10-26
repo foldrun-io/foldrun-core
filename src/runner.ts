@@ -2372,6 +2372,24 @@ async function runStep(
         return;
       }
     }
+    // A step in core's own Docker container (self-hosting) has no machine
+    // login to fall back to: with no credential at all it could only fail at
+    // the model, with Claude Code's own "Not logged in · Please run /login".
+    // Refused here, before a sandbox is rented, saying what to set (a
+    // self-hosted install with no key, 26 Oct 2026). A local `foldrun run`
+    // keeps the machine's login; a registered executor brings its own.
+    if (credential?.kind === "none" && process.env.FOLDRUN_RUN_ISOLATION === "container") {
+      push(
+        "error",
+        "no model credential: this install has none and the account has no key of its own. Set ANTHROPIC_API_KEY " +
+          "(or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) in the platform's environment — for Docker Compose, " +
+          "self-hosting/.env, then `docker compose up -d` — or add the account's key in Settings → Model " +
+          "(`foldrun account model set <provider> --key …`)",
+      );
+      step.status = "failed";
+      save();
+      return;
+    }
     for (const w of providerWarnings) push("error", w);
     // A level that wrote a language nobody can read was skipped, not obeyed.
     for (const l of language.lines) push("info", l);

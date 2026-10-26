@@ -695,3 +695,16 @@ test("the driver written into the runner image is plain JS node can load (a TS c
   fs.rmSync(dir, { recursive: true, force: true });
   assert.equal(r.status, 0, r.stderr);
 });
+
+test("buildFailureSummary names a full Docker disk first, with apt's own E: line", () => {
+  const log = [
+    "Need to get 51.2 MB of archives.",
+    "E: You don't have enough free space in /var/cache/apt/archives/.",
+    "The command '/bin/sh -c apt-get update && apt-get install -y xvfb' returned a non-zero code: 100",
+  ].join("\n");
+  const lines = buildFailureSummary(log).split("\n");
+  assert.match(lines[0], /the Docker disk is full/);
+  assert.ok(lines.some((l) => /E: You don't have enough free space/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /returned a non-zero code: 100/.test(l)));
+  assert.doesNotMatch(buildFailureSummary(log), /no engine or ERROR line/);
+});
