@@ -2107,7 +2107,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     // A header name is case-insensitive on the wire; a JSON field is not.
     // `body:eventId` lower-cased to `body:eventid` matched nothing, and a
     // dedupe that matches nothing admits everything.
-    idempotency: typeof data.idempotency === "string" ? idempotencyName(data.idempotency) : null,
+    idempotency: idempotencyOf(data.idempotency, data.trigger, data.signature),
     debounce: durationOf(data.debounce),
     throttle: durationOf(data.throttle),
     catchup: data.catchup === "none" || data.catchup === "last" ? data.catchup : null,
@@ -2142,6 +2142,19 @@ export function parseSchemaText(text: string): { schema: Record<string, unknown>
     return { problem: "a schema is a JSON object (type, properties, required, …)" };
   }
   return { schema: value as Record<string, unknown> };
+}
+
+/**
+ * The flow's `idempotency:`, or its default. A GitHub-signed webhook dedupes
+ * on `x-github-delivery` unless it says otherwise: GitHub's signature has no
+ * timestamp, so a delivery captured once could be replayed for ever, and
+ * every GitHub delivery carries that id (FOL-94). Any `idempotency:` the
+ * file sets wins; `none` (or `false`, `off`) turns dedupe off.
+ */
+function idempotencyOf(raw: unknown, trigger: unknown, signature: unknown): string | null {
+  if (raw === false || (typeof raw === "string" && /^(none|off|false)$/i.test(raw.trim()))) return null;
+  if (typeof raw === "string") return idempotencyName(raw);
+  return trigger === "webhook" && String(signature) === "github" ? "x-github-delivery" : null;
 }
 
 function idempotencyName(raw: string): string | null {
