@@ -261,6 +261,7 @@ test("a container step with no model credential anywhere is refused before a san
       const texts = done.steps[0].events.map((e) => e.text).join("\n");
       assert.match(texts, /no model credential: .*ANTHROPIC_API_KEY.*self-hosting\/\.env.*Settings → Model/, texts);
       assert.equal(done.steps[0].credential, "none set");
+      assert.doesNotMatch(texts, /fall back to whatever login/, "no machine login to fall back to in a container");
     } finally {
       for (const [k, v] of [["ANTHROPIC_API_KEY", saved.key], ["CLAUDE_CODE_OAUTH_TOKEN", saved.oauth], ["ANTHROPIC_AUTH_TOKEN", saved.auth]] as const) {
         if (v === undefined) delete process.env[k];

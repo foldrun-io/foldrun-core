@@ -2345,7 +2345,10 @@ async function runStep(
     const noKey = !providerLabel && !platform.platformKeyAllowed(tenant);
     const credential = providerLabel || noKey ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
     step.credential = credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
-    if (credential) {
+    // Core's own Docker container has no login to fall back to (below):
+    // there, "none set" is refused with what to do, not described.
+    const noCredentialInContainer = credential?.kind === "none" && process.env.FOLDRUN_RUN_ISOLATION === "container";
+    if (credential && !noCredentialInContainer) {
       const line = credentialLine(credential);
       push(line.type, line.text);
     }
@@ -2378,7 +2381,7 @@ async function runStep(
     // Refused here, before a sandbox is rented, saying what to set (a
     // self-hosted install with no key, 26 Oct 2026). A local `foldrun run`
     // keeps the machine's login; a registered executor brings its own.
-    if (credential?.kind === "none" && process.env.FOLDRUN_RUN_ISOLATION === "container") {
+    if (noCredentialInContainer) {
       push(
         "error",
         "no model credential: this install has none and the account has no key of its own. Set ANTHROPIC_API_KEY " +
