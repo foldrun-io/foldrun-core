@@ -17,6 +17,7 @@ import { FLOW_TRIGGERS, EFFORT_LEVELS } from "../src/frontmatter-fields.ts";
 import { completionsAt, type Vocabulary } from "../src/completions.ts";
 import { cronProblem, parseCron } from "../src/cron.ts";
 import { nearestField } from "../src/scan.ts";
+import { configMatter } from "../src/matter.ts";
 
 const src = (f: string) => fs.readFileSync(path.join(import.meta.dirname, "..", "src", f), "utf8");
 const keys = (kind: SchemaKind) => new Set(FRONTMATTER[kind].map((f) => f.key));
@@ -97,6 +98,10 @@ test("values: what does nothing is reported, every alias and well-formed value i
     "config/invalid-value effort", "config/invalid-value size", "config/invalid-value permissionMode", "config/invalid-value ask",
   ]);
   assert.deepEqual(p("agent", { tools: { web: true }, model: ["max"] }), ["config/wrong-type tools", "config/wrong-type model"]);
+  assert.deepEqual(p("agent", { size: "large", resources: { cpu: 2, memory: "4Gi", disk: "10Gi" } }), []);
+  assert.deepEqual(p("agent", configMatter("---\nguardrail:\n  resources: { memory: 1536Mi }\n---\n").data), [], "a guardrail field");
+  assert.deepEqual(p("agent", { resources: { cpu: "fast" } }), ["config/invalid-value resources"]);
+  assert.deepEqual(p("agent", { resources: "big" }), ["config/wrong-type resources"]);
   assert.deepEqual(p("agent", { apis: [{ name: "crm", base: "https://x", methods: ["GET", "FETCH"] }] }), ["config/invalid-value apis"]);
   assert.deepEqual(p("flow", { trigger: "schedule", schedule: "@daily", every: "15m", disable_after: 3, live: true, at: "2026-11-01T09:00:00Z" }), []);
   assert.deepEqual(p("flow", { trigger: "sometimes", schedule: "every day", debounce: "soon", disable_after: 500 }), [

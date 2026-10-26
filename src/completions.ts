@@ -143,6 +143,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "skills", insert: "skills:\n  - ", hint: "allowlist; omit to inherit all" },
     { label: "scripts", insert: "scripts:\n  - name: \n    run: \n    description: " },
     { label: "runtime", insert: "runtime:\n  python: \"3\"\n  packages: []" },
+    { label: "resources", insert: "resources:\n  cpu: 2\n  memory: 4Gi", hint: "cores, memory and disk in numbers, over the size class's" },
     { label: "mcpServers", insert: "mcpServers:\n  " },
     { label: "ask", insert: "ask:\n  timeout: 30m", hint: "tools: [ask] — how long ask_person waits for a person (max 24h)" },
     { label: "permissionMode", insert: "permissionMode: plan", hint: "plan = read-only" },

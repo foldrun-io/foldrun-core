@@ -8,6 +8,7 @@ import { resolveEffort, parseDuration, parseInstant, parseRate, STEP_OPTION_KEYS
 import { budgetProblem } from "./budget.ts";
 import { cronProblem } from "./cron.ts";
 import { modelSecretCollision } from "./model-credential.ts";
+import { resourcesProblem } from "./resources.ts";
 
 export { FRONTMATTER, schemaKindOf, type FieldSpec, type FieldType, type SchemaKind } from "./frontmatter-fields.ts";
 
@@ -33,6 +34,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
     apis: apisProblem,
     budget: (v) => budgetProblem(v, ["run"]),
     ask: (v) => askProblem(v),
+    resources: resourcesProblem,
     secrets: modelSecretCollision,
   },
   "agents-md": {

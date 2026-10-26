@@ -79,6 +79,7 @@ const AGENT: FieldSpec[] = [
   { key: "model", type: "string", help: "fast | default | max, an alias, or a full model id" },
   { key: "effort", type: "string", values: EFFORT_LEVELS, help: "how long it thinks" },
   { key: "size", type: "string", values: ["small", "large", "heavy"], help: "the sandbox it rents; anything else becomes large" },
+  { key: "resources", type: "object", help: "{cpu, memory, disk} in numbers, over the size class's figures key by key — cpu 0.5–8, memory 256Mi–16Gi, disk 1–40Gi" },
   { key: "permissionMode", type: "string", values: ["plan"], help: "plan = read-only; no other mode changes anything here" },
   { key: "tools", type: ["list", "string"], help: "the one grant list" },
   { key: "disallowedTools", type: ["list", "string"], help: "subtract from what it would otherwise have" },
@@ -244,7 +245,7 @@ const SAID_WHAT_IT_IS: FieldSpec[] = [
 const JOB_FIELDS: Partial<Record<SchemaKind, Partial<Record<Job, readonly string[]>>>> = {
   agent: {
     governance: ["owner", "budget"],
-    guardrail: ["limits", "network", "hooks", "disallowedTools", "permissionMode", "secrets", "sandbox"],
+    guardrail: ["limits", "network", "hooks", "disallowedTools", "permissionMode", "secrets", "sandbox", "resources"],
   },
   flow: {
     governance: ["owner", "approvers", "approve_within", "budget", "priority"],
