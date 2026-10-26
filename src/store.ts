@@ -3557,6 +3557,9 @@ export interface StepRecord {
   actual?: {
     busyCpuSecs: number | null;
     peakMemBytes: number | null;
+    /** Seconds the CPU cap (the class's cores) held the sandbox back, from
+     *  cpu.stat. Absent before 26 Oct 2026. */
+    throttledSecs?: number | null;
     rxBytes: number | null;
     txBytes: number | null;
   } | null;

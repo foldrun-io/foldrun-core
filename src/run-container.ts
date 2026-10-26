@@ -181,6 +181,8 @@ export function parseDriverMark(line: string): { name: StartupPhase; at: number 
 export interface StepActuals {
   busyCpuSecs: number | null;
   peakMemBytes: number | null;
+  /** Seconds the CPU cap held the sandbox back. Absent before 26 Oct 2026. */
+  throttledSecs?: number | null;
   rxBytes: number | null;
   txBytes: number | null;
 }
@@ -619,6 +621,11 @@ function readActuals() {
   const cpuStat = read("/sys/fs/cgroup/cpu.stat");
   const usage = cpuStat?.match(/^usage_usec (\\d+)/m);
   const cpuacctNs = usage ? NaN : Number(read("/sys/fs/cgroup/cpuacct/cpuacct.usage")?.trim());
+  // Time the CPU cap held the sandbox back: v2's throttled_usec in the same
+  // cpu.stat, v1's throttled_time (nanoseconds) under gVisor. Large against
+  // busy time means the step wanted more cores than its class gives.
+  const throttledUs = cpuStat?.match(/^throttled_usec (\\d+)/m);
+  const throttledNs = throttledUs ? null : read("/sys/fs/cgroup/cpu/cpu.stat")?.match(/^throttled_time (\\d+)/m);
   const peak =
     read("/sys/fs/cgroup/memory.peak") ??
     read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes") ??
@@ -638,6 +645,7 @@ function readActuals() {
         ? cpuacctNs / 1e9
         : null,
     peakMemBytes: peak ? Number(peak.trim()) || null : null,
+    throttledSecs: throttledUs ? Number(throttledUs[1]) / 1e6 : throttledNs ? Number(throttledNs[1]) / 1e9 : null,
     rxBytes: sawNet ? rx : null,
     txBytes: sawNet ? tx : null,
   };
@@ -1378,6 +1386,8 @@ export function parseDriverLine(
             ? {
                 busyCpuSecs: typeof parsed.res.busyCpuSecs === "number" ? parsed.res.busyCpuSecs : null,
                 peakMemBytes: typeof parsed.res.peakMemBytes === "number" ? parsed.res.peakMemBytes : null,
+                // A driver from before 26 Oct 2026 sends none: unknown, not zero.
+                throttledSecs: typeof parsed.res.throttledSecs === "number" ? parsed.res.throttledSecs : null,
                 rxBytes: typeof parsed.res.rxBytes === "number" ? parsed.res.rxBytes : null,
                 txBytes: typeof parsed.res.txBytes === "number" ? parsed.res.txBytes : null,
               }
@@ -1412,6 +1422,30 @@ function ensureRunNetwork(): string {
     );
   }
   return RUN_NETWORK;
+}
+
+// The cores the container engine can hand out, asked once. `--cpus` above it
+// is refused outright ("range of CPUs is from 0.01 to N"), so a heavy step
+// on a two-core server would fail before it began. The engine may be a VM
+// (Docker Desktop) with fewer cores than this machine, which is why it is
+// asked rather than read from os; podman answers a different template, and
+// an engine that does not answer falls back to this machine's count.
+let engineCpuCount: number | null = null;
+function engineCpus(): number {
+  if (engineCpuCount !== null) return engineCpuCount;
+  const out = spawnSync(cli(), ["info", "--format", "{{.NCPU}}"], { encoding: "utf8", timeout: 10_000 });
+  const n = Number((out.stdout ?? "").trim());
+  engineCpuCount = Number.isInteger(n) && n > 0 ? n : os.availableParallelism();
+  return engineCpuCount;
+}
+
+/** The `--cpus` a step's container gets: its class's billed cores, no more
+ *  than the engine has. Null when the figure is not a number, so the flag is
+ *  left off rather than failing the step on an install's typo. */
+export function dockerCpus(cpus: string, available: number = engineCpus()): string | null {
+  const n = Number(cpus);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return String(Math.min(n, available));
 }
 
 export interface RunInContainerArgs {
@@ -1579,8 +1613,8 @@ export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; 
     // For steps that render a browser or hold real data. The memory figure is
     // a hard ceiling (memory is not compressible — over it, the kernel OOM-kills
     // the pod, which on a single-box install can take neighbours with it). The
-    // cpus figure is a billing weight, not a ceiling: on k8s the pod bursts CPU
-    // freely, and this is the rate its seconds are priced at.
+    // cpus figure is both the rate its seconds are priced at and, since
+    // 26 Oct 2026, the cores the sandbox is capped at.
     return {
       cpus: process.env.FOLDRUN_RUNNER_CPUS_HEAVY ?? "4",
       memory: process.env.FOLDRUN_RUNNER_MEMORY_HEAVY ?? "8Gi",
@@ -1654,6 +1688,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       { mode: 0o600 },
     );
 
+    const cpus = dockerCpus(sizeLimits(args.size).cpus);
     const flags = [
       "--security-opt", "no-new-privileges",
       ...(args.runId ? ["--label", `${RUN_LABEL}=${args.runId}`] : []),
@@ -1663,10 +1698,11 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID",
       "--pids-limit", "512",
       // Memory is a hard ceiling (not compressible — an OOM protects the host).
-      // CPU is deliberately NOT capped, matching the k8s path: a cap only
-      // throttles work the customer pays for, and the tier's cpu figure is a
-      // billing weight, applied in usage.ts, not a docker --cpus limit here.
+      // CPU is capped at the class's billed cores, matching the k8s path
+      // (since 26 Oct 2026): a step runs on what it pays for and cannot take
+      // the whole machine from the steps beside it.
       "--memory", dockerMemory(sizeLimits(args.size).memory),
+      ...(cpus ? ["--cpus", cpus] : []),
       "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag

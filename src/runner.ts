@@ -1296,9 +1296,10 @@ export function agentContext(
   // is large — the install's configured limits — so existing agents change
   // nothing. `size: small` is the opt-in for agents that wait on APIs more
   // than they work; `size: heavy` for a rendered browser or real data in
-  // memory. Memory is a hard ceiling per class; CPU bursts uncapped and bills
-  // at the class rate, so heavy both may use more and costs more. The actuals
-  // line in any trace is the evidence for right-sizing.
+  // memory. Memory and cores are hard ceilings per class and bill at the
+  // class rate (cores capped since 26 Oct 2026), so heavy both may use more
+  // and costs more. The actuals line in any trace — busy, throttled, peak —
+  // is the evidence for right-sizing.
   const size: "small" | "large" | "heavy" =
     front.size === "small" ? "small" : front.size === "heavy" ? "heavy" : "large";
 
@@ -3327,6 +3328,7 @@ async function runStep(
         push(
           "info",
           `resources: cpu busy ${outcome.res.busyCpuSecs?.toFixed(1) ?? "?"}s · ` +
+            (outcome.res.throttledSecs ? `throttled ${outcome.res.throttledSecs.toFixed(1)}s · ` : "") +
             `peak mem ${mb(outcome.res.peakMemBytes)}MB · ` +
             `net ${mb(outcome.res.rxBytes)}MB in / ${mb(outcome.res.txBytes)}MB out`,
         );
