@@ -165,7 +165,11 @@ test("the driver's resource reading survives the boundary, nulls intact", () => 
     // A metric the sandbox couldn't read stays null — never zero, which
     // would claim "measured: nothing" where the truth is "not measured".
     txBytes: null,
+    // A driver from before throttling was read sends none: unknown too.
+    throttledSecs: null,
   });
+  const now = parseDriverLine('{"e":"done","status":"completed","result":"out","res":{"busyCpuSecs":30,"throttledSecs":4.5}}');
+  assert.equal((now as { res?: { throttledSecs?: number } }).res?.throttledSecs, 4.5);
 });
 
 test("a file the step never touched is not written back over a concurrent edit", () => {
