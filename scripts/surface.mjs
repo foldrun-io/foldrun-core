@@ -130,14 +130,45 @@ export function statements(text) {
       continue;
     }
     const top = /^[^\s})\]>|&.,:?]/.test(line);
+    // A trailing `// note` is not the declaration: flattened to one line it
+    // would swallow the members after it (27 Oct 2026). A `//` with space on
+    // both sides only — never the one inside "https://…".
     if (top) {
-      if (cur != null) out.push(cur);
+      if (cur != null) out.push(stripComments(cur));
       cur = { text: line, deprecated: /@deprecated\b/.test(comment) };
     } else if (cur != null) cur.text += "\n" + line;
     if (line.trim()) comment = "";
   }
-  if (cur != null) out.push(cur);
+  if (cur != null) out.push(stripComments(cur));
   return out;
+}
+
+/** A statement without its `// notes` — a `//` outside any string or
+ *  template literal, string state carried across lines, so a multi-line
+ *  template literal keeps its `//` (Codex review). Flattened to one line, a
+ *  kept comment would swallow the members after it (27 Oct 2026). */
+function stripComments(st) {
+  const t = st.text;
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (quote) {
+      out += ch;
+      if (ch === "\\" && i + 1 < t.length) out += t[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "/" && t[i + 1] === "/" && (i === 0 || /\s/.test(t[i - 1]))) {
+      while (i < t.length && t[i] !== "\n") i++;
+      out = out.replace(/[ \t]+$/, "");
+      if (i < t.length) out += "\n";
+      continue;
+    }
+    out += ch;
+  }
+  return { ...st, text: out };
 }
 
 /** One exported declaration: its name and what a caller depends on. */

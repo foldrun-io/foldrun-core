@@ -37,6 +37,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  actions: write
 
 concurrency:
   group: release
@@ -65,6 +66,12 @@ jobs:
           elif git rev-parse -q --verify "refs/tags/v$pkg" >/dev/null; then
             echo "v$pkg is already tagged — nothing to release"
             echo "go=false" >> "$GITHUB_OUTPUT"
+            # Tagged but with no GitHub release (that step failed last time):
+            # repair it here, or no later run ever would (Codex review).
+            if ! GH_TOKEN="${{ github.token }}" gh release view "v$pkg" >/dev/null 2>&1; then
+              echo "v$pkg has no GitHub release — making it"
+              echo "repair=v$pkg" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           else
             v="$pkg"
@@ -74,6 +81,18 @@ jobs:
           if npm view "$name@$v" version --prefer-online >/dev/null 2>&1; then
             echo "$name@$v is already on npm — tag only"
             echo "published=true" >> "$GITHUB_OUTPUT"
+            # Tag the commit npm shipped, not whatever main is now: a run
+            # that published then failed to tag leaves the next push to tag
+            # (Codex review — it tagged the newer commit). npm records the
+            # commit as gitHead; without it, refuse rather than guess.
+            if [ "$GITHUB_REF_TYPE" = "branch" ]; then
+              shipped="$(npm view "$name@$v" gitHead --prefer-online 2>/dev/null || true)"
+              if [ -z "$shipped" ] || ! git cat-file -e "$shipped^{commit}" 2>/dev/null; then
+                echo "$name@$v is on npm, but npm does not say which commit it came from — tag it by hand: git tag -a v$v <commit>"
+                exit 1
+              fi
+              echo "tagsha=$shipped" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
@@ -127,10 +146,12 @@ jobs:
         if: steps.what.outputs.go == 'true' && github.ref_type == 'branch'
         env:
           V: ${{ steps.what.outputs.version }}
+          TAGSHA: ${{ steps.what.outputs.tagsha }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$V" -m "$(node -p "require('./package.json').name") $V"
+          # The commit npm shipped when this run only tags; else this one.
+          git tag -a "v$V" -m "$(node -p "require('./package.json').name") $V" "${TAGSHA:-HEAD}"
           # Without the repository's git hooks: `npm ci`/`npm install` ran
           # `prepare`, which installs the pre-push hook meant for a laptop.
           # Its checks are the steps above, already passed for this commit;
@@ -180,3 +201,25 @@ jobs:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           V: ${{ steps.what.outputs.version }}
         run: gh api repos/foldrun-io/foldrun-cli/dispatches -f event_type=core-released -f "client_payload[version]=$V"
+
+      # A tag with no GitHub release: make the release from the changelog.
+      - name: repair a missing GitHub release
+        if: steps.what.outputs.repair != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          T: ${{ steps.what.outputs.repair }}
+        run: |
+          v="${T#v}"
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" { on = 1; next } on && /^## \[/ { exit } on { print }' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || echo "See CHANGELOG.md." > RELEASE_NOTES.md
+          pre=""; case "$v" in *-*) pre="--prerelease" ;; esac
+          gh release create "$T" --verify-tag --title "$T" --notes-file RELEASE_NOTES.md $pre
+
+      # Whatever landed on main while this published was skipped by
+      # release-pr.yml ("a release in flight"): draft it now (Codex review).
+      - name: draft what came after
+        if: steps.what.outputs.go == 'true' && github.ref_type == 'branch'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release-pr.yml --ref main
