@@ -178,31 +178,32 @@ test("a file the step never touched is not written back over a concurrent edit",
   // edited on the host while the step ran, differs — so it was written back
   // from the container's stale copy and the edit vanished. On 2026-09-03 a
   // tool.md fixed mid-run was reverted eight minutes later by a step that had
-  // never read it.
+  // never read it. (A data folder here: tools/ is configuration, never taken
+  // back at all since FOL-96.)
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-back-"));
   const host = path.join(base, "host");
   const handed = path.join(base, "in");
   const out = path.join(base, "out");
-  for (const d of [host, handed, out]) fs.mkdirSync(path.join(d, "tools"), { recursive: true });
+  for (const d of [host, handed, out]) fs.mkdirSync(path.join(d, "storage"), { recursive: true });
 
   // Handed to the container, and returned unchanged by the step.
-  fs.writeFileSync(path.join(handed, "tools/a.md"), "original\n");
-  fs.writeFileSync(path.join(out, "tools/a.md"), "original\n");
+  fs.writeFileSync(path.join(handed, "storage/a.md"), "original\n");
+  fs.writeFileSync(path.join(out, "storage/a.md"), "original\n");
   // Meanwhile a person fixed it on the host.
-  fs.writeFileSync(path.join(host, "tools/a.md"), "the fix\n");
+  fs.writeFileSync(path.join(host, "storage/a.md"), "the fix\n");
 
   // And a file the step genuinely wrote.
-  fs.writeFileSync(path.join(handed, "tools/b.md"), "before\n");
-  fs.writeFileSync(path.join(out, "tools/b.md"), "after the step\n");
-  fs.writeFileSync(path.join(host, "tools/b.md"), "before\n");
+  fs.writeFileSync(path.join(handed, "storage/b.md"), "before\n");
+  fs.writeFileSync(path.join(out, "storage/b.md"), "after the step\n");
+  fs.writeFileSync(path.join(host, "storage/b.md"), "before\n");
 
   const applied = applyContainerChanges(host, out, handed);
 
-  assert.equal(fs.readFileSync(path.join(host, "tools/a.md"), "utf8"), "the fix\n",
+  assert.equal(fs.readFileSync(path.join(host, "storage/a.md"), "utf8"), "the fix\n",
     "the concurrent edit was overwritten by the container's stale copy");
-  assert.equal(fs.readFileSync(path.join(host, "tools/b.md"), "utf8"), "after the step\n",
+  assert.equal(fs.readFileSync(path.join(host, "storage/b.md"), "utf8"), "after the step\n",
     "a file the step really changed must still come back");
-  assert.deepEqual(applied, ["tools/b.md"]);
+  assert.deepEqual(applied, ["storage/b.md"]);
 
   fs.rmSync(base, { recursive: true, force: true });
 });

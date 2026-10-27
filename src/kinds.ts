@@ -55,6 +55,20 @@ export type Kind =
 // question each answers rather than the alphabet, and a consistency test
 // holds the sidebar and the asset pages to it.
 
+/** How a run's write to a kind's files is treated on the way back. */
+export type CopyBackClass = "config" | "code" | "data";
+
+/** Workspace files that are configuration without being a kind: the shared
+ *  context and its pre-rename name. */
+export const WORKSPACE_CONFIG_FILES = ["AGENTS.md", "project.md"] as const;
+
+// Where single-file subagents authored by other tools are found, in
+// precedence order: the vendor-neutral cross-client location first, then any
+// tool-specific one for pragmatic compatibility. Extend the tail, never the
+// head. Shared by the deploy import (deploy.ts readTree), the CLI checker
+// and the copy-back rule, so all three agree on what counts as an agent.
+export const SUBAGENT_IMPORT_DIRS = [".agents/agents", ".claude/agents"] as const;
+
 export interface KindMeta {
   kind: Kind;
   /** Singular noun, for buttons and prose. */
@@ -77,6 +91,14 @@ export interface KindMeta {
   hint: string;
   /** Path relative to the scope root. */
   file: (name: string) => string;
+  /**
+   * What a run's sandbox writing one of these means (copy-back.ts):
+   * `config` grants or changes what runs and how, `code` is something a
+   * later step executes — neither is ever taken back from a step, which
+   * proposes the change instead — and `data` is what steps legitimately
+   * write. Required, so a new kind cannot become copy-back-able unnoticed.
+   */
+  copyBack: CopyBackClass;
   /** Starting content. */
   template: (name: string, ctx?: TemplateContext) => string;
 }
@@ -105,6 +127,7 @@ const titleCase = (slug: string) => {
 export const KINDS: Record<Kind, KindMeta> = {
   agents: {
     kind: "agents",
+    copyBack: "config",
     one: "agent",
     docType: null,
     docKey: null,
@@ -129,6 +152,7 @@ this text is the whole of the agent's instructions.
 
   evals: {
     kind: "evals",
+    copyBack: "config",
     one: "eval",
     docType: null,
     docKey: null,
@@ -152,6 +176,7 @@ expect:
 
   flows: {
     kind: "flows",
+    copyBack: "config",
     one: "flow",
     docType: null,
     docKey: null,
@@ -171,6 +196,7 @@ trigger: manual
 
   tools: {
     kind: "tools",
+    copyBack: "config",
     one: "tool",
     docType: null,
     docKey: null,
@@ -198,6 +224,7 @@ tools: [${name}]
 
   hooks: {
     kind: "hooks",
+    copyBack: "code",
     one: "hook",
     docType: null,
     docKey: null,
@@ -228,6 +255,7 @@ it reads the event as JSON on stdin and prints one JSON answer —
   // a decision, so the sidebar has no door for it.
   knowledge: {
     kind: "knowledge",
+    copyBack: "data",
     one: "knowledge doc",
     docType: "Reference",
     // OKF's field and OKF's vocabulary — `Reference` is only the starting point.
@@ -250,6 +278,7 @@ The reference content. Agents read this and never rewrite it.
 
   memory: {
     kind: "memory",
+    copyBack: "data",
     one: "memory",
     docType: "Fact",
     // OKF's field and OKF's vocabulary — `Fact` is only the starting point.
@@ -277,6 +306,7 @@ The fact.
 
   skills: {
     kind: "skills",
+    copyBack: "config",
     one: "skill",
     docType: null,
     docKey: null,
@@ -297,6 +327,7 @@ Step-by-step instructions. Bundle code in this folder's scripts/ if it needs any
 
   scripts: {
     kind: "scripts",
+    copyBack: "code",
     one: "script",
     // Code, not a document — no frontmatter to carry either field. A tool
     // file points at it.

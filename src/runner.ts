@@ -3127,6 +3127,8 @@ async function runStep(
         network: { level: network.level, enforced: forward?.enforce === true },
         // A test run's state/ and storage/ changes come out under the run.
         divert: testRun && runId ? divertFor(runId) : undefined,
+        // Read at copy-out: what the host handed back into the sandbox.
+        handedBack: () => step.handedBack,
         test: testRun,
         // Resume: a sandbox a previous driver left running, recorded on the
         // step. Consumed once — a fresh attempt after this one (a retry, a
@@ -3332,6 +3334,11 @@ async function runStep(
       step.image = outcome.image ?? null;
       step.browserPod = outcome.browserPod ? { ...outcome.browserPod } : null;
       if (step.subagentOf && outcome.applied?.length) step.wrote = [...new Set([...(step.wrote ?? []), ...outcome.applied])];
+      if (outcome.refused?.length) {
+        const seen = new Map((step.refused ?? []).map((r) => [r.path, r]));
+        for (const r of outcome.refused) seen.set(r.path, r);
+        step.refused = [...seen.values()];
+      }
       if (outcome.status === "failed" && outcome.browserPod?.lost) {
         const decision = podLossDecision(outcome.browserPod);
         if (decision.rerun) {
@@ -5241,6 +5248,15 @@ function driveRunInner(
           // Its files go back with the reply, so the delegating step's
           // sandbox has them too (delegate-tools.ts copyBackFiles).
           const back = readCopyBack(pDir, child.wrote ?? []);
+          // What goes back into the parent's sandbox, as the host sends it:
+          // its copy-out reads this, not the sandbox's own note (FOL-96).
+          if (back.files.length) {
+            parent.handedBack = { ...(parent.handedBack ?? {}) };
+            for (const f of back.files) {
+              parent.handedBack[f.path] = crypto.createHash("sha256").update(Buffer.from(f.base64, "base64")).digest("hex");
+            }
+            save();
+          }
           return {
             status,
             result: child.result ?? (errors || "(no reply)"),

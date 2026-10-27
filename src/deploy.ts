@@ -41,6 +41,7 @@ import { libraryTools } from "./library.ts";
 import { lintFlow, regexProblem } from "./flow-lint.ts";
 import { parseEval } from "./evals.ts";
 import { refNames } from "./refs.ts";
+import { SUBAGENT_IMPORT_DIRS } from "./kinds.ts";
 import matter, { configMatter } from "./matter.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
 import { conformanceIssues } from "./okf.ts";
@@ -123,12 +124,9 @@ export interface DeployResult extends DeployPlan {
  * skipped rather than rejected, because a workspace living in a repo alongside
  * other things is the normal case, not an error.
  */
-// Where single-file subagents authored by other tools are found, in
-// precedence order: the vendor-neutral cross-client location first, then any
-// tool-specific one for pragmatic compatibility. Extend the tail, never the
-// head. Shared by the deploy import (readTree) and the CLI checker so the two
-// agree on what counts as an agent.
-export const SUBAGENT_IMPORT_DIRS = [".agents/agents", ".claude/agents"] as const;
+// Where single-file subagents authored by other tools are found — declared
+// with the kinds (kinds.ts), which the copy-back rule reads too.
+export { SUBAGENT_IMPORT_DIRS };
 
 /** What agents write as they run, not what anyone authored: state/ and
  *  memory/, the workspace's or one agent's. */

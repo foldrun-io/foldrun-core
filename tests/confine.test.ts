@@ -120,7 +120,7 @@ test("an ordinary index.md is not collateral damage", () => {
   for (const p of [
     `${ROOTS.agentDir}/outputs/index.md`,
     `${WORKSPACE}/outputs/site/index.md`,
-    `${ROOTS.agentDir}/skills/writing/references/index.md`,
+    `${ROOTS.agentDir}/notes/references/index.md`,
   ]) {
     assert.equal(write(p).ok, true, `${p} should be allowed`);
   }
@@ -367,7 +367,8 @@ test("a write that would grow storage/, state/ or workspace/ inside the agent's 
   assert.equal(write(`${WORKSPACE}/storage/pending-replies.json`).ok, true);
   assert.equal(write(`${ROOTS.agentDir}/workspace/state/ledger.md`).ok, true, "prefix expanded, not refused");
   // What an agent's own folder is for is untouched.
-  for (const p of ["outputs/draft.md", "memory/fact.md", "agent.md", "notes/storage-ideas.md"]) {
+  // (Not agent.md: its own definition is configuration — FOL-96.)
+  for (const p of ["outputs/draft.md", "memory/fact.md", "notes/storage-ideas.md"]) {
     assert.equal(write(`${ROOTS.agentDir}/${p}`).ok, true, p);
   }
   // Reading a stray that already exists is not refused.

@@ -30,6 +30,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { refusedBack } from "./copy-back.ts";
 
 /**
  * A path with its symlinks resolved, as far as it exists.
@@ -319,6 +320,21 @@ export function checkPaths(
           `${toolName} was denied: "${raw}" is generated from the files around it and will be ` +
           `rewritten on the next write. Read it freely — to change what it says, change a ` +
           `concept file instead.`,
+      };
+    }
+
+    // Configuration and code are a person's: the same list a sandbox's
+    // copy-back refuses (copy-back.ts, FOL-96), so a step that runs on this
+    // host, with no sandbox between it and the files, is held to the same
+    // rule by its file tools. Its shell is not confined here — isolation is.
+    const asConfig = isWrite && !inLibrary ? refusedBack(within) : null;
+    if (asConfig) {
+      return {
+        ok: false,
+        reason:
+          `${toolName} was denied: "${raw}" is this workspace's ${asConfig === "config" ? "configuration" : "code"}, ` +
+          `which a run does not change. Say what should change and why in your answer — a person ` +
+          `applies it (or it becomes a Proposed fix). Your own notes go to outputs/ or workspace/memory/.`,
       };
     }
 
