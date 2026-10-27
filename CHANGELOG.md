@@ -13,6 +13,25 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.14.0] — 2026-10-27
+
+### Changed in the public API
+
+Declarations whose shape changed. Check that each still accepts what it did; one that does not is a break, and needs a `!` commit before this merges.
+
+- `FlowInfo` from `@foldrun/core`
+- `StepRecord` from `@foldrun/core`
+- `RunRecord` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+### New in the public API
+
+- `RoomLevel` from `@foldrun/core`
+
+- feat(compute): disk, and compute: for a flow — each run's pool ([7280639](https://github.com/foldrun-io/foldrun-core/commit/7280639))
+- feat(room): a step with no room waits — no time limit — and its run waits in the queue ([df9a801](https://github.com/foldrun-io/foldrun-core/commit/df9a801))
+- fix(resume): the orphan sweep keeps the sandboxes its siblings re-attach to ([23f4ec4](https://github.com/foldrun-io/foldrun-core/commit/23f4ec4))
+
 ## [2.13.1] — 2026-10-26
 
 - fix(run): a docker step's record holds the cores Docker gave it ([debea64](https://github.com/foldrun-io/foldrun-core/commit/debea64))
