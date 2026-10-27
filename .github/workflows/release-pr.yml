@@ -22,6 +22,8 @@ name: release-pr
 on:
   push:
     branches: [main]
+  # release.yml, once a release is tagged: what landed meanwhile.
+  workflow_dispatch:
 
 permissions:
   contents: write

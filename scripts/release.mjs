@@ -63,6 +63,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { changeOf } from "./surface-change.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const git = (...args) =>
@@ -170,7 +171,12 @@ function compareSurfaces(before, after) {
     } else if (b.required != null && a.required != null && a.required > b.required) {
       breaking.push(`${a.what} now needs ${a.required} argument${a.required === 1 ? "" : "s"}, was ${b.required}`);
     } else if (b.kind !== a.kind || (b.sig ?? "") !== (a.sig ?? "")) {
-      changed.push(`${a.what}${b.kind !== a.kind ? ` (was a ${b.kind}, now a ${a.kind})` : ""}`);
+      // Widened only (optional members or trailing parameters added) is a
+      // minor; any other change is a break (surface-change.mjs). Releases
+      // merge themselves, so no person reads this list before they ship.
+      const c = changeOf(b, a);
+      if (c.additive) changed.push(a.what);
+      else breaking.push(`${a.what} — ${c.why}`);
     }
     if (a && a.deprecated && !b.deprecated) deprecated.push(a.what);
   }
@@ -182,7 +188,7 @@ const RANK = { patch: 0, minor: 1, major: 2 };
 
 function inferBump() {
   if (surfaceDiff?.breaking.length || commits.some(MARKED_BREAK)) return "major";
-  if (surfaceDiff?.added.length || surfaceDiff?.deprecated.length || commits.some((c) => !FIXY.test(c.subject))) return "minor";
+  if (surfaceDiff?.added.length || surfaceDiff?.changed.length || surfaceDiff?.deprecated.length || commits.some((c) => !FIXY.test(c.subject))) return "minor";
   return "patch";
 }
 
@@ -288,9 +294,9 @@ const breaks = [...marked, ...(surfaceDiff?.breaking ?? [])];
 if (breaks.length) lines.push("### Breaking changes", "", ...capped(breaks).map((b) => `- ${b}`), "");
 if (surfaceDiff?.changed.length) {
   lines.push(
-    "### Changed in the public API",
+    "### Widened in the public API",
     "",
-    "Declarations whose shape changed. Check that each still accepts what it did; one that does not is a break, and needs a `!` commit before this merges.",
+    "Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).",
     "",
     ...capped(surfaceDiff.changed).map((c) => `- ${c}`),
     "",

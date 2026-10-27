@@ -99,7 +99,7 @@ test("a doc comment with @deprecated marks the declaration under it, and only th
 function repo(version: string, index: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-release-"));
   fs.mkdirSync(path.join(dir, "scripts"));
-  for (const f of ["release.mjs", "surface.mjs"]) fs.copyFileSync(path.join(root, "scripts", f), path.join(dir, "scripts", f));
+  for (const f of ["release.mjs", "surface.mjs", "surface-change.mjs"]) fs.copyFileSync(path.join(root, "scripts", f), path.join(dir, "scripts", f));
   fs.writeFileSync(
     path.join(dir, "package.json"),
     JSON.stringify({ name: "@foldrun/core", version, engines: { node: ">=22" }, foldrun: { publicApi: ["."] } }, null, 2) + "\n",
@@ -169,6 +169,24 @@ test("MAJOR: a function that now needs more arguments is a break; an optional on
   const out = r.release();
   assert.equal(out.next, "2.0.0");
   assert.match(out.out, /`a` from `@foldrun\/core` now needs 2 arguments, was 1/);
+});
+
+// 27 Oct 2026: releases merge themselves, so a changed declaration is
+// judged by the rule (surface-change.mjs), not left for a person.
+test("an interface that only gains an optional member is a minor; a required one, or a retype, is a major", () => {
+  const I = (body: string) => `export interface Run { id: string;${body} }\n`;
+  const r = repo("1.0.0", I(""));
+  r.commit("fix: note", { "index.ts": I(" note?: string;") });
+  const minor = r.release();
+  assert.equal(minor.next, "1.1.0", "widened, even under a fix: commit");
+  assert.match(minor.out, /### Widened in the public API\n[\s\S]*- `Run` from `@foldrun\/core`/);
+  r.commit("fix: owner", { "index.ts": I(" note?: string; owner: string;") });
+  const major = r.release();
+  assert.equal(major.next, "2.0.0");
+  assert.match(major.out, /`Run` from `@foldrun\/core` — owner is new and required/);
+  const r2 = repo("1.0.0", I(" n: number;"));
+  r2.commit("fix: wider n", { "index.ts": I(" n: number | string;") });
+  assert.equal(r2.release().next, "2.0.0", "a retyped member");
 });
 
 test("MAJOR: a behaviour change marked with ! or a BREAKING CHANGE footer; a mention is not a mark", () => {
