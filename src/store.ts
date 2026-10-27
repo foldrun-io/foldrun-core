@@ -20,6 +20,7 @@
 //
 // An account is a named directory (per OKF: tenancy is a hosting concern).
 
+import { readCompute } from "./resources.ts";
 import { expandPlatformVars } from "./host-env.ts";
 import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
@@ -1386,6 +1387,9 @@ export interface FlowInfo {
   budget: number | null;
   /** What is wrong with the `budget:` line, or null. */
   budgetProblem: string | null;
+  /** `compute:` — what one run's steps may hold together at once (27 Oct
+   *  2026); null is no cap of its own. Copied onto each run as it starts. */
+  compute?: { vcpu?: number; memGiB?: number; diskGiB?: number } | null;
   /** `trigger: flow` — start when this other flow of the workspace finishes,
    *  with `on:` saying which endings count. The finished run's summary and
    *  result become this run's task. */
@@ -2080,6 +2084,10 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     priority: data.priority === "high" || data.priority === "low" || data.priority === "normal" ? data.priority : null,
     budget: runBudget(data.budget),
     budgetProblem: budgetProblem(data.budget, ["run"]),
+    compute: (() => {
+      const c = readCompute(data.compute).value;
+      return Object.keys(c).length ? c : null;
+    })(),
     // `after: [[flow:publish]]` — a link or a bare name, read the same way
     // as every other file-naming field (refs.ts).
     after: (refNames(data.after)[0] ?? "").replace(/^flow:/, "").trim() || null,
@@ -3335,6 +3343,10 @@ export function isSplicedRecord(step: { rescueOf?: string; subagentOf?: string; 
   return !!step.subagentOf || isRescueRecord(step);
 }
 
+/** Which cap holds a step back from starting (27 Oct 2026): its run's,
+ *  its workspace's, its account's, or the node's budget for runs. */
+export type RoomLevel = "run" | "workspace" | "account" | "node";
+
 export interface StepRecord {
   agent: string;
   instruction: string;
@@ -3532,7 +3544,7 @@ export interface StepRecord {
    *  from what the config says when the bill is computed. Absent on steps
    *  from before sizes existed — billing falls back to the flat rate. */
   size?: "small" | "large" | "heavy";
-  reserved?: { cpus: number; memGiB: number } | null;
+  reserved?: { cpus: number; memGiB: number; diskGiB?: number } | null;
   /** The agent's `resources:` as applied (resources.ts), when it set any:
    *  why `reserved` differs from the class's figures. Absent before 26 Oct
    *  2026 and on steps of an agent that wrote none. */
@@ -3540,13 +3552,13 @@ export interface StepRecord {
   /** What the step's sandbox holds while it exists — set once it is past
    *  the room gate, cleared when the attempt ends. What an account's
    *  compute in use sums; `reserved` is the bill's record of the same. */
-  holding?: { cpus: number; memGiB: number } | null;
+  holding?: { cpus: number; memGiB: number; diskGiB?: number } | null;
   /** Waiting for room to start (27 Oct 2026): since when — the first time
    *  the room gate said no, kept across re-drives so its place in line is
    *  its age — what it asked for, and why there was none. Set while it
    *  waits in its driver and while its run waits in the queue; cleared the
    *  moment its sandbox exists. A wait for room never fails the step. */
-  roomWait?: { since: string; why: string; cpus: number; memGiB: number } | null;
+  roomWait?: { since: string; why: string; cpus: number; memGiB: number; diskGiB?: number; level?: RoomLevel } | null;
   /** The attempt a step sent back to the queue for room resumes on — a
    *  wait is not a try, so it spends none of its `retry:`. */
   resumeAttempt?: number | null;
@@ -3631,6 +3643,9 @@ export interface RunRecord {
    *  a run was held to is on its record rather than read from a file that
    *  may since have changed. Null: none. */
   budgetUsd?: number | null;
+  /** The flow's `compute:` when this run was first driven — what its steps
+   *  may hold together at once, its own pool (27 Oct 2026). Null: none. */
+  compute?: { vcpu?: number; memGiB?: number; diskGiB?: number } | null;
   /** Memory files this run created or changed, workspace-relative — what
    *  the agents decided was worth remembering, listed so a person can review
    *  the lesson without diffing the folder. */
@@ -4243,10 +4258,12 @@ export function runMeter(run: RunRecord): {
 export function runComputeMeter(run: RunRecord): {
   coreSecs: number;
   gibSecs: number;
+  /** GiB of disk allowed × seconds (27 Oct 2026): the third hold. */
+  diskGibSecs: number;
   busyCpuSecs: number;
   flatSecs: number;
 } {
-  let coreSecs = 0, gibSecs = 0, busyCpuSecs = 0, flatSecs = 0;
+  let coreSecs = 0, gibSecs = 0, diskGibSecs = 0, busyCpuSecs = 0, flatSecs = 0;
   for (const s of run.steps) {
     if (s.status !== "completed" && s.status !== "failed") continue;
     if (s.carriedFrom) continue;
@@ -4255,12 +4272,13 @@ export function runComputeMeter(run: RunRecord): {
     if (s.reserved) {
       coreSecs += secs * s.reserved.cpus;
       gibSecs += secs * s.reserved.memGiB;
+      diskGibSecs += secs * (s.reserved.diskGiB ?? 0);
     } else {
       flatSecs += secs;
     }
     busyCpuSecs += s.actual?.busyCpuSecs ?? 0;
   }
-  return { coreSecs, gibSecs, busyCpuSecs, flatSecs };
+  return { coreSecs, gibSecs, diskGibSecs, busyCpuSecs, flatSecs };
 }
 
 export function runDurationSecs(run: RunRecord): number | null {

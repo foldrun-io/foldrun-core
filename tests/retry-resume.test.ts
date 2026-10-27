@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createFlowRun, driveRun, isAuthRefusal, startFlowRun, waitForRun, isModelConnectionLost, dropRetrySafe, wroteToolCallAsText, TEXT_CALL_NOTE } from "../src/runner.ts";
-import { readRun, writeRun, type FlowStep } from "../src/store.ts";
+import { readRun, writeRun, runComputeMeter, type FlowStep } from "../src/store.ts";
 import { registerPlatform, platform } from "../src/platform.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
 import { putFile, storageBaseline, readFileBytes } from "../src/storage.ts";
@@ -100,10 +100,10 @@ test("resources: reaches the sandbox and the bill, and an OOM retry never holds 
       // After the OOM, heavy: cores, memory and disk all raised to heavy's
       // (12Gi < heavy's 20Gi, so the class's disk — null — applies).
       assert.deepEqual(seen[1], { cpus: "4", memory: "8Gi", disk: null });
-      assert.deepEqual(s.reserved, { cpus: 4, memGiB: 8 }, "the bill reads what was held");
+      assert.deepEqual(s.reserved, { cpus: 4, memGiB: 8, diskGiB: 20 }, "the bill reads what was held — disk too (27 Oct 2026)");
       assert.deepEqual(s.resources, { cpu: 1, memory: "3072Mi", disk: "12Gi" }, "what was asked is on the record");
       assert.ok(s.events.some((e) => /resources: `gpu` is not one of cpu, memory, disk/.test(e.text)), "a dropped key is said");
-      assert.deepEqual(heldDuring.slice(0, 2), [null, { cpus: 1, memGiB: 3 }], "nothing held until the sandbox exists");
+      assert.deepEqual(heldDuring.slice(0, 2), [null, { cpus: 1, memGiB: 3, diskGiB: 12 }], "nothing held until the sandbox exists");
       assert.equal(s.holding, null, "nothing held once the attempt ended");
     });
   } finally {
@@ -193,6 +193,31 @@ test("the orphan sweep keeps the sandboxes its siblings re-attach to, and is not
   } finally {
     registerPlatform({ killOrphanSandboxes: prev.orphans, killRunSandboxes: prev.all });
   }
+});
+
+// 27 Oct 2026: a flow's compute: is each run's pool — stamped on the run when
+// it is first driven — and a step holds and is billed for its disk too.
+test("a run carries its flow's compute:, and a step's disk is held, waited with and billed", async () => {
+  const seen: RunInContainerArgs[] = [];
+  const fake: Fake = async (args) => {
+    seen.push(args);
+    args.room!.waiting("node full", "node");
+    args.checkpoint?.("pod-1", 0);
+    return { status: "completed", result: "ok", costUsd: 0, timing: { sandboxMs: 0, totalMs: 10_000 } };
+  };
+  await withFake(fake, true, async (ws) => {
+    fs.mkdirSync(path.join(ws, "flows"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "flows/f.md"), "---\ncompute: { vcpu: 2, disk: 20Gi }\n---\n\n1. [[worker]] — work\n");
+    fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), "---\nname: worker\ndescription: works\nsize: heavy\nresources: { disk: 30Gi }\n---\n\nWork.\n");
+    const run = createFlowRun("acme", "desk", [step()], "f", "running");
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const done = readRun("acme", "desk", run.id)!;
+    assert.deepEqual(done.compute, { vcpu: 2, diskGiB: 20 }, "the flow's pool, on the run");
+    assert.equal(done.steps[0].reserved?.diskGiB, 30, "the bill's record holds the disk the step was allowed");
+    assert.equal(runComputeMeter(done).diskGibSecs, 300, "10 s × 30 GiB");
+    assert.equal(seen[0].room?.key, `${run.id}#0`, "its tie-break key");
+  });
 });
 
 // 27 Oct 2026: a step with no room to start waits — no time limit — and,

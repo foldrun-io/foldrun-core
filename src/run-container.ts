@@ -18,6 +18,7 @@
 // The runner image bundles @foldrun/core itself, so the driver runs the same
 // executeStep the server would — one implementation, two homes.
 
+import type { RoomLevel } from "./store.ts";
 import type { PeerInfo } from "./operator.ts";
 import { isHookRecord, type HookRecord } from "./hooks.ts";
 import fs from "node:fs";
@@ -1534,7 +1535,9 @@ export interface RunInContainerArgs {
    *  on, it may answer `deferred` so its run goes back to the queue. */
   room?: {
     since: string | null;
-    waiting: (why: string) => void;
+    /** `${runId}#${step}` — breaks a tie between two equal ages. */
+    key?: string;
+    waiting: (why: string, level?: RoomLevel) => void;
     mayDefer: () => boolean;
   };
   /** A test run: where state/ and storage/ changes go instead of the

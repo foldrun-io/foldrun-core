@@ -131,7 +131,7 @@ const AGENTS_MD: FieldSpec[] = [
   { key: "budget", type: ["number", "string"], help: "USD per month, or N/day | N/week | N/month" },
   { key: "priority", type: "string", values: ["high", "normal", "low"], help: "account: where its runs stand in the queue" },
   { key: "concurrency", type: ["number", "string"], help: "account: runs at once" },
-  { key: "compute", type: "object", help: "account: {vcpu, memory} its running steps may hold together — lowers the plan's, never raises it" },
+  { key: "compute", type: "object", help: "{vcpu, memory, disk} the running steps here may hold together — the account's pool, or this workspace's; only narrows the level above" },
   { key: "alerts", type: "object", validated: true, help: "thresholds that tell notify: — failure_rate (30%), min_runs, credits_day, run_minutes, stale_days, cost_spike, runs_per_hour, new_host" },
   { key: "capture", type: "string", values: ["full", "metadata"], help: "what runs record of each tool call: full (its input and output, secrets masked) or metadata (name, size and time only)" },
   { key: "network_enforce", type: "boolean", help: "true: a site off a step's network: list is refused, not only named in the trace. The account's or the workspace's true is enough" },
@@ -172,6 +172,7 @@ const FLOW: FieldSpec[] = [
   { key: "pause_when", type: "string", help: "a marker that pauses the flow when a run's result says it" },
   { key: "approvers", type: ["list", "string"], help: "who may approve its gates" },
   { key: "budget", type: ["number", "string"], help: "USD per run" },
+  { key: "compute", type: "object", help: "{vcpu, memory, disk} one run's steps may hold together at once — only narrows the workspace's and account's" },
   { key: "live", type: "boolean", help: "true: steps may act for real in a test run" },
 ];
 
