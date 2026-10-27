@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.14.1] — 2026-10-27
+
+- ci(release): release-merge looks for its own evidence — ci's hint, a 10-minute schedule ([cb4d86a](https://github.com/foldrun-io/foldrun-core/commit/cb4d86a))
+- ci(release): merge the release PR once ci passes on its exact head; tell the CLI when a core is out ([489c3d4](https://github.com/foldrun-io/foldrun-core/commit/489c3d4))
+
 ## [2.14.0] — 2026-10-27
 
 ### Changed in the public API
