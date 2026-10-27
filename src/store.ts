@@ -3533,6 +3533,14 @@ export interface StepRecord {
   /** On an isolated sub-agent's run: the workspace paths its sandbox's
    *  changes were applied to — what its delegating step is told it wrote. */
   wrote?: string[];
+  /** What this step's sandbox changed that was not taken back to the
+   *  workspace: configuration and code, which a step proposes and a person
+   *  applies (copy-back.ts, FOL-96). */
+  refused?: { path: string; kind: "config" | "code" }[];
+  /** What the host handed back into this step's sandbox mid-step — its
+   *  `sandbox: own` jobs' files, path → sha256 — recorded HERE, on the host,
+   *  so the copy-out never has to take the sandbox's word for it (FOL-96). */
+  handedBack?: Record<string, string>;
   /**
    * Sandbox seconds this step rented, and how many of them were cold start.
    * Set only on the isolated path — an in-process step rents nothing, so

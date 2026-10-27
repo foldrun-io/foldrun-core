@@ -539,7 +539,9 @@ test("the copy-out does not apply a copied-back job change a second time (Codex 
     const baseline = { "state/log.md": crypto.createHash("sha256").update("A\n").digest("hex") };
     copyBackFiles(pod, [{ path: "state/log.md", base64: Buffer.from("A\nB\n").toString("base64") }], { since: Date.now() - 1_000, from: "reader" });
     fs.appendFileSync(path.join(pod, "state/log.md"), "C\n");
-    applyContainerChanges(host, pod, baseline);
+    // The host's own record of what it handed back (StepRecord.handedBack).
+    const handedBack = { "state/log.md": crypto.createHash("sha256").update("A\nB\n").digest("hex") };
+    applyContainerChanges(host, pod, baseline, undefined, undefined, { handedBack });
     assert.equal(fs.readFileSync(path.join(host, "state/log.md"), "utf8"), "A\nB\nC\n", "B once, then C");
     assert.ok(!fs.existsSync(path.join(host, ".foldrun/copied-back.json")), "the manifest stays in the sandbox");
   } finally {

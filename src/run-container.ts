@@ -29,6 +29,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, isPlatformPath, type ApiSpec, type Effort, type ModelCall } from "./store.ts";
 import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
+import { refusedBack, refusedLine, type RefusedPath } from "./copy-back.ts";
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
@@ -229,6 +230,9 @@ export interface ContainerStepOutcome {
    *  applyContainerChanges returned. An isolated sub-agent's reply names
    *  them to the step that delegated (delegate-tools.ts). */
   applied?: string[];
+  /** What the step changed that was not taken back: configuration and code
+   *  (copy-back.ts). On the step record and in the trail. */
+  refused?: RefusedPath[];
 }
 
 /**
@@ -334,6 +338,45 @@ export function hashTree(dir: string): Record<string, string> {
 }
 
 /**
+ * Where the host keeps what a sandbox was handed (hashTree), for a driver
+ * that inherits the step: under the run's own folder, which is platform-
+ * owned — never staged into a sandbox, never copied back, erased with the
+ * run (deleteRun). It used to ride into the pod beside the input and be
+ * read back from there, where the step could rewrite it (FOL-96).
+ */
+export function handedInPath(workspaceRoot: string, runId: string, ref: string): string | null {
+  const safe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/;
+  if (!safe.test(runId) || !safe.test(ref)) return null;
+  return path.join(workspaceRoot, "runs", runId, "sandbox", `${ref}.json`);
+}
+
+/** Note what a sandbox was handed, on the host. */
+export function writeHandedIn(workspaceRoot: string, runId: string, ref: string, hashes: Record<string, string>): void {
+  const file = handedInPath(workspaceRoot, runId, ref);
+  if (!file) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(hashes));
+}
+
+/** What the host noted a sandbox was handed, or undefined. */
+export function readHandedIn(workspaceRoot: string, runId: string, ref: string): Record<string, string> | undefined {
+  const file = handedInPath(workspaceRoot, runId, ref);
+  if (!file) return undefined;
+  try {
+    const m = JSON.parse(fs.readFileSync(file, "utf8"));
+    return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, string>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Forget it once the step's copy-out is done. */
+export function dropHandedIn(workspaceRoot: string, runId: string, ref: string): void {
+  const file = handedInPath(workspaceRoot, runId, ref);
+  if (file) fs.rmSync(file, { force: true });
+}
+
+/**
  * Every file's mtime under `dir`, relative path to milliseconds — so a copy
  * that cannot carry times can have them put back. `kubectl cp` unpacks with
  * `tar -m`, which stamps every file with the moment it landed; on 2026-09-24
@@ -412,12 +455,24 @@ export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Bu
   return Buffer.from(h.slice(0, end) + joined + stepAdded, "utf8");
 }
 
+export interface ApplyOptions {
+  /** What the host handed back into this sandbox mid-step — a `sandbox: own`
+   *  job's files (delegate-tools.ts), path → sha256 — as the HOST recorded
+   *  it (StepRecord.handedBack). The sandbox's own note of the same is only
+   *  believed where it agrees with this: a step can write that note. */
+  handedBack?: Record<string, string>;
+  /** Told of every path the step changed that was not taken back because it
+   *  is configuration or code (copy-back.ts). */
+  onRefused?: (refused: RefusedPath) => void;
+}
+
 export function applyContainerChanges(
   hostWs: string,
   containerWs: string,
   baseline?: string | Record<string, string>,
   note?: (message: string) => void,
   divert?: WriteDivert,
+  opts: ApplyOptions = {},
 ): string[] {
   const applied: string[] = [];
   // Files a sandbox: own job's reply copied into this sandbox mid-step
@@ -425,6 +480,10 @@ export function applyContainerChanges(
   // those, that is what the step started from. The job's change is already on
   // the workspace; read against the older baseline it came back as the
   // step's own and was merged in a second time (Codex review, 23 Oct 2026).
+  // The sandbox notes which it actually wrote (a conflict goes beside the
+  // file instead), but the step can write that note too, so an entry counts
+  // only where the host handed exactly those bytes back (FOL-96).
+  const handedBack = opts.handedBack ?? {};
   let imported: Record<string, string> = {};
   try {
     // Read here, on the host: a link the step planted is never followed,
@@ -433,7 +492,11 @@ export function applyContainerChanges(
     const file = path.join(dir, "copied-back.json");
     if (fs.lstatSync(dir).isDirectory() && fs.lstatSync(file).isFile()) {
       const m = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (m && typeof m === "object" && !Array.isArray(m)) imported = m as Record<string, string>;
+      if (m && typeof m === "object" && !Array.isArray(m)) {
+        for (const [rel, h] of Object.entries(m as Record<string, unknown>)) {
+          if (typeof h === "string" && handedBack[rel] === h) imported[rel] = h;
+        }
+      }
     }
   } catch {
     /* none copied back */
@@ -474,6 +537,15 @@ export function applyContainerChanges(
       const target = path.join(hostWs, rel);
       const hostNow = fs.existsSync(target) ? fs.readFileSync(target) : null;
       if (hostNow && hostNow.equals(next)) continue;
+      // Configuration and code are a person's (copy-back.ts): refused here,
+      // after "did the step change it" and before any merge, conflict copy
+      // or test divert — so none of those can carry it to the workspace,
+      // and the next step is staged from the workspace's own copy.
+      const refused = refusedBack(rel);
+      if (refused) {
+        opts.onRefused?.({ path: rel.replaceAll("\\", "/"), kind: refused });
+        continue;
+      }
       // The host moved too since the step was handed its copy — another run
       // or a person wrote it. Writing the step's copy over it erased the
       // other run's ledger rows on 2026-09-14. Merge appends; keep both
@@ -1543,6 +1615,10 @@ export interface RunInContainerArgs {
   /** A test run: where state/ and storage/ changes go instead of the
    *  workspace, and who to tell about each. See test-mode.ts. */
   divert?: WriteDivert;
+  /** What the host handed back into this sandbox mid-step (StepRecord.
+   *  handedBack), read at copy-out — kept on the host, never read back from
+   *  the sandbox alone (FOL-96). */
+  handedBack?: () => Record<string, string> | undefined;
   /** The run is a test run. An isolated executor labels the sandbox so the
    *  cluster can cut its network down to the egress proxy: a script tool
    *  calls the network directly, not through the proxy where the test-mode
@@ -1912,8 +1988,13 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     fs.mkdirSync(wsOut);
     const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
     let applied: string[] = [];
+    const refused: RefusedPath[] = [];
     if (back.status === 0) {
-      applied = applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m), args.divert);
+      applied = applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m), args.divert, {
+        handedBack: args.handedBack?.(),
+        onRefused: (r) => refused.push(r),
+      });
+      if (refused.length) args.emit("info", refusedLine(refused));
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }
@@ -1927,7 +2008,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       phases,
     };
     args.emit("info", timingLine(timing));
-    return { ...outcome, timing, applied };
+    return { ...outcome, timing, applied, ...(refused.length ? { refused } : {}) };
   } finally {
     if (containerId) spawnSync(cli(), ["rm", "-f", containerId], { stdio: "ignore" });
     fs.rmSync(staging, { recursive: true, force: true });
