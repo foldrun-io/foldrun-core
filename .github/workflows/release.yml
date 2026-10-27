@@ -159,3 +159,24 @@ jobs:
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(steps.what.outputs.version, '-') }}
           make_latest: ${{ !contains(steps.what.outputs.version, '-') }}
+
+      # Tell the CLI a core is out (27 Oct 2026): its bump-core.yml moves the
+      # CLI onto it, tests it against the registry's copy, and the CLI's own
+      # release follows. A wake-up only — bump-core reads npm itself, and runs
+      # daily as well, so a lost dispatch costs a day, not a release.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: steps.what.outputs.go == 'true' && !contains(steps.what.outputs.version, '-')
+        id: bot
+        with:
+          client-id: ${{ vars.FOLDRUN_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.FOLDRUN_BOT_PRIVATE_KEY }}
+          owner: foldrun-io
+          repositories: foldrun-cli
+          permission-contents: write
+      - name: tell the CLI
+        if: steps.what.outputs.go == 'true' && !contains(steps.what.outputs.version, '-')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          V: ${{ steps.what.outputs.version }}
+        run: gh api repos/foldrun-io/foldrun-cli/dispatches -f event_type=core-released -f "client_payload[version]=$V"
