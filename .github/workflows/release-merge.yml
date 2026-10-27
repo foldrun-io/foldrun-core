@@ -20,14 +20,22 @@ name: release-merge
 # and main moves to it only as a fast-forward — so neither a newer push to
 # release/next nor a newer main is ever merged untested; a refused merge is
 # left for the next ci run, never retried blind.
+#
+# How it wakes (27 Oct 2026, first live run): ci on release/next is started
+# by GITHUB_TOKEN, and a run that token started starts no workflow_run — so
+# ci's last job dispatches this workflow instead (workflow_dispatch is the
+# exception), and a 10-minute schedule catches anything missed. Whatever
+# woke it, it trusts no event: it asks GitHub for a successful ci run on
+# exactly the pull request's head, from this repository.
 on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 concurrency:
   group: release-merge
@@ -35,28 +43,28 @@ concurrency:
 
 jobs:
   merge:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'release/next' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: is this the release pull request ci just passed?
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD: ${{ github.event.workflow_run.head_sha }}
         run: |
           pr="$(gh pr list -R "$GITHUB_REPOSITORY" --head release/next --base main --state open --json number,headRefOid,title,isDraft,headRepositoryOwner --jq '.[0] // empty')"
           [ -n "$pr" ] || { echo "no open release pull request"; exit 0; }
           n="$(jq -r .number <<<"$pr")"; oid="$(jq -r .headRefOid <<<"$pr")"; title="$(jq -r .title <<<"$pr")"
           [ "$(jq -r .isDraft <<<"$pr")" = "false" ] || { echo "#$n is a draft"; exit 0; }
-          [ "$oid" = "$HEAD" ] || { echo "#$n has moved on from what ci tested ($oid, not $HEAD)"; exit 0; }
+          HEAD="$oid"
+          # ci passed on exactly this head, run by this repository (a fork's
+          # branch of the same name is never counted).
+          ok="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$HEAD&status=success&per_page=20" --jq "[.workflow_runs[] | select(.head_repository.full_name == \"$GITHUB_REPOSITORY\" and .head_branch == \"release/next\")] | length")"
+          [ "$ok" -gt 0 ] || { echo "#$n: no successful ci run on $HEAD yet"; exit 0; }
           [[ "$title" =~ ^release\ [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "#$n is not titled release X.Y.Z: $title"; exit 0; }
           files="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$HEAD" --jq '.files[].filename')"
           extra="$(grep -vxE 'package\.json|package-lock\.json|CHANGELOG\.md' <<<"$files" || true)"
           [ -z "$extra" ] || { echo "#$n changes more than the release files:"; echo "$extra"; exit 1; }
           echo "pr=$n" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         if: steps.check.outputs.pr != ''
@@ -82,7 +90,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           N: ${{ steps.check.outputs.pr }}
-          HEAD: ${{ github.event.workflow_run.head_sha }}
+          HEAD: ${{ steps.check.outputs.head }}
         run: |
           R="$GITHUB_REPOSITORY"
           main="$(gh api "repos/$R/git/ref/heads/main" --jq .object.sha)"

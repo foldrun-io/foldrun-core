@@ -40,3 +40,21 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit -p .
       - run: npm test
+
+  # The release pull request passed: wake release-merge.yml (27 Oct 2026).
+  # Its own workflow_run never fires for this run — GITHUB_TOKEN started it —
+  # but a workflow_dispatch from GITHUB_TOKEN does. release-merge checks the
+  # evidence itself; this only says "look now".
+  release-hint:
+    needs: test
+    if: >-
+      (github.event_name == 'pull_request' && github.head_ref == 'release/next' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name != 'pull_request' && github.ref_name == 'release/next')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release-merge.yml -R "$GITHUB_REPOSITORY" --ref main
