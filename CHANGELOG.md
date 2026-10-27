@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.14.2] — 2026-10-27
+
+- ci(release): a changed declaration is judged, not listed; release recovers from a half-done run ([227eec9](https://github.com/foldrun-io/foldrun-core/commit/227eec9))
+
 ## [2.14.1] — 2026-10-27
 
 - ci(release): release-merge looks for its own evidence — ci's hint, a 10-minute schedule ([cb4d86a](https://github.com/foldrun-io/foldrun-core/commit/cb4d86a))
