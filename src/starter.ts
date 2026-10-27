@@ -433,6 +433,7 @@ model: default           # a default for every step here
 effort: low
 overlap: skip            # skip | queue — what a second run does while one is live
 priority: normal         # high | normal | low — where its runs stand in the queue
+compute: { vcpu: 4, memory: 8Gi, disk: 40Gi }  # optional: what one run may hold at once
 ---
 
 1. [[researcher]] — Find three sources on {{topic}}.

@@ -19,7 +19,7 @@ import { cascadeLimits, toolOwners } from "./limits.ts";
 import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
-import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, type StepTiming } from "./run-container.ts";
+import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, classDisk, type StepTiming } from "./run-container.ts";
 import { readResources, hasOverride } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
@@ -47,6 +47,7 @@ import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
+  type RoomLevel,
   accountDir,
   workspaceDir,
   buildMemoryIndex,
@@ -2327,7 +2328,7 @@ async function runStep(
     const limits = resolveResources(size, asked.value, { atLeastClass: !!step.sizeUp });
     // What the sandbox holds while it exists — `step.holding`, what the
     // account's compute in use sums (Settings, `foldrun usage compute`).
-    const held = { cpus: heldCores(limits.cpus, process.env.FOLDRUN_RUN_ISOLATION), memGiB: memoryGiB(limits.memory) };
+    const held = { cpus: heldCores(limits.cpus, process.env.FOLDRUN_RUN_ISOLATION), memGiB: memoryGiB(limits.memory), diskGiB: memoryGiB(limits.disk ?? classDisk(size)) };
 
     // oauth2 secrets become live access tokens here — the one async moment
     // in secret resolution, at the last host-side point before anything is
@@ -3146,8 +3147,9 @@ async function runStep(
         // on the record from the first "no" and survives a re-drive.
         room: {
           since: step.roomWait?.since ?? null,
-          waiting: (why: string) => {
-            step.roomWait = { since: step.roomWait?.since ?? new Date().toISOString(), why, cpus: held.cpus, memGiB: held.memGiB };
+          ...(runId && stepIndex !== undefined ? { key: `${runId}#${stepIndex}` } : {}),
+          waiting: (why: string, level?: RoomLevel) => {
+            step.roomWait = { since: step.roomWait?.since ?? new Date().toISOString(), why, cpus: held.cpus, memGiB: held.memGiB, diskGiB: held.diskGiB, ...(level ? { level } : {}) };
             save();
           },
           // Only before anything ran: a later call of this attempt (a
@@ -3422,6 +3424,7 @@ async function runStep(
       // from the record, never from what the config says at billing time.
       step.size = size;
       if (hasOverride(asked.value)) step.resources = asked.value;
+      // Cores, GiB and disk (27 Oct 2026): all three are billed as held.
       step.reserved = held;
     } else {
       // Same withholding as the sandbox path — the in-process step is what
@@ -4736,6 +4739,12 @@ function driveRunInner(
         run.budgetUsd = readFlow(tenant, workspace, run.flow)?.budget ?? null;
         save();
       }
+      // compute: — the flow's run pool, stamped the same way: the cap a run
+      // is held to is on its record (27 Oct 2026).
+      if (run.compute === undefined) {
+        run.compute = readFlow(tenant, workspace, run.flow)?.compute ?? null;
+        save();
+      }
 
       let gi = 0;
       let context: string | null = null;
@@ -5301,7 +5310,7 @@ function driveRunInner(
           for (const step of launching) {
             if (!step.roomWait || !mayDefer(step)()) continue;
             const w = step.roomWait;
-            const why = await platform.roomCheck({ tenant, runId: run.id, since: w.since, cpus: w.cpus, memGiB: w.memGiB }).catch(() => null);
+            const why = await platform.roomCheck({ tenant, workspace, runId: run.id, since: w.since, cpus: w.cpus, memGiB: w.memGiB, diskGiB: w.diskGiB ?? 0 }).catch(() => null);
             if (!why) continue;
             roomStill.add(step);
             if (why !== w.why) {

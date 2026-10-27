@@ -109,15 +109,19 @@ export function hasOverride(o: ResourceOverride | null | undefined): o is Resour
   return !!o && (o.cpu !== undefined || o.memory !== undefined || o.disk !== undefined);
 }
 
-/** An account's own `compute:` in AGENTS.md — the most its running steps may
- *  hold together. It can only lower what the plan or install allows
- *  (platform limits.ts accountCompute); here it is only read:
+/** `compute:` — the most the steps running inside one scope may hold
+ *  together, in cores, memory and disk (27 Oct 2026: disk, and the scopes
+ *  past the account). Written in the account's AGENTS.md (its pool), a
+ *  workspace's AGENTS.md (that workspace's pool) and a flow (each run's
+ *  pool). Each level only narrows the one above it — the plan or install
+ *  caps the account (platform limits.ts). Here it is only read:
  *
- *    compute: { vcpu: 4, memory: 8Gi }
+ *    compute: { vcpu: 4, memory: 8Gi, disk: 40Gi }
  */
 export interface ComputeAsk {
   vcpu?: number;
   memGiB?: number;
+  diskGiB?: number;
 }
 
 export function readCompute(raw: unknown): { value: ComputeAsk; problems: string[] } {
@@ -125,11 +129,11 @@ export function readCompute(raw: unknown): { value: ComputeAsk; problems: string
   const problems: string[] = [];
   if (raw === undefined || raw === null) return { value, problems };
   if (typeof raw !== "object" || Array.isArray(raw)) {
-    return { value, problems: [`is ${shown(raw)}, not a map — write {vcpu: 4, memory: 8Gi}`] };
+    return { value, problems: [`is ${shown(raw)}, not a map — write {vcpu: 4, memory: 8Gi, disk: 40Gi}`] };
   }
   const r = raw as Record<string, unknown>;
   for (const k of Object.keys(r)) {
-    if (k !== "vcpu" && k !== "memory") problems.push(`\`${k}\` is not vcpu or memory — it is ignored`);
+    if (k !== "vcpu" && k !== "memory" && k !== "disk") problems.push(`\`${k}\` is not vcpu, memory or disk — it is ignored`);
   }
   if (r.vcpu !== undefined && r.vcpu !== null) {
     const numeric = typeof r.vcpu === "number" || (typeof r.vcpu === "string" && /^\s*\d+(\.\d+)?\s*$/.test(r.vcpu));
@@ -141,6 +145,11 @@ export function readCompute(raw: unknown): { value: ComputeAsk; problems: string
     const mi = quantityMi(r.memory);
     if (!Number.isFinite(mi) || mi < 256) problems.push(`memory: ${shown(r.memory)} is not a size of 256Mi or more — write 8Gi`);
     else value.memGiB = mi / 1024;
+  }
+  if (r.disk !== undefined && r.disk !== null) {
+    const mi = quantityMi(r.disk);
+    if (!Number.isFinite(mi) || mi < 1024) problems.push(`disk: ${shown(r.disk)} is not a size of 1Gi or more — write 40Gi`);
+    else value.diskGiB = mi / 1024;
   }
   return { value, problems };
 }

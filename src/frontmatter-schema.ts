@@ -55,6 +55,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
     disable_after: (v) => (Number(v) > 0 && Number(v) <= 100 ? null : `${String(v)} is not a count from 1 to 100; it is ignored`),
     pause_when: (v) => (String(v).length <= 60 ? null : "is longer than 60 characters"),
     budget: (v) => budgetProblem(v, ["run"]),
+    compute: computeProblem,
   },
   "tool": {
     transport: (v) => (["http", "script", "mcp"].includes(String(v).toLowerCase()) ? null : `"${String(v)}" is not a transport — http, script or mcp`),

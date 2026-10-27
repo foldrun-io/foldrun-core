@@ -126,7 +126,7 @@ export interface PlatformHooks {
    *  such a step is started again, so a run claimed only to find no room
    *  yet adds nothing to its trail. Optional: without it the step goes to
    *  its executor, which looks there. */
-  roomCheck?(ask: { tenant: string; runId: string; since: string; cpus: number; memGiB: number }): Promise<string | null>;
+  roomCheck?(ask: { tenant: string; workspace: string; runId: string; since: string; cpus: number; memGiB: number; diskGiB: number }): Promise<string | null>;
   /** Publish storage/public/ as share links after a run. Default: no links. */
   syncPublicShares(tenant: string, workspace: string): Promise<{ added: string[] }>;
   /** This account's own data key, or null to use the install key. */

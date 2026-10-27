@@ -8,6 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dockerCpus, dockerMemory, sizeLimits, resolveResources, memoryGiB, heldCores } from "../src/run-container.ts";
 import { readResources, resourcesProblem, quantityMi, anyMemoryMi, hasOverride, readCompute, computeProblem } from "../src/resources.ts";
+import { parseFlow } from "../src/store.ts";
+import { frontmatterProblems } from "../src/frontmatter-schema.ts";
 
 test("the docker CPU cap is the class's billed cores, no more than the engine has", () => {
   assert.equal(dockerCpus("2", 8), "2");
@@ -130,8 +132,21 @@ test("an account's compute: is read as cores and GiB; anything else is said", ()
   assert.equal(computeProblem(undefined), null);
   assert.match(computeProblem({ vcpu: 0.2 }) ?? "", /0.5 or more in halves/);
   assert.match(computeProblem({ memory: 8 }) ?? "", /write 8Gi/);
-  assert.match(computeProblem({ gpus: 1 }) ?? "", /not vcpu or memory/);
+  assert.match(computeProblem({ gpus: 1 }) ?? "", /not vcpu, memory or disk/);
   assert.match(computeProblem("lots") ?? "", /not a map/);
+});
+
+// 27 Oct 2026: disk in every pool, and compute: in a flow (each run's pool).
+test("compute: reads disk too, and a flow may write it — checked the same way", () => {
+  assert.deepEqual(readCompute({ vcpu: 2, memory: "4Gi", disk: "40Gi" }).value, { vcpu: 2, memGiB: 4, diskGiB: 40 });
+  assert.match(computeProblem({ disk: "512Mi" }) ?? "", /disk: 512Mi is not a size of 1Gi or more/);
+  assert.match(computeProblem({ disk: 40 }) ?? "", /write 40Gi/);
+  const flow = parseFlow("f.md", "---\ncompute: { vcpu: 2, memory: 4Gi, disk: 20Gi }\n---\n\n1. [[a]] — do it\n");
+  assert.deepEqual(flow.compute, { vcpu: 2, memGiB: 4, diskGiB: 20 });
+  assert.equal(parseFlow("g.md", "---\nname: g\n---\n\n1. [[a]] — do it\n").compute, null);
+  const problems = frontmatterProblems("flow", { compute: { vcpu: 2, gpus: 1 } }, () => null);
+  assert.ok(problems.some((p) => p.rule === "config/invalid-value" && /gpus/.test(p.message)), JSON.stringify(problems));
+  assert.ok(!frontmatterProblems("flow", { compute: { vcpu: 2 } }, () => null).some((p) => p.key === "compute"), "a flow's compute: is a known field");
 });
 
 test("the record holds the cores the sandbox got: docker lowers them to the machine's, k8s does not", () => {
