@@ -1,0 +1,98 @@
+name: release-merge
+
+# Merges the "release X.Y.Z" pull request once ci has passed on exactly its
+# head — so a release goes out with nobody clicking (owner, 27 Oct 2026:
+# "all releases should be automated"). Merging is what publishes:
+# release.yml runs on that push to main, tests the merged tree again and
+# publishes with trusted publishing.
+#
+# The decision a person used to make at the merge is made where the change
+# is written: a break is marked `!` or `BREAKING CHANGE:` in its commit, and
+# release.mjs then makes the version a major (CLAUDE.md, Versions).
+#
+# Guards, all checked before the bot's token is minted (Codex review):
+#   - the ci run passed, ran on release/next of THIS repository — a fork's
+#     branch of the same name never reaches here;
+#   - the open pull request from release/next to main has exactly the head
+#     ci tested, and its title is "release X.Y.Z";
+#   - release/next differs from main only in the files release.mjs writes.
+# The merge is built from that exact head on the main it was drafted from,
+# and main moves to it only as a fast-forward — so neither a newer push to
+# release/next nor a newer main is ever merged untested; a refused merge is
+# left for the next ci run, never retried blind.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'release/next' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: is this the release pull request ci just passed?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr="$(gh pr list -R "$GITHUB_REPOSITORY" --head release/next --base main --state open --json number,headRefOid,title,isDraft,headRepositoryOwner --jq '.[0] // empty')"
+          [ -n "$pr" ] || { echo "no open release pull request"; exit 0; }
+          n="$(jq -r .number <<<"$pr")"; oid="$(jq -r .headRefOid <<<"$pr")"; title="$(jq -r .title <<<"$pr")"
+          [ "$(jq -r .isDraft <<<"$pr")" = "false" ] || { echo "#$n is a draft"; exit 0; }
+          [ "$oid" = "$HEAD" ] || { echo "#$n has moved on from what ci tested ($oid, not $HEAD)"; exit 0; }
+          [[ "$title" =~ ^release\ [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "#$n is not titled release X.Y.Z: $title"; exit 0; }
+          files="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$HEAD" --jq '.files[].filename')"
+          extra="$(grep -vxE 'package\.json|package-lock\.json|CHANGELOG\.md' <<<"$files" || true)"
+          [ -z "$extra" ] || { echo "#$n changes more than the release files:"; echo "$extra"; exit 1; }
+          echo "pr=$n" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: steps.check.outputs.pr != ''
+        id: app
+        with:
+          client-id: ${{ vars.FOLDRUN_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.FOLDRUN_BOT_PRIVATE_KEY }}
+          owner: foldrun-io
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      # As the bot, not GITHUB_TOKEN: a push GITHUB_TOKEN makes starts no
+      # workflow, and this one must start release.yml.
+      #
+      # A compare-and-swap on main (Codex review): read main, require the
+      # tested head to contain it — a release drafted before main moved is
+      # stale, its version and changelog miss what landed — build the merge
+      # commit on exactly that main, and move main to it as a fast-forward
+      # only. If main moved in between, GitHub refuses the update; the push
+      # that moved it redrafts release/next and the next ci run decides.
+      - name: merge it
+        if: steps.check.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          N: ${{ steps.check.outputs.pr }}
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          R="$GITHUB_REPOSITORY"
+          main="$(gh api "repos/$R/git/ref/heads/main" --jq .object.sha)"
+          behind="$(gh api "repos/$R/compare/$main...$HEAD" --jq .behind_by)"
+          [ "$behind" = "0" ] || { echo "release/next is $behind commit(s) behind main — stale; release-pr.yml redrafts it"; exit 0; }
+          tree="$(gh api "repos/$R/git/commits/$HEAD" --jq .tree.sha)"
+          merge="$(gh api -X POST "repos/$R/git/commits" -f message="Merge pull request #$N from $R/release/next" -f tree="$tree" -f "parents[]=$main" -f "parents[]=$HEAD" --jq .sha)"
+          if gh api -X PATCH "repos/$R/git/refs/heads/main" -f sha="$merge" -F force=false >/dev/null; then
+            echo "merged #$N ($HEAD) onto $main as $merge — release.yml publishes it"
+          else
+            echo "main moved while merging — nothing changed; the next ci run decides again"
+            exit 1
+          fi
