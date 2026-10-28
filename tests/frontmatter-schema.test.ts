@@ -178,3 +178,10 @@ test("FOL-19: secrets: naming a model variable is flagged on an agent and a tool
   assert.match(frontmatterProblems("tool", { name: "t", secrets: "ANTHROPIC_BASE_URL" }, () => null).find((p) => p.key === "secrets")?.message ?? "", /ANTHROPIC_BASE_URL/);
   assert.equal(frontmatterProblems("tool", { name: "t", secrets: "proxied" }, () => null).find((p) => p.key === "secrets"), undefined);
 });
+
+test("idempotency: false, the opt-out parseFlow reads, passes the schema; a list does not (FOL-94)", () => {
+  assert.deepEqual(frontmatterProblems("flow", { trigger: "webhook", idempotency: false }, nearestField), []);
+  assert.deepEqual(frontmatterProblems("flow", { trigger: "webhook", idempotency: "none" }, nearestField), []);
+  assert.equal(frontmatterProblems("flow", { trigger: "webhook", idempotency: ["x"] }, nearestField)[0]?.rule, "config/wrong-type");
+});
+
