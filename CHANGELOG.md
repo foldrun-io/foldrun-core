@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [4.0.0] — 2026-10-28
+
+### Breaking changes
+
+- a mid-step install of a package with no wheel, or one (d774aa5)
+
+- fix(install)!: no pip or npm package runs its own code on the way in (FOL-98) ([d774aa5](https://github.com/foldrun-io/foldrun-core/commit/d774aa5))
+
 ## [3.0.0] — 2026-10-28
 
 ### Breaking changes
