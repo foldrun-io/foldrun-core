@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [5.0.0] — 2026-10-28
+
+### Breaking changes
+
+- `---js` (and coffee/cson) frontmatter no longer parses; (28c12a7)
+
+- fix(security)!: no tenant code on the shared worker/web pod; bounded matching; platform mail caps ([28c12a7](https://github.com/foldrun-io/foldrun-core/commit/28c12a7))
+
 ## [4.0.0] — 2026-10-28
 
 ### Breaking changes
