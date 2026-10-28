@@ -3,6 +3,7 @@
 // fail without failing the flow. A direct agent run is a one-step ad-hoc
 // flow, so there is a single execution path.
 
+import { globMatch } from "./bounded-match.ts";
 import { latestRevisionId } from "./history.ts";
 import { recordCallIo, redactionsFor } from "./capture.ts";
 import { AUTH_REFUSAL, platformCause } from "./issues.ts";
@@ -4308,15 +4309,16 @@ export function startFlowRun(
 export function resolvePreview(storageDir: string, patterns: string[], cap = 12): string[] {
   const out = new Set<string>();
   for (const pattern of patterns) {
+    // Inside storage/ only: no climbing, no absolute paths.
+    const parts = pattern.replaceAll("\\", "/").split("/");
+    if (pattern.startsWith("/") || parts.includes("..") || pattern.length > 400) continue;
     if (!/[*?]/.test(pattern)) {
       if (fs.existsSync(path.join(storageDir, pattern))) out.add(pattern);
       continue;
     }
-    const re = new RegExp(
-      "^" + pattern
-        .split("**").map((part) => part.split("*").map((x) => x.replace(/[.+^${}()|[\]\\?]/g, "\\$&")).join("[^/]*"))
-        .join(".*") + "$",
-    );
+    // Matched in linear time: this runs on the worker every account shares,
+    // and a regex built from "**a**a**a**b" backtracks for seconds.
+    const re = { test: (r: string) => globMatch(pattern, r) };
     const walk = (dir: string, rel: string) => {
       let entries: fs.Dirent[];
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }

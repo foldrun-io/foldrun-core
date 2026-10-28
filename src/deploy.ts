@@ -80,6 +80,9 @@ const IN_WORKSPACE_DIR = new RegExp(`^(${WORKSPACE_DIRS.join("|")})/`);
 export function isSourcePath(rel: string): boolean {
   const norm = rel.replaceAll("\\", "/");
   const parts = norm.split("/");
+  // A path that climbs, is absolute or has an empty segment is never a
+  // workspace file — and `foldrun pull` writes what this accepts to disk.
+  if (norm.startsWith("/") || /^[a-zA-Z]:/.test(norm) || parts.some((p) => p === ".." || p === "." || p === "")) return false;
   if (parts.some((p) => NOT_SOURCE.has(p))) return false;
   if (NOT_SOURCE_FILE.has(parts[parts.length - 1])) return false;
   return norm === "AGENTS.md" || norm === "project.md" || IN_WORKSPACE_DIR.test(norm);

@@ -19,7 +19,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { resolveSecrets, materializeSecrets } from "./secrets.ts";
+import { resolveSecrets, materializeSecrets, secretSites } from "./secrets.ts";
+import { siteCovers } from "./network.ts";
 import { listAgents, workspaceDir, type ToolDef } from "./store.ts";
 import { libraryDir } from "./library.ts";
 import { secretsUsedByApi } from "./api-tools.ts";
@@ -96,6 +97,27 @@ export interface ToolTestInput {
   args?: Record<string, string>;
 }
 
+/**
+ * A script or a command-started MCP server is the tenant's own code. On an
+ * install that isolates runs (FOLDRUN_RUN_ISOLATION) that code only ever runs
+ * in a step's sandbox — the web pod that answers Test is not one: it holds
+ * the platform's keys and every account's files (29 Oct 2026, OWASP review;
+ * hooks' Test was already refused the same way).
+ */
+function hostCodeRefusal(transport: "script" | "mcp"): Omit<ToolTestResult, "ms"> | null {
+  if (!process.env.FOLDRUN_RUN_ISOLATION) return null;
+  return {
+    ok: false,
+    transport,
+    missingSecrets: [],
+    summary: "this tool runs your own code, which this install runs only inside a step's sandbox — not from here",
+    detail:
+      "Test it locally with\n  foldrun tool test <name>\n" +
+      "or with a test run of a flow whose agent has it under tools:, e.g.\n" +
+      "  foldrun invoke <flow> --to <workspace> --test --wait",
+  };
+}
+
 export async function testTool(
   tenant: string,
   workspace: string,
@@ -170,6 +192,19 @@ export async function testTool(
           detail: `base: ${api.base}\npath: ${probePath}`,
         });
       }
+      // A secret bound to sites is filled in a run only by the egress proxy,
+      // only for those sites. The tester fills secrets itself, so it must ask
+      // the same question — or any editor could write a tool whose base is
+      // their own server and "test" the account's Stripe key out to it.
+      const bound = secretSites(tenant, needed, workspace);
+      const offSite = Object.entries(bound).filter(([, sites]) => !sites.some((site) => siteCovers(site, url.hostname))).map(([n]) => n);
+      if (offSite.length) {
+        return done({
+          ok: false, transport: "http", missingSecrets: missing,
+          summary: `${offSite.join(", ")} ${offSite.length === 1 ? "is" : "are"} bound to other sites than ${url.hostname} — not sent`,
+          detail: offSite.map((n) => `${n}: ${bound[n].join(", ")}`).join("\n"),
+        });
+      }
       for (const [k, v] of Object.entries(api.query)) url.searchParams.set(k, substitute(v, env));
 
       const headers: Record<string, string> = {};
@@ -219,6 +254,8 @@ export async function testTool(
   }
 
   if (def.kind === "script") {
+    const refused = hostCodeRefusal("script");
+    if (refused) return done(refused);
     let run = String(def.spec.run ?? "");
     // A run's working directory is the calling AGENT's folder, not the
     // workspace root — and scripts rely on that. `path.resolve(cwd, "..",
@@ -404,6 +441,8 @@ export async function testTool(
       detail: "",
     });
   }
+  const refusedMcp = hostCodeRefusal("mcp");
+  if (refusedMcp) return done(refusedMcp);
 
   const named = Object.entries(spec.env ?? {})
     .map(([, v]) => String(v).match(/^\$\{([A-Z0-9_]+)\}$/)?.[1])

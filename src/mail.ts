@@ -258,7 +258,45 @@ export async function mailWanted(tenant: string, email: string, category: MailCa
  * carries that reader's own unsubscribe token; required mail goes as one.
  * Never throws: a mail that fails is an `ok: false` with the reason.
  */
+// The platform's own sender is shared by every account, so its reputation
+// is everyone's. Mail an account can make the platform send to addresses it
+// typed (invites, notify:, approvals, low balance) is capped per account per
+// day on the platform's key; mail about the account's own sign-in, billing
+// and health is not. An account sending on its own key is its own business.
+// Counted in this process — a brake, not a ledger (29 Oct 2026: open signup
+// on dev let anyone send ~86k invites a day from hello@foldrun.io).
+const UNCAPPED = new Set<string>(["security", "billing", "account"]);
+const PLATFORM_MAX_RECIPIENTS = 10;
+const platformDayCap = (category: string) =>
+  Number(process.env[category === "invites" ? "FOLDRUN_PLATFORM_INVITES_PER_DAY" : "FOLDRUN_PLATFORM_MAIL_PER_DAY"]) ||
+  (category === "invites" ? 25 : 200);
+const platformSent = new Map<string, number>();
+
+/** Recipients this account may still send to today on the platform's key. */
+export function platformMailAllowance(tenant: string, category: string, key: string, now = new Date()): number {
+  const platformKey = process.env.FOLDRUN_RESEND_API_KEY;
+  if (!platformKey || key !== platformKey || UNCAPPED.has(category)) return Infinity;
+  const used = platformSent.get(`${now.toISOString().slice(0, 10)}|${tenant}|${category === "invites" ? "invites" : "other"}`) ?? 0;
+  return Math.max(0, platformDayCap(category) - used);
+}
+
+function notePlatformSent(tenant: string, category: string, n: number, now = new Date()): void {
+  const day = now.toISOString().slice(0, 10);
+  for (const k of platformSent.keys()) if (!k.startsWith(day)) platformSent.delete(k);
+  const k = `${day}|${tenant}|${category === "invites" ? "invites" : "other"}`;
+  platformSent.set(k, (platformSent.get(k) ?? 0) + n);
+}
+
 export async function sendMail(m: MailMessage): Promise<MailResult> {
+  const allowance = platformMailAllowance(m.tenant, m.category, m.mail.key);
+  if (allowance !== Infinity) {
+    const n = recipients(m.to).length;
+    if (n > PLATFORM_MAX_RECIPIENTS) {
+      return { ok: false, error: `more than ${PLATFORM_MAX_RECIPIENTS} recipients on the platform's sender — set the account's own RESEND_API_KEY and EMAIL_FROM to send more`, sent: [], suppressed: [] };
+    }
+  }
+  const capped = allowance !== Infinity;
+  const overCap = `this account reached today's limit for ${m.category} mail on the platform's sender — set its own RESEND_API_KEY and EMAIL_FROM, or try tomorrow`;
   const all = recipients(m.to);
   const required = isRequiredCategory(m.category);
   const workspace = m.workspace ?? null;
@@ -296,6 +334,8 @@ export async function sendMail(m: MailMessage): Promise<MailResult> {
   };
 
   if (required) {
+    if (capped && all.length > allowance) return { ok: false, error: overCap, sent: [], suppressed: [] };
+    if (capped) notePlatformSent(m.tenant, m.category, all.length);
     if (all.length) await post(all, {}, "");
     return { ok: all.length > 0 && sent.length === all.length, status, error, sent, suppressed };
   }
@@ -304,6 +344,15 @@ export async function sendMail(m: MailMessage): Promise<MailResult> {
     if (!(await mailWanted(m.tenant, to, m.category, workspace))) {
       suppressed.push(to);
       continue;
+    }
+    // Counted only for someone who takes this mail: an opted-out recipient
+    // must not use up the day's allowance for the ones who want it.
+    if (capped) {
+      if (platformMailAllowance(m.tenant, m.category, m.mail.key) < 1) {
+        error = overCap;
+        continue;
+      }
+      notePlatformSent(m.tenant, m.category, 1);
     }
     const claim = { tenant: m.tenant, email: to, category: m.category, workspace: mailCategory(m.category)?.perWorkspace ? workspace : null };
     const links = unsubscribeLinks(claim);

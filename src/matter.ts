@@ -79,8 +79,25 @@ function foldJobs(data: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+// gray-matter ships a `javascript` engine that eval()s a block opened with
+// `---js` or `---javascript` — with `process` and `require` in reach. Every
+// file it parses here was written by a tenant (or an agent), on the shared
+// web pod and worker. Only YAML is a language here; any other engine name
+// throws, which the readers already treat as frontmatter that does not parse.
+const refuse = (name: string) => () => {
+  throw new Error(`frontmatter opened with "---${name}" — only YAML frontmatter is read`);
+};
+const ENGINES = {
+  js: { parse: refuse("js"), stringify: refuse("js") },
+  javascript: { parse: refuse("javascript"), stringify: refuse("javascript") },
+  coffee: { parse: refuse("coffee"), stringify: refuse("coffee") },
+  coffeescript: { parse: refuse("coffeescript"), stringify: refuse("coffeescript") },
+  cson: { parse: refuse("cson"), stringify: refuse("cson") },
+};
+const safe = (options?: Options): Options => ({ ...(options ?? {}), engines: { ...(options?.engines ?? {}), ...ENGINES } as Options["engines"] });
+
 function matter(input: string, options?: Options) {
-  return grayMatter(input, options ?? {});
+  return grayMatter(input, safe(options));
 }
 matter.stringify = grayMatter.stringify;
 matter.test = grayMatter.test;
@@ -93,7 +110,7 @@ matter.test = grayMatter.test;
  * note's own `governance:` is its own (Codex debate, 21 Oct 2026).
  */
 export function configMatter(input: string, options?: Options) {
-  const file = grayMatter(input, options ?? {});
+  const file = grayMatter(input, safe(options));
   if (file.data && typeof file.data === "object" && !Array.isArray(file.data)) {
     (file as { data: Record<string, unknown> }).data = foldJobs(file.data as Record<string, unknown>);
   }

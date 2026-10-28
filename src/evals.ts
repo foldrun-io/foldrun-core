@@ -42,6 +42,8 @@ import { deployedCommit } from "./deploy.ts";
 import { latestRevisionId } from "./history.ts";
 import matter from "./matter.ts";
 import { spawn } from "node:child_process";
+import { hostSafeEnv } from "./host-env.ts";
+import { boundedRegexTest } from "./bounded-match.ts";
 import { judgeVerdict, JUDGE_VERDICT_INSTRUCTION, parseJudge } from "./judge-verdict.ts";
 import { readAgentsMdKeys } from "./agents-md.ts";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -596,7 +598,8 @@ async function waitForRun(tenant: string, workspace: string, runId: string) {
 
 function shell(command: string, cwd: string): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], { cwd });
+    // Never the platform's own environment: keys, database URL, tokens.
+    const child = spawn("bash", ["-lc", command], { cwd, env: hostSafeEnv() });
     let out = "";
     const append = (c: Buffer) => {
       if (out.length < 2000) out += c.toString();
@@ -707,7 +710,9 @@ export async function checkAssertion(
     }
     case "matches": {
       try {
-        const passed = new RegExp(assertion.value, "i").test(output);
+        // Bounded: the pattern is the tenant's, the process is shared.
+        const passed = boundedRegexTest(assertion.value, "i", output);
+        if (passed === "timeout") return { assertion, passed: false, detail: "the pattern took too long to match — simplify it" };
         return { assertion, passed, detail: passed ? "matched" : "no match" };
       } catch {
         return { assertion, passed: false, detail: "invalid regular expression" };
@@ -715,13 +720,20 @@ export async function checkAssertion(
     }
     case "file": {
       const target = path.resolve(agentDir, assertion.value);
-      if (!target.startsWith(path.resolve(agentDir))) {
+      if (!target.startsWith(path.resolve(agentDir) + path.sep)) {
         return { assertion, passed: false, detail: "path escapes the agent directory" };
       }
       const exists = fs.existsSync(target) && fs.statSync(target).size > 0;
       return { assertion, passed: exists, detail: exists ? "present and non-empty" : "missing or empty" };
     }
     case "run": {
+      // A `run:` is the tenant's own shell command. On an install that
+      // isolates runs it would execute here, on the web pod, beside the
+      // platform's keys and every account's files — so it is refused there,
+      // as a hook's Test is. A laptop runs every step in-process anyway.
+      if (process.env.FOLDRUN_RUN_ISOLATION) {
+        return { assertion, passed: false, detail: "run: assertions are not executed on this install — check the output with contains:/matches:/judge:, or a file with file:; `foldrun eval` runs them on your own machine" };
+      }
       const { code, out } = await shell(assertion.value, agentDir);
       return { assertion, passed: code === 0, detail: `exit ${code ?? "error"}${out ? ` — ${out.slice(0, 200)}` : ""}` };
     }
