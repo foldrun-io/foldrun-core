@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [2.14.3] — 2026-10-28
+
+- fix(schema): idempotency: false passes foldrun check (FOL-94 review) ([b46ff9f](https://github.com/foldrun-io/foldrun-core/commit/b46ff9f))
+- fix(triggers): dedupe GitHub deliveries by default (FOL-94) ([2c624f4](https://github.com/foldrun-io/foldrun-core/commit/2c624f4))
+
 ## [2.14.2] — 2026-10-27
 
 - ci(release): a changed declaration is judged, not listed; release recovers from a half-done run ([227eec9](https://github.com/foldrun-io/foldrun-core/commit/227eec9))
