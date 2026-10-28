@@ -68,6 +68,15 @@ export function refusedBack(rel: string): "config" | "code" | null {
 }
 
 /** The trail's line for a step's refused writes. */
+/** The trail's line for config and code a person-approved step changed and
+ *  that were kept (an approval gate before the step: the person read what
+ *  it would do — the desks' retro applies approved fixes this way). */
+export function keptLine(kept: readonly RefusedPath[]): string {
+  const shown = kept.slice(0, 20).map((r) => `${r.path} (${r.kind})`).join(", ");
+  const more = kept.length > 20 ? ` and ${kept.length - 20} more` : "";
+  return `kept with approval: ${shown}${more} — configuration or code this step changed, kept because a person approved the step before it ran`;
+}
+
 export function refusedLine(refused: readonly RefusedPath[]): string {
   const shown = refused.slice(0, 20).map((r) => `${r.path} (${r.kind})`).join(", ");
   const more = refused.length > 20 ? ` and ${refused.length - 20} more` : "";

@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { KINDS, ALL_KINDS } from "../src/kinds.ts";
-import { refusedBack, refusedLine, type RefusedPath } from "../src/copy-back.ts";
+import { refusedBack, refusedLine, keptLine, type RefusedPath } from "../src/copy-back.ts";
 import { applyContainerChanges, handedInPath, writeHandedIn, readHandedIn, dropHandedIn, type RunInContainerArgs, type ContainerStepOutcome } from "../src/run-container.ts";
 import { checkPaths } from "../src/confine.ts";
 import { isPlatformPath } from "../src/store.ts";
@@ -318,4 +318,35 @@ test("step 2 of the same run is staged from the workspace's own AGENTS.md, and s
     }
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a step a person approved before it ran keeps its config and code changes, each named — the desks' retro applies fixes so", () => {
+  const t = trees({
+    host: { "agents/w/agent.md": "W0", "skills/s/SKILL.md": "S0", "state/cursor.json": "1" },
+    handed: { "agents/w/agent.md": "W0", "skills/s/SKILL.md": "S0", "state/cursor.json": "1" },
+    out: { "agents/w/agent.md": "W1 — the approved fix", "skills/s/SKILL.md": "S1", "evals/retro-case.md": "a new eval case", "state/cursor.json": "2" },
+  });
+  try {
+    const refused: RefusedPath[] = [];
+    const kept: RefusedPath[] = [];
+    const applied = applyContainerChanges(t.host, t.out, t.handed, undefined, undefined, { onRefused: (r) => refused.push(r), allowConfig: true, onKept: (r) => kept.push(r) });
+    assert.equal(read(t.host, "agents/w/agent.md"), "W1 — the approved fix");
+    assert.equal(read(t.host, "skills/s/SKILL.md"), "S1");
+    assert.equal(read(t.host, "evals/retro-case.md"), "a new eval case");
+    assert.deepEqual(refused, []);
+    assert.deepEqual(kept.map((r) => r.path).sort(), ["agents/w/agent.md", "evals/retro-case.md", "skills/s/SKILL.md"]);
+    assert.deepEqual(applied.sort(), ["agents/w/agent.md", "evals/retro-case.md", "skills/s/SKILL.md", "state/cursor.json"]);
+    assert.match(keptLine(kept), /^kept with approval: .*agents\/w\/agent\.md \(config\).*a person approved the step/);
+  } finally {
+    t.done();
+  }
+});
+
+test("a laptop step a person approved may write configuration and code with its file tools", () => {
+  const WS = "/data/acme/workspaces/desk";
+  const roots = { agentDir: `${WS}/agents/retro`, workspaceRoot: WS, libraryRoot: "/data/acme/library", configWrites: true };
+  for (const p of [`${WS}/agents/writer/agent.md`, `${WS}/skills/x/SKILL.md`, `${WS}/evals/case.md`]) {
+    assert.equal(checkPaths("Write", { file_path: p }, roots).ok, true, p);
+  }
+  assert.equal(checkPaths("Write", { file_path: "/data/acme/library/skills/x/SKILL.md" }, roots).ok, false, "the account library stays read-only");
 });

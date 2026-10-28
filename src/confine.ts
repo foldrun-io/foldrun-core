@@ -98,6 +98,9 @@ export interface Roots {
   workspaceRoot: string;
   /** The account library: readable, never writable. */
   libraryRoot: string;
+  /** A person approved this step before it ran (an approval gate): its
+   *  writes to the workspace's configuration and code are allowed. */
+  configWrites?: boolean;
 }
 
 // Skills are announced to the agent with virtual prefixes — `workspace/skills/…`
@@ -327,7 +330,7 @@ export function checkPaths(
     // copy-back refuses (copy-back.ts, FOL-96), so a step that runs on this
     // host, with no sandbox between it and the files, is held to the same
     // rule by its file tools. Its shell is not confined here — isolation is.
-    const asConfig = isWrite && !inLibrary ? refusedBack(within) : null;
+    const asConfig = isWrite && !inLibrary && !roots.configWrites ? refusedBack(within) : null;
     if (asConfig) {
       return {
         ok: false,
