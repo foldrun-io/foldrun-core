@@ -163,7 +163,7 @@ const FLOW: FieldSpec[] = [
   { key: "every", type: ["string", "number"], help: "trigger: watch — how often" },
   { key: "path", type: "string", help: "trigger: storage — the prefix under storage/" },
   { key: "filter", type: "object", validated: true, help: "webhook, email, flow or storage trigger: the fields a delivery must have to start a run — e.g. {action: [opened], sender: {type: {not_in: [Bot]}}}" },
-  { key: "idempotency", type: "string", help: "a header name, or body:<field>, that marks a repeat delivery; none to turn off (signature: github defaults to x-github-delivery)" },
+  { key: "idempotency", type: ["string", "boolean"], help: "a header name, or body:<field>, that marks a repeat delivery; none (or false) to turn off (signature: github defaults to x-github-delivery)" },
   { key: "debounce", type: ["string", "number"], help: "wait for a burst to end" },
   { key: "throttle", type: ["string", "number"], help: "at most one run per window" },
   { key: "sla", type: ["string", "number"], help: "tell someone when a run outlives it" },
