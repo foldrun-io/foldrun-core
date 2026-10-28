@@ -87,6 +87,9 @@ export interface ExecOutcome {
 }
 
 export interface ExecOptions {
+  /** A person approved this step before it ran: its file tools may write
+   *  the workspace's configuration and code (confine.ts, FOL-96). */
+  configWrites?: boolean;
   /** What the step reports beyond its events (FOL-54 step 4): `metadata`
    *  sends each model call (`turn`); `full` also sends each tool call's input
    *  and output (`io`). Unset sends neither — the consult, the probe and any
@@ -520,7 +523,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
               }
             }
             const verdict = isFilesystemTool(hookInput.tool_name)
-              ? checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot })
+              ? checkPaths(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
               : null;
             if (verdict && !verdict.ok) {
               emit("error", verdict.reason!, via ? { subagent: via } : undefined);
@@ -560,7 +563,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
                 const again = hookInput.tool_name === "Bash"
                   ? checkBash(String(v.input.command ?? ""))
                   : isFilesystemTool(hookInput.tool_name)
-                    ? checkPaths(hookInput.tool_name, v.input, { agentDir, workspaceRoot, libraryRoot })
+                    ? checkPaths(hookInput.tool_name, v.input, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
                     : { ok: true as const };
                 const granted = opts.allowed.includes(hookInput.tool_name) || opts.mcpNames.some((n) => hookInput.tool_name.startsWith(`mcp__${n}__`));
                 // The sub-agent guard read the ORIGINAL input: a rewrite of a
@@ -628,7 +631,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
           toolName === "Bash"
             ? checkBash(String(input.command ?? ""))
             : isFilesystemTool(toolName)
-              ? checkPaths(toolName, input, { agentDir, workspaceRoot, libraryRoot })
+              ? checkPaths(toolName, input, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
               : { ok: true as const };
         if (!verdict.ok) {
           refund();

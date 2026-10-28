@@ -3540,7 +3540,7 @@ export interface StepRecord {
   /** What the host handed back into this step's sandbox mid-step — its
    *  `sandbox: own` jobs' files, path → sha256 — recorded HERE, on the host,
    *  so the copy-out never has to take the sandbox's word for it (FOL-96). */
-  handedBack?: Record<string, string>;
+  handedBack?: Record<string, string | string[]>;
   /**
    * Sandbox seconds this step rented, and how many of them were cold start.
    * Set only on the isolated path — an in-process step rents nothing, so

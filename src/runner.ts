@@ -3036,6 +3036,8 @@ async function runStep(
         tenant,
         input: {
           agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
+          // Its file tools inside the sandbox get the same allowance (FOL-96).
+          configWrites: step.approve === true && Boolean(step.approvedAt),
           prompt,
           model,
           effort,
@@ -3129,6 +3131,9 @@ async function runStep(
         divert: testRun && runId ? divertFor(runId) : undefined,
         // Read at copy-out: what the host handed back into the sandbox.
         handedBack: () => step.handedBack,
+        // A person approved this step before it ran: configuration and code
+        // it changes are kept, listed on the trail (FOL-96).
+        configWrites: step.approve === true && Boolean(step.approvedAt),
         test: testRun,
         // Resume: a sandbox a previous driver left running, recorded on the
         // step. Consumed once — a fresh attempt after this one (a retry, a
@@ -3510,6 +3515,9 @@ async function runStep(
       const attemptInProcess = (modelEnv: Record<string, string | undefined>) => executeStep({
         agentDir,
         workspaceRoot,
+        // A person approved this step (its gate) before it ran: it may change
+        // configuration and code (FOL-96) — the desks' retro applies fixes so.
+        configWrites: step.approve === true && Boolean(step.approvedAt),
         libraryRoot: libraryDir(tenant),
         ...(subagents.length ? { subagents } : {}),
         // The colleagues' inbox, read after every tool call — the same hook
@@ -5253,7 +5261,13 @@ function driveRunInner(
           if (back.files.length) {
             parent.handedBack = { ...(parent.handedBack ?? {}) };
             for (const f of back.files) {
-              parent.handedBack[f.path] = crypto.createHash("sha256").update(Buffer.from(f.base64, "base64")).digest("hex");
+              const h = crypto.createHash("sha256").update(Buffer.from(f.base64, "base64")).digest("hex");
+              // Kept beside any earlier job's for the same path, never over
+              // it: either may be what the sandbox ends up holding.
+              const prev = parent.handedBack[f.path];
+              const all = prev === undefined ? [] : Array.isArray(prev) ? prev : [prev];
+              if (!all.includes(h)) all.push(h);
+              parent.handedBack[f.path] = all.length === 1 ? all[0] : all;
             }
             save();
           }

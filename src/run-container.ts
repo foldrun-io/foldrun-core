@@ -29,7 +29,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, isPlatformPath, type ApiSpec, type Effort, type ModelCall } from "./store.ts";
 import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
-import { refusedBack, refusedLine, type RefusedPath } from "./copy-back.ts";
+import { refusedBack, refusedLine, keptLine, type RefusedPath } from "./copy-back.ts";
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
 import { isFileValue, fileContent } from "./secrets.ts";
@@ -48,6 +48,9 @@ import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
  *  secrets in headers, assembled prompt, serializable MCP configs. */
 export interface ContainerStepInput {
   agentRel: string; // "agents/<name>" inside the workspace
+  /** A person approved this step before it ran: its file tools may write
+   *  configuration and code inside the sandbox too (FOL-96). */
+  configWrites?: boolean;
   prompt: string;
   model: string;
   effort?: Effort | null;
@@ -460,10 +463,14 @@ export interface ApplyOptions {
    *  job's files (delegate-tools.ts), path → sha256 — as the HOST recorded
    *  it (StepRecord.handedBack). The sandbox's own note of the same is only
    *  believed where it agrees with this: a step can write that note. */
-  handedBack?: Record<string, string>;
+  handedBack?: Record<string, string | string[]>;
   /** Told of every path the step changed that was not taken back because it
    *  is configuration or code (copy-back.ts). */
   onRefused?: (refused: RefusedPath) => void;
+  /** A person approved the step before it ran: configuration and code it
+   *  changed come back, each told to onKept instead of refused. */
+  allowConfig?: boolean;
+  onKept?: (kept: RefusedPath) => void;
 }
 
 export function applyContainerChanges(
@@ -494,7 +501,11 @@ export function applyContainerChanges(
       const m = JSON.parse(fs.readFileSync(file, "utf8"));
       if (m && typeof m === "object" && !Array.isArray(m)) {
         for (const [rel, h] of Object.entries(m as Record<string, unknown>)) {
-          if (typeof h === "string" && handedBack[rel] === h) imported[rel] = h;
+          // Every version the host handed back for the path counts: two jobs
+          // can return the same file, and the sandbox may hold the first
+          // (the second went beside a parent edit as a conflict copy).
+          const ok = handedBack[rel];
+          if (typeof h === "string" && (Array.isArray(ok) ? ok.includes(h) : ok === h)) imported[rel] = h;
         }
       }
     }
@@ -542,7 +553,9 @@ export function applyContainerChanges(
       // or test divert — so none of those can carry it to the workspace,
       // and the next step is staged from the workspace's own copy.
       const refused = refusedBack(rel);
-      if (refused) {
+      if (refused && opts.allowConfig) {
+        opts.onKept?.({ path: rel.replaceAll("\\", "/"), kind: refused });
+      } else if (refused) {
         opts.onRefused?.({ path: rel.replaceAll("\\", "/"), kind: refused });
         continue;
       }
@@ -878,6 +891,7 @@ try {
     agentDir,
     workspaceRoot: "/workspace",
     libraryRoot: "/library",
+    configWrites: input.configWrites === true,
     prompt: input.prompt,
     model: input.model,
     effort: input.effort ?? null,
@@ -1563,6 +1577,9 @@ export function heldCores(cpus: string, isolation: string | undefined, available
 
 export interface RunInContainerArgs {
   workspaceRoot: string;
+  /** A person approved this step before it ran: configuration and code it
+   *  changed are kept, not refused (copy-back.ts, FOL-96). */
+  configWrites?: boolean;
   libraryRoot: string;
   /** The platform's gallery, staged under /library BEFORE the account library so the account's copies win. */
   galleryRoot?: string;
@@ -1618,7 +1635,7 @@ export interface RunInContainerArgs {
   /** What the host handed back into this sandbox mid-step (StepRecord.
    *  handedBack), read at copy-out — kept on the host, never read back from
    *  the sandbox alone (FOL-96). */
-  handedBack?: () => Record<string, string> | undefined;
+  handedBack?: () => Record<string, string | string[]> | undefined;
   /** The run is a test run. An isolated executor labels the sandbox so the
    *  cluster can cut its network down to the egress proxy: a script tool
    *  calls the network directly, not through the proxy where the test-mode
@@ -1989,12 +2006,16 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     const back = spawnSync(cli(), ["cp", `${containerId}:/workspace/.`, wsOut], { encoding: "utf8" });
     let applied: string[] = [];
     const refused: RefusedPath[] = [];
+    const kept: RefusedPath[] = [];
     if (back.status === 0) {
       applied = applyContainerChanges(args.workspaceRoot, wsOut, wsIn, (m) => args.emit("error", m), args.divert, {
         handedBack: args.handedBack?.(),
         onRefused: (r) => refused.push(r),
+        allowConfig: args.configWrites === true,
+        onKept: (r) => kept.push(r),
       });
       if (refused.length) args.emit("info", refusedLine(refused));
+      if (kept.length) args.emit("info", keptLine(kept));
     } else {
       args.emit("error", `copy-out failed — the step's file changes were lost:\n${back.stderr.slice(0, 500)}`);
     }
