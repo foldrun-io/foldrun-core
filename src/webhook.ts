@@ -163,7 +163,7 @@ const KEEP_DELIVERIES = 500;
 export function recordDelivery(tenant: string, workspace: string, delivery: HookDelivery) {
   const file = deliveriesFile(tenant, workspace);
   if (!fs.existsSync(path.dirname(file))) return; // no workspace, nothing to log against
-  if (UNAUTHENTICATED.includes(delivery.outcome) && collapseInto(file, delivery)) return;
+  if (UNAUTHENTICATED.includes(delivery.outcome)) return recordRefusal(file, tenant, workspace, delivery);
   fs.appendFileSync(file, JSON.stringify(delivery) + "\n");
   // Bounded: compact to the newest KEEP when it doubles. Amortised cheap,
   // and a log that grows forever is a disk-full incident with a delay.
@@ -179,9 +179,42 @@ export function recordDelivery(tenant: string, workspace: string, delivery: Hook
   }
 }
 
+/**
+ * A refusal — anyone's to send — never changes the workspace's directory: no
+ * new file, no tmp file, no rename. The directory's mtime is the workspace's
+ * deployedAt (store.ts listWorkspaces), and a stranger posting a bad token
+ * moved it (FOL-102). So a refusal goes into a log that already exists, in
+ * place (an append, or the last line rewritten), and is never the write that
+ * compacts it; a workspace with no log yet gets a server log line instead,
+ * at most one a minute per workspace.
+ */
+function recordRefusal(file: string, tenant: string, workspace: string, delivery: HookDelivery) {
+  if (!fs.existsSync(file)) return noteRefusal(tenant, workspace, delivery);
+  if (collapseInto(file, delivery)) return;
+  fs.appendFileSync(file, JSON.stringify(delivery) + "\n");
+}
+
+const REFUSAL_NOTE_MS = 60_000;
+const refusalNotes = new Map<string, { at: number; since: number }>();
+
+function noteRefusal(tenant: string, workspace: string, delivery: HookDelivery) {
+  const key = `${tenant}/${workspace}`;
+  const now = Date.now();
+  const seen = refusalNotes.get(key);
+  if (seen && now - seen.at < REFUSAL_NOTE_MS) {
+    seen.since++;
+    return;
+  }
+  const more = seen?.since ? ` (and ${seen.since} more since the last note)` : "";
+  console.warn(`[hooks] refused a delivery to ${key}/${delivery.flow}: ${delivery.outcome}${more}`);
+  refusalNotes.set(key, { at: now, since: 0 });
+  if (refusalNotes.size > 10_000) refusalNotes.clear(); // bounded: a note lost beats memory
+}
+
 /** Fold a refusal into the log's last line when that line is a refusal
  *  too. The flow name is not part of the match: it comes from the URL, so
- *  a flood that varies it would otherwise never collapse. True when folded. */
+ *  a flood that varies it would otherwise never collapse. True when folded.
+ *  Rewritten in place, never through a rename (recordRefusal says why). */
 function collapseInto(file: string, delivery: HookDelivery): boolean {
   let text: string;
   try {
@@ -204,9 +237,15 @@ function collapseInto(file: string, delivery: HookDelivery): boolean {
     first: last.first ?? last.t,
     ...(last.detail === "more than one flow name" || last.flow !== delivery.flow ? { detail: "more than one flow name" } : {}),
   };
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, end.slice(0, cut) + JSON.stringify(merged) + "\n");
-  fs.renameSync(tmp, file);
+  const line = Buffer.from(JSON.stringify(merged) + "\n");
+  const at = Buffer.byteLength(end.slice(0, cut));
+  const fd = fs.openSync(file, "r+");
+  try {
+    fs.writeSync(fd, line, 0, line.length, at);
+    fs.ftruncateSync(fd, at + line.length);
+  } finally {
+    fs.closeSync(fd);
+  }
   return true;
 }
 

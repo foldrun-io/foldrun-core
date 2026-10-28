@@ -178,6 +178,16 @@ export interface PlatformHooks {
    */
   fetchUntrusted(url: string, init?: RequestInit, opts?: { maxBytes?: number }): Promise<Response>;
   /**
+   * May the host call this URL a tenant chose — a provider's base_url,
+   * before an eval's judge or a dashboard draft talks to it? A reason it may
+   * not, or null. This is the early refusal people can read; the guarantee
+   * is that every byte of such a call goes through fetchUntrusted (FOL-95).
+   * Default: hostUrlProblem below — https on an install that guards
+   * untrusted fetches, anything on a laptop (its own localhost included).
+   * A platform may bind a stricter check (the addresses a name resolves to).
+   */
+  checkUntrustedUrl(url: string): Promise<string | null>;
+  /**
    * Hand a notify: webhook to whatever delivers it. The platform records
    * the delivery, makes the first attempt now and retries on a backoff from
    * the worker (`retry: true`); `retry: false` is one attempt, recorded —
@@ -210,6 +220,11 @@ export interface WebhookDeliveryOutcome {
   retrying?: boolean;
 }
 
+/** Marks the laptop's fetchUntrusted. A symbol from the global registry, not
+ *  the function itself: every bundle has its own copy of this module (see
+ *  KEY below), and only the shared object says which one was registered. */
+const LAPTOP_FETCH = Symbol.for("foldrun.laptop-fetch");
+
 const local: PlatformHooks = {
   edition: () => "self-hosted",
   async enqueueFlowRun(tenant, workspace, steps, flowName, modelOverride, tags = [], startedBy = null, opts = {}) {
@@ -237,7 +252,8 @@ const local: PlatformHooks = {
   platformKeyAllowed: () => true,
   galleryDir: () => null,
   noteOAuthRefresh: async () => undefined,
-  fetchUntrusted: (url, init) => fetch(url, init),
+  fetchUntrusted: Object.assign((url: string, init?: RequestInit) => fetch(url, init), { [LAPTOP_FETCH]: true }),
+  checkUntrustedUrl: async (url) => hostUrlProblem(url),
   async deliverWebhook(tenant, workspace, delivery) {
     const { attemptWebhook, newDeliveryId } = await import("./notify.ts");
     const deliveryId = newDeliveryId();
@@ -258,6 +274,34 @@ const local: PlatformHooks = {
 const KEY = Symbol.for("foldrun.platform");
 const g = globalThis as unknown as Record<symbol, PlatformHooks | undefined>;
 export const platform: PlatformHooks = (g[KEY] ??= { ...local });
+
+/** True when this process fetches tenant-chosen URLs through a guard: a
+ *  platform bound fetchUntrusted. A laptop has not, and calls its own LAN on
+ *  purpose. */
+export function guardsUntrustedUrls(): boolean {
+  return !(platform.fetchUntrusted as unknown as Record<symbol, unknown>)[LAPTOP_FETCH];
+}
+
+/**
+ * Why the host may not call a tenant's model endpoint at this URL, or null.
+ * On an install that guards untrusted fetches the endpoint must be https: the
+ * key rides in every request, and a plain-http base is also how a tenant
+ * names a cluster service. Private and internal addresses are refused by the
+ * guard itself, on every hop. FOLDRUN_EGRESS_ALLOW_PRIVATE=1 — the operator's
+ * own install calling its own network — lifts this as it lifts the guard. A
+ * laptop: always null.
+ */
+export function hostUrlProblem(url: string): string | null {
+  if (!guardsUntrustedUrls() || process.env.FOLDRUN_EGRESS_ALLOW_PRIVATE === "1") return null;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return `${url} is not a URL`;
+  }
+  if (u.protocol !== "https:") return `${u.origin} is not https — this platform calls a model endpoint only over https`;
+  return null;
+}
 
 /** Install the platform's implementations. Partial: what is not given keeps its local default. */
 export function registerPlatform(hooks: Partial<PlatformHooks>): void {

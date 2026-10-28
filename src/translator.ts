@@ -68,7 +68,11 @@ function usageBlock(u: { input: number; cached: number; output: number } | null)
   };
 }
 
-export type TranslatorWire = "chat" | "responses";
+/** `anthropic` is no translation at all: the host-side passthrough for an
+ *  endpoint that already speaks Messages, so the SDK on the host talks only
+ *  to loopback and every byte to the tenant's URL goes through the guard
+ *  (FOL-95). A step never gets it (translatorSpecFor returns null there). */
+export type TranslatorWire = "chat" | "responses" | "anthropic";
 
 export interface TranslatorSpec {
   /** The provider's base, e.g. https://api.openai.com/v1 — `/chat/completions`
@@ -76,8 +80,10 @@ export interface TranslatorSpec {
   upstreamBase: string;
   /** Which OpenAI shape the endpoint speaks. Default chat. */
   wire?: TranslatorWire;
-  /** Already resolved. Sent as `Authorization: Bearer`. */
+  /** Already resolved. Sent as `Authorization: Bearer`, or as `x-api-key`
+   *  where `upstreamAuth` says so (the anthropic wire only). */
   upstreamKey: string;
+  upstreamAuth?: "bearer" | "x-api-key";
   /** Extra headers the provider wants, already resolved. */
   headers?: Record<string, string>;
   maxTokensParam?: "max_tokens" | "max_completion_tokens";
@@ -943,6 +949,8 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
         req.on("error", reject);
       });
 
+      if (spec.wire === "anthropic") return await passthrough(spec, base, label, req, url, raw, res, log, started);
+
       if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
         // No endpoint on the other side counts for us; four characters a
         // token is the estimate every tokenizer lands near for English.
@@ -1103,6 +1111,73 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
         server.close(() => resolve());
       }),
   };
+}
+
+/** Request headers the SDK's own call carries that the endpoint is owed:
+ *  the content type, and Anthropic's version and beta flags. Its credential
+ *  (the translator's key) is not one of them. */
+const PASSED_HEADERS = /^(content-type|accept|anthropic-[a-z0-9-]+)$/;
+/** Response headers that describe the bytes as they came off the wire —
+ *  fetch has already decoded them, so they would lie on the way back. */
+const HOP_HEADERS = new Set(["content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive"]);
+
+/**
+ * The anthropic wire: the SDK's request, as it is, to the same path under the
+ * tenant's base URL, with the tenant's key put on here — through
+ * fetchUntrusted, so no private or cluster address, no redirect that takes
+ * the key to another origin, and the answer read to UPSTREAM_MAX_BYTES. The
+ * answer streams back as it arrives, status and headers included.
+ */
+async function passthrough(
+  spec: TranslatorSpec,
+  base: string,
+  label: string,
+  req: http.IncomingMessage,
+  url: URL,
+  raw: string,
+  res: http.ServerResponse,
+  log: string[],
+  started: number,
+): Promise<void> {
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) if (PASSED_HEADERS.test(k) && typeof v === "string") headers[k] = v;
+  Object.assign(headers, spec.headers ?? {});
+  if (spec.upstreamAuth === "x-api-key") headers["x-api-key"] = spec.upstreamKey;
+  else headers.authorization = `Bearer ${spec.upstreamKey}`;
+  const method = req.method ?? "GET";
+  const target = `${base}${url.pathname}${url.search}`;
+  let upstream: Response;
+  try {
+    upstream = await fetchUntrusted(target, { method, headers, body: method === "GET" || method === "HEAD" ? undefined : raw }, { sameOrigin: true, maxBytes: UPSTREAM_MAX_BYTES });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.push(`${method} ${label}${url.pathname} → unreachable: ${message}`);
+    res.writeHead(502, { "content-type": "application/json" });
+    res.end(errorBody(502, `translator: could not reach ${label}: ${message}`));
+    return;
+  }
+  const out: Record<string, string> = {};
+  upstream.headers.forEach((v, k) => {
+    if (!HOP_HEADERS.has(k)) out[k] = v;
+  });
+  res.writeHead(upstream.status, out);
+  log.push(`${method} ${label}${url.pathname} → ${upstream.status} (${Date.now() - started}ms)`);
+  const reader = upstream.body?.getReader();
+  if (!reader) return void res.end();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+    res.end();
+  } catch (err) {
+    // Mid-answer (the cap, a dropped connection): an Anthropic error event,
+    // so a stream reads as failed, not as a reply that merely stopped.
+    const message = err instanceof Error ? err.message : String(err);
+    log.push(`translator error: ${message}`);
+    res.end(`event: error\ndata: ${errorBody(500, `translator: ${message}`)}\n\n`);
+  }
 }
 
 /**

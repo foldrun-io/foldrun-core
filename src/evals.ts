@@ -31,7 +31,7 @@
 // they pass — no point paying a model to grade output already known to be
 // wrong.
 
-import { accountModelEnv, withModelEnv } from "./model-env.ts";
+import { accountModelEnv, withModelEnv, ModelKeyError } from "./model-env.ts";
 import type { TranslatorSpec } from "./translator.ts";
 import { sdkEnv } from "./step-exec.ts";
 import { platformModelEnv } from "./runner.ts";
@@ -746,7 +746,14 @@ export async function checkAssertion(
       } catch (err) {
         return { assertion, passed: false, detail: `judge not run — ${err instanceof Error ? err.message : String(err)}` };
       }
-      const said = await withModelEnv(m, (env) => judgeCall(assertion.value, output, model, effort, env));
+      let said: Awaited<ReturnType<typeof judgeCall>>;
+      try {
+        said = await withModelEnv(m, (env) => judgeCall(assertion.value, output, model, effort, env));
+      } catch (err) {
+        // The provider's URL refused on the host (FOL-95), like a missing key above.
+        if (!(err instanceof ModelKeyError)) throw err;
+        return { assertion, passed: false, detail: `judge not run — ${err.message}` };
+      }
       const { passed, detail } = judgeVerdict(said.text);
       return { assertion, passed, detail, costUsd: said.costUsd };
     }
