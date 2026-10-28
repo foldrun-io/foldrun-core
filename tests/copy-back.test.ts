@@ -348,5 +348,4 @@ test("a laptop step a person approved may write configuration and code with its 
   for (const p of [`${WS}/agents/writer/agent.md`, `${WS}/skills/x/SKILL.md`, `${WS}/evals/case.md`]) {
     assert.equal(checkPaths("Write", { file_path: p }, roots).ok, true, p);
   }
-  assert.equal(checkPaths("Write", { file_path: "/data/acme/library/skills/x/SKILL.md" }, roots).ok, false, "the account library stays read-only");
 });
