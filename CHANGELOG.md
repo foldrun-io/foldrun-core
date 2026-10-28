@@ -13,6 +13,33 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [3.0.0] — 2026-10-28
+
+### Breaking changes
+
+- `SUBAGENT_IMPORT_DIRS` from `@foldrun/core` — was a const, now a value
+- `KindMeta` from `@foldrun/core/kinds` — copyBack is new and required
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+- `Roots` from `@foldrun/core`
+
+### New in the public API
+
+- `CopyBackClass` from `@foldrun/core/kinds`
+- `WORKSPACE_CONFIG_FILES` from `@foldrun/core/kinds`
+- `SUBAGENT_IMPORT_DIRS` from `@foldrun/core/kinds`
+
+- test(copy-back): drop an assertion about the library — read-only is the mount's, not checkPaths' ([daa28fa](https://github.com/foldrun-io/foldrun-core/commit/daa28fa))
+- feat(copy-back): a step a person approved may change config and code; every handed-back hash counts (FOL-96 review) ([7ca19c7](https://github.com/foldrun-io/foldrun-core/commit/7ca19c7))
+
+### feat
+
+- copy-back keeps data only; config and code a step changes are refused (FOL-96) ([423928c](https://github.com/foldrun-io/foldrun-core/commit/423928c))
+
 ## [2.14.3] — 2026-10-28
 
 - fix(schema): idempotency: false passes foldrun check (FOL-94 review) ([b46ff9f](https://github.com/foldrun-io/foldrun-core/commit/b46ff9f))
