@@ -12,7 +12,13 @@
 // pip and npm need no root and run here, as the agent, into a per-step
 // directory already on PATH / PYTHONPATH / NODE_PATH (stepInstallEnv), so the
 // next command finds what this one installed. Inside a run container all of
-// it goes when the container does. Every install is logged with the line to
+// it goes when the container does.
+//
+// No package runs its own code on the way in (FOL-98, 28 Oct 2026): npm
+// installs with --ignore-scripts (no preinstall/postinstall), and pip takes
+// built wheels only (--only-binary :all:) — an sdist's setup.py is code. A
+// package that has no wheel says so, and `runtime: packages:` builds it
+// before the step instead, where the build is declared, cached and seen. Every install is logged with the line to
 // add to the agent's `runtime:` to have it before the step starts next time.
 
 import fs from "node:fs";
@@ -106,26 +112,29 @@ export function buildInstallTool(opts: {
         fs.mkdirSync(target, { recursive: true });
         const uv = findUv();
         const res = uv
-          ? spawnSync(uv, ["pip", "install", "-q", "--python", opts.python, "--target", target, ...names], {
+          ? spawnSync(uv, ["pip", "install", "-q", "--only-binary", ":all:", "--python", opts.python, "--target", target, ...names], {
               env: { ...opts.env, UV_CACHE_DIR: path.join(opts.cacheRoot, ".uv-cache"), UV_LINK_MODE: "copy", UV_NO_PROGRESS: "1" } as unknown as NodeJS.ProcessEnv,
               encoding: "utf8",
               timeout: 600_000,
             })
-          : spawnSync(opts.python, ["-m", "pip", "install", "-q", "--disable-pip-version-check", "--target", target, ...names], {
+          : spawnSync(opts.python, ["-m", "pip", "install", "-q", "--disable-pip-version-check", "--only-binary", ":all:", "--target", target, ...names], {
               env: opts.env as unknown as NodeJS.ProcessEnv,
               encoding: "utf8",
               timeout: 600_000,
             });
         if (res.status !== 0) {
-          const msg = summarizeInstallFailure(uv ? "uv pip install" : "pip install", `${res.stdout ?? ""}${res.stderr ?? ""}${res.error ? res.error.message : ""}`);
+          const raw = `${res.stdout ?? ""}${res.stderr ?? ""}${res.error ? res.error.message : ""}`;
+          const msg = summarizeInstallFailure(uv ? "uv pip install" : "pip install", raw);
           opts.emit("error", `install: pip ${names.join(" ")} — ${msg.split("\n")[0]}`);
-          return text(msg, true);
+          // Wheels only: one that exists only as source is not built here.
+          const noWheel = /no matching distribution|only-binary|no wheels? (?:with|for)|binary.*not available|doesn't have a wheel|has no wheel/i.test(raw);
+          return text(noWheel ? `${msg}\n\nOnly built wheels are installed mid-step — a source package's build runs its own code. Declare it in the agent's runtime: packages: [${names.join(", ")}] to have it built before the step.` : msg, true);
         }
         how = `pip, ${Math.round((Date.now() - t0) / 1000)}s`;
       } else {
         const prefix = path.join(opts.dir, "npm");
         fs.mkdirSync(prefix, { recursive: true });
-        const res = spawnSync("npm", ["install", "--no-fund", "--no-audit", "--no-progress", "--prefix", prefix, ...names], {
+        const res = spawnSync("npm", ["install", "--ignore-scripts", "--no-fund", "--no-audit", "--no-progress", "--prefix", prefix, ...names], {
           env: { ...opts.env, npm_config_cache: path.join(opts.cacheRoot, ".npm-cache") } as unknown as NodeJS.ProcessEnv,
           encoding: "utf8",
           timeout: 600_000,

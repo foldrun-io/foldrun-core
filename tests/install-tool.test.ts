@@ -123,3 +123,32 @@ test("every agent is granted install; disallowedTools: [install] and plan mode t
   assert.ok(!allowedOf(mk("denied", "tools: [read]\ndisallowedTools: [install]\n")).includes(INSTALL_TOOL), "disallowedTools removes it");
   assert.ok(!allowedOf(mk("planner", "tools: [read, Bash]\npermissionMode: plan\n")).includes(INSTALL_TOOL), "plan mode is read-only");
 });
+
+test("no package runs its own code on the way in: npm with --ignore-scripts, pip and uv wheels only (FOL-98)", async () => {
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), "it-fake-"));
+  const log = path.join(fake, "calls.log");
+  for (const bin of ["npm", "python3", "uv"]) {
+    fs.writeFileSync(path.join(fake, bin), `#!/bin/sh\necho "${bin} $*" >> "${log}"\nexit 0\n`, { mode: 0o755 });
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-noscripts-"));
+  const prevPath = process.env.PATH;
+  try {
+    for (const withUv of [false, true]) {
+      // findUv reads the process's PATH; the spawned managers resolve from the env's.
+      process.env.PATH = withUv ? `${fake}${path.delimiter}${prevPath}` : (prevPath ?? "").split(path.delimiter).filter((d) => !fs.existsSync(path.join(d, "uv"))).join(path.delimiter);
+      const env = { ...process.env, PATH: `${fake}${path.delimiter}${process.env.PATH}` };
+      const tool = buildInstallTool({ dir, socket: null, cacheRoot: dir, python: path.join(fake, "python3"), env, emit: () => {} });
+      await tool.call({ manager: "npm", packages: ["left-pad@1.3.0"] });
+      await tool.call({ manager: "pip", packages: ["requests==2.32.3"] });
+    }
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n");
+    const npm = calls.filter((c) => c.startsWith("npm "));
+    const pip = calls.filter((c) => c.startsWith("python3 ") || c.startsWith("uv "));
+    assert.equal(npm.length, 2);
+    for (const c of npm) assert.match(c, / --ignore-scripts /, c);
+    assert.ok(pip.some((c) => c.startsWith("uv ")) && pip.some((c) => c.startsWith("python3 ")), calls.join("\n"));
+    for (const c of pip) assert.match(c, / --only-binary :all: /, c);
+  } finally {
+    process.env.PATH = prevPath;
+  }
+});
