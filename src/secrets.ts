@@ -63,6 +63,12 @@ export type SecretScope = "account" | "workspace";
 export function installKeyMaterial(): string {
   const fromEnv = process.env.FOLDRUN_SECRET_KEY;
   if (fromEnv) return fromEnv;
+  // A process that must never hold the install key (the egress proxy) says
+  // so; without this, asking for it would quietly mint a NEW random key on
+  // the shared data volume — a second root key nobody chose.
+  if (process.env.FOLDRUN_INSTALL_KEY_ABSENT === "1") {
+    throw new Error("this process runs without the install key (FOLDRUN_INSTALL_KEY_ABSENT=1) — whatever asked for it belongs in the worker");
+  }
   fs.mkdirSync(dataRoot(), { recursive: true });
   if (!fs.existsSync(keyFile())) {
     fs.writeFileSync(keyFile(), crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
@@ -105,9 +111,99 @@ interface StoredSecret {
    *  these sites alone. Metadata, not a value, so it is stored in the clear
    *  beside the ciphertext and survives the value being set again. */
   sites?: string[];
+  /** 2: sealed with the record's place as AAD — account, scope, name, kind,
+   *  key and sites (vaultAad). Absent: the older, unbound form. */
+  v?: 2;
 }
 
 type SecretsFile = Record<string, StoredSecret>;
+
+// ------------------------------------------------------------ binding
+//
+// A v2 record is sealed with WHERE it belongs as additional authenticated
+// data: the account, the scope (account or which workspace), the name, its
+// kind, which key sealed it, and the sites it is bound to. Before 29 Oct 2026
+// (OWASP review) a record was bound to nothing: anyone who could write the
+// data volume or a backup could move one secret's ciphertext under another
+// name, scope or account, or rewrite its clear `sites` and have the egress
+// proxy fill it for their own host. Now any of those makes it fail to open,
+// which reads as "not set" — never as unbound.
+//
+// The place comes from the FILE the record is read from, never from fields
+// inside it. Sites stay in clear beside the ciphertext (listing needs no
+// key, and a pod from before v2 reads them there) and are authenticated by
+// the AAD.
+//
+// Rolled out in steps: every release since reads v2; FOLDRUN_VAULT_WRITE_BOUND=1
+// writes it and migrates existing records at boot; FOLDRUN_VAULT_REQUIRE_BOUND=1
+// refuses the old form once none is left.
+
+// The scope is account or workspace, not WHICH workspace: a workspace can be
+// renamed (its folder moves with its vault), and binding the name would make
+// every rename a re-seal racing other writers. What that leaves open — a
+// ciphertext moved between two workspaces of the same account by someone who
+// can already write the volume — is the residual, and stays inside one account.
+function vaultAad(tenant: string, workspace: string | undefined, name: string, rec: Pick<StoredSecret, "kind" | "k" | "sites">): Buffer {
+  if (rec.sites !== undefined && (!Array.isArray(rec.sites) || rec.sites.some((x) => typeof x !== "string"))) {
+    throw new Error("malformed sites");
+  }
+  return Buffer.from(
+    JSON.stringify(["foldrun-vault/2", tenant, workspace ? "w" : "a", name, rec.kind ?? "", rec.k ?? "install", [...(rec.sites ?? [])].sort()]),
+    "utf8",
+  );
+}
+const writeBound = () => process.env.FOLDRUN_VAULT_WRITE_BOUND === "1";
+const requireBound = () => process.env.FOLDRUN_VAULT_REQUIRE_BOUND === "1";
+
+/** One record, sealed for its place. Bound (v2) when the install writes bound
+ *  records or `bound` says so; the unbound form otherwise. */
+function sealRecord(
+  tenant: string,
+  workspace: string | undefined,
+  name: string,
+  value: string,
+  meta: { kind?: SecretKind; sites?: string[]; updatedAt?: string },
+  bound = writeBound(),
+): StoredSecret {
+  const { key, mark } = keyFor(tenant);
+  const rec: StoredSecret = {
+    iv: "",
+    tag: "",
+    data: "",
+    updatedAt: meta.updatedAt ?? new Date().toISOString(),
+    ...(meta.kind ? { kind: meta.kind } : {}),
+    ...(mark ? { k: mark } : {}),
+    ...(meta.sites?.length ? { sites: [...meta.sites] } : {}),
+  };
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, GCM);
+  if (bound) {
+    cipher.setAAD(vaultAad(tenant, workspace, name, rec));
+    rec.v = 2;
+  }
+  const enc = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  rec.iv = iv.toString("base64");
+  rec.tag = cipher.getAuthTag().toString("base64");
+  rec.data = enc.toString("base64");
+  return rec;
+}
+
+/** A record's value, opened for its place; null when it will not open. */
+function openRecord(tenant: string, workspace: string | undefined, name: string, rec: StoredSecret | undefined): string | null {
+  if (!rec) return null;
+  if (rec.v === 2) {
+    // Metadata someone rewrote into a shape that is not a list fails closed,
+    // like a bad tag — never as an exception up the read path.
+    let aad: Buffer;
+    try {
+      aad = vaultAad(tenant, workspace, name, rec);
+    } catch {
+      return null;
+    }
+    return decrypt(tenant, rec, aad);
+  }
+  return requireBound() ? null : decrypt(tenant, rec);
+}
 
 function read(tenant: string, workspace?: string): SecretsFile {
   return readFile(secretsFile(tenant, workspace));
@@ -199,18 +295,15 @@ export function setSecret(
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   }
   if (value.length > 8192) throw new Error("secret too long");
-  const sealed = encryptValue(tenant, value);
   mutateVaultFile(secretsFile(tenant, workspace), (all) => {
     // A new value keeps the sites the old one was bound to: binding is a
     // property of the credential's use, not of its current value, and a
     // rotation that silently unbound it would put the new value in pods.
+    // Sealed here, under the lock: a bound record's AAD names those sites.
     const sites = all[name]?.sites;
-    all[name] = {
-      ...sealed,
-      updatedAt: new Date().toISOString(),
-      ...(kind ? { kind } : {}),
-      ...(sites?.length ? { sites } : {}),
-    };
+    // Once bound, always bound: a re-save with the switch off must not
+    // quietly drop the record's authentication.
+    all[name] = sealRecord(tenant, workspace, name, value, { kind, sites }, all[name]?.v === 2 || writeBound());
     return all;
   });
 }
@@ -241,6 +334,15 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
     if (rec.kind === "client-cert" && clean.some((s) => s.startsWith("*."))) {
       throw new Error(`${name} is a client certificate — bind it to exact hosts, not a wildcard`);
     }
+    // A bound record names its sites in its seal: open it with the old
+    // binding and seal it again with the new one. One that will not open is
+    // refused, never relabelled.
+    if (rec.v === 2) {
+      const value = openRecord(tenant, workspace, name, rec);
+      if (value === null) throw new Error(`${name} cannot be read with this install's keys — set its value again before binding it`);
+      all[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: clean, updatedAt: rec.updatedAt }, true);
+      return all;
+    }
     if (clean.length) rec.sites = clean;
     else delete rec.sites;
     return all;
@@ -259,7 +361,11 @@ export function secretSites(tenant: string, names: string[], workspace?: string)
   const own = workspace ? read(tenant, workspace) : {};
   const account = read(tenant);
   for (const name of names) {
-    const rec = own[name] ?? account[name];
+    // The record getSecret would take the VALUE from — the workspace's only
+    // when it opens, else the account's. Picking by presence paired an
+    // account value with a workspace record's (unauthenticated) sites.
+    const ownRec = own[name];
+    const rec = ownRec && openRecord(tenant, workspace, name, ownRec) !== null ? ownRec : account[name];
     if (rec?.sites?.length) out[name] = [...rec.sites];
   }
   return out;
@@ -303,8 +409,10 @@ export function decryptValue(
   return decrypt(tenant, rec as StoredSecret | undefined);
 }
 
-function decrypt(tenant: string, rec: StoredSecret | undefined): string | null {
+function decrypt(tenant: string, rec: StoredSecret | undefined, aad?: Buffer): string | null {
   if (!rec) return null;
+  // A bound record opens only with its binding: one without is not a guess.
+  if (rec.v === 2 && !aad) return null;
   try {
     // The record says which key wrote it. An unmarked one predates per-account
     // keys and is under the install key; guessing either way would turn a
@@ -334,6 +442,7 @@ function decrypt(tenant: string, rec: StoredSecret | undefined): string | null {
       GCM,
     );
     decipher.setAuthTag(Buffer.from(rec.tag, "base64"));
+    if (aad) decipher.setAAD(aad);
     return Buffer.concat([
       decipher.update(Buffer.from(rec.data, "base64")),
       decipher.final(),
@@ -350,10 +459,10 @@ export function getSecret(
   workspace?: string,
 ): { value: string; scope: SecretScope } | null {
   if (workspace) {
-    const own = decrypt(tenant, read(tenant, workspace)[name]);
+    const own = openRecord(tenant, workspace, name, read(tenant, workspace)[name]);
     if (own !== null) return { value: own, scope: "workspace" };
   }
-  const shared = decrypt(tenant, read(tenant)[name]);
+  const shared = openRecord(tenant, undefined, name, read(tenant)[name]);
   return shared === null ? null : { value: shared, scope: "account" };
 }
 
@@ -490,7 +599,7 @@ export function rotateMasterKey(
   const rewritten: RotationResult["rewritten"] = [];
   const unreadable: string[] = [];
 
-  for (const { file } of secretFiles(tenant)) {
+  for (const { file, workspace } of secretFiles(tenant)) {
     let count = 0;
     mutateVaultFile(file, (all) => {
       const next: SecretsFile = {};
@@ -505,10 +614,14 @@ export function rotateMasterKey(
           next[name] = rec;
           continue;
         }
+        // A bound record keeps its binding: same place, same AAD.
+        let aad: Buffer | null = null;
         let plain: string;
         try {
+          if (rec.v === 2) aad = vaultAad(tenant, workspace, name, rec);
           const d = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(rec.iv, "base64"), GCM);
           d.setAuthTag(Buffer.from(rec.tag, "base64"));
+          if (aad) d.setAAD(aad);
           plain = Buffer.concat([d.update(Buffer.from(rec.data, "base64")), d.final()]).toString("utf8");
         } catch {
           unreadable.push(name);
@@ -517,6 +630,7 @@ export function rotateMasterKey(
         }
         const iv = crypto.randomBytes(12);
         const c = crypto.createCipheriv("aes-256-gcm", newKey, iv, GCM);
+        if (aad) c.setAAD(aad);
         const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
         next[name] = {
           iv: iv.toString("base64"),
@@ -526,6 +640,10 @@ export function rotateMasterKey(
           // Kept: without it an oauth2 secret stops being refreshed after a
           // rotation, and a file/ssh/api secret stops being materialised.
           ...(rec.kind ? { kind: rec.kind } : {}),
+          // Kept too (it was dropped until 29 Oct 2026): a rotation that
+          // unbinds every bound secret puts their values into pods.
+          ...(rec.sites?.length ? { sites: rec.sites } : {}),
+          ...(aad ? { v: 2 as const } : {}),
         };
         count++;
       }
@@ -637,8 +755,11 @@ export function replaceOAuth2RefreshToken(tenant: string, name: string, workspac
     let replaced = false;
     mutateVaultFile(secretsFile(tenant, scope), (all) => {
       const rec = all[name];
-      if (rec && decrypt(tenant, rec) === usedValue) {
-        all[name] = { ...rec, ...encryptValue(tenant, next), updatedAt: new Date().toISOString() };
+      if (rec && openRecord(tenant, scope, name, rec) === usedValue) {
+        // Built whole, not spread over the old record: a spread kept a stale
+        // `k: "tenant"` when this seal fell back to the install key, and the
+        // record then opened with neither.
+        all[name] = sealRecord(tenant, scope, name, next, { kind: rec.kind, sites: rec.sites }, rec.v === 2 || writeBound());
         replaced = true;
       }
       return all;
@@ -747,7 +868,15 @@ export async function materializeSecrets(
   env: Record<string, string>,
   /** Whose secrets these are, when the caller knows: lets the platform keep
    *  each OAuth connection's health and quote a reconnect link on failure. */
-  ctx?: { tenant: string; workspace?: string },
+  ctx?: {
+    tenant: string;
+    workspace?: string;
+    /** A rotated refresh token goes here INSTEAD of the vault: a caller that
+     *  cannot open the vault (the egress proxy without the install key)
+     *  keeps it itself and has it written by a process that can. `next` is
+     *  the stored value with the new refresh token. */
+    onRotate?: (name: string, usedValue: string, next: string) => unknown;
+  },
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = { ...env };
   for (const [name, value] of Object.entries(env)) {
@@ -769,7 +898,8 @@ export async function materializeSecrets(
           // the next run does not refresh again.
           const next = OAUTH2_PREFIX + JSON.stringify({ ...config, refresh_token: live.rotated });
           try {
-            if (ctx) replaceOAuth2RefreshToken(ctx.tenant, name, ctx.workspace, value, live.rotated);
+            if (ctx?.onRotate) await ctx.onRotate(name, value, next);
+            else if (ctx) replaceOAuth2RefreshToken(ctx.tenant, name, ctx.workspace, value, live.rotated);
           } catch {
             // The access token is good either way; the next refresh says if not.
           }
@@ -1028,7 +1158,7 @@ export function setClientCertSecret(tenant: string, name: string, config: Client
     ...(config.export ? { export: true } : {}),
   };
   if (!SECRET_NAME.test(name)) throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
-  const sealed = encryptValue(tenant, CLIENT_CERT_PREFIX + JSON.stringify(stored));
+  const plainCert = CLIENT_CERT_PREFIX + JSON.stringify(stored);
   // Written under the vault's own lock, with the binding checked in the same
   // step: a value set over a secret keeps its site binding, and a wildcard
   // one would present the certificate to a whole domain.
@@ -1037,7 +1167,7 @@ export function setClientCertSecret(tenant: string, name: string, config: Client
     if (sites?.some((site) => site.startsWith("*."))) {
       throw new Error(`${name} is bound to ${sites.join(", ")} — a client certificate is bound to exact hosts; unbind the wildcard first`);
     }
-    all[name] = { ...sealed, updatedAt: new Date().toISOString(), kind: "client-cert", ...(sites?.length ? { sites } : {}) };
+    all[name] = sealRecord(tenant, workspace, name, plainCert, { kind: "client-cert", sites }, all[name]?.v === 2 || writeBound());
     return all;
   });
 }
@@ -1144,6 +1274,44 @@ export function apiConfigOf(value: string): ApiConfig {
 
 
 /**
+ * Seal every unbound record of an account for its place (v2). Run at boot
+ * once the install writes bound records (FOLDRUN_VAULT_WRITE_BOUND=1), and by
+ * scripts/seal-vault-bindings.mjs. Per file, all or nothing: every unbound
+ * value is opened first, and a file holding one that will not open is left
+ * exactly as it is and reported. Idempotent: bound records are skipped.
+ */
+export function sealVaultBindings(tenant: string): { sealed: number; unreadable: string[] } {
+  assertSafeName(tenant, "tenant");
+  let sealed = 0;
+  const unreadable: string[] = [];
+  for (const { file, workspace } of secretFiles(tenant)) {
+    mutateVaultFile(file, (all) => {
+      const plain = new Map<string, string>();
+      const bad: string[] = [];
+      for (const [name, rec] of Object.entries(all)) {
+        if (rec.v === 2) continue;
+        const value = decrypt(tenant, rec);
+        if (value === null) bad.push(workspace ? `${workspace}/${name}` : name);
+        else plain.set(name, value);
+      }
+      unreadable.push(...bad);
+      if (plain.size === 0 || bad.length) return null;
+      const next: SecretsFile = { ...all };
+      for (const [name, value] of plain) {
+        const rec = all[name];
+        next[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: rec.sites, updatedAt: rec.updatedAt }, true);
+      }
+      sealed += plain.size;
+      return next;
+    });
+  }
+  return { sealed, unreadable };
+}
+
+/** Whether this install writes bound vault records (and migrates at boot). */
+export const vaultWritesBound = writeBound;
+
+/**
  * Move an account's secrets from the install key onto its own key.
  *
  * Read with whichever key each record names, write them all back under the
@@ -1158,7 +1326,7 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
   let moved = 0;
   const unreadable: string[] = [];
 
-  for (const { file } of secretFiles(tenant)) {
+  for (const { file, workspace } of secretFiles(tenant)) {
     // Under the vault's lock: every pod runs this at boot, and a save made
     // between our read and our write must not be lost.
     mutateVaultFile(file, (all) => {
@@ -1166,7 +1334,7 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
       const unreadableHere: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
         if (rec.k === "tenant") continue; // already moved
-        const value = decrypt(tenant, rec);
+        const value = openRecord(tenant, workspace, name, rec);
         if (value === null) {
           unreadableHere.push(name);
           continue;
@@ -1180,12 +1348,7 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
       if (plain.size === 0 || unreadableHere.length) return null;
       const next: SecretsFile = { ...all };
       for (const [name, value] of plain) {
-        next[name] = {
-          ...encryptValue(tenant, value),
-          updatedAt: all[name].updatedAt,
-          ...(all[name].kind ? { kind: all[name].kind } : {}),
-          ...(all[name].sites?.length ? { sites: all[name].sites } : {}),
-        };
+        next[name] = sealRecord(tenant, workspace, name, value, { kind: all[name].kind, sites: all[name].sites, updatedAt: all[name].updatedAt }, all[name].v === 2 || writeBound());
       }
       moved += plain.size;
       return next;
