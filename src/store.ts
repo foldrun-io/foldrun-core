@@ -2785,9 +2785,58 @@ export function listWorkspaceFiles(tenant: string, workspace: string): string[] 
   return out.sort();
 }
 
+/**
+ * Where a path really lands once every symlink on the way is followed — for
+ * one not there yet, its nearest existing ancestor's real path with the rest
+ * appended. null when a link on the way points nowhere. `followLast: false`
+ * stops short of the last part: the link itself is what is removed or moved.
+ */
+function realLanding(full: string, followLast = true): string | null {
+  const tail: string[] = followLast ? [] : [path.basename(full)];
+  let probe = followLast ? full : path.dirname(full);
+  for (;;) {
+    try {
+      fs.lstatSync(probe);
+    } catch {
+      const up = path.dirname(probe);
+      if (up === probe) return null;
+      tail.unshift(path.basename(probe));
+      probe = up;
+      continue;
+    }
+    try {
+      return path.join(fs.realpathSync(probe), ...tail);
+    } catch {
+      return null; // a dangling link: where it would write is not knowable
+    }
+  }
+}
+
+/** Whether `full` stays in the workspace `dir` with symlinks followed (FOL-83).
+ *  The string checks (assertEditablePath, runOutputPath's prefix) read the
+ *  path as written; a link planted inside the workspace — `knowledge/x.md` →
+ *  /etc/passwd, or a folder → / — passed them, and reads, writes and the run
+ *  archive followed it out. */
+function landsInside(dir: string, full: string, followLast = true): boolean {
+  let root: string;
+  try {
+    root = fs.realpathSync(dir);
+  } catch {
+    root = path.resolve(dir);
+  }
+  const at = realLanding(full, followLast);
+  return at !== null && (at === root || at.startsWith(root + path.sep));
+}
+
+function assertLandsInside(dir: string, full: string, rel: string, followLast = true) {
+  if (!landsInside(dir, full, followLast)) throw new Error(`illegal path: ${rel} leads out of the workspace through a symlink`);
+}
+
 export function readWorkspaceFile(tenant: string, workspace: string, rel: string): string {
-  const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
+  const dir = workspaceDir(tenant, workspace);
+  const p = path.join(dir, assertEditablePath(rel));
   if (!fs.existsSync(p)) throw new Error(`file not found: ${rel}`);
+  assertLandsInside(dir, p, rel);
   return fs.readFileSync(p, "utf8");
 }
 
@@ -2808,7 +2857,11 @@ export function writeWorkspaceFile(
   // past 256 KB. Still a file a person edits, not a store for data.
   if (content.length > MAX_EDITABLE_FILE) throw new Error("file too large");
   matter(content); // reject files whose frontmatter doesn't parse
-  const p = path.join(workspaceDir(tenant, workspace), assertEditablePath(rel));
+  const dir = workspaceDir(tenant, workspace);
+  const p = path.join(dir, assertEditablePath(rel));
+  // Before anything is created: mkdir below would otherwise make folders
+  // through a linked directory too.
+  assertLandsInside(dir, p, rel);
   const existed = fs.existsSync(p);
   const before = existed ? fs.readFileSync(p, "utf8") : null;
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -2918,6 +2971,10 @@ export function renameWorkspaceFile(tenant: string, workspace: string, from: str
   const dst = path.join(dir, assertEditablePath(to));
   if (!fs.existsSync(src)) throw new Error(`${from} does not exist`);
   if (fs.existsSync(dst)) throw new Error(`${to} already exists`);
+  // The link itself may be moved; what is moved must not come from, or go
+  // to, outside the workspace through a linked folder.
+  assertLandsInside(dir, src, from, false);
+  assertLandsInside(dir, dst, to);
   fs.mkdirSync(path.dirname(dst), { recursive: true });
   const moved = deletionsUnder(workspaceDir(tenant, workspace), path.normalize(from).replaceAll("\\", "/"));
   fs.renameSync(src, dst);
@@ -2992,12 +3049,16 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
   if (/^agents\/[a-z0-9_-]+$/.test(norm) ||
       /^(skills|tools)\/[a-z0-9_-]+$/.test(norm) ||
       /^agents\/[a-z0-9_-]+\/skills\/[a-z0-9_-]+$/.test(norm)) {
+    // The last part may be a link — rmSync removes the link, not what it
+    // names — but a linked folder ABOVE it would delete outside.
+    assertLandsInside(dir, path.join(dir, norm), norm, false);
     const gone = deletionsUnder(dir, norm);
     fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
     recordRevision(tenant, workspace, gone, { message: `deleted ${norm}/`, ...meta });
     return;
   }
   const p = path.join(dir, assertEditablePath(norm));
+  assertLandsInside(dir, p, norm, false);
   const gone = deletionsUnder(dir, norm);
   fs.rmSync(p, { force: true });
   recordRevision(tenant, workspace, gone, meta);
@@ -3836,6 +3897,7 @@ export function runOutputPath(
   const full = path.resolve(root, rel);
   if (full !== root && !full.startsWith(root + path.sep)) return null;
   if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+  if (!landsInside(workspaceDir(tenant, workspace), full)) return null;
   return full;
 }
 
