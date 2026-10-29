@@ -1139,11 +1139,17 @@ async function passthrough(
   log: string[],
   started: number,
 ): Promise<void> {
+  // Lowercase keys, so a header named twice in different case is one header,
+  // and the provider's own headers last: one that carries its credential
+  // itself (an Authorization or x-api-key in `headers:`) wins over the key
+  // slot, as on the Chat Completions wire above.
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) if (PASSED_HEADERS.test(k) && typeof v === "string") headers[k] = v;
-  Object.assign(headers, spec.headers ?? {});
-  if (spec.upstreamAuth === "x-api-key") headers["x-api-key"] = spec.upstreamKey;
-  else headers.authorization = `Bearer ${spec.upstreamKey}`;
+  if (spec.upstreamKey) {
+    if (spec.upstreamAuth === "x-api-key") headers["x-api-key"] = spec.upstreamKey;
+    else headers.authorization = `Bearer ${spec.upstreamKey}`;
+  }
+  for (const [k, v] of Object.entries(spec.headers ?? {})) headers[k.toLowerCase()] = v;
   const method = req.method ?? "GET";
   const target = `${base}${url.pathname}${url.search}`;
   let upstream: Response;
