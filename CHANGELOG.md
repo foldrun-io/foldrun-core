@@ -13,6 +13,24 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [8.0.0] — 2026-10-29
+
+### Breaking changes
+
+- `PlatformHooks` from `@foldrun/core` — setting is new and required
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunRecord` from `@foldrun/core`
+
+### New in the public API
+
+- `PriceSnapshot` from `@foldrun/core`
+
+- feat(platform): a setting hook for operator settings; runs carry their price snapshot ([c0a1c9f](https://github.com/foldrun-io/foldrun-core/commit/c0a1c9f))
+
 ## [7.0.2] — 2026-10-29
 
 - fix(store): a first write under a linked data folder is not read as leaving (FOL-83 review) ([37ed5b3](https://github.com/foldrun-io/foldrun-core/commit/37ed5b3))
