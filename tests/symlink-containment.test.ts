@@ -86,3 +86,22 @@ test("run archive: an output that links out is not served; a real one is", () =>
   assert.equal(runOutputPath(TENANT, WS, run, "writer", "dir/secret.md"), null);
   assert.ok(runOutputPath(TENANT, WS, run, "writer", "report.md")?.endsWith("report.md"));
 });
+
+test("a first write into a workspace not made yet, under a linked data folder, is not refused", () => {
+  // FOLDRUN_DATA reached through a link (macOS /tmp → /private/tmp): the
+  // workspace's own folder does not exist yet, so its root is canonicalised
+  // through its nearest real ancestor, as the written path is.
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-real-data-"));
+  const linked = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-link-")), "data");
+  fs.symlinkSync(real, linked);
+  const was = process.env.FOLDRUN_DATA;
+  process.env.FOLDRUN_DATA = linked;
+  try {
+    assert.ok(!fs.existsSync(workspaceDir(TENANT, "fresh")));
+    writeWorkspaceFile(TENANT, "fresh", "AGENTS.md", "---\nname: fresh\n---\n");
+    assert.ok(fs.existsSync(path.join(real, TENANT, "workspaces", "fresh", "AGENTS.md")));
+  } finally {
+    if (was === undefined) delete process.env.FOLDRUN_DATA;
+    else process.env.FOLDRUN_DATA = was;
+  }
+});
