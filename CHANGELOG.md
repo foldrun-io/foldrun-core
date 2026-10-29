@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [7.0.2] — 2026-10-29
+
+- fix(store): a first write under a linked data folder is not read as leaving (FOL-83 review) ([37ed5b3](https://github.com/foldrun-io/foldrun-core/commit/37ed5b3))
+
 ## [7.0.1] — 2026-10-29
 
 - fix(store): refuse paths that lead out of the workspace through a symlink (FOL-83) ([bf60162](https://github.com/foldrun-io/foldrun-core/commit/bf60162))
