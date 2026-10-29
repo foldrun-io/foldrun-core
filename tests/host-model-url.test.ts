@@ -181,6 +181,32 @@ test("the passthrough never takes the key to another origin, and a bearer key ri
   }
 });
 
+test("a provider's own credential header wins, in any case, and is sent once (Codex review)", async () => {
+  const up = await endpoint((_req, _body, res) => res.end("{}"));
+  try {
+    const call = async (env: Record<string, string>) => {
+      const t = await startTranslator(anthropicPassthrough({ ANTHROPIC_BASE_URL: up.url, ...env })!);
+      try {
+        await (await fetch(`${t.baseUrl}/v1/messages`, { method: "POST", headers: { "x-api-key": t.key }, body: "{}" })).text();
+      } finally {
+        await t.close();
+      }
+    };
+    // No key slot: the gateway's own Authorization, as written, alone.
+    await call({ ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_CUSTOM_HEADERS: "Authorization: Bearer gw-123" });
+    assert.equal(up.seen[0].headers.authorization, "Bearer gw-123", "not replaced, not joined with an empty bearer");
+    // A key AND an Authorization header: the header the provider wrote wins.
+    await call({ ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "sk-token", ANTHROPIC_CUSTOM_HEADERS: "authorization: Bearer gw-456" });
+    assert.equal(up.seen[1].headers.authorization, "Bearer gw-456");
+    // Different headers live side by side.
+    await call({ ANTHROPIC_API_KEY: "sk-key", ANTHROPIC_CUSTOM_HEADERS: "X-Org: acme" });
+    assert.equal(up.seen[2].headers["x-api-key"], "sk-key");
+    assert.equal(up.seen[2].headers["x-org"], "acme");
+  } finally {
+    await up.close();
+  }
+});
+
 test("the platform's own credential goes as it always did: no passthrough, no check", () =>
   guarded(
     async () => {
