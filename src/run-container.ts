@@ -21,6 +21,7 @@
 import type { RoomLevel } from "./store.ts";
 import type { PeerInfo } from "./operator.ts";
 import { isHookRecord, type HookRecord } from "./hooks.ts";
+import { platform } from "./platform.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1730,8 +1731,8 @@ export function k8sMemory(value: string): string {
 export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; memory: string } {
   if (size === "small") {
     return {
-      cpus: process.env.FOLDRUN_RUNNER_CPUS_SMALL ?? "1",
-      memory: process.env.FOLDRUN_RUNNER_MEMORY_SMALL ?? "1Gi",
+      cpus: platform.setting("FOLDRUN_RUNNER_CPUS_SMALL") ?? "1",
+      memory: platform.setting("FOLDRUN_RUNNER_MEMORY_SMALL") ?? "1Gi",
     };
   }
   if (size === "heavy") {
@@ -1741,13 +1742,13 @@ export function sizeLimits(size?: "small" | "large" | "heavy"): { cpus: string; 
     // cpus figure is both the rate its seconds are priced at and, since
     // 26 Oct 2026, the cores the sandbox is capped at.
     return {
-      cpus: process.env.FOLDRUN_RUNNER_CPUS_HEAVY ?? "4",
-      memory: process.env.FOLDRUN_RUNNER_MEMORY_HEAVY ?? "8Gi",
+      cpus: platform.setting("FOLDRUN_RUNNER_CPUS_HEAVY") ?? "4",
+      memory: platform.setting("FOLDRUN_RUNNER_MEMORY_HEAVY") ?? "8Gi",
     };
   }
   return {
-    cpus: process.env.FOLDRUN_RUNNER_CPUS ?? "2",
-    memory: process.env.FOLDRUN_RUNNER_MEMORY ?? "2g",
+    cpus: platform.setting("FOLDRUN_RUNNER_CPUS") ?? "2",
+    memory: platform.setting("FOLDRUN_RUNNER_MEMORY") ?? "2g",
   };
 }
 

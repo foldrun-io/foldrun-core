@@ -3674,6 +3674,14 @@ export interface StepRecord {
   } | null;
 }
 
+/** A run's prices as they stood when it was admitted: the operator
+ *  settings' version and the figures themselves, by name. */
+export interface PriceSnapshot {
+  version: number;
+  at: string;
+  values: Record<string, number>;
+}
+
 export interface RunRecord {
   id: string;
   flow: string; // flow name, or "adhoc:<agent>" for direct agent runs
@@ -3682,6 +3690,12 @@ export interface RunRecord {
   status: "queued" | "running" | "awaiting-approval" | "completed" | "failed";
   startedAt: string;
   finishedAt: string | null;
+  /** The prices the run was admitted under — the platform's run-start
+   *  snapshot of its operator settings (30 Oct 2026). Its settlement and
+   *  its `budget:` read these, never a price changed while it ran. Opaque
+   *  to core; absent on a laptop, and on runs from before snapshots (those
+   *  price at the live figures). */
+  pricing?: PriceSnapshot | null;
   /** Set when a worker parked this run at an approval gate and returned its
    *  slot to the queue. The approval API re-enqueues exactly when this is
    *  set — without the marker it would also re-enqueue runs whose starting

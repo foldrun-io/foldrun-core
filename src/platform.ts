@@ -150,6 +150,15 @@ export interface PlatformHooks {
    *  Default: yes — a laptop or a self-hosted install is its own operator. */
   platformKeyAllowed(tenant: string): boolean;
   /**
+   * An operator setting, by the environment variable that used to hold it
+   * (30 Oct 2026): the platform answers with the operator's value where one
+   * is set (its settings store) and the variable otherwise, spelled as the
+   * variable would be. Read where core reads FOLDRUN_EMAIL_FROM, the
+   * platform mail caps and the step sizes. Default: the variable itself —
+   * a laptop or the CLI reads its environment as before.
+   */
+  setting(env: string): string | undefined;
+  /**
    * Where the platform's built-in tools sit on disk, materialised at boot —
    * a shelf every account reads, beneath its own library. A name found in
    * the workspace wins, then the account's copy, then this. Default: none,
@@ -250,6 +259,7 @@ const local: PlatformHooks = {
   workspaceChanged() {},
   sandboxResumable: () => false,
   platformKeyAllowed: () => true,
+  setting: (env) => process.env[env],
   galleryDir: () => null,
   noteOAuthRefresh: async () => undefined,
   fetchUntrusted: Object.assign((url: string, init?: RequestInit) => fetch(url, init), { [LAPTOP_FETCH]: true }),

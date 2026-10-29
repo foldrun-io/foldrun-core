@@ -268,7 +268,7 @@ export async function mailWanted(tenant: string, email: string, category: MailCa
 const UNCAPPED = new Set<string>(["security", "billing", "account"]);
 const PLATFORM_MAX_RECIPIENTS = 10;
 const platformDayCap = (category: string) =>
-  Number(process.env[category === "invites" ? "FOLDRUN_PLATFORM_INVITES_PER_DAY" : "FOLDRUN_PLATFORM_MAIL_PER_DAY"]) ||
+  Number(platform.setting(category === "invites" ? "FOLDRUN_PLATFORM_INVITES_PER_DAY" : "FOLDRUN_PLATFORM_MAIL_PER_DAY")) ||
   (category === "invites" ? 25 : 200);
 const platformSent = new Map<string, number>();
 

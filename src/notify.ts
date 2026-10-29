@@ -58,7 +58,7 @@ export function platformMail(tenant: string): { key: string; from: string } | nu
   const own = accountMail(tenant);
   if (own && getSecret(tenant, "EMAIL_FROM")?.value?.trim()) return own;
   const key = process.env.FOLDRUN_RESEND_API_KEY;
-  if (key) return { key, from: process.env.FOLDRUN_EMAIL_FROM || "foldrun <hello@foldrun.io>" };
+  if (key) return { key, from: platform.setting("FOLDRUN_EMAIL_FROM") || "foldrun <hello@foldrun.io>" };
   return own;
 }
 
