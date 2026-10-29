@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [7.0.1] — 2026-10-29
+
+- fix(store): refuse paths that lead out of the workspace through a symlink (FOL-83) ([bf60162](https://github.com/foldrun-io/foldrun-core/commit/bf60162))
+
 ## [7.0.0] — 2026-10-29
 
 ### Breaking changes
