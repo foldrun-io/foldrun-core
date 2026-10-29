@@ -13,6 +13,30 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [6.0.0] — 2026-10-29
+
+### Breaking changes
+
+- `TranslatorWire` from `@foldrun/core` — its declaration changed
+- `PlatformHooks` from `@foldrun/core` — checkUntrustedUrl is new and required
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `TranslatorSpec` from `@foldrun/core`
+
+### New in the public API
+
+- `guardsUntrustedUrls` from `@foldrun/core`
+- `hostUrlProblem` from `@foldrun/core`
+
+- fix(translator): a provider's own credential header wins on the Anthropic passthrough (Codex review) ([36d88f5](https://github.com/foldrun-io/foldrun-core/commit/36d88f5))
+
+### fix
+
+- host-side model calls go through the URL guard; refused hook deliveries leave workspace metadata alone (FOL-95, FOL-102) ([350bfac](https://github.com/foldrun-io/foldrun-core/commit/350bfac))
+
 ## [5.0.0] — 2026-10-28
 
 ### Breaking changes
