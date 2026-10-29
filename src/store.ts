@@ -2818,12 +2818,10 @@ function realLanding(full: string, followLast = true): string | null {
  *  /etc/passwd, or a folder → / — passed them, and reads, writes and the run
  *  archive followed it out. */
 function landsInside(dir: string, full: string, followLast = true): boolean {
-  let root: string;
-  try {
-    root = fs.realpathSync(dir);
-  } catch {
-    root = path.resolve(dir);
-  }
+  // Canonical the same way as the path: a workspace not made yet under a
+  // linked ancestor (macOS /tmp → /private/tmp) is its nearest real
+  // ancestor plus the rest, or a first write into it would read as leaving.
+  const root = realLanding(dir) ?? path.resolve(dir);
   const at = realLanding(full, followLast);
   return at !== null && (at === root || at.startsWith(root + path.sep));
 }
