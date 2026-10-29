@@ -13,6 +13,19 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [7.0.0] — 2026-10-29
+
+### Breaking changes
+
+- `materializeSecrets` from `@foldrun/core` — parameter 2 changed
+
+### New in the public API
+
+- `sealVaultBindings` from `@foldrun/core`
+- `vaultWritesBound` from `@foldrun/core`
+
+- feat(security): secrets sealed for their place (vault v2), behind a switch ([dbbd2a8](https://github.com/foldrun-io/foldrun-core/commit/dbbd2a8))
+
 ## [6.0.0] — 2026-10-29
 
 ### Breaking changes
