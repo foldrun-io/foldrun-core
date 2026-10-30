@@ -118,3 +118,22 @@ export function cronProblem(expr: unknown): string | null {
     ? `schedule: "${expr}" has ${fields} field${fields === 1 ? "" : "s"}; cron has five — minute hour day-of-month month day-of-week ("0 9 * * MON"), or @hourly, @daily, @weekly, @monthly. As written the flow never fires`
     : `schedule: "${expr}" is not a cron the scheduler can read — a field is out of range or not a number (minute 0-59, hour 0-23, day 1-31, month 1-12, weekday 0-7 or sun-sat). As written the flow never fires`;
 }
+
+/** Days in each month, February at its leap-year 29: a cron naming the 29th
+ *  of February does fire, every fourth year. */
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Whether the calendar has any day this cron names (30 Oct 2026). `0 0 30 2 *`
+ * parses — every field is in range — yet no February has a 30th, so a search
+ * for its next fire walked the whole window every time it was asked (the
+ * schedule page did, 57,600 minutes per flow per request). Answered from the
+ * fields alone: only a day of the month with no weekday beside it can miss,
+ * since with a weekday either may match and every month has every weekday.
+ */
+export function cronCanFire(cron: Cron): boolean {
+  if (!cron.domRestricted || cron.dowRestricted) return true;
+  const firstDay = Math.min(...cron.dom);
+  for (const m of cron.month) if (firstDay <= MONTH_DAYS[m - 1]!) return true;
+  return false;
+}

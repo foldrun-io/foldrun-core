@@ -6,7 +6,8 @@ import { FRONTMATTER, JOBS, type FieldType, type SchemaKind } from "./frontmatte
 import { jobFold } from "./matter.ts";
 import { resolveEffort, parseDuration, parseInstant, parseRate, STEP_OPTION_KEYS } from "./store.ts";
 import { budgetProblem } from "./budget.ts";
-import { cronProblem } from "./cron.ts";
+import { cronProblem, parseCron, cronCanFire } from "./cron.ts";
+import { SECRET_NAME } from "./secrets.ts";
 import { modelSecretCollision } from "./model-credential.ts";
 import { resourcesProblem, computeProblem } from "./resources.ts";
 
@@ -70,7 +71,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
 
 export interface FieldProblem {
   key: string;
-  rule: "config/unknown-field" | "config/wrong-type" | "config/invalid-value" | "config/missing-field" | "config/conflict" | "config/misplaced";
+  rule: "config/unknown-field" | "config/wrong-type" | "config/invalid-value" | "config/missing-field" | "config/conflict" | "config/misplaced" | "config/cron-never-fires" | "secret/signing-secret-value";
   level: "error" | "warn" | "info";
   message: string;
 }
@@ -172,10 +173,45 @@ export function frontmatterProblems(
         : null;
     if (why) out.push({ key, rule: "config/invalid-value", level: "warn", message: `\`${key}:\` ${why.replace(/^\w+: /, "")}` });
   }
+  // A cron every field of which is in range, on a day no month has —
+  // `0 0 30 2 *`. The scheduler's own cronCanFire decides (30 Oct 2026), so
+  // check and the scheduler say the same about it: it never fires.
+  if (kind === "flow" && typeof data.schedule === "string") {
+    const cron = parseCron(data.schedule);
+    if (cron && !cronCanFire(cron)) {
+      out.push({ key: "schedule", rule: "config/cron-never-fires", level: "warn", message: `\`schedule: "${data.schedule}"\` names a day no month it allows has — the flow never fires. Pick a day every named month has, or add a weekday` });
+    }
+  }
+  // A signing secret is the NAME of a vault entry (30 Oct 2026): a flow's
+  // `signing_secret:` and notify's `signing_secret:` are looked up with
+  // getSecret, so a literal value there is a secret written into a
+  // versioned, deployed file — and never matches anything in the vault.
+  // The message never repeats the value.
+  if (kind === "flow" && data.signing_secret !== undefined) {
+    const why = signingSecretProblem(data.signing_secret);
+    if (why) out.push({ key: "signing_secret", rule: "secret/signing-secret-value", level: "warn", message: `\`signing_secret:\` ${why}` });
+  }
+  if (kind === "agents-md" && data.notify && typeof data.notify === "object" && !Array.isArray(data.notify)) {
+    const raw = (data.notify as { signing_secret?: unknown }).signing_secret;
+    const why = raw === undefined ? null : signingSecretProblem(raw);
+    if (why) out.push({ key: "notify", rule: "secret/signing-secret-value", level: "warn", message: `\`notify: signing_secret:\` ${why}` });
+  }
   if (kind === "skill" && !(typeof data.description === "string" && data.description.trim())) {
     out.push({ key: "description", rule: "config/missing-field", level: "warn", message: "no `description:` — a skill without one is never loaded; the model chooses a skill by it" });
   }
   return out;
+}
+
+/** Why a `signing_secret:` value is not a vault secret's name, or null. The
+ *  runtime reads `NAME` and `${NAME}` alike (notify.ts, store.ts). Never
+ *  says what the value is: it may be the secret itself. */
+export function signingSecretProblem(v: unknown): string | null {
+  if (typeof v !== "string") return null; // config/wrong-type says so
+  const name = v.trim().replace(/^\$\{|\}$/g, "");
+  if (!name) return null;
+  return SECRET_NAME.test(name)
+    ? null
+    : "holds something that is not a secret's name (UPPER_SNAKE_CASE, like WEBHOOK_SIGNING_KEY) — it is looked up in the vault by name, so a value written here is never found, and is deployed and versioned in plain text. Put the value in the vault (`foldrun secrets set NAME`), write the name here, and rotate it";
 }
 
 function askProblem(v: unknown): string | null {

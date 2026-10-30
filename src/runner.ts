@@ -5040,15 +5040,18 @@ function driveRunInner(
         if (needsApproval.length) {
           for (const step of needsApproval) {
             step.status = "awaiting-approval";
+            const t = new Date().toISOString();
             step.events.push({
-              t: new Date().toISOString(),
+              t,
               type: "info",
               // ask: is the same gate carrying a question — the answer
               // arrives as the approval note and rides into the prompt.
+              // An event URL is this step's and this park's alone (30 Oct
+              // 2026): the index and this line's `t` are in its token.
               text: step.ask
                 ? `waiting for an answer: ${step.ask}`
                 : step.waitFor === "event"
-                  ? `waiting for an external event — release it with POST ${eventUrl(tenant, workspace, run.id)}`
+                  ? `waiting for an external event — release it with POST ${eventUrl(tenant, workspace, run.id, { step: run.steps.indexOf(step), at: t })}`
                   : "waiting for approval before running",
             });
           }

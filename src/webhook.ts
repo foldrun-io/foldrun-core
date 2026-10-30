@@ -96,22 +96,39 @@ export function approveToken(tenant: string, workspace: string, runId: string): 
     .slice(0, 32);
 }
 
+/** One parked `wait: event` gate: the step's index in the run record and
+ *  the moment it parked (the `t` of its "waiting for an external event"
+ *  trace line). */
+export interface EventGate {
+  step: number;
+  at: string;
+}
+
 /**
  * The token that releases a run parked on `wait: event`. Its own HMAC
  * family, so an approval link cannot double as an event URL or the reverse.
+ *
+ * With `gate`, the token is for that one park of that one step (30 Oct
+ * 2026). The per-run token released every later `wait: event` of the run,
+ * so a URL handed to a third party for the first gate also opened the
+ * second, and never expired. A gate's token dies with its park: the step
+ * released is no longer waiting, and parking again (a loop) stamps a new
+ * `at`. The per-run form, without `gate`, is what URLs printed before then
+ * carry — the events route still takes it for a step parked under it.
  */
-export function eventToken(tenant: string, workspace: string, runId: string): string {
+export function eventToken(tenant: string, workspace: string, runId: string, gate?: EventGate): string {
   return crypto
     .createHmac("sha256", installKey())
-    .update(`event:${tenant}/${workspace}/${runId}`)
+    .update(gate ? `event:${tenant}/${workspace}/${runId}#${gate.step}@${gate.at}` : `event:${tenant}/${workspace}/${runId}`)
     .digest("hex")
     .slice(0, 32);
 }
 
 /** The URL a `wait: event` step is released at — absolute when the install
- *  knows its origin, a path otherwise. */
-export function eventUrl(tenant: string, workspace: string, runId: string): string {
-  const p = `/api/events/${tenant}/${workspace}/${runId}?token=${eventToken(tenant, workspace, runId)}`;
+ *  knows its origin, a path otherwise. With `gate`, that step's own URL
+ *  (`&step=<index>`); the route finds the park's moment on the record. */
+export function eventUrl(tenant: string, workspace: string, runId: string, gate?: EventGate): string {
+  const p = `/api/events/${tenant}/${workspace}/${runId}?token=${eventToken(tenant, workspace, runId, gate)}${gate ? `&step=${gate.step}` : ""}`;
   const base = publicUrl();
   return base ? `${base}${p}` : p;
 }

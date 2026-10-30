@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { startFlowRun, waitForRun } from "../src/runner.ts";
 import { parseFlow, readRun, type FlowStep } from "../src/store.ts";
-import { deliverEvent } from "../src/approvals.ts";
+import { deliverEvent, eventGatesFor } from "../src/approvals.ts";
 import { eventToken, approveToken, eventUrl } from "../src/webhook.ts";
 
 function workspace(agents: Record<string, string>) {
@@ -122,6 +122,48 @@ test("an event delivered by a named person records them, and a step that is not 
     assert.equal(done.eventPayload, "paid");
     assert.ok(done.events.some((e) => /approved by ann@acme\.test/.test(e.text)));
     assert.ok(!done.events.some((e) => /by an external event/.test(e.text)));
+  } finally {
+    w.done();
+  }
+});
+
+// 30 Oct 2026: the event URL is one step's, for one park. The per-run token
+// released every later `wait: event` of the run and never expired.
+test("an event URL opens its own step's park only; the old per-run form only a step parked under it", async () => {
+  const w = workspace({ sender: "sent", first: "one", second: "two" });
+  try {
+    const run = startFlowRun(
+      "acme", "desk",
+      [step("sender", 1), step("first", 2, { waitFor: "event" }), step("second", 3, { waitFor: "event" })],
+      "two-gates",
+    );
+    await until(() => readRun("acme", "desk", run.id)?.status === "awaiting-approval");
+    const parked = readRun("acme", "desk", run.id)!;
+    const line = parked.steps[1].events.find((e) => /external event/.test(e.text))!;
+    const url = /POST (\S+)/.exec(line.text)![1];
+    assert.match(url, /\?token=[0-9a-f]{32}&step=1$/, "the printed URL names its step");
+    const token = new URL(url, "http://x").searchParams.get("token")!;
+    assert.equal(token, eventToken("acme", "desk", run.id, { step: 1, at: line.t }));
+    assert.notEqual(token, eventToken("acme", "desk", run.id), "not the per-run token");
+
+    assert.deepEqual(eventGatesFor("acme", "desk", parked, token, 1), { known: true, steps: [1] });
+    assert.deepEqual(eventGatesFor("acme", "desk", parked, token, 2), { known: false, steps: [] }, "not another step's");
+    assert.deepEqual(eventGatesFor("acme", "desk", parked, "0".repeat(32), 1), { known: false, steps: [] });
+    // The old form opens nothing parked since: its line names a step.
+    assert.deepEqual(eventGatesFor("acme", "desk", parked, eventToken("acme", "desk", run.id), null), { known: true, steps: [] });
+
+    await deliverEvent("acme", "desk", run.id, "first", { step: 1 });
+    await until(() => readRun("acme", "desk", run.id)?.steps[2].status === "awaiting-approval", 20_000);
+    const later = readRun("acme", "desk", run.id)!;
+    // The first URL, once released, is spent — and never opens the second gate.
+    assert.deepEqual(eventGatesFor("acme", "desk", later, token, 1), { known: true, steps: [] });
+    assert.deepEqual(eventGatesFor("acme", "desk", later, token, 2), { known: false, steps: [] });
+
+    // A step parked under the old URL (printed before 30 Oct 2026) is still released by it.
+    const legacy = structuredClone(later);
+    const second = legacy.steps[2].events.find((e) => /external event/.test(e.text))!;
+    second.text = `waiting for an external event — release it with POST ${eventUrl("acme", "desk", run.id)}`;
+    assert.deepEqual(eventGatesFor("acme", "desk", legacy, eventToken("acme", "desk", run.id), null), { known: true, steps: [2] });
   } finally {
     w.done();
   }

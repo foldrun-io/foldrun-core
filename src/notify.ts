@@ -34,7 +34,7 @@
 import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, readFlow, runVerdict, type RunRecord } from "./store.ts";
-import { getSecret, secretSites } from "./secrets.ts";
+import { getSecret, secretSites, signingSecretShown, accountSecretUsableIn } from "./secrets.ts";
 import { siteCovers } from "./network.ts";
 import { publicUrl } from "./webhook.ts";
 import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
@@ -63,11 +63,15 @@ export function platformMail(tenant: string): { key: string; from: string } | nu
   return own;
 }
 
-/** The account's own Resend key and sender, or null when it has none. */
-export function accountMail(tenant: string): { key: string; from: string } | null {
-  const own = getSecret(tenant, "RESEND_API_KEY");
+/** The account's own Resend key and sender, or null when it has none.
+ *  With a workspace — mail a workspace's run causes — an account key or
+ *  sender limited to other workspaces is not used (30 Oct 2026); the
+ *  account's own mail (resets, invites) names none and is not limited. */
+export function accountMail(tenant: string, workspace?: string): { key: string; from: string } | null {
+  const usable = (name: string) => !workspace || accountSecretUsableIn(tenant, name, workspace);
+  const own = usable("RESEND_API_KEY") ? getSecret(tenant, "RESEND_API_KEY") : null;
   if (!own) return null;
-  const from = getSecret(tenant, "EMAIL_FROM")?.value?.trim() || "foldrun <onboarding@resend.dev>";
+  const from = (usable("EMAIL_FROM") ? getSecret(tenant, "EMAIL_FROM")?.value?.trim() : "") || "foldrun <onboarding@resend.dev>";
   return { key: own.value, from };
 }
 
@@ -81,8 +85,15 @@ export function accountMail(tenant: string): { key: string; from: string } | nul
  * owner's bin. The platform's key is the fallback for an account that set
  * none, so `notify:` works before anyone has configured mail at all.
  */
-export function notifyMail(tenant: string): { key: string; from: string } | null {
-  return accountMail(tenant) ?? platformMail(tenant);
+export function notifyMail(tenant: string, workspace?: string): { key: string; from: string } | null {
+  if (!workspace) return accountMail(tenant) ?? platformMail(tenant);
+  // A workspace's notification: the account's sender only where it may be
+  // used, else the platform's — never platformMail's fall back to the
+  // account's own key, which would walk around the limit.
+  const own = accountMail(tenant, workspace);
+  if (own) return own;
+  const key = process.env.FOLDRUN_RESEND_API_KEY;
+  return key ? { key, from: platform.setting("FOLDRUN_EMAIL_FROM") || "foldrun <hello@foldrun.io>" } : null;
 }
 
 /** Was the mail sent on the account's own key? Only then is a refusal from
@@ -169,7 +180,7 @@ export function signatureHeaders(
   const secret = getSecret(tenant, config.signingSecret, workspace);
   if (!secret) {
     console.error(
-      `[foldrun] notify: signing_secret names ${config.signingSecret}, which is not in the vault for ${tenant}/${workspace} — sending unsigned`,
+      `[foldrun] notify: signing_secret names ${signingSecretShown(config.signingSecret)}, which is not in the vault for ${tenant}/${workspace} — sending unsigned`,
     );
     return {};
   }
@@ -475,7 +486,7 @@ export async function sendPlainNotificationOutcome(
   };
   try {
     if (config.email) {
-      const mail = notifyMail(tenant);
+      const mail = notifyMail(tenant, workspace);
       if (!mail) return no;
       const r = await sendMail({
         tenant,
@@ -529,7 +540,7 @@ export async function sendTestNotification(
   const detail = `Sent from ${workspace} at ${sent}. If you are reading this, failures and approval gates will reach you here too.`;
 
   if (config.email) {
-    const mail = notifyMail(tenant);
+    const mail = notifyMail(tenant, workspace);
     if (!mail) {
       return {
         ok: false,
@@ -568,7 +579,7 @@ export async function sendTestNotification(
     ? {
         ok: true,
         destination: shown,
-        detail: `${config.signingSecret ? "accepted, signed with " + config.signingSecret : "accepted"} (delivery ${r.deliveryId})`,
+        detail: `${config.signingSecret ? "accepted, signed with " + signingSecretShown(config.signingSecret) : "accepted"} (delivery ${r.deliveryId})`,
       }
     : { ok: false, destination: shown, detail: `${r.statusCode ? `HTTP ${r.statusCode} — ` : ""}${r.detail.replace(/\s+/g, " ").slice(0, 400)}` };
 }
@@ -659,7 +670,7 @@ export async function sendRunNotification(
 
   try {
     if (config.email) {
-      const mail = notifyMail(tenant);
+      const mail = notifyMail(tenant, workspace);
       if (!mail) {
         console.error(`[foldrun] notify: email configured but no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account ${tenant}, or FOLDRUN_RESEND_API_KEY on the platform`);
         return false;

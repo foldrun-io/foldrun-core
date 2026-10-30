@@ -156,7 +156,7 @@ const FLOW: FieldSpec[] = [
   { key: "catchup", type: "string", validated: true, help: "last | none" },
   { key: "on", type: "string", validated: true, help: "trigger: flow — completed | failed | blocked | any" },
   { key: "signature", type: "string", validated: true, help: "github | stripe | slack | hmac" },
-  { key: "signing_secret", type: "string", help: "the secret a webhook's signature is checked with" },
+  { key: "signing_secret", type: "string", help: "the NAME of the vault secret a webhook's signature is checked with — never the value" },
   { key: "after", type: ["string", "list"], help: "trigger: flow — the flow this one follows" },
   { key: "at", type: "string", help: "trigger: once — when" },
   { key: "url", type: "string", help: "trigger: watch — the page watched" },

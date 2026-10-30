@@ -271,6 +271,29 @@ export const SCAN_RULES: readonly ScanRule[] = [
     help: "A skill with no description is never loaded: the model chooses skills by their descriptions.",
   },
   {
+    // 30 Oct 2026: check and the scheduler read a schedule with the same
+    // cronCanFire (core cron.ts), so check says what the scheduler does.
+    id: "config/cron-never-fires",
+    category: "config",
+    level: "warn",
+    title: "A schedule that names a day no month has",
+    help:
+      "`0 0 30 2 *` is a valid cron — every field is in range — but no February has a 30th, so the flow never runs and the " +
+      "scheduler never lists a next run for it. Pick a day every named month has, or add a weekday (either then matches).",
+  },
+  {
+    // 30 Oct 2026: a signing secret is looked up in the vault by name.
+    id: "secret/signing-secret-value",
+    category: "secret",
+    level: "warn",
+    title: "A signing_secret: that holds a value, not a secret's name",
+    help:
+      "A flow's `signing_secret:` and `notify: signing_secret:` name a vault entry (`WEBHOOK_SIGNING_KEY`, or `${WEBHOOK_SIGNING_KEY}`). " +
+      "Anything else is looked up as a name and never found — every signed delivery is refused, every notification goes unsigned — " +
+      "and the value itself is deployed and versioned in plain text. Put it in the vault (`foldrun secrets set NAME`), write the name, and rotate it.",
+    owasp: ["ASI03"],
+  },
+  {
     id: "check/ignore-needs-reason",
     category: "config",
     level: "warn",

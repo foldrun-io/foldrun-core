@@ -111,8 +111,15 @@ interface StoredSecret {
    *  these sites alone. Metadata, not a value, so it is stored in the clear
    *  beside the ciphertext and survives the value being set again. */
   sites?: string[];
+  /** An ACCOUNT secret limited to these workspaces (GitHub's "selected
+   *  repositories" for an organisation secret). Absent: every workspace may
+   *  use it, as before. Every other workspace is answered as if it were not
+   *  set (getSecret). Metadata like `sites`: in the clear, and in the seal
+   *  of a bound record. Never on a workspace's own record. */
+  workspaces?: string[];
   /** 2: sealed with the record's place as AAD — account, scope, name, kind,
-   *  key and sites (vaultAad). Absent: the older, unbound form. */
+   *  key, sites and, when limited, workspaces (vaultAad). Absent: the older,
+   *  unbound form. */
   v?: 2;
 }
 
@@ -143,14 +150,46 @@ type SecretsFile = Record<string, StoredSecret>;
 // every rename a re-seal racing other writers. What that leaves open — a
 // ciphertext moved between two workspaces of the same account by someone who
 // can already write the volume — is the residual, and stays inside one account.
-function vaultAad(tenant: string, workspace: string | undefined, name: string, rec: Pick<StoredSecret, "kind" | "k" | "sites">): Buffer {
+//
+// Rolling out (30 Oct 2026, accepted, no switch): a pod from before this
+// release cannot open a limited record (its AAD lacks the list), and one that
+// sets a new value over it writes the record back without the list — open to
+// every workspace again. So limits are set after every pod, worker and the
+// egress proxy run this version; the secrets docs say so.
+//
+// The workspaces an account secret is limited to are in the seal too (30 Oct
+// 2026), appended only when the record has the list: every record sealed
+// before keeps the AAD it was sealed with, and a list added to, widened in or
+// stripped from a sealed record on disk makes it fail to open — "not set",
+// never "every workspace". These ARE workspace names, so a rename re-seals
+// them (retargetSecretWorkspaces), under the vault lock.
+function vaultAad(tenant: string, workspace: string | undefined, name: string, rec: Pick<StoredSecret, "kind" | "k" | "sites" | "workspaces">): Buffer {
   if (rec.sites !== undefined && (!Array.isArray(rec.sites) || rec.sites.some((x) => typeof x !== "string"))) {
     throw new Error("malformed sites");
   }
+  if (rec.workspaces !== undefined && (!Array.isArray(rec.workspaces) || rec.workspaces.some((x) => typeof x !== "string"))) {
+    throw new Error("malformed workspaces");
+  }
   return Buffer.from(
-    JSON.stringify(["foldrun-vault/2", tenant, workspace ? "w" : "a", name, rec.kind ?? "", rec.k ?? "install", [...(rec.sites ?? [])].sort()]),
+    JSON.stringify([
+      "foldrun-vault/2",
+      tenant,
+      workspace ? "w" : "a",
+      name,
+      rec.kind ?? "",
+      rec.k ?? "install",
+      [...(rec.sites ?? [])].sort(),
+      ...(rec.workspaces !== undefined ? [["workspaces", [...rec.workspaces].sort()]] : []),
+    ]),
     "utf8",
   );
+}
+
+/** May an account record be used in this workspace? No list: everywhere. A
+ *  list that is not a list of names (rewritten on disk) allows nowhere. */
+function usableIn(rec: Pick<StoredSecret, "workspaces"> | undefined, workspace: string): boolean {
+  if (!rec || rec.workspaces === undefined) return true;
+  return Array.isArray(rec.workspaces) && rec.workspaces.includes(workspace);
 }
 const writeBound = () => process.env.FOLDRUN_VAULT_WRITE_BOUND === "1";
 const requireBound = () => process.env.FOLDRUN_VAULT_REQUIRE_BOUND === "1";
@@ -162,7 +201,7 @@ function sealRecord(
   workspace: string | undefined,
   name: string,
   value: string,
-  meta: { kind?: SecretKind; sites?: string[]; updatedAt?: string },
+  meta: { kind?: SecretKind; sites?: string[]; workspaces?: string[]; updatedAt?: string },
   bound = writeBound(),
 ): StoredSecret {
   const { key, mark } = keyFor(tenant);
@@ -174,6 +213,8 @@ function sealRecord(
     ...(meta.kind ? { kind: meta.kind } : {}),
     ...(mark ? { k: mark } : {}),
     ...(meta.sites?.length ? { sites: [...meta.sites] } : {}),
+    // An empty list is a choice (no workspace may use it), kept as written.
+    ...(meta.workspaces !== undefined ? { workspaces: [...meta.workspaces] } : {}),
   };
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, GCM);
@@ -284,12 +325,57 @@ export function mutateVaultFile(file: string, change: (all: SecretsFile) => Secr
 
 export const SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
 
+/**
+ * How a `signing_secret:` is shown in an answer, a log line or a delivery
+ * record: the name it holds, and only a name (30 Oct 2026). It is meant to
+ * name a vault entry, but nothing stopped the value itself being written
+ * there, and notify's test send echoed it back to the dashboard as "signed
+ * with <it>". Anything that is not a secret name is described, never
+ * repeated (foldrun check flags it as secret/signing-secret-value).
+ */
+export function signingSecretShown(name: string): string {
+  return SECRET_NAME.test(name) ? name : "the signing_secret: (not a secret name — see foldrun check)";
+}
+
+/**
+ * Which workspaces an ACCOUNT secret may be used in, given with the value so
+ * both are sealed in one locked write (30 Oct 2026): a new secret created
+ * and limited in two calls was open to every workspace between them, and
+ * stayed open if the second failed. `workspaces` undefined keeps what the
+ * record has; null opens it to every workspace; a list limits it.
+ * `exists` is asked about each name under the vault lock, so a workspace
+ * deleted meanwhile is not granted (the delete takes its name off every
+ * list under the same lock — retargetSecretWorkspaces).
+ */
+export interface SecretLimit {
+  workspaces?: string[] | null;
+  exists?: (workspace: string) => boolean;
+}
+
+/** A list as stored: trimmed, de-duplicated, sorted; every name a safe one
+ *  and, when the caller can say, one that exists. */
+function cleanWorkspaceList(workspaces: unknown): string[] | null {
+  if (workspaces === null) return null;
+  if (!Array.isArray(workspaces) || workspaces.some((w) => typeof w !== "string")) {
+    throw new Error("workspaces is a list of workspace names, or null for every workspace");
+  }
+  const clean = [...new Set((workspaces as string[]).map((w) => w.trim()).filter(Boolean))].sort();
+  for (const w of clean) assertSafeName(w, "workspace");
+  return clean;
+}
+function assertWorkspacesExist(list: string[] | null, exists?: (w: string) => boolean) {
+  if (!list || !exists) return;
+  const missing = list.filter((w) => !exists(w));
+  if (missing.length) throw Object.assign(new Error(`no workspace ${missing.join(", ")} in this account`), { status: 400 });
+}
+
 export function setSecret(
   tenant: string,
   name: string,
   value: string,
   workspace?: string,
   kind?: SecretKind,
+  limit: SecretLimit = {},
 ) {
   // A string, not anything that prints as one: RegExp.test and the vault's
   // keys both coerce, so ["RESEND_API_KEY"] from a JSON body was stored as
@@ -298,17 +384,32 @@ export function setSecret(
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   }
   if (value.length > 8192) throw new Error("secret too long");
+  const wanted = limitFor(workspace, limit);
   mutateVaultFile(secretsFile(tenant, workspace), (all) => {
     // A new value keeps the sites the old one was bound to: binding is a
     // property of the credential's use, not of its current value, and a
     // rotation that silently unbound it would put the new value in pods.
     // Sealed here, under the lock: a bound record's AAD names those sites.
     const sites = all[name]?.sites;
+    // The workspaces it is limited to stay too, for the same reason: a new
+    // value that every workspace could suddenly read is a widening nobody
+    // asked for — unless this call says otherwise, in the same write.
+    if (wanted !== undefined) assertWorkspacesExist(wanted, limit.exists);
+    const workspaces = wanted !== undefined ? (wanted ?? undefined) : all[name]?.workspaces;
     // Once bound, always bound: a re-save with the switch off must not
-    // quietly drop the record's authentication.
-    all[name] = sealRecord(tenant, workspace, name, value, { kind, sites }, all[name]?.v === 2 || writeBound());
+    // quietly drop the record's authentication. A limited record is always
+    // bound, so its list is in its seal (see setSecretWorkspaces).
+    all[name] = sealRecord(tenant, workspace, name, value, { kind, sites, workspaces }, all[name]?.v === 2 || workspaces !== undefined || writeBound());
     return all;
   });
+}
+
+/** The list a write was asked to store, checked: undefined when it was not
+ *  asked to change it. Only the account's store has lists. */
+function limitFor(workspace: string | undefined, limit: SecretLimit): string[] | null | undefined {
+  if (limit.workspaces === undefined) return undefined;
+  if (workspace) throw new Error("a workspace's own secret is that workspace's already — only an account secret is limited to workspaces");
+  return cleanWorkspaceList(limit.workspaces);
 }
 
 /**
@@ -345,7 +446,7 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
     if (rec.v === 2) {
       const value = openRecord(tenant, workspace, name, rec);
       if (value === null) throw new Error(`${name} cannot be read with this install's keys — set its value again before binding it`);
-      all[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: clean, updatedAt: rec.updatedAt }, true);
+      all[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: clean, workspaces: rec.workspaces, updatedAt: rec.updatedAt }, true);
       return all;
     }
     if (clean.length) rec.sites = clean;
@@ -370,7 +471,10 @@ export function secretSites(tenant: string, names: string[], workspace?: string)
     // when it opens, else the account's. Picking by presence paired an
     // account value with a workspace record's (unauthenticated) sites.
     const ownRec = own[name];
-    const rec = ownRec && openRecord(tenant, workspace, name, ownRec) !== null ? ownRec : account[name];
+    const ownOpens = Boolean(ownRec && openRecord(tenant, workspace, name, ownRec) !== null);
+    // An account record limited to other workspaces is not this one's.
+    if (!ownOpens && workspace && !usableIn(account[name], workspace)) continue;
+    const rec = ownOpens ? ownRec : account[name];
     if (rec?.sites?.length) out[name] = [...rec.sites];
   }
   return out;
@@ -457,7 +561,12 @@ function decrypt(tenant: string, rec: StoredSecret | undefined, aad?: Buffer): s
   }
 }
 
-/** Nearest wins: a workspace secret shadows an account one of the same name. */
+/** Nearest wins: a workspace secret shadows an account one of the same name.
+ *  An account secret limited to some workspaces (setSecretWorkspaces) is
+ *  absent for every other — the answer a secret that was never set gets, on
+ *  every path that resolves one for a workspace: runs, tool tests, notify,
+ *  the egress proxy, MCP servers. Without a workspace it is the account's
+ *  own use (its model key, its mail sender), which no list limits. */
 export function getSecret(
   tenant: string,
   name: string,
@@ -467,8 +576,127 @@ export function getSecret(
     const own = openRecord(tenant, workspace, name, read(tenant, workspace)[name]);
     if (own !== null) return { value: own, scope: "workspace" };
   }
-  const shared = openRecord(tenant, undefined, name, read(tenant)[name]);
+  const rec = read(tenant)[name];
+  if (workspace && !usableIn(rec, workspace)) return null;
+  const shared = openRecord(tenant, undefined, name, rec);
   return shared === null ? null : { value: shared, scope: "account" };
+}
+
+/** May the ACCOUNT's secret `name` be used for this workspace? True when it
+ *  is not limited (or not set); for callers that read the account's copy on
+ *  a workspace's behalf without getSecret's workspace-first lookup — the
+ *  account's mail sender for a workspace's notifications (notify.ts). */
+export function accountSecretUsableIn(tenant: string, name: string, workspace: string): boolean {
+  return usableIn(read(tenant)[name], workspace);
+}
+
+/**
+ * Limit an account secret to some workspaces, or lift the limit (null).
+ * An empty list means no workspace may use it. Returns the list as stored,
+ * sorted, or null.
+ *
+ * `exists` is asked about each name under the vault lock (the API passes
+ * "is there such a workspace"), so it cannot grant a name a delete has just
+ * taken off every list. `ifWorkspaces`, when given, is the list the caller
+ * saw (null: every workspace): a list changed since is refused (409), so
+ * two admins editing it at once do not silently overwrite each other.
+ *
+ * The record is sealed (v2) whatever it was, whatever
+ * FOLDRUN_VAULT_WRITE_BOUND says: a list in the clear on an unbound record
+ * could be stripped on disk to open the secret to every workspace; sealed,
+ * a stripped list makes it unreadable. Every reader since 29 Oct 2026 reads v2.
+ */
+export function setSecretWorkspaces(
+  tenant: string,
+  name: string,
+  workspaces: string[] | null,
+  opts: { exists?: (workspace: string) => boolean; ifWorkspaces?: string[] | null } = {},
+): string[] | null {
+  if (typeof name !== "string") throw new Error("a secret's name is a string");
+  const clean = cleanWorkspaceList(workspaces);
+  const expected = opts.ifWorkspaces === undefined ? undefined : cleanWorkspaceList(opts.ifWorkspaces);
+  let found = false;
+  mutateVaultFile(secretsFile(tenant), (all) => {
+    const rec = all[name];
+    if (!rec) return null;
+    found = true;
+    if (expected !== undefined) {
+      const now = Array.isArray(rec.workspaces) ? [...rec.workspaces].sort() : null;
+      if (JSON.stringify(now) !== JSON.stringify(expected)) {
+        throw Object.assign(new Error(`${name}'s workspaces changed since you loaded them (now ${now === null ? "every workspace" : now.length ? now.join(", ") : "none"}) — reload and try again`), { status: 409 });
+      }
+    }
+    assertWorkspacesExist(clean, opts.exists);
+    all[name] = withWorkspaces(tenant, name, rec, clean);
+    return all;
+  });
+  if (!found) throw Object.assign(new Error(`no secret ${name} in the account`), { status: 404 });
+  return clean;
+}
+
+/** An account record with its workspace list replaced (null: removed),
+ *  opened and sealed again as a bound record with the new list in its seal.
+ *  One that will not open is refused, never relabelled (setSecretSites). */
+function withWorkspaces(tenant: string, name: string, rec: StoredSecret, workspaces: string[] | null): StoredSecret {
+  const value = openRecord(tenant, undefined, name, rec);
+  if (value === null) throw new Error(`${name} cannot be read with this install's keys — set its value again before changing its workspaces`);
+  return sealRecord(tenant, undefined, name, value, { kind: rec.kind, sites: rec.sites, workspaces: workspaces ?? undefined, updatedAt: rec.updatedAt }, true);
+}
+
+/**
+ * A workspace is being renamed (to: its new name) or deleted (to: null):
+ * every account secret limited to it follows. Without this a rename quietly
+ * cut the workspace off its secrets, and a delete left the name on the list
+ * for the next workspace given it.
+ *
+ * `failed` names the records that hold the name but will not open with this
+ * install's keys: they are left exactly as they are, so the old name is
+ * STILL on their list — a key restored later would bring the grant back.
+ * The caller must not report the rename or delete as clean while any are
+ * left (the API refuses it, naming them: set them again, or delete them).
+ *
+ * Names, not ids: a grant naming a workspace's immutable id would survive a
+ * rename untouched and could never pass to a new workspace given an old
+ * name — the stronger design, not built yet (30 Oct 2026).
+ */
+export function retargetSecretWorkspaces(tenant: string, from: string, to: string | null): { changed: string[]; failed: string[] } {
+  const changed: string[] = [];
+  const failed: string[] = [];
+  const file = secretsFile(tenant);
+  if (!fs.existsSync(file)) return { changed, failed };
+  mutateVaultFile(file, (all) => {
+    changed.length = 0;
+    failed.length = 0;
+    const staged: typeof all = {};
+    for (const [name, rec] of Object.entries(all)) {
+      const list = rec.workspaces as unknown;
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) {
+        // A list rewritten on disk into something else allows nowhere
+        // (usableIn) — nothing for this rename to carry.
+        continue;
+      }
+      if (!list.includes(from)) continue;
+      const next = [...new Set(list.map((w) => (w === from ? to : w)).filter((w): w is string => typeof w === "string"))].sort();
+      try {
+        staged[name] = withWorkspaces(tenant, name, rec, next);
+        changed.push(name);
+      } catch {
+        failed.push(name);
+      }
+    }
+    // All or nothing (Codex, 30 Oct 2026): writing the readable records and
+    // refusing the rename for the unreadable ones moved grants to a name the
+    // workspace never took. One failure leaves the vault exactly as it was.
+    if (failed.length) {
+      changed.length = 0;
+      return null;
+    }
+    if (!changed.length) return null;
+    Object.assign(all, staged);
+    return all;
+  });
+  return { changed, failed };
 }
 
 export function deleteSecret(tenant: string, name: string, workspace?: string) {
@@ -491,19 +719,27 @@ export interface SecretEntry {
   /** The sites it is bound to — the proxy fills it for these and no other,
    *  and it never enters a sandbox. Absent when unbound. */
   sites?: string[];
+  /** An account secret limited to these workspaces; absent: every one. */
+  workspaces?: string[];
 }
 
 // Metadata only — never values. Without a workspace this lists the account
 // store; with one it lists what that workspace actually resolves, marking
 // which scope each name comes from.
 export function listSecrets(tenant: string, workspace?: string): SecretEntry[] {
-  const account = Object.entries(read(tenant)).map(([name, rec]) => ({
-    name,
-    updatedAt: rec.updatedAt,
-    scope: "account" as const,
-    ...(rec.kind ? { kind: rec.kind } : {}),
-    ...(rec.sites?.length ? { sites: [...rec.sites] } : {}),
-  }));
+  const records = Object.entries(read(tenant));
+  const account = records
+    // What a workspace resolves leaves out an account secret limited to
+    // others: it is not set, as far as that workspace is concerned.
+    .filter(([, rec]) => !workspace || usableIn(rec, workspace))
+    .map(([name, rec]) => ({
+      name,
+      updatedAt: rec.updatedAt,
+      scope: "account" as const,
+      ...(rec.kind ? { kind: rec.kind } : {}),
+      ...(rec.sites?.length ? { sites: [...rec.sites] } : {}),
+      ...(!workspace && Array.isArray(rec.workspaces) ? { workspaces: [...rec.workspaces] } : {}),
+    }));
   if (!workspace) return account.sort((a, b) => a.name.localeCompare(b.name));
 
   const own = Object.entries(read(tenant, workspace)).map(([name, rec]) => ({
@@ -648,6 +884,9 @@ export function rotateMasterKey(
           // Kept too (it was dropped until 29 Oct 2026): a rotation that
           // unbinds every bound secret puts their values into pods.
           ...(rec.sites?.length ? { sites: rec.sites } : {}),
+          // And the workspaces it is limited to: dropped, it would read as
+          // "every workspace" (and fail its seal).
+          ...(rec.workspaces !== undefined ? { workspaces: rec.workspaces } : {}),
           ...(aad ? { v: 2 as const } : {}),
         };
         count++;
@@ -702,6 +941,7 @@ export function setOAuth2Secret(
   name: string,
   config: OAuth2Config,
   workspace?: string,
+  limit: SecretLimit = {},
 ) {
   for (const field of ["token_url", "client_id"] as const) {
     if (!config[field]?.trim()) throw new Error(`oauth2 secret needs ${field}`);
@@ -719,7 +959,7 @@ export function setOAuth2Secret(
   if (!/^https:\/\//.test(config.token_url) && !/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(config.token_url)) {
     throw new Error("token_url must be https — a refresh token over http is a leaked one");
   }
-  setSecret(tenant, name, OAUTH2_PREFIX + JSON.stringify(config), workspace, "oauth2");
+  setSecret(tenant, name, OAUTH2_PREFIX + JSON.stringify(config), workspace, "oauth2", limit);
 }
 
 export function isOAuth2Value(value: string): boolean {
@@ -764,7 +1004,7 @@ export function replaceOAuth2RefreshToken(tenant: string, name: string, workspac
         // Built whole, not spread over the old record: a spread kept a stale
         // `k: "tenant"` when this seal fell back to the install key, and the
         // record then opened with neither.
-        all[name] = sealRecord(tenant, scope, name, next, { kind: rec.kind, sites: rec.sites }, rec.v === 2 || writeBound());
+        all[name] = sealRecord(tenant, scope, name, next, { kind: rec.kind, sites: rec.sites, workspaces: rec.workspaces }, rec.v === 2 || writeBound());
         replaced = true;
       }
       return all;
@@ -966,6 +1206,7 @@ export function setServiceAccountSecret(
   name: string,
   config: ServiceAccountConfig,
   workspace?: string,
+  limit: SecretLimit = {},
 ) {
   for (const field of ["token_url", "issuer", "private_key", "scope"] as const) {
     if (!config[field]?.trim()) throw new Error(`service account secret needs ${field}`);
@@ -978,7 +1219,7 @@ export function setServiceAccountSecret(
     if (config.subject.length > 320 || /[\u0000-\u001f\u007f\s]/.test(config.subject.trim())) throw new Error("subject is one identifier, no spaces or control characters");
   }
   const stored: ServiceAccountConfig = { ...config, ...(config.subject !== undefined ? { subject: config.subject.trim() } : {}) };
-  setSecret(tenant, name, SERVICE_ACCOUNT_PREFIX + JSON.stringify(stored), workspace, "service-account");
+  setSecret(tenant, name, SERVICE_ACCOUNT_PREFIX + JSON.stringify(stored), workspace, "service-account", limit);
 }
 
 function base64url(input: Buffer | string): string {
@@ -1056,9 +1297,9 @@ async function exchangeServiceAccount(config: ServiceAccountConfig, cacheKey: st
 
 const FILE_PREFIX = "@file ";
 
-export function setFileSecret(tenant: string, name: string, content: string, workspace?: string) {
+export function setFileSecret(tenant: string, name: string, content: string, workspace?: string, limit: SecretLimit = {}) {
   if (!content) throw new Error("a file secret needs content");
-  setSecret(tenant, name, FILE_PREFIX + content, workspace, "file");
+  setSecret(tenant, name, FILE_PREFIX + content, workspace, "file", limit);
 }
 
 export function isFileValue(value: string): boolean {
@@ -1089,7 +1330,7 @@ export interface SshConfig {
   password?: string;
 }
 
-export function setSshSecret(tenant: string, name: string, config: SshConfig, workspace?: string) {
+export function setSshSecret(tenant: string, name: string, config: SshConfig, workspace?: string, limit: SecretLimit = {}) {
   const host = config.host?.trim();
   const user = config.user?.trim();
   if (!host || /[\s'"`$\\]/.test(host)) throw new Error("ssh secret needs a host (no spaces or quotes)");
@@ -1107,7 +1348,7 @@ export function setSshSecret(tenant: string, name: string, config: SshConfig, wo
     host, user, port,
     ...(hasKey ? { private_key: config.private_key } : { password: config.password }),
   };
-  setSecret(tenant, name, SSH_PREFIX + JSON.stringify(stored), workspace, "ssh");
+  setSecret(tenant, name, SSH_PREFIX + JSON.stringify(stored), workspace, "ssh", limit);
 }
 
 export function isSshValue(value: string): boolean {
@@ -1142,7 +1383,7 @@ export interface ClientCertConfig {
   export?: boolean;
 }
 
-export function setClientCertSecret(tenant: string, name: string, config: ClientCertConfig, workspace?: string) {
+export function setClientCertSecret(tenant: string, name: string, config: ClientCertConfig, workspace?: string, limit: SecretLimit = {}) {
   if (!/-----BEGIN CERTIFICATE-----/.test(config.cert ?? "")) throw new Error("cert must be a PEM certificate");
   if (!/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/.test(config.key ?? "")) throw new Error("key must be a PEM private key");
   // The pair must match: a certificate presented with another key's proof
@@ -1167,12 +1408,15 @@ export function setClientCertSecret(tenant: string, name: string, config: Client
   // Written under the vault's own lock, with the binding checked in the same
   // step: a value set over a secret keeps its site binding, and a wildcard
   // one would present the certificate to a whole domain.
+  const wanted = limitFor(workspace, limit);
   mutateVaultFile(secretsFile(tenant, workspace), (all) => {
     const sites = all[name]?.sites;
+    if (wanted !== undefined) assertWorkspacesExist(wanted, limit.exists);
+    const workspaces = wanted !== undefined ? (wanted ?? undefined) : all[name]?.workspaces;
     if (sites?.some((site) => site.startsWith("*."))) {
       throw new Error(`${name} is bound to ${sites.join(", ")} — a client certificate is bound to exact hosts; unbind the wildcard first`);
     }
-    all[name] = sealRecord(tenant, workspace, name, plainCert, { kind: "client-cert", sites }, all[name]?.v === 2 || writeBound());
+    all[name] = sealRecord(tenant, workspace, name, plainCert, { kind: "client-cert", sites, workspaces }, all[name]?.v === 2 || workspaces !== undefined || writeBound());
     return all;
   });
 }
@@ -1186,11 +1430,11 @@ export interface IdentityConfig {
   audience: string;
 }
 
-export function setIdentitySecret(tenant: string, name: string, config: IdentityConfig, workspace?: string) {
+export function setIdentitySecret(tenant: string, name: string, config: IdentityConfig, workspace?: string, limit: SecretLimit = {}) {
   const audience = typeof config.audience === "string" ? config.audience.trim() : "";
   if (!audience) throw new Error("an identity needs an audience — the value your cloud's trust expects in aud");
   if (audience.length > 600 || /[\u0000-\u001f\u007f]/.test(audience)) throw new Error("audience is one value, at most 600 characters, no control characters");
-  setSecret(tenant, name, IDENTITY_PREFIX + JSON.stringify({ audience }), workspace, "identity");
+  setSecret(tenant, name, IDENTITY_PREFIX + JSON.stringify({ audience }), workspace, "identity", limit);
 }
 
 export function isIdentityValue(value: string): boolean {
@@ -1233,7 +1477,7 @@ export function basicAuthorization(username: string, password: string): string {
   return `Basic ${Buffer.from(`${username}:${password}`, "utf8").toString("base64")}`;
 }
 
-export function setApiSecret(tenant: string, name: string, config: ApiConfig, workspace?: string) {
+export function setApiSecret(tenant: string, name: string, config: ApiConfig, workspace?: string, limit: SecretLimit = {}) {
   let all = { ...(config.headers ?? {}) };
   if (config.basic) {
     if (Object.keys(all).some((h) => h.toLowerCase() === "authorization")) {
@@ -1265,7 +1509,7 @@ export function setApiSecret(tenant: string, name: string, config: ApiConfig, wo
   setSecret(
     tenant, name,
     API_PREFIX + JSON.stringify({ ...(base ? { base_url: trimSlashes(base) } : {}), headers: config.headers }),
-    workspace, "api",
+    workspace, "api", limit,
   );
 }
 
@@ -1304,7 +1548,7 @@ export function sealVaultBindings(tenant: string): { sealed: number; unreadable:
       const next: SecretsFile = { ...all };
       for (const [name, value] of plain) {
         const rec = all[name];
-        next[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: rec.sites, updatedAt: rec.updatedAt }, true);
+        next[name] = sealRecord(tenant, workspace, name, value, { kind: rec.kind, sites: rec.sites, workspaces: rec.workspaces, updatedAt: rec.updatedAt }, true);
       }
       sealed += plain.size;
       return next;
@@ -1353,7 +1597,7 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
       if (plain.size === 0 || unreadableHere.length) return null;
       const next: SecretsFile = { ...all };
       for (const [name, value] of plain) {
-        next[name] = sealRecord(tenant, workspace, name, value, { kind: all[name].kind, sites: all[name].sites, updatedAt: all[name].updatedAt }, all[name].v === 2 || writeBound());
+        next[name] = sealRecord(tenant, workspace, name, value, { kind: all[name].kind, sites: all[name].sites, workspaces: all[name].workspaces, updatedAt: all[name].updatedAt }, all[name].v === 2 || writeBound());
       }
       moved += plain.size;
       return next;

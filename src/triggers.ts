@@ -15,7 +15,7 @@
 import crypto from "node:crypto";
 import { platform } from "./platform.ts";
 import { listFlows, readRun, runVerdict, type FlowInfo, type FlowStep, type RunRecord } from "./store.ts";
-import { getSecret } from "./secrets.ts";
+import { getSecret, signingSecretShown } from "./secrets.ts";
 
 /** The last step's result — the same reading runner.ts makes, kept local so
  *  this module never imports the runner (the queue imports both). */
@@ -273,7 +273,7 @@ export function verifyWebhookSignature(
   if (!flow.signature) return { ok: true, reason: "no signature required" };
   if (!flow.signingSecret) return { ok: false, reason: `signature: ${flow.signature} needs signing_secret: \${NAME}` };
   const secret = getSecret(tenant, flow.signingSecret, workspace);
-  if (!secret) return { ok: false, reason: `signing secret ${flow.signingSecret} is not set` };
+  if (!secret) return { ok: false, reason: `signing secret ${signingSecretShown(flow.signingSecret)} is not set` };
   const hmac = (data: string) => crypto.createHmac("sha256", secret.value).update(data).digest("hex");
   const fresh = (ts: number) => Math.abs(now / 1000 - ts) <= 300;
 

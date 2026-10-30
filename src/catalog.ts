@@ -155,6 +155,33 @@ export async function loadCatalog(baseUrl: string): Promise<Catalog | null> {
   }
 }
 
+/** How long after an attempt a background refresh of the same gateway is
+ *  not tried again, whether it worked or not. */
+export const CATALOG_RETRY_MS = 5 * 60_000;
+const lastTried = new Map<string, number>();
+
+/**
+ * Refresh a gateway's catalogue behind the caller, at most once per
+ * CATALOG_RETRY_MS per gateway (30 Oct 2026). For the editor's completions and
+ * the flows page, which ask on every request: a stale or missing catalogue
+ * used to start a fresh outbound fetch each time — a 10 s one per keystroke
+ * against an unreachable gateway, nothing remembering that it had just
+ * failed. The attempt is noted before it starts, so callers arriving while
+ * one is in flight do not start another. True when one was started. A run's
+ * own read (loadCatalog) is untouched.
+ */
+export function refreshCatalogSoon(baseUrl: string, load: (baseUrl: string) => Promise<unknown> = loadCatalog, now = Date.now()): boolean {
+  const cached = readCatalog(baseUrl);
+  if (cached && now - Date.parse(cached.fetchedAt) < TTL_MS) return false; // fresh: nothing to fetch
+  const last = lastTried.get(baseUrl);
+  if (last !== undefined && now - last < CATALOG_RETRY_MS) return false;
+  lastTried.delete(baseUrl);
+  lastTried.set(baseUrl, now);
+  if (lastTried.size > 1000) lastTried.delete(lastTried.keys().next().value as string);
+  void load(baseUrl).catch(() => null);
+  return true;
+}
+
 /** A preset reference — settings live in the gateway's dashboard, opaque to
  *  us on purpose. The catalogue offers no opinion on one. */
 export const isPresetRef = (model: string) => model.startsWith("@preset/");

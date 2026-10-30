@@ -74,8 +74,10 @@ export interface Package {
 /** An error the API layer turns into a status rather than a 500. */
 export class PackageError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
-    super(message);
+  /** `cause`: the error underneath a 500, so an HTTP caller can log it and
+   *  answer without it — a Node error names the server's paths (30 Oct 2026). */
+  constructor(message: string, status: number, opts?: { cause?: unknown }) {
+    super(message, opts);
     this.status = status;
   }
 }
@@ -437,7 +439,7 @@ export function applyImport(
         // best effort — the error below is the one to report
       }
     }
-    throw new PackageError(`the import could not be written, and nothing was kept: ${err instanceof Error ? err.message : String(err)}`, 500);
+    throw new PackageError(`the import could not be written, and nothing was kept: ${err instanceof Error ? err.message : String(err)}`, 500, { cause: err });
   }
   for (const c of changes) {
     const abs = path.join(dir, c.path);

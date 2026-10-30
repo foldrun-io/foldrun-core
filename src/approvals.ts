@@ -13,7 +13,7 @@
 import crypto from "node:crypto";
 import { readRun, writeRun, readFlow, mayApprove, type FlowInfo, type RunRecord } from "./store.ts";
 import { platform } from "./platform.ts";
-import { approveToken, installKey } from "./webhook.ts";
+import { approveToken, eventToken, installKey } from "./webhook.ts";
 
 export interface ApprovalDecision {
   decision: "approve" | "reject";
@@ -361,6 +361,60 @@ export async function expireStaleGate(
  * key through the dashboard's approve route — and `step` releases one
  * waiting step rather than all of them.
  */
+const EVENT_WAIT_LINE = "waiting for an external event — release it with POST ";
+
+/**
+ * What a presented event token opens on a run (30 Oct 2026): `known` when
+ * it is a real token of this run — one of its parks, or the old per-run
+ * form — and `steps`, the waiting steps it releases now (none: a 409, the
+ * gate it was for is no longer waiting).
+ *
+ * With `step` (the `&step=` every URL printed since carries), the token is
+ * that step's, bound to the moment it parked: the `t` of its "waiting for an
+ * external event" line. It releases that step only while that park is the
+ * step's current one — a released step is no longer waiting, and a step
+ * parked again (a loop) has a new `t` — so a URL handed out for one gate
+ * opens neither a later gate nor a later park.
+ *
+ * Without `step`, the per-run token URLs carried before then. It releases
+ * only a step still waiting under such a URL — its park line has no
+ * `step=` — so a run parked when this shipped can still be released, and
+ * nothing parked since can be released by the old form.
+ */
+export function eventGatesFor(
+  tenant: string,
+  workspace: string,
+  run: RunRecord,
+  presented: string,
+  step: number | null,
+): { known: boolean; steps: number[] } {
+  const none = { known: false, steps: [] as number[] };
+  if (!presented) return none;
+  const same = (want: string) => {
+    const a = Buffer.from(presented), b = Buffer.from(want);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
+  const parks = (i: number) => (run.steps[i]?.events ?? []).filter((e) => e?.text?.startsWith(EVENT_WAIT_LINE));
+  const waiting = (i: number) => {
+    const s = run.steps[i];
+    return !!s && s.status === "awaiting-approval" && s.waitFor === "event";
+  };
+  if (step !== null) {
+    const lines = parks(step);
+    const hit = lines.findIndex((e) => same(eventToken(tenant, workspace, run.id, { step, at: e.t })));
+    if (hit < 0) return none;
+    // Only the step's latest park is open, and only while it waits.
+    return { known: true, steps: hit === lines.length - 1 && waiting(step) ? [step] : [] };
+  }
+  if (!same(eventToken(tenant, workspace, run.id))) return none;
+  const legacy: number[] = [];
+  for (let i = 0; i < run.steps.length; i++) {
+    const last = parks(i).at(-1);
+    if (last && waiting(i) && !/[?&]step=\d/.test(last.text)) legacy.push(i);
+  }
+  return { known: true, steps: legacy };
+}
+
 export async function deliverEvent(
   tenant: string,
   workspace: string,
