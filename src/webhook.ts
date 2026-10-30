@@ -57,7 +57,10 @@ export function rotateWebhook(tenant: string, workspace: string, flow: string): 
   const hooks = readHooks(tenant, workspace);
   hooks[flow] = { gen: (hooks[flow]?.gen ?? 0) + 1, rotatedAt: new Date().toISOString() };
   const file = hooksFile(tenant, workspace);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // Into a workspace that exists, never making one (30 Oct 2026): the mkdir
+  // here turned a rotate under a mistyped name into a workspace holding only
+  // hooks.json, past the plan's workspace count.
+  if (!fs.existsSync(path.dirname(file))) throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
   fs.writeFileSync(file, JSON.stringify(hooks, null, 2));
   return webhookPath(tenant, workspace, flow);
 }

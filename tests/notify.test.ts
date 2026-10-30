@@ -9,9 +9,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { notifyConfig, sendRunNotification, isQuietFlow, notifyMail, platformMail, attemptWebhook, nextAttemptAt, WEBHOOK_BACKOFF_MS, newDeliveryId } from "../src/notify.ts";
+import { notifyConfig, sendRunNotification, isQuietFlow, notifyMail, platformMail, attemptWebhook, nextAttemptAt, WEBHOOK_BACKOFF_MS, newDeliveryId, webhookTarget } from "../src/notify.ts";
 import crypto from "node:crypto";
-import { setSecret } from "../src/secrets.ts";
+import { setSecret, setSecretSites } from "../src/secrets.ts";
 import type { RunRecord } from "../src/store.ts";
 
 function withWorkspace(
@@ -298,4 +298,83 @@ test("an attempt at a workspace whose notify: lost its url fails with the reason
     assert.equal(a.ok, false);
     assert.equal(a.statusCode, null);
     assert.match(a.error!, /no url/);
+  }));
+
+// 30 Oct 2026: notify.url filled any secret into any host, so an editor could
+// send a site-bound key to their own server with Test or redeliver.
+test("a secret bound to sites fills notify.url only for a host among them", () =>
+  withWorkspace(null, async () => {
+    const hits: string[] = [];
+    const server = http.createServer((req, res) => {
+      hits.push(req.url ?? "");
+      req.resume();
+      req.on("end", () => res.writeHead(200).end("ok"));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    try {
+      // An account secret bound to another site, named in a workspace URL.
+      setSecret("acme", "STRIPE_KEY", "sk_live_not_for_you");
+      setSecretSites("acme", "STRIPE_KEY", ["api.stripe.com"]);
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/x?k=\${STRIPE_KEY}\n---\n`);
+      const t = webhookTarget("acme", "desk");
+      assert.equal(t.url, null);
+      assert.match(t.refused!, /STRIPE_KEY is bound to other sites/);
+      assert.doesNotMatch(t.refused!, /sk_live/);
+      const a = await attemptWebhook("acme", "desk", { id: "dlv_b", event: "test", body: "{}", attempt: 1, manual: true });
+      assert.equal(a.ok, false);
+      assert.match(a.error!, /bound to other sites/);
+      assert.deepEqual(hits, [], "nothing left for the off-site host");
+
+      // An unbound alias holding the same value does not hide the bound one:
+      // every name filled in has its binding checked (Codex, 30 Oct 2026).
+      setSecret("acme", "STRIPE_ALIAS", "sk_live_not_for_you");
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/x?a=\${STRIPE_KEY}&b=\${STRIPE_ALIAS}\n---\n`);
+      assert.equal(webhookTarget("acme", "desk").url, null);
+      assert.match(webhookTarget("acme", "desk").refused!, /STRIPE_KEY/);
+
+      // A host that only LOOKS like the site (userinfo) is still the other host.
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://api.stripe.com@127.0.0.1:${port}/x?k=\${STRIPE_KEY}\n---\n`);
+      assert.equal(webhookTarget("acme", "desk").url, null);
+
+      // The legitimate shape: the whole URL is a secret bound to its own host.
+      setSecret("acme", "HOOK_URL", `http://127.0.0.1:${port}/hook/sekrit`, "desk");
+      setSecretSites("acme", "HOOK_URL", ["127.0.0.1"], "desk");
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), "---\nnotify:\n  url: ${HOOK_URL}\n---\n");
+      const ok = await attemptWebhook("acme", "desk", { id: "dlv_c", event: "test", body: "{}", attempt: 1 });
+      assert.equal(ok.ok, true, ok.error ?? "");
+      assert.deepEqual(hits, ["/hook/sekrit"]);
+
+      // An unbound secret fills as it does for an agent's secrets: and a tool test.
+      setSecret("acme", "HOOK_PATH", "plain-path");
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/p/\${HOOK_PATH}\n---\n`);
+      assert.equal((await attemptWebhook("acme", "desk", { id: "dlv_d", event: "test", body: "{}", attempt: 1 })).ok, true);
+      assert.deepEqual(hits, ["/hook/sekrit", "/p/plain-path"]);
+    } finally {
+      server.close();
+    }
+  }));
+
+test("a failed attempt's error never quotes the URL with its secret filled in", () =>
+  withWorkspace(null, async () => {
+    // Redirects to itself forever: the refusal names the URL it was sent to.
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => res.writeHead(307, { location: req.url ?? "/" }).end());
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    setSecret("acme", "HOOK_TOKEN", "tok-secret-123", "desk");
+    fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/h?t=\${HOOK_TOKEN}\n---\n`);
+    try {
+      const a = await attemptWebhook("acme", "desk", { id: "dlv_r", event: "failed", body: "{}", attempt: 1 });
+      assert.equal(a.ok, false);
+      assert.match(a.error!, /redirects/);
+      assert.doesNotMatch(a.error!, /tok-secret-123/);
+      assert.match(a.error!, /\$\{HOOK_TOKEN\}/);
+    } finally {
+      server.close();
+    }
   }));

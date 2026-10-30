@@ -87,19 +87,30 @@ test("run archive: an output that links out is not served; a real one is", () =>
   assert.ok(runOutputPath(TENANT, WS, run, "writer", "report.md")?.endsWith("report.md"));
 });
 
-test("a first write into a workspace not made yet, under a linked data folder, is not refused", () => {
+test("a first write into a new, empty workspace under a linked data folder is not refused", () => {
   // FOLDRUN_DATA reached through a link (macOS /tmp → /private/tmp): the
-  // workspace's own folder does not exist yet, so its root is canonicalised
-  // through its nearest real ancestor, as the written path is.
+  // workspace's root and the written path are both canonicalised, so a
+  // folder the write makes inside it is not mistaken for a way out.
   const real = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-real-data-"));
   const linked = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-link-")), "data");
   fs.symlinkSync(real, linked);
   const was = process.env.FOLDRUN_DATA;
   process.env.FOLDRUN_DATA = linked;
   try {
+    // 30 Oct 2026: a write never makes the workspace — that is POST
+    // /api/workspaces, deploy or import. A name that is not there is a 404,
+    // and nothing is created.
     assert.ok(!fs.existsSync(workspaceDir(TENANT, "fresh")));
+    assert.throws(
+      () => writeWorkspaceFile(TENANT, "fresh", "AGENTS.md", "---\nname: fresh\n---\n"),
+      (e: Error & { status?: number }) => e.status === 404 && /not found/.test(e.message),
+    );
+    assert.ok(!fs.existsSync(workspaceDir(TENANT, "fresh")), "a refused write made no folder");
+    fs.mkdirSync(workspaceDir(TENANT, "fresh"), { recursive: true });
     writeWorkspaceFile(TENANT, "fresh", "AGENTS.md", "---\nname: fresh\n---\n");
+    writeWorkspaceFile(TENANT, "fresh", "knowledge/first.md", "first\n");
     assert.ok(fs.existsSync(path.join(real, TENANT, "workspaces", "fresh", "AGENTS.md")));
+    assert.ok(fs.existsSync(path.join(real, TENANT, "workspaces", "fresh", "knowledge", "first.md")));
   } finally {
     if (was === undefined) delete process.env.FOLDRUN_DATA;
     else process.env.FOLDRUN_DATA = was;

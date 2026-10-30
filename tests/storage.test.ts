@@ -491,3 +491,134 @@ test("with no static key, the S3 driver signs with the pod's role credentials, t
     for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v as string);
   }
 });
+
+// ---------- 30 Oct 2026: sizes the store reports, workspaces that exist ----------
+
+/** What a presigned PUT leaves on the fs driver: an object under the key, no record. */
+function parkObject(bytes: Buffer, ws = WS): string {
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+  const at = blobPath(TENANT, ws, sha);
+  fs.mkdirSync(path.dirname(at), { recursive: true });
+  fs.writeFileSync(at, bytes);
+  return sha;
+}
+
+test("a registered upload records the size the store reports, never the one claimed", async () => {
+  const { registerUpload } = await import("../src/storage.ts");
+  const sha = parkObject(Buffer.alloc(700));
+  const rec = await registerUpload(TENANT, WS, "big.bin", sha, -1e12, "user:me");
+  assert.equal(rec.size, 700, "a negative claim used to be stored, and lowered the quota line");
+  assert.equal(usedBytes(TENANT, WS), 700);
+});
+
+test("a registered upload over the per-file limit is refused and its object removed", async () => {
+  const { registerUpload } = await import("../src/storage.ts");
+  process.env.FOLDRUN_STORAGE_MAX_MB = "0.001"; // 1 KB
+  try {
+    const sha = parkObject(Buffer.alloc(4096));
+    await assert.rejects(registerUpload(TENANT, WS, "big.bin", sha, 1, "user:me"), /the limit is/);
+    assert.equal(fs.existsSync(blobPath(TENANT, WS, sha)), false, "an object nothing names is not left in the store");
+    assert.equal(listStorage(TENANT, WS).length, 0);
+  } finally {
+    delete process.env.FOLDRUN_STORAGE_MAX_MB;
+  }
+});
+
+test("a registered upload is held to the workspace quota, and bytes a record names are kept", async () => {
+  const { registerUpload } = await import("../src/storage.ts");
+  process.env.FOLDRUN_STORAGE_QUOTA_MB = "0.001"; // 1 KB
+  try {
+    await putFile(TENANT, WS, "a.bin", Buffer.alloc(600), "user:me");
+    const sha = parkObject(Buffer.alloc(600, 1));
+    await assert.rejects(registerUpload(TENANT, WS, "b.bin", sha, 0, "user:me"), /quota exceeded/);
+    assert.equal(fs.existsSync(blobPath(TENANT, WS, sha)), false);
+    // The same bytes under a second name add nothing, so they are not refused.
+    const same = getFile(TENANT, WS, "a.bin")!.sha;
+    await registerUpload(TENANT, WS, "a-copy.bin", same, 600, "user:me");
+    assert.equal(fs.existsSync(blobPath(TENANT, WS, same)), true);
+  } finally {
+    delete process.env.FOLDRUN_STORAGE_QUOTA_MB;
+  }
+});
+
+test("storage writes refuse a workspace that does not exist, as a 404", async () => {
+  const { registerUpload, uploadUrl } = await import("../src/storage.ts");
+  const is404 = (err: unknown) => (err as { status?: number }).status === 404 && /workspace invented not found/.test((err as Error).message);
+  await assert.rejects(putFile(TENANT, "invented", "a.txt", Buffer.from("x"), "user:me"), is404);
+  await assert.rejects(registerUpload(TENANT, "invented", "a.txt", "a".repeat(64), 1, "user:me"), is404);
+  await assert.rejects(uploadUrl(TENANT, "invented", "a.txt", "a".repeat(64), 1), is404);
+  assert.equal(fs.existsSync(path.join(root, TENANT, "storage", "invented")), false, "no store was made for the name");
+});
+
+test("an upload URL checks the limits on the declared length, and signs that length in", async () => {
+  const { uploadUrl } = await import("../src/storage.ts");
+  process.env.FOLDRUN_STORAGE_MAX_MB = "0.001";
+  try {
+    await assert.rejects(uploadUrl(TENANT, WS, "big.bin", "a".repeat(64), 4096), /the limit is/);
+    await assert.rejects(uploadUrl(TENANT, WS, "big.bin", "a".repeat(64), -5), /whole number above 0/);
+  } finally {
+    delete process.env.FOLDRUN_STORAGE_MAX_MB;
+  }
+  const keys = ["FOLDRUN_STORAGE_DRIVER", "FOLDRUN_S3_ENDPOINT", "FOLDRUN_S3_BUCKET", "FOLDRUN_S3_ACCESS_KEY_ID", "FOLDRUN_S3_SECRET_ACCESS_KEY"];
+  process.env.FOLDRUN_STORAGE_DRIVER = "s3";
+  process.env.FOLDRUN_S3_ENDPOINT = "https://acct.r2.cloudflarestorage.com";
+  process.env.FOLDRUN_S3_BUCKET = "foldrun-files";
+  process.env.FOLDRUN_S3_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE";
+  process.env.FOLDRUN_S3_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+  try {
+    const url = new URL((await uploadUrl(TENANT, WS, "photo.jpg", "b".repeat(64), 2048))!);
+    // The bucket then refuses a body of any other length.
+    assert.equal(url.searchParams.get("X-Amz-SignedHeaders"), "content-length;host");
+    assert.equal(url.searchParams.get("X-Amz-Expires"), "600");
+    // A GET is still signed on host alone.
+    const { driverFor } = await import("../src/storage.ts");
+    const get = new URL((await driverFor(TENANT, WS).presignGet("k/x.txt", "x.txt", "text/plain"))!);
+    assert.equal(get.searchParams.get("X-Amz-SignedHeaders"), "host");
+  } finally {
+    for (const k of keys) delete process.env[k];
+  }
+});
+
+test("a stored file opens as a stream, whole or one range, with its real length", async () => {
+  const { openFile, storedSize } = await import("../src/storage.ts");
+  await putFile(TENANT, WS, "clip.txt", Buffer.from("0123456789"), "user:me");
+  assert.equal(await storedSize(TENANT, WS, "clip.txt"), 10);
+  const whole = (await openFile(TENANT, WS, "clip.txt"))!;
+  assert.equal(whole.size, 10);
+  assert.equal(Buffer.from(await new Response(whole.body).arrayBuffer()).toString(), "0123456789");
+  const part = (await openFile(TENANT, WS, "clip.txt", { start: 2, end: 4 }))!;
+  assert.equal(Buffer.from(await new Response(part.body).arrayBuffer()).toString(), "234");
+  assert.equal(await openFile(TENANT, WS, "nope.txt"), null);
+});
+
+test("deleting a workspace deletes its file store, so a new one of that name starts empty", async () => {
+  const { purgeWorkspaceStorage } = await import("../src/storage.ts");
+  const { deleteWorkspace } = await import("../src/store.ts");
+  await putFile(TENANT, WS, "report.pdf", Buffer.from("%PDF"), "user:me");
+  await purgeWorkspaceStorage(TENANT, WS);
+  deleteWorkspace(TENANT, WS);
+  assert.equal(fs.existsSync(path.join(root, TENANT, "storage", WS)), false);
+  fs.mkdirSync(path.join(workspaceDir(TENANT, WS), "agents"), { recursive: true });
+  assert.deepEqual(listStorage(TENANT, WS), [], "the old files came back with the name");
+
+  // deleteWorkspace alone still drops the index, so nothing stays reachable.
+  await putFile(TENANT, WS, "again.txt", Buffer.from("x"), "user:me");
+  deleteWorkspace(TENANT, WS);
+  assert.equal(fs.existsSync(path.join(root, TENANT, "storage", WS)), false);
+});
+
+test("renaming a workspace moves its files to the new name, and drops a stale store there", async () => {
+  const { moveWorkspaceStorage } = await import("../src/storage.ts");
+  const { renameWorkspace } = await import("../src/store.ts");
+  await putFile(TENANT, WS, "report.pdf", Buffer.from("%PDF moved"), "user:me");
+  // A store left under the new name by a workspace that is gone.
+  fs.mkdirSync(path.join(workspaceDir(TENANT, "renamed"), "agents"), { recursive: true });
+  await putFile(TENANT, "renamed", "stale.txt", Buffer.from("not yours"), "user:me");
+  fs.rmSync(workspaceDir(TENANT, "renamed"), { recursive: true, force: true });
+
+  renameWorkspace(TENANT, WS, "renamed");
+  await moveWorkspaceStorage(TENANT, WS, "renamed");
+  assert.deepEqual(listStorage(TENANT, "renamed").map((f) => f.path), ["report.pdf"]);
+  assert.equal((await readFileBytes(TENANT, "renamed", "report.pdf"))?.toString(), "%PDF moved");
+  assert.equal(fs.existsSync(path.join(root, TENANT, "storage", WS)), false, "nothing stays under the old name");
+});

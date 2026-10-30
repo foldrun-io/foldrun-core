@@ -34,7 +34,8 @@
 import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, readFlow, runVerdict, type RunRecord } from "./store.ts";
-import { getSecret } from "./secrets.ts";
+import { getSecret, secretSites } from "./secrets.ts";
+import { siteCovers } from "./network.ts";
 import { publicUrl } from "./webhook.ts";
 import { approveLinkPath, approveLinkTtlMs } from "./approvals.ts";
 import { noteSecretUse, healthKey } from "./secret-health.ts";
@@ -209,15 +210,80 @@ export function newDeliveryId(): string {
 }
 
 /** The URL with ${SECRET}s resolved, and how it may be shown: a Slack hook
- *  URL is itself a credential, so it is never echoed resolved. */
-export function webhookTarget(tenant: string, workspace: string, config: NotifyConfig | null = notifyConfig(tenant, workspace)): { url: string | null; shown: string } {
+ *  URL is itself a credential, so it is never echoed resolved.
+ *
+ *  A secret bound to sites (`foldrun secrets sites`) is filled only when the
+ *  resolved URL's host is one of them — the rule the egress proxy and the
+ *  tool tester keep (30 Oct 2026). Before, notify.url filled any secret into
+ *  any host, so an editor could write `https://their.server/?k=${STRIPE_KEY}`
+ *  and press Test. The host is read AFTER filling, because the usual shape is
+ *  the whole URL as one secret (`${SLACK_WEBHOOK_URL}`, bound to
+ *  hooks.slack.com). An unbound secret fills as it does for an agent's
+ *  `secrets:` and a tool test — workspace first, then the account — since
+ *  binding is how an account says where a value may go. `refused` says why
+ *  `url` is null when a binding stopped it; `filled` maps each value put
+ *  into the URL to its name, so an error that echoes the URL can be scrubbed. */
+export function webhookTarget(
+  tenant: string,
+  workspace: string,
+  config: NotifyConfig | null = notifyConfig(tenant, workspace),
+): { url: string | null; shown: string; refused?: string; filled: Record<string, string> } {
   const raw = config?.url ?? "";
+  const filled: Record<string, string> = {};
+  // Every name put in, kept apart from `filled` (value → name, for
+  // scrubbing): two secrets with the same value would otherwise leave only
+  // the last name there, and the first one's binding would go unchecked.
+  const used = new Set<string>();
   const url = raw.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => {
     const hit = getSecret(tenant, name, workspace);
+    if (hit) {
+      filled[hit.value] = name;
+      used.add(name);
+    }
     return hit ? hit.value : whole;
   });
   const shown = raw.includes("${") ? raw : raw ? `${raw.slice(0, 40)}${raw.length > 40 ? "…" : ""}` : "none";
-  return { url: !url || url.includes("${") ? null : url, shown };
+  if (!url || url.includes("${")) return { url: null, shown, filled: {} };
+  const bound = secretSites(tenant, [...used], workspace);
+  if (Object.keys(bound).length) {
+    let host = "";
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      // Not a URL: no host can be one of its sites.
+    }
+    const offSite = Object.entries(bound).filter(([, sites]) => !host || !sites.some((site) => siteCovers(site, host))).map(([n]) => n);
+    if (offSite.length) {
+      return {
+        url: null,
+        shown,
+        filled: {},
+        // The host is not echoed: it is read from the FILLED url, so
+        // `https://${KEY}.their.server/` would print the key back.
+        refused: `${offSite.join(", ")} ${offSite.length === 1 ? "is" : "are"} bound to other sites than notify.url's host — not sent`,
+      };
+    }
+  }
+  return { url, shown, filled };
+}
+
+/** An error about a request to a resolved notify.url, with every secret value
+ *  put back as its ${NAME} — a redirect refusal quotes the URL it was sent to,
+ *  and the delivery log that keeps it is read by every viewer. */
+function scrubTarget(text: string, filled: Record<string, string>): string {
+  let out = text;
+  // Longest first, so a value inside another is not half-replaced.
+  for (const value of Object.keys(filled).sort((a, b) => b.length - a.length)) {
+    if (!value) continue;
+    const variants = new Set([value]);
+    try {
+      variants.add(encodeURI(value)).add(encodeURIComponent(value));
+    } catch {
+      // A lone surrogate cannot be encoded, so it cannot appear encoded.
+    }
+    for (const v of variants) out = out.split(v).join(`\${${filled[value]}}`);
+  }
+  return out;
 }
 
 export interface WebhookAttempt {
@@ -252,10 +318,13 @@ export async function attemptWebhook(
   if (!config?.url) {
     return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "this workspace's notify: has no url any more" };
   }
-  const { url } = webhookTarget(tenant, workspace, config);
+  const { url, refused, filled } = webhookTarget(tenant, workspace, config);
   if (!url) {
-    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "the secret named in notify.url is not in this account's vault" };
+    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: refused ?? "the secret named in notify.url is not in this account's vault" };
   }
+  // A URL that carries a secret is a credential: a redirect is followed only
+  // within the origin it was sent to, as the tool tester does.
+  const carriesSecret = Object.keys(filled).length > 0;
   try {
     const res = await fetchUntrusted(url, {
       method: "POST",
@@ -270,7 +339,7 @@ export async function attemptWebhook(
       },
       body: d.body,
       signal: AbortSignal.timeout(Number(process.env.FOLDRUN_WEBHOOK_TIMEOUT_MS) || 8000),
-    });
+    }, { sameOrigin: carriesSecret });
     const text = (await res.text().catch(() => "")).slice(0, 500);
     return {
       ...base,
@@ -282,7 +351,7 @@ export async function attemptWebhook(
     };
   } catch (err) {
     const why = err instanceof Error ? (err.name === "TimeoutError" ? "timed out" : err.message) : String(err);
-    return { ...base, ok: false, statusCode: null, durationMs: Date.now() - started, response: null, error: why.slice(0, 500) };
+    return { ...base, ok: false, statusCode: null, durationMs: Date.now() - started, response: null, error: scrubTarget(why, filled).slice(0, 500) };
   }
 }
 
@@ -486,9 +555,9 @@ export async function sendTestNotification(
   // The destination is echoed back with the secret still unresolved: a
   // Slack webhook URL is itself a credential, and a page that prints it is
   // a page that leaks it into a screenshot.
-  const { url, shown } = webhookTarget(tenant, workspace, config);
+  const { url, shown, refused } = webhookTarget(tenant, workspace, config);
   if (!url) {
-    return { ok: false, destination: shown, detail: `the secret named in notify.url is not in this account's vault` };
+    return { ok: false, destination: shown, detail: refused ?? `the secret named in notify.url is not in this account's vault` };
   }
   const payload = JSON.stringify({ text: `${headline} — ${detail}`, workspace, status: "test", summary: detail });
   // One attempt, recorded in the delivery log like any other — and the way
@@ -635,8 +704,9 @@ export async function sendRunNotification(
 
     // ${SECRET} so the Slack URL — itself a credential — can live in the
     // vault instead of in a file that gets committed.
-    if (!webhookTarget(tenant, workspace, config).url) {
-      console.error(`[foldrun] notify: secret in URL not set for ${tenant}/${workspace}`);
+    const target = webhookTarget(tenant, workspace, config);
+    if (!target.url) {
+      console.error(`[foldrun] notify: ${target.refused ?? "secret in URL not set"} for ${tenant}/${workspace}`);
       return false;
     }
     const event = blocked ? "blocked" : run.status;

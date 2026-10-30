@@ -282,6 +282,9 @@ export function deleteLibraryPath(
 ) {
   const norm = path.normalize(rel);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
+  // "." (or "./", "a/..") is the shelf itself: one call took every shared
+  // tool or skill from every workspace (30 Oct 2026). Name what goes.
+  if (norm === "." || norm === "./") throw new Error(`illegal path: ${rel} — name the file or folder to delete, not the whole ${kind} shelf`);
   const target = path.join(libraryDir(tenant, kind), norm);
   const gone: { path: string; before: string | null; after: null }[] = [];
   if (fs.existsSync(target)) {

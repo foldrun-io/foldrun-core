@@ -22,6 +22,7 @@ import {
   listSecrets,
   isFileValue,
   fileContent,
+  setSecretSites,
 } from "../src/secrets.ts";
 import { setOAuth2Secret } from "../src/secrets.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "../src/secret-files.ts";
@@ -45,6 +46,16 @@ function withVault(body: () => void | Promise<void>) {
     throw e;
   }
 }
+
+test("a name that only prints as one is refused: a list from a JSON body is not RESEND_API_KEY (30 Oct 2026)", () =>
+  withVault(() => {
+    const list = ["RESEND_API_KEY"] as unknown as string;
+    assert.throws(() => setSecret("acme", list, "re_x"), /UPPER_SNAKE_CASE/);
+    assert.throws(() => setFileSecret("acme", list, "x"), /UPPER_SNAKE_CASE/);
+    setSecret("acme", "RESEND_API_KEY", "re_owner");
+    assert.throws(() => setSecretSites("acme", list, ["api.resend.com"]), /is a string/);
+    assert.deepEqual(listSecrets("acme").map((e) => e.name), ["RESEND_API_KEY"]);
+  }));
 
 test("machine-to-machine OAuth: no refresh token, client_credentials exchange", () =>
   withVault(async () => {

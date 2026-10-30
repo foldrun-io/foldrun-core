@@ -291,7 +291,10 @@ export function setSecret(
   workspace?: string,
   kind?: SecretKind,
 ) {
-  if (!SECRET_NAME.test(name)) {
+  // A string, not anything that prints as one: RegExp.test and the vault's
+  // keys both coerce, so ["RESEND_API_KEY"] from a JSON body was stored as
+  // RESEND_API_KEY past a caller's check on the name (30 Oct 2026).
+  if (typeof name !== "string" || !SECRET_NAME.test(name)) {
     throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   }
   if (value.length > 8192) throw new Error("secret too long");
@@ -314,6 +317,8 @@ export function setSecret(
  * scheme, path or port. Returns the list as stored.
  */
 export function setSecretSites(tenant: string, name: string, sites: string[], workspace?: string): string[] {
+  // all[name] would find ["NAME"] as NAME: see setSecret.
+  if (typeof name !== "string") throw new Error("a secret's name is a string");
   const clean = [...new Set(sites.map((x) => x.trim().toLowerCase()).filter(Boolean))];
   for (const site of clean) {
     if (!SITE.test(site)) throw new Error(`"${site}" is not a site — a domain like api.example.com or *.example.com, no scheme, path or port`);
@@ -1157,7 +1162,7 @@ export function setClientCertSecret(tenant: string, name: string, config: Client
     ...(config.passphrase ? { passphrase: config.passphrase } : {}),
     ...(config.export ? { export: true } : {}),
   };
-  if (!SECRET_NAME.test(name)) throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
+  if (typeof name !== "string" || !SECRET_NAME.test(name)) throw new Error(`secret name "${name}" must be UPPER_SNAKE_CASE`);
   const plainCert = CLIENT_CERT_PREFIX + JSON.stringify(stored);
   // Written under the vault's own lock, with the binding checked in the same
   // step: a value set over a secret keeps its site binding, and a wildcard

@@ -98,6 +98,16 @@ const historyDir = (tenant: string, scope: string) => {
   return path.join(dataRoot(), tenant, ".history", scope);
 };
 
+/** Refuse (400) a deploy's `commit` that cannot be a revision id. A writer
+ *  calls this BEFORE it writes: checked only in recordRevision, after the
+ *  files were replaced, a bad commit left the new source live with no
+ *  revision, no snapshot and no audit entry (30 Oct 2026). */
+export function assertCommitId(commit: string) {
+  if (typeof commit !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._@-]{0,120}$/.test(commit)) {
+    throw Object.assign(new Error(`commit "${String(commit).slice(0, 130)}" is not a commit id — letters, digits and . _ @ -, at most 121 characters`), { status: 400 });
+  }
+}
+
 /** A local revision id: sortable by time, unique enough, visibly not a sha. */
 export function newRevisionId(now = new Date()): string {
   return `r-${now.getTime().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
@@ -121,8 +131,16 @@ export function recordRevision(
 
   const dir = historyDir(tenant, scope);
   fs.mkdirSync(dir, { recursive: true });
+  // A commit is the revision's id only the first time it is recorded. A
+  // second deploy of one commit (a CI re-run after a dashboard edit), or a
+  // `commit` that names a revision already here, overwrote that revision's
+  // record and its snapshot (30 Oct 2026) — History could no longer restore
+  // to it. It gets its own id now; `commit` still says which one it was,
+  // and a restore by commit (resolveRevision) still finds it.
+  if (meta.commit) assertCommitId(meta.commit);
+  const commitId = meta.commit && !fs.existsSync(path.join(dir, `${meta.commit}.json`)) ? meta.commit : null;
   const rev: Revision = {
-    id: meta.id ?? meta.commit ?? newRevisionId(),
+    id: meta.id ?? commitId ?? newRevisionId(),
     at: new Date().toISOString(),
     by: meta.by ?? "system",
     message: meta.message ?? describe(changed),
@@ -301,7 +319,11 @@ export function resolveRevision(
     hit = all.find((r) => Date.parse(r.at) <= moment);
   } else {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(t)) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
-    hit = all.find((r) => r.id === t || r.commit === t || (t.length >= 7 && r.commit?.startsWith(t)));
+    // An exact id first, then a commit: a commit deployed twice is recorded
+    // once under its own id and again under a fresh one naming it (30 Oct
+    // 2026, recordRevision), and newest-first with one predicate answered
+    // the first revision's id with the second's snapshot.
+    hit = all.find((r) => r.id === t) ?? all.find((r) => r.commit === t || (t.length >= 7 && r.commit?.startsWith(t)));
   }
   return hit ? { id: hit.id, at: hit.at, by: hit.by, message: hit.message } : null;
 }
@@ -409,8 +431,13 @@ export function changedPathsBetween(tenant: string, scope: string, from: string 
   if (!from || !to) return null;
   if (from === to) return [];
   const revs = listRevisions(tenant, scope, { limit: 500 }); // newest first
-  const ti = revs.findIndex((r) => r.id === to || r.commit === to);
-  const fi = revs.findIndex((r) => r.id === from || r.commit === from);
+  // An exact id before a commit, as resolveRevision.
+  const at = (x: string) => {
+    const byId = revs.findIndex((r) => r.id === x);
+    return byId >= 0 ? byId : revs.findIndex((r) => r.commit === x);
+  };
+  const ti = at(to);
+  const fi = at(from);
   if (ti < 0 || fi < 0 || ti > fi) return null;
   return [...new Set(revs.slice(ti, fi).flatMap((r) => r.paths))].sort();
 }

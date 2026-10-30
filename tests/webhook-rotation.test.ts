@@ -57,6 +57,16 @@ test("rotation changes the token and only that flow's token", () => {
   });
 });
 
+test("rotating under a workspace that does not exist is a 404 and makes nothing (30 Oct 2026)", () => {
+  withWorkspace(() => {
+    assert.throws(
+      () => rotateWebhook("acme", "typo-ws", "publish"),
+      (e: Error & { status?: number }) => e.status === 404,
+    );
+    assert.equal(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/typo-ws")), false);
+  });
+});
+
 test("deliveries are recorded newest-first and bounded", () => {
   withWorkspace(() => {
     for (let i = 0; i < 1100; i++) {

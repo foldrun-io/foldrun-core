@@ -51,6 +51,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { Readable } from "node:stream";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import { assertSafeName, workspaceDir, STORAGE_DIR, adoptLegacyFilesDir } from "./store.ts";
 
@@ -84,6 +85,30 @@ interface Index {
 
 const maxBytes = () => Number(process.env.FOLDRUN_STORAGE_MAX_MB ?? 512) * 1024 * 1024;
 const quotaBytes = () => Number(process.env.FOLDRUN_STORAGE_QUOTA_MB ?? 5120) * 1024 * 1024;
+
+/** The bytes a set of records occupies: distinct blobs, not records — two
+ *  names for identical bytes are one object. A size that is not a positive
+ *  number counts as nothing: indexes written before 30 Oct 2026 hold sizes a
+ *  browser claimed, and a negative one used to lower the total. */
+function bytesOf(files: Pick<FileRecord, "sha" | "size">[]): number {
+  const seen = new Map<string, number>();
+  for (const f of files) seen.set(f.sha, Number.isFinite(f.size) && f.size > 0 ? f.size : 0);
+  return [...seen.values()].reduce((a, b) => a + b, 0);
+}
+
+/**
+ * Refuse a workspace that is not there, as a 404 (30 Oct 2026).
+ *
+ * The store is keyed by workspace *name* and used to be created for any safe
+ * name on first write, so an editor got a fresh quota for every name they
+ * invented — stores no workspace list shows and no delete reaches. Every
+ * write here, and the routes that read, ask this first.
+ */
+export function requireWorkspace(tenant: string, workspace: string): void {
+  if (!fs.existsSync(workspaceDir(tenant, workspace))) {
+    throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
+  }
+}
 
 // ---------- paths ----------
 
@@ -212,9 +237,7 @@ export function getFile(tenant: string, workspace: string, rel: string): FileRec
 export function usedBytes(tenant: string, workspace: string): number {
   // Distinct blobs, not records: two names for identical bytes occupy one
   // object, and billing the tenant twice for it would be a lie.
-  const seen = new Map<string, number>();
-  for (const f of readIndex(tenant, workspace).files) seen.set(f.sha, f.size);
-  return [...seen.values()].reduce((a, b) => a + b, 0);
+  return bytesOf(readIndex(tenant, workspace).files);
 }
 
 // ---------- the driver interface ----------
@@ -224,6 +247,15 @@ export interface Driver {
   put(key: string, body: Buffer, mime: string): Promise<void>;
   get(key: string): Promise<Buffer>;
   has(key: string): Promise<boolean>;
+  /** The object's real length, or null when there is none — what the store
+   *  holds, never what a browser said it sent (30 Oct 2026). */
+  size(key: string): Promise<number | null>;
+  /** The bytes as a stream, optionally one inclusive byte range — so a route
+   *  hands a file on without holding all of it in memory. */
+  open(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>>;
+  /** Server-side copy to another key (s3 only — the fs driver's blobs move
+   *  with their directory). Used when a workspace is renamed. */
+  copy?(from: string, to: string): Promise<void>;
   remove(key: string): Promise<void>;
   /** A URL a browser can GET directly, or null when the driver has no such
    *  thing (fs) and the route must stream the bytes itself. */
@@ -232,7 +264,9 @@ export interface Driver {
   presignGet(key: string, filename: string, mime: string, ttlSec?: number, inlineType?: string): Promise<string | null>;
   /** A URL a browser can PUT directly to, so upload bytes never transit the
    *  dashboard process. Null on fs, where the route takes the body. */
-  presignPut(key: string, mime: string, ttlSec?: number): Promise<string | null>;
+  /** `size`: sign the length in, so the store refuses a PUT of any other
+   *  length (30 Oct 2026) — the per-file limit then holds at the bucket. */
+  presignPut(key: string, mime: string, ttlSec?: number, size?: number): Promise<string | null>;
 }
 
 // ---------- fs driver ----------
@@ -263,6 +297,18 @@ function fsDriver(tenant: string, workspace: string): Driver {
     },
     async has(key) {
       return fs.existsSync(at(key));
+    },
+    async size(key) {
+      try {
+        const st = fs.statSync(at(key));
+        return st.isFile() ? st.size : null;
+      } catch {
+        return null;
+      }
+    },
+    async open(key, range) {
+      const stream = fs.createReadStream(at(key), range ? { start: range.start, end: range.end } : {});
+      return Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
     },
     async remove(key) {
       fs.rmSync(at(key), { force: true });
@@ -435,10 +481,17 @@ function presign(
   ttlSec: number,
   extraQuery: Record<string, string> = {},
   now = new Date(),
+  extraHeaders: Record<string, string> = {},
 ): string {
   const { host, origin, canonicalUri } = target(cfg, key);
   const { amzDate, dateStamp } = stamps(now);
   const scope = `${dateStamp}/${cfg.region}/s3/aws4_request`;
+  // Headers the request must carry exactly as signed. `content-length` on an
+  // upload is the one that matters: the store then refuses a body of any
+  // other length, so a presigned PUT cannot be used to park 5 GB under a key
+  // that was asked for as 2 MB (30 Oct 2026).
+  const headers: Record<string, string> = { host, ...Object.fromEntries(Object.entries(extraHeaders).map(([k, v]) => [k.toLowerCase(), v])) };
+  const signed = Object.keys(headers).sort();
 
   const query: Record<string, string> = {
     ...extraQuery,
@@ -446,7 +499,7 @@ function presign(
     "X-Amz-Credential": `${creds.accessKeyId}/${scope}`,
     "X-Amz-Date": amzDate,
     "X-Amz-Expires": String(ttlSec),
-    "X-Amz-SignedHeaders": "host",
+    "X-Amz-SignedHeaders": signed.join(";"),
     // A role's credentials are only valid with their token, and the token
     // is part of what is signed.
     ...(creds.sessionToken ? { "X-Amz-Security-Token": creds.sessionToken } : {}),
@@ -460,8 +513,8 @@ function presign(
     method,
     canonicalUri,
     canonicalQuery,
-    `host:${host}\n`,
-    "host",
+    signed.map((h) => `${h}:${headers[h].trim()}\n`).join(""),
+    signed.join(";"),
     "UNSIGNED-PAYLOAD",
   ].join("\n");
 
@@ -483,6 +536,7 @@ async function s3Request(
   key: string,
   body?: Buffer,
   mime?: string,
+  extra: Record<string, string> = {},
 ): Promise<Response> {
   const creds = await credentials(cfg);
   const { host, origin, canonicalUri } = target(cfg, key);
@@ -496,6 +550,9 @@ async function s3Request(
     "x-amz-date": amzDate,
     ...(creds.sessionToken ? { "x-amz-security-token": creds.sessionToken } : {}),
     ...(mime ? { "content-type": mime } : {}),
+    // range on a streamed read, x-amz-copy-source on a copy. Lower-case,
+    // because the canonical form is.
+    ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k.toLowerCase(), v])),
   };
   const signed = Object.keys(headers).sort();
   const canonicalHeaders = signed.map((h) => `${h}:${headers[h].trim()}\n`).join("");
@@ -545,6 +602,27 @@ function s3Driver(cfg: S3Config): Driver {
       const res = await s3Request(cfg, "HEAD", key);
       return res.ok;
     },
+    async size(key) {
+      const res = await s3Request(cfg, "HEAD", key);
+      if (res.status === 404) return null;
+      if (!res.ok) await fail(res, "head");
+      const n = Number(res.headers.get("content-length"));
+      return Number.isSafeInteger(n) && n >= 0 ? n : null;
+    },
+    async open(key, range) {
+      const res = await s3Request(cfg, "GET", key, undefined, undefined, range ? { range: `bytes=${range.start}-${range.end}` } : {});
+      if (!res.ok || !res.body) await fail(res, "get");
+      return res.body as ReadableStream<Uint8Array>;
+    },
+    async copy(from, to) {
+      // CopyObject: the bytes move inside the store, never through here.
+      const res = await s3Request(cfg, "PUT", to, undefined, undefined, {
+        "x-amz-copy-source": `/${cfg.bucket}/${uriEncode(from, true)}`,
+      });
+      // S3 can answer 200 with an <Error> body when a copy fails part-way.
+      const text = res.ok ? await res.text() : "";
+      if (!res.ok || /<Error>/.test(text)) throw new Error(`s3 copy failed: ${res.status} ${text.slice(0, 300)}`);
+    },
     async remove(key) {
       const res = await s3Request(cfg, "DELETE", key);
       // 404 on delete is the desired end state, not an error.
@@ -560,8 +638,8 @@ function s3Driver(cfg: S3Config): Driver {
         "response-content-type": safe ?? mime,
       });
     },
-    async presignPut(key, _mime, ttlSec = 600) {
-      return presign(cfg, await credentials(cfg), "PUT", key, ttlSec);
+    async presignPut(key, _mime, ttlSec = 600, size) {
+      return presign(cfg, await credentials(cfg), "PUT", key, ttlSec, {}, new Date(), size === undefined ? {} : { "content-length": String(size) });
     },
   };
 }
@@ -619,6 +697,9 @@ export async function putFile(
   body: Buffer,
   by: string,
 ): Promise<FileRecord> {
+  // A person's upload. A run's harvest writes through putFileQuietly, into a
+  // workspace that was there when the run began.
+  requireWorkspace(tenant, workspace);
   const record = await putFileQuietly(tenant, workspace, rel, body, by);
   // A run's copy-back announces once, for all its files, from harvestFiles.
   if (!by.startsWith("run:")) await announceFiles(tenant, workspace, [record.path], by);
@@ -666,20 +747,29 @@ async function putFileQuietly(
 }
 
 /** Register bytes a browser PUT straight to the bucket. Same bookkeeping as
- *  putFile, minus the bytes — the platform never saw them. */
+ *  putFile, minus the bytes — the platform never saw them.
+ *
+ *  `_claimed` is the size the browser says it sent, kept for the callers that
+ *  pass it and never believed (30 Oct 2026): the record, the per-file limit
+ *  and the quota all use the length the store reports. It used to store the
+ *  claim, so an object registered as 0 bytes (or -1e12) sat outside every
+ *  limit and lowered the quota line for everything after it. */
 export async function registerUpload(
   tenant: string,
   workspace: string,
   rel: string,
   sha: string,
-  size: number,
+  _claimed: number,
   by: string,
 ): Promise<FileRecord> {
   const norm = assertFilePath(rel);
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("expected a sha256");
+  requireWorkspace(tenant, workspace);
   const driver = driverFor(tenant, workspace);
-  // Trust nothing the browser said about whether the PUT landed.
-  if (!(await driver.has(blobKey(tenant, workspace, sha)))) {
+  const key = blobKey(tenant, workspace, sha);
+  // Trust nothing the browser said: not that the PUT landed, not its size.
+  const size = await driver.size(key);
+  if (size === null) {
     throw new Error("no object at that key — the upload did not complete");
   }
   const index = readIndex(tenant, workspace);
@@ -692,10 +782,21 @@ export async function registerUpload(
     updatedAt: new Date().toISOString(),
     by,
   };
-  writeIndex(tenant, workspace, {
-    version: 1,
-    files: [...index.files.filter((f) => f.path !== norm), record],
-  });
+  const files = [...index.files.filter((f) => f.path !== norm), record];
+  // putFile's two limits, on the real length. A refused object is removed:
+  // nothing names it, so it would sit in the bucket unreachable and billed —
+  // unless a record already names these bytes, which are then not ours to drop.
+  const refuse = async (message: string): Promise<never> => {
+    if (!index.files.some((f) => f.sha === sha)) await driver.remove(key).catch(() => {});
+    throw new Error(message);
+  };
+  if (size > maxBytes()) {
+    await refuse(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
+  }
+  if (bytesOf(files) > quotaBytes() && bytesOf(files) > bytesOf(index.files)) {
+    await refuse(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+  }
+  writeIndex(tenant, workspace, { version: 1, files });
   if (previous && previous.sha !== sha) await collect(tenant, workspace, previous.sha);
   await announceFiles(tenant, workspace, [record.path], by);
   return record;
@@ -709,6 +810,36 @@ export async function readFileBytes(
   const record = getFile(tenant, workspace, rel);
   if (!record) return null;
   return driverFor(tenant, workspace).get(blobKey(tenant, workspace, record.sha));
+}
+
+/** A stored file's real length, from the store — a stat or a HEAD, never a
+ *  read. Null when there is no such record or no object behind it. */
+export async function storedSize(tenant: string, workspace: string, rel: string): Promise<number | null> {
+  const record = getFile(tenant, workspace, rel);
+  if (!record) return null;
+  return driverFor(tenant, workspace).size(blobKey(tenant, workspace, record.sha));
+}
+
+/**
+ * A stored file as a stream, with its real length — for a route that passes
+ * the bytes on (a download, a public link) rather than reading them whole
+ * into memory. Null when there is no such record or no object behind it.
+ * `range` is inclusive and must lie inside the file (storedSize first, then
+ * byteRange, when the caller honours a Range header).
+ */
+export async function openFile(
+  tenant: string,
+  workspace: string,
+  rel: string,
+  range?: { start: number; end: number } | null,
+): Promise<{ record: FileRecord; size: number; body: ReadableStream<Uint8Array> } | null> {
+  const record = getFile(tenant, workspace, rel);
+  if (!record) return null;
+  const driver = driverFor(tenant, workspace);
+  const key = blobKey(tenant, workspace, record.sha);
+  const size = await driver.size(key);
+  if (size === null) return null;
+  return { record, size, body: await driver.open(key, range ?? undefined) };
 }
 
 export async function deleteFile(tenant: string, workspace: string, rel: string): Promise<boolean> {
@@ -779,10 +910,83 @@ export async function uploadUrl(
   workspace: string,
   rel: string,
   sha: string,
+  size?: number,
 ): Promise<string | null> {
-  assertFilePath(rel);
+  const norm = assertFilePath(rel);
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("expected a sha256");
-  return driverFor(tenant, workspace).presignPut(blobKey(tenant, workspace, sha), mimeFor(rel));
+  requireWorkspace(tenant, workspace);
+  // The limits, before a byte moves, and the length signed into the URL so
+  // the bucket refuses any other (30 Oct 2026). registerUpload checks the
+  // real object again; this is what keeps an oversized one from ever landing
+  // — an object that is PUT and never registered was otherwise unbounded.
+  if (size !== undefined) {
+    if (!Number.isSafeInteger(size) || size <= 0) throw new Error("size must be the file's length in bytes, a whole number above 0");
+    if (size > maxBytes()) throw new Error(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
+    const files = readIndex(tenant, workspace).files;
+    const next = [...files.filter((f) => f.path !== norm), { sha, size }];
+    if (bytesOf(next) > quotaBytes() && bytesOf(next) > bytesOf(files)) {
+      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+    }
+  }
+  return driverFor(tenant, workspace).presignPut(blobKey(tenant, workspace, sha), mimeFor(norm), undefined, size);
+}
+
+// ---------- a workspace deleted or renamed ----------
+
+/** The store's directory for a name, without the workspace check —
+ *  for the two calls below, which run when the folder is gone or moving. */
+function storeDirOf(tenant: string, workspace: string): string | null {
+  if (!fileStoreEnabled()) return null;
+  return storeDir(tenant, workspace);
+}
+
+/**
+ * Drop everything a workspace stored: every object its index names, then the
+ * index (30 Oct 2026). Called when a workspace is deleted — the store is kept
+ * by name beside the folder, so it used to outlive it: the files stayed
+ * downloadable under the old name, public links kept serving them, and a new
+ * workspace given the same name inherited them. Best effort per object (a
+ * leaked object costs storage; the index going is what makes them
+ * unreachable), and a no-op when there is no store.
+ */
+export async function purgeWorkspaceStorage(tenant: string, workspace: string): Promise<void> {
+  const dir = storeDirOf(tenant, workspace);
+  if (!dir || !fs.existsSync(dir)) return;
+  const driver = driverFor(tenant, workspace);
+  if (driver.kind !== "fs") {
+    const shas = new Set(readIndex(tenant, workspace).files.map((f) => f.sha));
+    for (const sha of shas) await driver.remove(blobKey(tenant, workspace, sha)).catch(() => {});
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * Move a workspace's stored files to its new name (30 Oct 2026). A rename
+ * used to move the folder only: the renamed workspace lost its files, and
+ * the old name kept them for whoever took it next.
+ *
+ * On fs the blobs live under the store's directory, so moving the directory
+ * is the whole move. On s3 an object's key carries the workspace name, so
+ * every object is copied first; only once all copies landed does the index
+ * move and the old objects go. A copy that fails leaves the store under the
+ * old name, whole, and throws — the caller can put the folder back.
+ *
+ * Whatever a store under the new name held is dropped first: it belonged to a
+ * workspace of that name that no longer exists, never to this one.
+ */
+export async function moveWorkspaceStorage(tenant: string, from: string, to: string): Promise<void> {
+  const src = storeDirOf(tenant, from);
+  const dest = storeDirOf(tenant, to);
+  if (!src || !dest || src === dest) return;
+  if (fs.existsSync(dest)) await purgeWorkspaceStorage(tenant, to);
+  if (!fs.existsSync(src)) return;
+  const driver = driverFor(tenant, from);
+  const shas = driver.kind === "fs" ? [] : [...new Set(readIndex(tenant, from).files.map((f) => f.sha))];
+  if (shas.length && !driver.copy) throw new Error(`the ${driver.kind} store cannot move files to a new workspace name`);
+  for (const sha of shas) await driver.copy!(blobKey(tenant, from, sha), blobKey(tenant, to, sha));
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(src, dest);
+  for (const sha of shas) await driver.remove(blobKey(tenant, from, sha)).catch(() => {});
 }
 
 // ---------- the run mirror ----------

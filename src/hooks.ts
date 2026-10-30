@@ -44,6 +44,11 @@ export const HOOK_TIMEOUT_MAX = 120;
 export const HOOK_CODE_MAX = 100 * 1024;
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+/** A hook's name: its folder's name, never a path. */
+export function isHookName(name: unknown): name is string {
+  return typeof name === "string" && NAME.test(name);
+}
+
 export interface HookDef {
   name: string;
   /** The folder holding hook.md and run.mjs. */
@@ -139,6 +144,15 @@ export function resolveHooks(args: {
   for (const name of args.names) {
     if (seen.has(name)) continue;
     seen.add(name);
+    // Checked before the name is joined to anything (30 Oct 2026): readHookDef
+    // tested only basename(dir), so `../../<tenant>/workspaces/<ws>/hooks/<h>`
+    // passed, and the hook test route answered which folders exist anywhere
+    // on the server — on a laptop it would have run that run.mjs. An error,
+    // not missing: a step refuses either way, and the name is the problem.
+    if (!isHookName(name)) {
+      errors.push(`"${name}" is not a hook name — lowercase letters, digits and dashes (the hook's folder name)`);
+      continue;
+    }
     const own = path.join(args.workspaceRoot, "hooks", name);
     const shared = path.join(args.libraryRoot, "hooks", name);
     const dir = fs.existsSync(own) ? own : fs.existsSync(shared) ? shared : null;

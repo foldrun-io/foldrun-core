@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { libraryTools, libraryUsage, listLibrary, type LibraryUse } from "../src/library.ts";
+import { libraryTools, libraryUsage, listLibrary, deleteLibraryPath, type LibraryUse } from "../src/library.ts";
 import { brokenToolReport, workspaceTools } from "../src/store.ts";
 import { commandFor } from "../src/script-tools.ts";
 
@@ -62,6 +62,25 @@ test("a library tool is traced to the agents that opted in", () => {
         { workspace: "desk", agent: "writer", relation: "use" },
         { workspace: "other", agent: "biller", relation: "use" },
       ]);
+    },
+  );
+});
+
+test("deleting \".\" is refused: the shelf is not a path to delete (30 Oct 2026)", () => {
+  withAccount(
+    {
+      "acme/library/tools/billing.md": tool("billing"),
+      "acme/library/tools/crm/tool.md": tool("crm"),
+    },
+    () => {
+      for (const rel of [".", "./", "crm/..", "./crm/../"]) {
+        assert.throws(() => deleteLibraryPath("acme", "tools", rel), /whole tools shelf/, rel);
+      }
+      assert.ok(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/library/tools/billing.md")));
+      // A named file or folder still goes.
+      deleteLibraryPath("acme", "tools", "crm", { by: "ana@example.com" });
+      assert.ok(!fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/library/tools/crm")));
+      assert.ok(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/library/tools/billing.md")));
     },
   );
 });

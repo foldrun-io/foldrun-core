@@ -26,14 +26,14 @@ import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { recordRevision, registerTreeReader, type RevisionFile } from "./history.ts";
+import { recordRevision, registerTreeReader, assertCommitId, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import matter, { frontmatterErrorText, configMatter } from "./matter.ts";
-import { readAgentsMdKeys } from "./agents-md.ts";
+import { readAgentsMdKeys, patchFrontmatter } from "./agents-md.ts";
 
 /**
  * The frontmatter of one markdown file, as the runtime reads it. Exported
@@ -182,6 +182,19 @@ const SAFE_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 export function assertSafeName(name: string, kind: string) {
   if (!SAFE_NAME.test(name)) throw new Error(`invalid ${kind} "${name}" — kebab-case only`);
+}
+
+/**
+ * A name that is ONE folder under its parent — agents/<name>, never a path.
+ * Wider than SAFE_NAME on purpose: an agent imported from
+ * `.claude/agents/code_reviewer.md` keeps that file's name, and a run of it
+ * must keep working. What it refuses is what makes a name a path: a
+ * separator, a dot segment, a NUL. 30 Oct 2026: POST …/agents/<agent>/run
+ * and the runner joined the name unchecked, so `..%2F..%2F<tenant>%2F…`
+ * reached another account's agent.
+ */
+export function isOneSegment(name: unknown): name is string {
+  return typeof name === "string" && name !== "" && name !== "." && name !== ".." && !/[/\\\0]/.test(name);
 }
 
 export function workspaceDir(tenant: string, workspace: string) {
@@ -382,6 +395,9 @@ export function saveWorkspace(
   } = {},
 ) {
   if (files.length > 500) throw new Error("too many files");
+  // The commit becomes the revision's id: refused here, before the tree is
+  // replaced, never after it (history.ts assertCommitId).
+  if (meta.commit) assertCommitId(meta.commit);
   for (const f of files) {
     const norm = path.normalize(f.path);
     if (norm.startsWith("..") || path.isAbsolute(norm) || norm.startsWith("runs")) {
@@ -2856,6 +2872,13 @@ export function writeWorkspaceFile(
   if (content.length > MAX_EDITABLE_FILE) throw new Error("file too large");
   matter(content); // reject files whose frontmatter doesn't parse
   const dir = workspaceDir(tenant, workspace);
+  // A write goes INTO a workspace; it never makes one. The mkdir below is
+  // recursive, so until 30 Oct 2026 a write to a name that did not exist
+  // created that workspace — with workspace:write alone, past the
+  // workspace:manage role and the plan's workspace count that POST
+  // /api/workspaces, deploy and import apply. Those create through
+  // saveWorkspace / applyImport, not through here.
+  if (!fs.existsSync(dir)) throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
   const p = path.join(dir, assertEditablePath(rel));
   // Before anything is created: mkdir below would otherwise make folders
   // through a linked directory too.
@@ -3069,6 +3092,15 @@ export function deleteWorkspace(tenant: string, workspace: string) {
   const dir = workspaceDir(tenant, workspace);
   if (!fs.existsSync(dir)) throw new Error(`workspace ${workspace} not found`);
   fs.rmSync(dir, { recursive: true, force: true });
+  // Its file store too, kept by name beside the folder (storage.ts). Until
+  // 30 Oct 2026 the store outlived the delete: its files stayed downloadable
+  // and shared, and the next workspace given this name inherited them. The
+  // index going is what makes them unreachable; the API route first calls
+  // purgeWorkspaceStorage, which also removes the objects from a bucket
+  // (async, so it cannot live in here).
+  if (!singleWorkspace()) {
+    fs.rmSync(path.join(dataRoot(), tenant, STORAGE_DIR, workspace), { recursive: true, force: true });
+  }
   workspaceChanged(tenant, workspace, "delete");
 }
 
@@ -3120,23 +3152,26 @@ export function renameWorkspace(tenant: string, from: string, to: string) {
   }
 }
 
-/** Set a workspace's description, in AGENTS.md, without touching anything else. */
-export function setWorkspaceDescription(tenant: string, workspace: string, description: string) {
+/** Set a workspace's description, in AGENTS.md, without touching anything else.
+ *
+ *  30 Oct 2026: the value was spliced in as `description: ${text}`, so a
+ *  newline in it wrote any other key (notify:, network_enforce:, past the
+ *  settings' allowed list), and String.replace read `$'` / `$&` in it as
+ *  patterns; the write went around writeWorkspaceFile, so History never saw
+ *  it. Now the key is written as YAML (patchFrontmatter, which reads the
+ *  result back and refuses an edit that changed any other key) and saved
+ *  through writeWorkspaceFile, as a revision. */
+export function setWorkspaceDescription(tenant: string, workspace: string, description: string, meta: ChangeMeta = {}) {
   const file = path.join(workspaceDir(tenant, workspace), "AGENTS.md");
   if (!fs.existsSync(file)) throw new Error("this workspace has no AGENTS.md");
 
   const raw = fs.readFileSync(file, "utf8");
-  const block = raw.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
-  if (!block) throw new Error("AGENTS.md has no frontmatter");
+  if (!/^---\r?\n[\s\S]*?\r?\n---/.test(raw)) throw new Error("AGENTS.md has no frontmatter");
 
-  const [, open, body, close] = block;
-  const lines = body.split("\n");
-  const at = lines.findIndex((l) => /^description:/.test(l));
-  const line = `description: ${description}`;
-  if (at === -1) lines.push(line);
-  else lines[at] = line;
-
-  fs.writeFileSync(file, raw.replace(open + body + close, open + lines.join("\n") + close));
+  writeWorkspaceFile(tenant, workspace, "AGENTS.md", patchFrontmatter(raw, { description }), {
+    message: "settings: description",
+    ...meta,
+  });
 }
 
 /**

@@ -90,6 +90,7 @@ import {
   STORAGE_DIR,
   adoptLegacyVersionKey,
   listAgents,
+  isOneSegment,
 } from "./store.ts";
 import { canReadBack } from "./tool-output.ts";
 import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
@@ -4926,8 +4927,12 @@ function driveRunInner(
           // finished steps to `failed`, destroying the history it was
           // resuming around.
           if (step.status !== "pending") continue;
-          const aDir = path.join(pDir, "agents", step.agent);
-          if (!fs.existsSync(path.join(aDir, "agent.md"))) {
+          // One folder under agents/, never a path (30 Oct 2026): an ad-hoc
+          // run's agent came from the URL, and `../../<tenant>/…` joined here
+          // ran another account's agent. Refused as not found, before the
+          // existence check could answer for a path outside.
+          const aDir = isOneSegment(step.agent) ? path.join(pDir, "agents", step.agent) : null;
+          if (!aDir || !fs.existsSync(path.join(aDir, "agent.md"))) {
             step.status = "failed";
             step.events.push({
               t: new Date().toISOString(),
@@ -5156,8 +5161,9 @@ function driveRunInner(
         // step of the flow (isSplicedRecord). It gets no delegateJob of its
         // own: depth one.
         const delegateFor = (parent: StepRecord) => async (agent: string, job: string, cancelled: () => boolean): Promise<DelegationResult> => {
-          const dir = path.join(pDir, "agents", agent);
-          if (!fs.existsSync(path.join(dir, "agent.md"))) return { status: "failed", result: `${agent} is not an agent in this workspace` };
+          // One folder under agents/, never a path — as the group check above.
+          const dir = isOneSegment(agent) ? path.join(pDir, "agents", agent) : null;
+          if (!dir || !fs.existsSync(path.join(dir, "agent.md"))) return { status: "failed", result: `${agent} is not an agent in this workspace` };
           // A stable id on both records: an index into run.steps moves when a
           // rescue or a fan-out is spliced in before the child.
           const id = `d_${crypto.randomBytes(5).toString("hex")}`;
@@ -5597,8 +5603,8 @@ function driveRunInner(
         };
         const rescueStep = async (step: StepRecord): Promise<void> => {
           if (!step.onFail) return;
-          const rescuerDir = path.join(pDir, "agents", step.onFail);
-          if (!fs.existsSync(path.join(rescuerDir, "agent.md"))) {
+          const rescuerDir = isOneSegment(step.onFail) ? path.join(pDir, "agents", step.onFail) : null;
+          if (!rescuerDir || !fs.existsSync(path.join(rescuerDir, "agent.md"))) {
             step.events.push({
               t: new Date().toISOString(),
               type: "error",
