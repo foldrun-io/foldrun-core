@@ -864,7 +864,6 @@ function prepareLanguageRuntime(tenant: string, spec: RuntimeSpec): PreparedRunt
   if (stale) log.push(`runtime ${fp}: cached entry unusable (${stale}); rebuilding`);
 
   const venvPython = path.join(root, "venv", "bin", "python");
-  const nodeModules = path.join(root, "node_modules");
   const wantsPy = wantsPython(spec);
   const wantsNd = wantsNode(spec);
   const built: Record<string, unknown> = { built: new Date().toISOString() };

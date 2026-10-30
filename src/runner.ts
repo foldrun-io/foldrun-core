@@ -13,7 +13,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import matter, { parseLenient, configMatter } from "./matter.ts";
-import { spawn } from "node:child_process";
 import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
 import { cascadeLimits, toolOwners } from "./limits.ts";
@@ -64,7 +63,6 @@ import {
   syncBundleFor,
   parseToolDef,
   type ToolDef,
-  parseFlow,
   readFlow,
   markerPresent,
   whenRowsPath,
@@ -92,7 +90,6 @@ import {
   STORAGE_DIR,
   adoptLegacyVersionKey,
   listAgents,
-  runCost,
 } from "./store.ts";
 import { canReadBack } from "./tool-output.ts";
 import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";

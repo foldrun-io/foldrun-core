@@ -32,7 +32,6 @@ import {
   WORKSPACE_DIRS,
   assertSafeName,
   type DeployFile,
-  notifyWorkspaceChanged,
   accountDir,
   frontmatterErrorText,
 } from "./store.ts";
