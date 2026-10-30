@@ -13,6 +13,40 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.1.0] — 2026-10-30
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `setSecret` from `@foldrun/core`
+- `SecretEntry` from `@foldrun/core`
+- `setOAuth2Secret` from `@foldrun/core`
+- `setServiceAccountSecret` from `@foldrun/core`
+- `setFileSecret` from `@foldrun/core`
+- `setSshSecret` from `@foldrun/core`
+- `setClientCertSecret` from `@foldrun/core`
+- `setIdentitySecret` from `@foldrun/core`
+- `setApiSecret` from `@foldrun/core`
+- `accountMail` from `@foldrun/core`
+- `notifyMail` from `@foldrun/core`
+- `eventToken` from `@foldrun/core`
+- `eventUrl` from `@foldrun/core`
+
+### New in the public API
+
+- `CATALOG_RETRY_MS` from `@foldrun/core`
+- `refreshCatalogSoon` from `@foldrun/core`
+- `signingSecretShown` from `@foldrun/core`
+- `SecretLimit` from `@foldrun/core`
+- `accountSecretUsableIn` from `@foldrun/core`
+- `setSecretWorkspaces` from `@foldrun/core`
+- `retargetSecretWorkspaces` from `@foldrun/core`
+- `EventGate` from `@foldrun/core`
+- `eventGatesFor` from `@foldrun/core`
+
+- feat(secrets): limit an account secret to selected workspaces; check warns on never-firing crons and literal signing secrets ([a053e98](https://github.com/foldrun-io/foldrun-core/commit/a053e98))
+
 ## [9.0.0] — 2026-10-30
 
 ### Breaking changes
