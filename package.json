@@ -1,6 +1,6 @@
 {
   "name": "@foldrun/core",
-  "version": "9.0.0",
+  "version": "9.1.0",
   "description": "Agents are just folders. The format, the runner, the checks.",
   "license": "FSL-1.1-ALv2",
   "type": "module",
