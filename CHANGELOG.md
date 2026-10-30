@@ -13,6 +13,36 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.0.0] — 2026-10-30
+
+### Breaking changes
+
+- writeWorkspaceFile throws (status 404) for a workspace (94d63d9)
+- `Driver` from `@foldrun/core` — presignPut changed
+- `registerUpload` from `@foldrun/core` — parameter 5 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `setWorkspaceDescription` from `@foldrun/core`
+- `uploadUrl` from `@foldrun/core`
+- `webhookTarget` from `@foldrun/core`
+
+### New in the public API
+
+- `isOneSegment` from `@foldrun/core`
+- `assertCommitId` from `@foldrun/core`
+- `requireWorkspace` from `@foldrun/core`
+- `storedSize` from `@foldrun/core`
+- `openFile` from `@foldrun/core`
+- `purgeWorkspaceStorage` from `@foldrun/core`
+- `moveWorkspaceStorage` from `@foldrun/core`
+- `assertCommitId` from `@foldrun/core/history`
+- `isHookName` from `@foldrun/core/hooks`
+
+- fix(security)!: refuse path-like agent and hook names, writes into a missing workspace, off-site notify secrets ([94d63d9](https://github.com/foldrun-io/foldrun-core/commit/94d63d9))
+
 ## [8.0.1] — 2026-10-30
 
 ### chore
