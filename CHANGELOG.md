@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [8.0.1] — 2026-10-30
+
+### chore
+
+- remove dead code, and refuse unused locals at typecheck ([4afd8d6](https://github.com/foldrun-io/foldrun-core/commit/4afd8d6))
+
 ## [8.0.0] — 2026-10-29
 
 ### Breaking changes
