@@ -13,10 +13,14 @@
 //                        base64 of the raw pair, which breaks on a secret
 //                        holding ':' or '%'
 //   none                 a public client: client_id in the body, no secret
+//   private_key_jwt      a JWT signed with the client's private key, no
+//                        secret at all (RFC 7523 §2.2, oauth-assertion.ts)
 //
 // Absent means the old behaviour: the body, with the secret if there is one.
 
-export const TOKEN_AUTH_METHODS = ["client_secret_post", "client_secret_basic", "none"] as const;
+import { ASSERTION_TYPE, assertionKeyProblem, signClientAssertion, type AssertionAlg } from "./oauth-assertion.ts";
+
+export const TOKEN_AUTH_METHODS = ["client_secret_post", "client_secret_basic", "none", "private_key_jwt"] as const;
 export type TokenAuth = (typeof TOKEN_AUTH_METHODS)[number];
 
 /** The short spellings a person types (`--token-auth basic`), to the RFC names. */
@@ -25,6 +29,7 @@ export function parseTokenAuth(value: string): TokenAuth | null {
   if ((TOKEN_AUTH_METHODS as readonly string[]).includes(v)) return v as TokenAuth;
   if (v === "post" || v === "body") return "client_secret_post";
   if (v === "basic") return "client_secret_basic";
+  if (v === "jwt" || v === "private-key-jwt" || v === "key") return "private_key_jwt";
   return null;
 }
 
@@ -32,10 +37,16 @@ export interface TokenClient {
   client_id: string;
   client_secret?: string;
   token_auth?: TokenAuth;
+  /** private_key_jwt: the private key (PEM or JWK), its kid and alg, and
+   *  its certificate when the provider names keys by it (oauth-assertion.ts). */
+  client_assertion_key?: string;
+  client_assertion_kid?: string;
+  client_assertion_alg?: AssertionAlg;
+  client_assertion_cert?: string;
 }
 
 /** Why a client's token_auth cannot work, or null. */
-export function tokenAuthProblem(client: { client_secret?: string; token_auth?: unknown }): string | null {
+export function tokenAuthProblem(client: { client_secret?: string; token_auth?: unknown; client_assertion_key?: string; client_assertion_alg?: unknown; client_assertion_cert?: string }): string | null {
   const auth = client.token_auth;
   if (auth === undefined) return null;
   if (typeof auth !== "string" || !(TOKEN_AUTH_METHODS as readonly string[]).includes(auth)) {
@@ -45,6 +56,11 @@ export function tokenAuthProblem(client: { client_secret?: string; token_auth?: 
   if (auth === "client_secret_basic" && !hasSecret) return "token_auth client_secret_basic needs a client_secret";
   if (auth === "client_secret_post" && !hasSecret) return "token_auth client_secret_post needs a client_secret — a public app is token_auth none";
   if (auth === "none" && hasSecret) return "token_auth none is a public client — it sends no client_secret; leave the secret empty or pick client_secret_post or client_secret_basic";
+  if (auth === "private_key_jwt") {
+    // One method per request: a signed assertion, never a secret beside it.
+    if (hasSecret) return "token_auth private_key_jwt signs with a key and sends no client_secret — leave the secret empty";
+    return assertionKeyProblem(client);
+  }
   return null;
 }
 
@@ -60,12 +76,18 @@ const formEncode = (s: string) => new URLSearchParams({ x: s }).toString().slice
  * pushed authorization request carries it as a parameter of the request it
  * describes even when the client authenticates with Basic (RFC 9126 §2.1).
  */
-export function oauthTokenRequest(client: TokenClient, params: Record<string, string>, opts: { clientIdInBody?: boolean } = {}): { headers: Record<string, string>; body: string } {
+export function oauthTokenRequest(
+  client: TokenClient,
+  params: Record<string, string>,
+  /** `audience`: the endpoint the request goes to — the `aud` of a
+   *  private_key_jwt assertion (required for that method). */
+  opts: { clientIdInBody?: boolean; audience?: string } = {},
+): { headers: Record<string, string>; body: string } {
   const problem = tokenAuthProblem(client);
   if (problem) throw new Error(problem);
   const form = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (k === "client_id" || k === "client_secret") continue;
+    if (k === "client_id" || k === "client_secret" || k === "client_assertion" || k === "client_assertion_type") continue;
     form.set(k, v);
   }
   const headers: Record<string, string> = {
@@ -80,6 +102,11 @@ export function oauthTokenRequest(client: TokenClient, params: Record<string, st
     const pair = `${formEncode(client.client_id)}:${formEncode(client.client_secret!)}`;
     headers.authorization = `Basic ${Buffer.from(pair, "utf8").toString("base64")}`;
     if (opts.clientIdInBody) form.set("client_id", client.client_id);
+  } else if (auth === "private_key_jwt") {
+    if (!opts.audience) throw new Error("a private_key_jwt request needs the endpoint it goes to (its assertion's aud)");
+    form.set("client_id", client.client_id);
+    form.set("client_assertion_type", ASSERTION_TYPE);
+    form.set("client_assertion", signClientAssertion(client as TokenClient & { client_assertion_key: string }, opts.audience));
   } else {
     form.set("client_id", client.client_id);
     if (auth === "client_secret_post") form.set("client_secret", client.client_secret!);

@@ -26,6 +26,7 @@ import { platform } from "./platform.ts";
 import { fetchUntrusted } from "./untrusted-fetch.ts";
 import { oauthTokenRequest, readTokenResponse, tokenAuthProblem, type TokenAuth } from "./oauth-token.ts";
 import { isSecureUrl } from "./oauth-discovery.ts";
+import type { AssertionAlg } from "./oauth-assertion.ts";
 
 /**
  * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
@@ -945,6 +946,13 @@ export interface OAuth2Config {
   /** The provider's revocation endpoint (RFC 7009): deleting or replacing
    *  this secret revokes its tokens there (revokeOAuth2). */
   revocation_url?: string;
+  /** token_auth private_key_jwt: the private key (PEM or JWK) the client
+   *  signs its assertions with, sealed with the rest of the recipe; its kid,
+   *  alg, and certificate when the provider names keys by it (Entra). */
+  client_assertion_key?: string;
+  client_assertion_kid?: string;
+  client_assertion_alg?: AssertionAlg;
+  client_assertion_cert?: string;
 }
 
 const OAUTH2_PREFIX = "@oauth2 ";
@@ -970,8 +978,8 @@ export function setOAuth2Secret(
   }
   // A public client (PKCE, no secret) refreshes with its client id alone;
   // client credentials are nothing without the secret.
-  if (config.grant_type === "client_credentials" && !config.client_secret?.trim()) {
-    throw new Error("oauth2 secret needs client_secret for client_credentials");
+  if (config.grant_type === "client_credentials" && !config.client_secret?.trim() && config.token_auth !== "private_key_jwt") {
+    throw new Error("oauth2 secret needs client_secret for client_credentials (or token_auth private_key_jwt with a key)");
   }
   if (config.grant_type !== "client_credentials" && !config.refresh_token?.trim()) {
     throw new Error("oauth2 secret needs refresh_token (or grant_type: client_credentials)");
@@ -1068,11 +1076,14 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
   const flight = (async () => {
     // One builder for every token request (oauth-token.ts): the client's
     // identity goes where its token_auth says, and an `extra` cannot set it.
-    const request = oauthTokenRequest(config, {
+    // Built per try: a private_key_jwt assertion's jti is good once, so a
+    // retry after a lost answer must carry a new one (Codex review).
+    const build = () => oauthTokenRequest(config, {
       grant_type: config.grant_type ?? "refresh_token",
       ...(config.grant_type === "client_credentials" ? {} : { refresh_token: config.refresh_token! }),
       ...(config.extra ?? {}),
-    });
+    }, { audience: config.token_url });
+    build(); // a config that cannot make a request says so before any network
     // A network blip is retried; a provider's answer is not. "fetch failed"
     // (a reset, a DNS hiccup, a timeout) failed whole steps on the first try
     // — gbp-desk's Thursday posts, 7 Oct 2026. A 4xx (revoked, wrong client)
@@ -1083,6 +1094,7 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
     for (let attempt = 0; attempt < OAUTH_REFRESH_TRIES; attempt++) {
       if (attempt) await new Promise((r) => setTimeout(r, oauthRetryDelayMs(attempt)));
       try {
+        const request = build();
         res = await fetchUntrusted(config.token_url, {
           method: "POST",
           headers: request.headers,
@@ -1231,7 +1243,7 @@ export async function revokeOAuth2Value(
   const out: OAuthRevokeResult = { revoked: [] };
   for (const [hint, token] of tokens) {
     try {
-      const request = oauthTokenRequest(config, { token, token_type_hint: hint });
+      const request = oauthTokenRequest(config, { token, token_type_hint: hint }, { audience: config.token_url });
       const res = await fetcher(config.revocation_url, { method: "POST", headers: request.headers, body: request.body, redirect: "error", signal: AbortSignal.timeout(10_000) });
       if (res.ok) {
         await res.body?.cancel().catch(() => {});

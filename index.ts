@@ -44,6 +44,7 @@ export * from "./src/secrets.ts";
 export * from "./src/oauth-presets.ts";
 export * from "./src/oauth-token.ts";
 export * from "./src/oauth-discovery.ts";
+export * from "./src/oauth-assertion.ts";
 export * from "./src/secret-files.ts";
 export * from "./src/notify.ts";
 export * from "./src/webhook.ts";

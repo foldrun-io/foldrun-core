@@ -78,7 +78,7 @@ test("token_auth that cannot work is refused, with the reason", () => {
   assert.match(tokenAuthProblem({ token_auth: "client_secret_basic" }) ?? "", /needs a client_secret/);
   assert.match(tokenAuthProblem({ token_auth: "client_secret_post", client_secret: " " }) ?? "", /public app is token_auth none/);
   assert.match(tokenAuthProblem({ token_auth: "none", client_secret: "shh" }) ?? "", /sends no client_secret/);
-  assert.match(tokenAuthProblem({ token_auth: "private_key_jwt", client_secret: "shh" }) ?? "", /must be one of/);
+  assert.match(tokenAuthProblem({ token_auth: "tls_client_auth", client_secret: "shh" }) ?? "", /must be one of/);
   assert.equal(tokenAuthProblem({ client_secret: "" }), null, "absent is always the old behaviour");
   assert.throws(() => oauthTokenRequest({ client_id: "c", token_auth: "client_secret_basic" }, {}), /needs a client_secret/);
 });
@@ -88,7 +88,8 @@ test("--token-auth spellings: basic, post, none and the RFC names", () => {
   assert.equal(parseTokenAuth("POST"), "client_secret_post");
   assert.equal(parseTokenAuth("none"), "none");
   assert.equal(parseTokenAuth("client_secret_basic"), "client_secret_basic");
-  assert.equal(parseTokenAuth("jwt"), null);
+  assert.equal(parseTokenAuth("mtls-later"), null);
+  assert.equal(parseTokenAuth("jwt"), "private_key_jwt");
 });
 
 // ------------------------------------------------------------ the reader

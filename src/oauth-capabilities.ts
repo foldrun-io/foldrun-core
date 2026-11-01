@@ -109,7 +109,8 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "client.private-key-jwt", role: "client", title: "Signed client assertion (private_key_jwt)", spec: "RFC 7523 §2.2",
-    status: "planned", note: "Part E: Entra certificates, Okta, FAPI.",
+    status: "supported", note: "`token_auth: private_key_jwt` with a key you paste or foldrun makes; a certificate adds Entra's thumbprint. `--token-auth jwt`.",
+    proof: [core("tests/oauth-assertion.test.ts", "an oauth2 secret with private_key_jwt refreshes"), platform("tests/oauth-connect.test.ts", "private_key_jwt: a saved app can have its key made"), platform(KC, "private_key_jwt (RFC 7523): code + PKCE + PAR signed"), cli("tests/cli-connect.test.ts", "connect --token-auth jwt --key-file")],
   },
   {
     id: "client.device", role: "client", title: "Device authorization", spec: "RFC 8628",
@@ -178,7 +179,8 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "server.private-key-jwt", role: "server", title: "Signed client assertion (private_key_jwt)", spec: "RFC 7523 §2.2",
-    status: "planned", note: "Part E: apps that declare `jwks` or `jwks_uri`.",
+    status: "supported", note: "Apps that register `jwks` or `jwks_uri` sign in with assertions; each `jti` is used once.",
+    proof: [web("tests/mcp-oauth.test.ts", "private_key_jwt (RFC 7523): an app with a JWKS signs in"), core("tests/oauth-assertion.test.ts", "the verifier refuses")],
   },
   // ------------------------------------------------------------ refused, both roles
   {
