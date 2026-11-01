@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [11.2.2] — 2026-11-01
+
+- ci(hooks): box checks use a short TMPDIR and install nested packages ([aacb4c3](https://github.com/foldrun-io/foldrun-core/commit/aacb4c3))
+
 ## [11.2.1] — 2026-11-01
 
 - ci(hooks): pre-push can run the repo checks on another machine (foldrun.checksHost) ([4c78348](https://github.com/foldrun-io/foldrun-core/commit/4c78348))
