@@ -13,6 +13,66 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.2.0] — 2026-11-01
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `AgentInfo` from `@foldrun/core`
+- `FlowInfo` from `@foldrun/core`
+- `RunRecord` from `@foldrun/core`
+- `RunSummary` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+- `subagentPrompt` from `@foldrun/core/subagents`
+
+### New in the public API
+
+- `stoppedByText` from `@foldrun/core`
+- `lockFileExclusive` from `@foldrun/core`
+- `materializeCurrent` from `@foldrun/core`
+- `@foldrun/core/a2a-client`
+- `A2A_PROTOCOL_VERSION` from `@foldrun/core/a2a-client`
+- `A2A_VERSION_HEADER` from `@foldrun/core/a2a-client`
+- `JSONRPC_BINDING` from `@foldrun/core/a2a-client`
+- `TASK_STATES` from `@foldrun/core/a2a-client`
+- `TaskState` from `@foldrun/core/a2a-client`
+- `TERMINAL_STATES` from `@foldrun/core/a2a-client`
+- `INTERRUPTED_STATES` from `@foldrun/core/a2a-client`
+- `A2A_ERRORS` from `@foldrun/core/a2a-client`
+- `MAX_CARD_BYTES` from `@foldrun/core/a2a-client`
+- `MAX_REPLY_BYTES` from `@foldrun/core/a2a-client`
+- `REQUEST_TIMEOUT_MS` from `@foldrun/core/a2a-client`
+- `MAX_REPLY_TEXT` from `@foldrun/core/a2a-client`
+- `stateWord` from `@foldrun/core/a2a-client`
+- `A2APart` from `@foldrun/core/a2a-client`
+- `A2AMessage` from `@foldrun/core/a2a-client`
+- `A2ATask` from `@foldrun/core/a2a-client`
+- `A2AConnection` from `@foldrun/core/a2a-client`
+- `A2AEndpoint` from `@foldrun/core/a2a-client`
+- `A2AError` from `@foldrun/core/a2a-client`
+- `plainToken` from `@foldrun/core/a2a-client`
+- `stripHidden` from `@foldrun/core/a2a-client`
+- `routeFor` from `@foldrun/core/a2a-client`
+- `validateCard` from `@foldrun/core/a2a-client`
+- `fetchCard` from `@foldrun/core/a2a-client`
+- `validateTask` from `@foldrun/core/a2a-client`
+- `rpc` from `@foldrun/core/a2a-client`
+- `SendResult` from `@foldrun/core/a2a-client`
+- `OutgoingMessage` from `@foldrun/core/a2a-client`
+- `messageBody` from `@foldrun/core/a2a-client`
+- `sendMessage` from `@foldrun/core/a2a-client`
+- `getTask` from `@foldrun/core/a2a-client`
+- `cancelTask` from `@foldrun/core/a2a-client`
+- `replyText` from `@foldrun/core/a2a-client`
+- `untrustedBlock` from `@foldrun/core/a2a-client`
+- `@foldrun/core/a2a-publish`
+- `A2aPublication` from `@foldrun/core/a2a-publish`
+- …and 26 more
+
+- fix(a2a): keep core's public signatures additive ([20551d5](https://github.com/foldrun-io/foldrun-core/commit/20551d5))
+- feat(a2a): call outside A2A agents (remotes:) and publish flows over A2A 1.0 ([55c6da8](https://github.com/foldrun-io/foldrun-core/commit/55c6da8))
+
 ## [9.1.0] — 2026-10-30
 
 ### Widened in the public API
