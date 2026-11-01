@@ -13,6 +13,20 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [10.1.0] — 2026-11-01
+
+### New in the public API
+
+- `DEVICE_GRANT` from `@foldrun/core`
+- `DeviceStart` from `@foldrun/core`
+- `startDeviceAuthorization` from `@foldrun/core`
+- `DevicePoll` from `@foldrun/core`
+- `pollDeviceToken` from `@foldrun/core`
+- `waitForDeviceToken` from `@foldrun/core`
+
+- feat(oauth): MCP client credentials marked supported (part G) ([c5b00f5](https://github.com/foldrun-io/foldrun-core/commit/c5b00f5))
+- feat(oauth): device authorization — start, poll, wait (part F) ([0d32973](https://github.com/foldrun-io/foldrun-core/commit/0d32973))
+
 ## [10.0.0] — 2026-11-01
 
 ### Breaking changes
