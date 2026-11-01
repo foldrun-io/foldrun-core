@@ -200,9 +200,12 @@ export function routeFor(conn: Pick<A2AConnection, "token" | "egress">, target: 
   return target;
 }
 
-/** Why the egress proxy refused a request, in its own words, or null for an
- *  answer that is the remote's. An internal address reads as one, plainly. */
-export function egressRefusal(status: number, text: string): string | null {
+/** Why the egress proxy refused a request, or null for an answer that is
+ *  the remote's. The diagnostic is fixed text of ours; the body's own words
+ *  go back as `said`, for the untrusted fence — the proxy passes a remote's
+ *  403 through as it came, so a remote can send this exact shape (Codex
+ *  review, 2 Nov 2026). */
+export function egressRefusal(status: number, text: string): { reason: string; said: string | null } | null {
   if (status !== 403) return null;
   let body: unknown;
   try {
@@ -212,9 +215,11 @@ export function egressRefusal(status: number, text: string): string | null {
   }
   const err = (body as { error?: { type?: unknown; message?: unknown } } | null)?.error;
   if (!err || err.type !== "egress") return null;
-  const said = typeof err.message === "string" ? err.message.replace(/^egress:\s*/, "") : "";
-  if (/private|internal/i.test(said)) return "its address is not allowed — this platform does not call private or internal addresses";
-  return `the platform's egress refused it${said ? `: ${short(said, 200)}` : ""}`;
+  const said = typeof err.message === "string" ? short(err.message.replace(/^egress:\s*/, ""), 200) : "";
+  const reason = /private|internal/i.test(said)
+    ? "its address is not allowed — this platform does not call private or internal addresses"
+    : "the platform's egress refused it";
+  return { reason, said: said || null };
 }
 
 /**
@@ -271,7 +276,7 @@ async function exchange(
   // The egress proxy's own refusal ({error: {type: "egress"}}) is ours, not
   // the remote's: the address is not allowed, and no secret would change it.
   const egress = egressRefusal(res.status, text);
-  if (egress) throw new A2AError(`${conn.remote} cannot be called from here: ${egress}`, null, true);
+  if (egress) throw new A2AError(`${conn.remote} cannot be called from here: ${egress.reason}`, null, true, egress.said);
   if (res.status === 401 || res.status === 403) {
     throw new A2AError(`${conn.remote} refused the credential (HTTP ${res.status})${conn.token ? "" : " — this remote has no secret: set one"}`, null, true);
   }
