@@ -56,8 +56,11 @@ const formEncode = (s: string) => new URLSearchParams({ x: s }).toString().slice
  * fields (grant_type, code, refresh_token, …); the client's identity is
  * added here, by its token_auth. Fields in `params` named client_id or
  * client_secret are dropped — the method decides those, never an `extra`.
+ * `clientIdInBody`: client_id goes in the form whatever the method — a
+ * pushed authorization request carries it as a parameter of the request it
+ * describes even when the client authenticates with Basic (RFC 9126 §2.1).
  */
-export function oauthTokenRequest(client: TokenClient, params: Record<string, string>): { headers: Record<string, string>; body: string } {
+export function oauthTokenRequest(client: TokenClient, params: Record<string, string>, opts: { clientIdInBody?: boolean } = {}): { headers: Record<string, string>; body: string } {
   const problem = tokenAuthProblem(client);
   if (problem) throw new Error(problem);
   const form = new URLSearchParams();
@@ -76,6 +79,7 @@ export function oauthTokenRequest(client: TokenClient, params: Record<string, st
     // not the body as well.
     const pair = `${formEncode(client.client_id)}:${formEncode(client.client_secret!)}`;
     headers.authorization = `Basic ${Buffer.from(pair, "utf8").toString("base64")}`;
+    if (opts.clientIdInBody) form.set("client_id", client.client_id);
   } else {
     form.set("client_id", client.client_id);
     if (auth === "client_secret_post") form.set("client_secret", client.client_secret!);

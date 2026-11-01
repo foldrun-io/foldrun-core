@@ -25,6 +25,7 @@ import { dataRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { fetchUntrusted } from "./untrusted-fetch.ts";
 import { oauthTokenRequest, readTokenResponse, tokenAuthProblem, type TokenAuth } from "./oauth-token.ts";
+import { isSecureUrl } from "./oauth-discovery.ts";
 
 /**
  * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
@@ -941,6 +942,9 @@ export interface OAuth2Config {
   /** Plain fields the provider returned beside the first token (Salesforce's
    *  instance_url) — kept with the recipe, never a credential. */
   fields?: Record<string, string>;
+  /** The provider's revocation endpoint (RFC 7009): deleting or replacing
+   *  this secret revokes its tokens there (revokeOAuth2). */
+  revocation_url?: string;
 }
 
 const OAUTH2_PREFIX = "@oauth2 ";
@@ -972,11 +976,14 @@ export function setOAuth2Secret(
   if (config.grant_type !== "client_credentials" && !config.refresh_token?.trim()) {
     throw new Error("oauth2 secret needs refresh_token (or grant_type: client_credentials)");
   }
+  if (config.revocation_url !== undefined && (typeof config.revocation_url !== "string" || !isSecureUrl(config.revocation_url))) {
+    throw new Error("revocation_url must be https");
+  }
   const authProblem = tokenAuthProblem(config);
   if (authProblem) throw new Error(`oauth2 secret: ${authProblem}`);
   // Loopback is exempt: a token endpoint on this same machine (tests, a
   // local mock, a sidecar) crosses no wire for http to leak on.
-  if (!/^https:\/\//.test(config.token_url) && !/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(config.token_url)) {
+  if (!isSecureUrl(config.token_url)) {
     throw new Error("token_url must be https — a refresh token over http is a leaked one");
   }
   setSecret(tenant, name, OAUTH2_PREFIX + JSON.stringify(config), workspace, "oauth2", limit);
@@ -1115,6 +1122,135 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
   } finally {
     oauthFlight.delete(cacheKey);
   }
+}
+
+// ---------------------------------------------------------------- revocation
+
+/** The oauth2 recipe stored at exactly this scope — never the account copy a
+ *  workspace would fall back to: revoking is about the copy being removed. */
+export function oauth2ValueAt(tenant: string, name: string, workspace?: string): string | null {
+  const v = openRecord(tenant, workspace, name, read(tenant, workspace)[name]);
+  return v !== null && isOAuth2Value(v) ? v : null;
+}
+
+/** The workspaces with a vault file of their own (current and legacy layout). */
+function workspacesWithSecrets(tenant: string): string[] {
+  const out = new Set<string>();
+  for (const dir of ["workspaces", "projects"]) {
+    const base = path.join(dataRoot(), tenant, dir);
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(base);
+    } catch {
+      continue;
+    }
+    for (const n of names) if (fs.existsSync(path.join(base, n, "secrets.json"))) out.add(n);
+  }
+  return [...out];
+}
+
+/**
+ * Another stored secret of this account holds a grant revoking this one could
+ * end: the same refresh token (a copy made by hand, or one rotation reached),
+ * or any grant from the same app (token URL and client id). Providers such as
+ * Google revoke every token of a user's grant to an app together, so deleting
+ * the Ads connection would take down the Search Console one made with the
+ * same app (Codex review, 1 Nov 2026). Such a grant is left alone.
+ */
+export function oauthGrantSharedElsewhere(tenant: string, name: string, workspace: string | undefined, refreshToken: string, app?: { token_url: string; client_id: string }): boolean {
+  for (const scope of [undefined, ...workspacesWithSecrets(tenant)]) {
+    for (const [other, rec] of Object.entries(read(tenant, scope))) {
+      if (other === name && scope === workspace) continue;
+      // By the value, not the optional kind tag: a recipe copied with a
+      // plain setSecret is still one materializeSecrets refreshes.
+      const v = openRecord(tenant, scope, other, rec);
+      if (!v || !isOAuth2Value(v)) continue;
+      try {
+        const other = JSON.parse(v.slice(OAUTH2_PREFIX.length)) as OAuth2Config;
+        if (other.refresh_token === refreshToken) return true;
+        if (app && other.grant_type !== "client_credentials" && other.token_url === app.token_url && other.client_id === app.client_id) return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return false;
+}
+
+/** What revoking an oauth2 secret's tokens came to. */
+export interface OAuthRevokeResult {
+  /** Nothing was asked: no revocation endpoint; another secret holds the
+   *  same grant or one from the same app; the replacement is from the same
+   *  app (a reconnect: revoking would end the new grant too at providers
+   *  that revoke per app); or the stored recipe could not be read. */
+  skipped?: "no-revocation-url" | "shared-grant" | "same-app" | "unreadable";
+  /** The token types the provider accepted the revocation of. */
+  revoked: ("refresh_token" | "access_token")[];
+  /** Why one failed — reported, never a reason to keep a secret. */
+  error?: string;
+}
+
+type RevokeFetcher = (url: string, init: RequestInit) => Promise<Response>;
+
+/**
+ * Revoke what an oauth2 recipe holds at its provider (RFC 7009): the refresh
+ * token, then the access token this process has cached for it. The client
+ * authenticates as at the token URL (its token_auth). A 200 is success —
+ * the RFC answers 200 for a token already invalid too; anything else is
+ * reported in `error`, and the next token is still tried. `replacement`: the
+ * recipe taking this one's place; one from the same app (token URL and client
+ * id) means nothing is revoked, since a provider that revokes per app would
+ * end the new grant with the old.
+ */
+export async function revokeOAuth2Value(
+  value: string,
+  opts: { tenant?: string; name?: string; workspace?: string; fetcher?: RevokeFetcher; replacement?: { token_url: string; client_id: string } } = {},
+): Promise<OAuthRevokeResult> {
+  let config: OAuth2Config;
+  try {
+    config = JSON.parse(value.slice(OAUTH2_PREFIX.length)) as OAuth2Config;
+  } catch {
+    return { skipped: "unreadable", revoked: [] };
+  }
+  if (!config.revocation_url) return { skipped: "no-revocation-url", revoked: [] };
+  if (opts.replacement && opts.replacement.token_url === config.token_url && opts.replacement.client_id === config.client_id) {
+    return { skipped: "same-app", revoked: [] };
+  }
+  if (config.grant_type !== "client_credentials" && opts.tenant && opts.name
+    && oauthGrantSharedElsewhere(opts.tenant, opts.name, opts.workspace, config.refresh_token ?? "", { token_url: config.token_url, client_id: config.client_id })) {
+    return { skipped: "shared-grant", revoked: [] };
+  }
+  // No redirect is followed: a 3xx is not ok, so a revocation endpoint that
+  // sends us to a login page is reported, never counted as revoked.
+  const fetcher: RevokeFetcher = opts.fetcher ?? ((url, init) => fetchUntrusted(url, init, { sameOrigin: true, noRedirects: true }));
+  const key = tokenCacheKey("oauth2", value, opts.tenant);
+  const access = oauthCache.get(key)?.token;
+  const tokens: ["refresh_token" | "access_token", string][] = [];
+  if (config.grant_type !== "client_credentials" && config.refresh_token) tokens.push(["refresh_token", config.refresh_token]);
+  if (access) tokens.push(["access_token", access]);
+  const out: OAuthRevokeResult = { revoked: [] };
+  for (const [hint, token] of tokens) {
+    try {
+      const request = oauthTokenRequest(config, { token, token_type_hint: hint });
+      const res = await fetcher(config.revocation_url, { method: "POST", headers: request.headers, body: request.body, redirect: "error", signal: AbortSignal.timeout(10_000) });
+      if (res.ok) {
+        await res.body?.cancel().catch(() => {});
+        out.revoked.push(hint);
+      } else {
+        // Reported, and the next token is still tried: a provider that will
+        // not revoke refresh tokens may still revoke the access token.
+        const why = readTokenResponse(await res.text().catch(() => ""), res.headers.get("content-type") ?? "");
+        out.error ??= `the provider refused to revoke the ${hint.replace("_", " ")} (${res.status}${why.error ? `: ${why.error_description ?? why.error}` : ""})`;
+      }
+    } catch (err) {
+      out.error ??= `revoking the ${hint.replace("_", " ")} failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  // Every entry serving that access token goes: after a rotation the same
+  // token is cached under the recipe before and after it (Codex review).
+  oauthCache.delete(key);
+  if (access) for (const [k, v] of oauthCache) if (v.token === access) oauthCache.delete(k);
+  return out;
 }
 
 /**

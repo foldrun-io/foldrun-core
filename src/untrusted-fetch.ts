@@ -104,6 +104,10 @@ export async function fetchUntrusted(
     sameOrigin?: boolean;
     /** The most the answer may be, read; MAX_BYTES unless said. */
     maxBytes?: number;
+    /** Follow no redirect at all: a 3xx comes back as the answer, for the
+     *  caller to treat as the failure it is (a revocation that redirects to
+     *  a login page did not revoke anything). */
+    noRedirects?: boolean;
   } = {},
 ): Promise<Response> {
   const maxBytes = opts.maxBytes ?? MAX_BYTES;
@@ -112,7 +116,7 @@ export async function fetchUntrusted(
   for (let hop = 0; ; hop++) {
     const res = await platform.fetchUntrusted(current, { ...req, redirect: "manual" }, { maxBytes });
     const location = REDIRECT.has(res.status) ? res.headers.get("location") : null;
-    if (!location) return capBody(res, maxBytes, current);
+    if (!location || opts.noRedirects) return capBody(res, maxBytes, current);
     // The body of a redirect is never read; free the socket.
     await res.body?.cancel().catch(() => {});
     if (hop >= MAX_REDIRECTS) throw new RedirectRefused(`${url}: more than ${MAX_REDIRECTS} redirects — not followed`);

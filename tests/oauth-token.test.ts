@@ -47,6 +47,13 @@ test("client_secret_basic form-urlencodes id and secret before base64 (RFC 6749 
   assert.deepEqual([id, secret], ["my app", "p:ss%w+rd"]);
 });
 
+test("clientIdInBody: Basic still puts client_id in the form (a PAR request)", () => {
+  const r = oauthTokenRequest({ client_id: "cid", client_secret: "shh", token_auth: "client_secret_basic" }, { state: "s" }, { clientIdInBody: true });
+  assert.equal(new URLSearchParams(r.body).get("client_id"), "cid");
+  assert.equal(new URLSearchParams(r.body).has("client_secret"), false);
+  assert.match(r.headers.authorization ?? "", /^Basic /);
+});
+
 test("none (and absent with no secret) sends the client id alone", () => {
   for (const r of [
     oauthTokenRequest({ client_id: "pub", token_auth: "none" }, { grant_type: "refresh_token", refresh_token: "rt" }),
