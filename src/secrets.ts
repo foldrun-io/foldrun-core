@@ -24,6 +24,7 @@ import path from "node:path";
 import { dataRoot } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { fetchUntrusted } from "./untrusted-fetch.ts";
+import { oauthTokenRequest, readTokenResponse, tokenAuthProblem, type TokenAuth } from "./oauth-token.ts";
 
 /**
  * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
@@ -934,6 +935,12 @@ export interface OAuth2Config {
   grant_type?: "refresh_token" | "client_credentials";
   /** Extra form fields some providers want (audience, scope, …). */
   extra?: Record<string, string>;
+  /** How the client authenticates at the token endpoint (oauth-token.ts):
+   *  absent is the form body, with the secret when there is one. */
+  token_auth?: TokenAuth;
+  /** Plain fields the provider returned beside the first token (Salesforce's
+   *  instance_url) — kept with the recipe, never a credential. */
+  fields?: Record<string, string>;
 }
 
 const OAUTH2_PREFIX = "@oauth2 ";
@@ -965,6 +972,8 @@ export function setOAuth2Secret(
   if (config.grant_type !== "client_credentials" && !config.refresh_token?.trim()) {
     throw new Error("oauth2 secret needs refresh_token (or grant_type: client_credentials)");
   }
+  const authProblem = tokenAuthProblem(config);
+  if (authProblem) throw new Error(`oauth2 secret: ${authProblem}`);
   // Loopback is exempt: a token endpoint on this same machine (tests, a
   // local mock, a sidecar) crosses no wire for http to leak on.
   if (!/^https:\/\//.test(config.token_url) && !/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(config.token_url)) {
@@ -1050,11 +1059,11 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
   if (pending) return pending;
 
   const flight = (async () => {
-    const body = new URLSearchParams({
+    // One builder for every token request (oauth-token.ts): the client's
+    // identity goes where its token_auth says, and an `extra` cannot set it.
+    const request = oauthTokenRequest(config, {
       grant_type: config.grant_type ?? "refresh_token",
       ...(config.grant_type === "client_credentials" ? {} : { refresh_token: config.refresh_token! }),
-      client_id: config.client_id,
-      ...(config.client_secret ? { client_secret: config.client_secret } : {}),
       ...(config.extra ?? {}),
     });
     // A network blip is retried; a provider's answer is not. "fetch failed"
@@ -1069,8 +1078,8 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
       try {
         res = await fetchUntrusted(config.token_url, {
           method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: body.toString(),
+          headers: request.headers,
+          body: request.body,
           signal: AbortSignal.timeout(15_000),
         }, { sameOrigin: true });
       } catch (err) {
@@ -1082,13 +1091,8 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
       break;
     }
     if (!res) throw lastNetwork instanceof Error ? lastNetwork : new Error(String(lastNetwork));
-    const payload = (await res.json().catch(() => ({}))) as {
-      access_token?: string;
-      refresh_token?: string;
-      expires_in?: number;
-      error?: string;
-      error_description?: string;
-    };
+    // JSON or form-encoded, Slack's nested user token, expires_in as a string.
+    const payload = readTokenResponse(await res.text().catch(() => ""), res.headers.get("content-type") ?? "");
     if (!res.ok || !payload.access_token) {
       throw new Error(
         `token refresh failed (${res.status}): ${payload.error_description ?? payload.error ?? "no access_token in the reply"}`,
