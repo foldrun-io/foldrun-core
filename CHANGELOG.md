@@ -13,6 +13,33 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.4.0] — 2026-11-01
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `OAuth2Config` from `@foldrun/core`
+- `oauthTokenRequest` from `@foldrun/core`
+
+### New in the public API
+
+- `oauth2ValueAt` from `@foldrun/core`
+- `oauthGrantSharedElsewhere` from `@foldrun/core`
+- `OAuthRevokeResult` from `@foldrun/core`
+- `revokeOAuth2Value` from `@foldrun/core`
+- `OAuthServerMetadata` from `@foldrun/core`
+- `DiscoveredClientConfig` from `@foldrun/core`
+- `isSecureUrl` from `@foldrun/core`
+- `metadataUrls` from `@foldrun/core`
+- `issuerProblem` from `@foldrun/core`
+- `fetchOAuthMetadata` from `@foldrun/core`
+- `clientConfigFromMetadata` from `@foldrun/core`
+- `pickTokenAuth` from `@foldrun/core`
+- `discoverOAuth` from `@foldrun/core`
+
+- feat(oauth): discovery from an issuer, revocation, PAR support (parts B, C) ([c6cad03](https://github.com/foldrun-io/foldrun-core/commit/c6cad03))
+
 ## [9.3.0] — 2026-11-01
 
 ### Widened in the public API
