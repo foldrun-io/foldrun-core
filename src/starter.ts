@@ -397,6 +397,7 @@ Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/
 \`/api/approvals\`, \`/api/issues\` (what went wrong, open until resolved), \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
 \`/api/me/notifications\` (what mail you get; a key acts for whoever minted it),
 \`/api/me/inbox\` (what waits on you: gates, questions, issues, proposed fixes, your failed runs),
+\`/api/mcp\` (this account as MCP tools for an AI app such as Claude Desktop or Cursor — an API key; \`foldrun mcp\` serves the same over stdio, \`foldrun docs mcp\`),
 \`/api/account/backups\` (snapshots, restore requests), \`/api/me/onboarding\` (getting started),
 \`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
 and \`/api/metrics\` (Prometheus). Outside \`/api\`: \`/a2a/<account>/<ws>/flows/<flow>\`
