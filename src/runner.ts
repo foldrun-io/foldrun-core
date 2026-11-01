@@ -2407,7 +2407,10 @@ async function runStep(
     const cardProblems = new Map<string, string>();
     for (const r of remotes) {
       const why = await platform.checkUntrustedUrl(r.card);
-      if (why) cardProblems.set(r.name, why);
+      if (why) {
+        cardProblems.set(r.name, why);
+        console.warn(`[a2a] remotes: ${r.name} refused for ${tenant}/${path.basename(workspaceRootOf(agentDir))} (${step.agent}): ${why}`);
+      }
     }
     const stepRemotes: RemoteSpec[] = remotes.map((r) => {
       const refused = cardProblems.get(r.name);
