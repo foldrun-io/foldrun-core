@@ -13,6 +13,40 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [11.0.0] — 2026-11-01
+
+### Breaking changes
+
+- `PlatformHooks` from `@foldrun/core` — fetchUntrusted changed
+- `SecretKind` from `@foldrun/core` — its declaration changed
+- `tokenCacheKey` from `@foldrun/core` — parameter 1 changed
+- `tokenAuthProblem` from `@foldrun/core` — parameter 1 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `OAuth2Config` from `@foldrun/core`
+- `TokenClient` from `@foldrun/core`
+
+### New in the public API
+
+- `TOKEN_EXCHANGE_GRANT` from `@foldrun/core`
+- `TokenExchangeConfig` from `@foldrun/core`
+- `setTokenExchangeSecret` from `@foldrun/core`
+- `isTokenExchangeValue` from `@foldrun/core`
+- `generateDpopKey` from `@foldrun/core`
+- `dpopHtu` from `@foldrun/core`
+- `dpopAth` from `@foldrun/core`
+- `dpopProof` from `@foldrun/core`
+- `dpopJkt` from `@foldrun/core`
+- `noteDpopNonce` from `@foldrun/core`
+- `dpopNonceFor` from `@foldrun/core`
+- `wantsDpopNonce` from `@foldrun/core`
+
+- feat(oauth): token exchange as a secret kind (part I) ([bd01a58](https://github.com/foldrun-io/foldrun-core/commit/bd01a58))
+- feat(oauth): DPoP and mutual-TLS client auth — sender-constrained tokens (part H) ([0e0f454](https://github.com/foldrun-io/foldrun-core/commit/0e0f454))
+
 ## [10.1.0] — 2026-11-01
 
 ### New in the public API
