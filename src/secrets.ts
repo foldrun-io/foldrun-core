@@ -27,6 +27,7 @@ import { fetchUntrusted } from "./untrusted-fetch.ts";
 import { oauthTokenRequest, readTokenResponse, tokenAuthProblem, type TokenAuth } from "./oauth-token.ts";
 import { isSecureUrl } from "./oauth-discovery.ts";
 import type { AssertionAlg } from "./oauth-assertion.ts";
+import { dpopProof, dpopNonceFor, noteDpopNonce } from "./oauth-dpop.ts";
 
 /**
  * GCM's auth tag, pinned to its full 16 bytes at every cipher call. Without
@@ -953,6 +954,15 @@ export interface OAuth2Config {
   client_assertion_kid?: string;
   client_assertion_alg?: AssertionAlg;
   client_assertion_cert?: string;
+  /** DPoP (RFC 9449): this connection's own key; token requests and the
+   *  calls that use its token carry proofs signed with it (oauth-dpop.ts). */
+  dpop_key?: string;
+  /** tls_client_auth (RFC 8705): the client certificate and key presented
+   *  to the token URL — and, through the egress proxy, on the calls its
+   *  certificate-bound token is used for. */
+  tls_client_cert?: string;
+  tls_client_key?: string;
+  tls_client_passphrase?: string;
 }
 
 const OAUTH2_PREFIX = "@oauth2 ";
@@ -978,8 +988,9 @@ export function setOAuth2Secret(
   }
   // A public client (PKCE, no secret) refreshes with its client id alone;
   // client credentials are nothing without the secret.
-  if (config.grant_type === "client_credentials" && !config.client_secret?.trim() && config.token_auth !== "private_key_jwt") {
-    throw new Error("oauth2 secret needs client_secret for client_credentials (or token_auth private_key_jwt with a key)");
+  // Client credentials need a proof of the client: a secret, a signing key or a certificate.
+  if (config.grant_type === "client_credentials" && !config.client_secret?.trim() && !["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth"].includes(config.token_auth ?? "")) {
+    throw new Error("oauth2 secret needs client_secret for client_credentials (or token_auth private_key_jwt with a key, or tls_client_auth with a certificate)");
   }
   if (config.grant_type !== "client_credentials" && !config.refresh_token?.trim()) {
     throw new Error("oauth2 secret needs refresh_token (or grant_type: client_credentials)");
@@ -1091,27 +1102,51 @@ async function exchange(config: OAuth2Config, cacheKey: string): Promise<OAuthLi
     // and the reconnect mail; a 5xx or 429 is the provider busy, retried.
     let res: Response | undefined;
     let lastNetwork: unknown;
+    let text = "";
+    // A certificate-authenticated client (RFC 8705) presents it on the connection.
+    const clientCert = config.tls_client_cert && config.tls_client_key
+      ? { cert: config.tls_client_cert, key: config.tls_client_key, ...(config.tls_client_passphrase ? { passphrase: config.tls_client_passphrase } : {}) }
+      : undefined;
+    let nonceRetried = false;
     for (let attempt = 0; attempt < OAUTH_REFRESH_TRIES; attempt++) {
       if (attempt) await new Promise((r) => setTimeout(r, oauthRetryDelayMs(attempt)));
       try {
         const request = build();
+        // DPoP: a fresh proof per try, with the server's nonce when it gave one.
+        const headers = config.dpop_key
+          ? { ...request.headers, dpop: dpopProof(config.dpop_key, { htm: "POST", htu: config.token_url, ...(dpopNonceFor(config.token_url, config.dpop_key) ? { nonce: dpopNonceFor(config.token_url, config.dpop_key) } : {}) }) }
+          : request.headers;
         res = await fetchUntrusted(config.token_url, {
           method: "POST",
-          headers: request.headers,
+          headers,
           body: request.body,
           signal: AbortSignal.timeout(15_000),
-        }, { sameOrigin: true });
+          // A DPoP proof names this URL and method: a redirect would carry it
+          // somewhere it is not for, so none is followed (Codex review).
+        }, { sameOrigin: true, ...(clientCert ? { clientCert } : {}), ...(config.dpop_key ? { noRedirects: true } : {}) });
       } catch (err) {
         lastNetwork = err;
         res = undefined;
         continue;
       }
+      // Read before deciding to retry: the last answer's own words are the
+      // error a person sees when every try is busy (Codex review).
+      text = await res.text().catch(() => "");
       if (res.status === 429 || res.status >= 500) continue;
+      if (config.dpop_key) {
+        noteDpopNonce(config.token_url, res, config.dpop_key);
+        // The server wants a nonce in the proof (RFC 9449 §8): once more, at once.
+        if (!nonceRetried && res.status === 400 && res.headers.get("dpop-nonce") && readTokenResponse(text, res.headers.get("content-type") ?? "").error === "use_dpop_nonce") {
+          nonceRetried = true;
+          attempt--;
+          continue;
+        }
+      }
       break;
     }
     if (!res) throw lastNetwork instanceof Error ? lastNetwork : new Error(String(lastNetwork));
     // JSON or form-encoded, Slack's nested user token, expires_in as a string.
-    const payload = readTokenResponse(await res.text().catch(() => ""), res.headers.get("content-type") ?? "");
+    const payload = readTokenResponse(text, res.headers.get("content-type") ?? "");
     if (!res.ok || !payload.access_token) {
       throw new Error(
         `token refresh failed (${res.status}): ${payload.error_description ?? payload.error ?? "no access_token in the reply"}`,
@@ -1234,7 +1269,9 @@ export async function revokeOAuth2Value(
   }
   // No redirect is followed: a 3xx is not ok, so a revocation endpoint that
   // sends us to a login page is reported, never counted as revoked.
-  const fetcher: RevokeFetcher = opts.fetcher ?? ((url, init) => fetchUntrusted(url, init, { sameOrigin: true, noRedirects: true }));
+  // A certificate-authenticated client (RFC 8705) presents it here too.
+  const clientCert = config.tls_client_cert && config.tls_client_key ? { cert: config.tls_client_cert, key: config.tls_client_key, ...(config.tls_client_passphrase ? { passphrase: config.tls_client_passphrase } : {}) } : undefined;
+  const fetcher: RevokeFetcher = opts.fetcher ?? ((url, init) => fetchUntrusted(url, init, { sameOrigin: true, noRedirects: true, ...(clientCert ? { clientCert } : {}) }));
   const key = tokenCacheKey("oauth2", value, opts.tenant);
   const access = oauthCache.get(key)?.token;
   const tokens: ["refresh_token" | "access_token", string][] = [];

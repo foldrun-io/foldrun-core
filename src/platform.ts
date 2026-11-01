@@ -185,7 +185,7 @@ export interface PlatformHooks {
    * `maxBytes` is the most the answer may be, read (untrusted-fetch.ts
    * caps it again, so a laptop's plain fetch may ignore it).
    */
-  fetchUntrusted(url: string, init?: RequestInit, opts?: { maxBytes?: number }): Promise<Response>;
+  fetchUntrusted(url: string, init?: RequestInit, opts?: { maxBytes?: number; clientCert?: { pool: string; identity: string; cert: string; key: string; passphrase?: string } }): Promise<Response>;
   /**
    * May the host call this URL a tenant chose — a provider's base_url,
    * before an eval's judge or a dashboard draft talks to it? A reason it may

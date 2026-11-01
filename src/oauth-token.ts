@@ -18,9 +18,10 @@
 //
 // Absent means the old behaviour: the body, with the secret if there is one.
 
+import crypto from "node:crypto";
 import { ASSERTION_TYPE, assertionKeyProblem, signClientAssertion, type AssertionAlg } from "./oauth-assertion.ts";
 
-export const TOKEN_AUTH_METHODS = ["client_secret_post", "client_secret_basic", "none", "private_key_jwt"] as const;
+export const TOKEN_AUTH_METHODS = ["client_secret_post", "client_secret_basic", "none", "private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth"] as const;
 export type TokenAuth = (typeof TOKEN_AUTH_METHODS)[number];
 
 /** The short spellings a person types (`--token-auth basic`), to the RFC names. */
@@ -30,6 +31,8 @@ export function parseTokenAuth(value: string): TokenAuth | null {
   if (v === "post" || v === "body") return "client_secret_post";
   if (v === "basic") return "client_secret_basic";
   if (v === "jwt" || v === "private-key-jwt" || v === "key") return "private_key_jwt";
+  if (v === "mtls" || v === "tls" || v === "cert") return "tls_client_auth";
+  if (v === "self-signed-mtls" || v === "self-signed") return "self_signed_tls_client_auth";
   return null;
 }
 
@@ -43,10 +46,15 @@ export interface TokenClient {
   client_assertion_kid?: string;
   client_assertion_alg?: AssertionAlg;
   client_assertion_cert?: string;
+  /** tls_client_auth / self_signed_tls_client_auth (RFC 8705): the client
+   *  certificate and key presented on the connection to the token URL. */
+  tls_client_cert?: string;
+  tls_client_key?: string;
+  tls_client_passphrase?: string;
 }
 
 /** Why a client's token_auth cannot work, or null. */
-export function tokenAuthProblem(client: { client_secret?: string; token_auth?: unknown; client_assertion_key?: string; client_assertion_alg?: unknown; client_assertion_cert?: string }): string | null {
+export function tokenAuthProblem(client: { client_secret?: string; token_auth?: unknown; client_assertion_key?: string; client_assertion_alg?: unknown; client_assertion_cert?: string; tls_client_cert?: string; tls_client_key?: string; tls_client_passphrase?: string }): string | null {
   const auth = client.token_auth;
   if (auth === undefined) return null;
   if (typeof auth !== "string" || !(TOKEN_AUTH_METHODS as readonly string[]).includes(auth)) {
@@ -60,6 +68,16 @@ export function tokenAuthProblem(client: { client_secret?: string; token_auth?: 
     // One method per request: a signed assertion, never a secret beside it.
     if (hasSecret) return "token_auth private_key_jwt signs with a key and sends no client_secret — leave the secret empty";
     return assertionKeyProblem(client);
+  }
+  if (auth === "tls_client_auth" || auth === "self_signed_tls_client_auth") {
+    if (hasSecret) return `token_auth ${auth} proves the client with its certificate and sends no client_secret — leave the secret empty`;
+    if (!client.tls_client_cert?.trim() || !client.tls_client_key?.trim()) return `token_auth ${auth} needs tls_client_cert and tls_client_key (PEM)`;
+    try {
+      const key = crypto.createPrivateKey(client.tls_client_passphrase ? { key: client.tls_client_key, passphrase: client.tls_client_passphrase } : client.tls_client_key);
+      if (!new crypto.X509Certificate(client.tls_client_cert).checkPrivateKey(key)) return "tls_client_cert is not the certificate of tls_client_key";
+    } catch {
+      return "tls_client_cert and tls_client_key must be a PEM certificate and its private key";
+    }
   }
   return null;
 }
@@ -102,6 +120,10 @@ export function oauthTokenRequest(
     const pair = `${formEncode(client.client_id)}:${formEncode(client.client_secret!)}`;
     headers.authorization = `Basic ${Buffer.from(pair, "utf8").toString("base64")}`;
     if (opts.clientIdInBody) form.set("client_id", client.client_id);
+  } else if (auth === "tls_client_auth" || auth === "self_signed_tls_client_auth") {
+    // The certificate on the connection is the proof (RFC 8705 §2): the
+    // caller presents tls_client_cert; the body names the client only.
+    form.set("client_id", client.client_id);
   } else if (auth === "private_key_jwt") {
     if (!opts.audience) throw new Error("a private_key_jwt request needs the endpoint it goes to (its assertion's aud)");
     form.set("client_id", client.client_id);

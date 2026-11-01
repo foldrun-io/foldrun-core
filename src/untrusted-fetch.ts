@@ -21,7 +21,8 @@
 // Past the limit the body errors — a caller never gets the first megabyte
 // passed off as the whole answer.
 
-import { platform } from "./platform.ts";
+import crypto from "node:crypto";
+import { platform, guardsUntrustedUrls } from "./platform.ts";
 
 /** How many redirects one request may follow. fetch's own limit is 20;
  *  nothing a tenant points the platform at needs more than a couple. */
@@ -88,6 +89,54 @@ export function capBody(res: Response, maxBytes: number, url: string): Response 
   return out;
 }
 
+/** One request with a client certificate, through node's https — a laptop's
+ *  fetch has no way to present one. Redirects are the caller's. */
+async function fetchWithClientCert(url: string, init: RequestInit, cert: { cert: string; key: string; passphrase?: string }, maxBytes: number): Promise<Response> {
+  const https = await import("node:https");
+  const body = init.body === undefined || init.body === null ? undefined : typeof init.body === "string" ? init.body : Buffer.from(await new Response(init.body as BodyInit).arrayBuffer());
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((v, k) => (headers[k] = v));
+  // fetch decompresses; node's https does not. Ask for none, and decode one
+  // that comes anyway (Codex review).
+  headers["accept-encoding"] ??= "identity";
+  const zlib = await import("node:zlib");
+  const { pipeline } = await import("node:stream");
+  return new Promise<Response>((resolve, reject) => {
+    const r = https.request(url, { method: init.method ?? "GET", headers, cert: cert.cert, key: cert.key, ...(cert.passphrase ? { passphrase: cert.passphrase } : {}), ...(init.signal ? { signal: init.signal } : {}) }, (raw) => {
+      const enc = String(raw.headers["content-encoding"] ?? "").toLowerCase();
+      const decoder = enc === "gzip" || enc === "x-gzip" ? zlib.createGunzip()
+        : enc === "deflate" ? zlib.createInflate()
+        : enc === "br" ? zlib.createBrotliDecompress()
+        : null;
+      // pipeline: a reset mid-answer, or a bad compressed stream, rejects;
+      // and one side ending destroys the other (Codex review).
+      const res = decoder ? pipeline(raw, decoder, (err) => { if (err) reject(err); }) : raw;
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on("data", (c: Buffer) => {
+        // The read limit holds while reading, not after (Codex review).
+        size += c.length;
+        if (size > maxBytes) {
+          res.destroy();
+          raw.destroy();
+          reject(new Error(`${url}: the answer is larger than ${maxBytes} bytes — not read`));
+          return;
+        }
+        chunks.push(c);
+      });
+      res.on("end", () => {
+        const h = new Headers();
+        for (const [k, v] of Object.entries(raw.headers)) if (v !== undefined && k !== "content-encoding" && k !== "content-length") h.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+        resolve(new Response(chunks.length ? Buffer.concat(chunks) : null, { status: raw.statusCode ?? 502, headers: h }));
+      });
+      res.on("error", reject);
+    });
+    r.on("error", reject);
+    if (body !== undefined) r.write(body);
+    r.end();
+  });
+}
+
 export class RedirectRefused extends Error {
   constructor(message: string) {
     super(message);
@@ -108,13 +157,23 @@ export async function fetchUntrusted(
      *  caller to treat as the failure it is (a revocation that redirects to
      *  a login page did not revoke anything). */
     noRedirects?: boolean;
+    /** Present this client certificate (mutual TLS, RFC 8705). */
+    clientCert?: { cert: string; key: string; passphrase?: string };
   } = {},
 ): Promise<Response> {
   const maxBytes = opts.maxBytes ?? MAX_BYTES;
   let current = url;
   let req: RequestInit = { ...init };
   for (let hop = 0; ; hop++) {
-    const res = await platform.fetchUntrusted(current, { ...req, redirect: "manual" }, { maxBytes });
+    const res = opts.clientCert && !guardsUntrustedUrls()
+      // A laptop's plain fetch cannot present a certificate: node's https does.
+      ? await fetchWithClientCert(current, { ...req, redirect: "manual" }, opts.clientCert, maxBytes)
+      : await platform.fetchUntrusted(current, { ...req, redirect: "manual" }, {
+        maxBytes,
+        // A pool per certificate: a connection that presented one client's
+        // certificate is never reused for another's (Codex review).
+        ...(opts.clientCert ? (() => { const fp = crypto.createHash("sha256").update(`${opts.clientCert!.cert}\n${opts.clientCert!.key}`).digest("hex"); return { clientCert: { pool: `oauth-mtls:${fp}`, identity: fp, ...opts.clientCert! } }; })() : {}),
+      });
     const location = REDIRECT.has(res.status) ? res.headers.get("location") : null;
     if (!location || opts.noRedirects) return capBody(res, maxBytes, current);
     // The body of a redirect is never read; free the socket.
@@ -131,7 +190,8 @@ export async function fetchUntrusted(
     }
     const from = new URL(current);
     const crossOrigin = next.origin !== from.origin;
-    if (crossOrigin && opts.sameOrigin) {
+    // A client certificate is a credential too: never carried to another origin.
+    if (crossOrigin && (opts.sameOrigin || opts.clientCert)) {
       throw new RedirectRefused(
         `${from.origin} redirected to ${next.origin} — not followed: this request carries a credential, and it goes only where it was sent`,
       );

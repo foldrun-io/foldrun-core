@@ -123,11 +123,13 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "client.dpop", role: "client", title: "DPoP sender-constrained tokens", spec: "RFC 9449",
-    status: "planned", note: "Part H: Bluesky/atproto, Okta DPoP.",
+    status: "supported", note: "`dpop: true` on the app (`--dpop`): each connection's own key; the egress proxy signs a proof for every call through a site binding; nonces honoured.",
+    proof: [core("tests/oauth-dpop-mtls.test.ts", "refresh with DPoP"), platform("tests/egress-dpop.test.ts", "a used DPoP connection gives its key"), platform(KC, "DPoP (RFC 9449): a connection made with DPoP gets a bound token"), cli("tests/cli-connect.test.ts", "connect --dpop")],
   },
   {
     id: "client.mtls", role: "client", title: "Mutual-TLS client auth and bound tokens", spec: "RFC 8705",
-    status: "planned", note: "Part H: the client-cert secret at the token endpoint.",
+    status: "supported", note: "`token_auth: tls_client_auth` with the certificate and key; presented to the token URL and, through the egress proxy, on the calls the token is bound to.",
+    proof: [core("tests/oauth-dpop-mtls.test.ts", "tls_client_auth (RFC 8705)"), platform("tests/egress-dpop.test.ts", "a certificate-authenticated connection gives its certificate"), platform(KC, "mutual TLS (RFC 8705)"), cli("tests/cli-connect.test.ts", "--token-auth mtls stores the certificate")],
   },
   {
     id: "client.ciba", role: "client", title: "Client-initiated backchannel authentication", spec: "OpenID CIBA",
