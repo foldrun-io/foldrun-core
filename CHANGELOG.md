@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.2.1] — 2026-11-01
+
+- docs(starter): name /api/mcp and `foldrun mcp` in the account CLAUDE.md ([ca325d4](https://github.com/foldrun-io/foldrun-core/commit/ca325d4))
+
 ## [9.2.0] — 2026-11-01
 
 ### Widened in the public API
