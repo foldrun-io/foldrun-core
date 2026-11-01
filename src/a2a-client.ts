@@ -200,6 +200,23 @@ export function routeFor(conn: Pick<A2AConnection, "token" | "egress">, target: 
   return target;
 }
 
+/** Why the egress proxy refused a request, in its own words, or null for an
+ *  answer that is the remote's. An internal address reads as one, plainly. */
+export function egressRefusal(status: number, text: string): string | null {
+  if (status !== 403) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const err = (body as { error?: { type?: unknown; message?: unknown } } | null)?.error;
+  if (!err || err.type !== "egress") return null;
+  const said = typeof err.message === "string" ? err.message.replace(/^egress:\s*/, "") : "";
+  if (/private|internal/i.test(said)) return "its address is not allowed — this platform does not call private or internal addresses";
+  return `the platform's egress refused it${said ? `: ${short(said, 200)}` : ""}`;
+}
+
 /**
  * One HTTP exchange, read as JSON, to a limit, with no redirect followed.
  *
@@ -251,6 +268,10 @@ async function exchange(
     }
     throw new A2AError(`${conn.remote}: the answer could not be read: ${short((err as Error)?.message ?? err, 200)}`);
   }
+  // The egress proxy's own refusal ({error: {type: "egress"}}) is ours, not
+  // the remote's: the address is not allowed, and no secret would change it.
+  const egress = egressRefusal(res.status, text);
+  if (egress) throw new A2AError(`${conn.remote} cannot be called from here: ${egress}`, null, true);
   if (res.status === 401 || res.status === 403) {
     throw new A2AError(`${conn.remote} refused the credential (HTTP ${res.status})${conn.token ? "" : " — this remote has no secret: set one"}`, null, true);
   }
