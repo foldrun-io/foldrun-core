@@ -13,6 +13,40 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [10.0.0] — 2026-11-01
+
+### Breaking changes
+
+- `tokenAuthProblem` from `@foldrun/core` — parameter 1 changed
+- `oauthTokenRequest` from `@foldrun/core` — parameter 3 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `OAuth2Config` from `@foldrun/core`
+- `TokenClient` from `@foldrun/core`
+
+### New in the public API
+
+- `Jwk` from `@foldrun/core`
+- `ASSERTION_TYPE` from `@foldrun/core`
+- `ASSERTION_ALGS` from `@foldrun/core`
+- `AssertionAlg` from `@foldrun/core`
+- `ASSERTION_MAX_SECONDS` from `@foldrun/core`
+- `algForKey` from `@foldrun/core`
+- `readPrivateKey` from `@foldrun/core`
+- `jwkThumbprint` from `@foldrun/core`
+- `publicJwkOf` from `@foldrun/core`
+- `generateClientKey` from `@foldrun/core`
+- `AssertionSigner` from `@foldrun/core`
+- `signClientAssertion` from `@foldrun/core`
+- `assertionKeyProblem` from `@foldrun/core`
+- `VerifiedAssertion` from `@foldrun/core`
+- `verifyClientAssertion` from `@foldrun/core`
+
+- feat(oauth): private_key_jwt — signed client assertions, sign and verify (part E) ([16557c9](https://github.com/foldrun-io/foldrun-core/commit/16557c9))
+
 ## [9.5.0] — 2026-11-01
 
 - feat(oauth): one capability list for every kind of OAuth, and provider fixtures (part D) ([f102739](https://github.com/foldrun-io/foldrun-core/commit/f102739))
