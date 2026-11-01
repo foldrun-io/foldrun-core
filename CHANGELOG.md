@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.5.0] — 2026-11-01
+
+- feat(oauth): one capability list for every kind of OAuth, and provider fixtures (part D) ([f102739](https://github.com/foldrun-io/foldrun-core/commit/f102739))
+
 ## [9.4.0] — 2026-11-01
 
 ### Widened in the public API
