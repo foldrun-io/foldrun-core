@@ -119,7 +119,8 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "client.token-exchange", role: "client", title: "Token exchange", spec: "RFC 8693",
-    status: "planned", note: "Part I: a `token-exchange` secret kind. Cloud STS is covered today by the keyless identity kind.",
+    status: "supported", note: "A `token-exchange` secret: another secret's live token traded for a narrower one, cached. Cloud STS is covered by the keyless identity kind; a workload identity as the subject is not yet.",
+    proof: [core("tests/oauth-token-exchange.test.ts", "the subject's live token is traded for a narrower one"), platform(KC, "token exchange (RFC 8693)"), cli("tests/cli-connect.test.ts", "--kind token-exchange")],
   },
   {
     id: "client.dpop", role: "client", title: "DPoP sender-constrained tokens", spec: "RFC 9449",

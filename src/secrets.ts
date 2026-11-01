@@ -46,7 +46,7 @@ const tenantKey = (tenant: string) => platform.tenantKey(tenant);
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
 import { trimSlashes } from "./paths.ts";
-import { SITE } from "./network.ts";
+import { SITE, siteCovers } from "./network.ts";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
 
@@ -98,7 +98,7 @@ function secretsFile(tenant: string, workspace?: string) {
 /** How the stored value is used at run time — "oauth2"/"service-account"
  *  are refreshed into live tokens, "file"/"ssh"/"api" are materialised into
  *  the run's scratch. Plain values have no kind. */
-export type SecretKind = "oauth2" | "service-account" | "file" | "ssh" | "api" | "client-cert" | "identity";
+export type SecretKind = "oauth2" | "service-account" | "file" | "ssh" | "api" | "client-cert" | "identity" | "token-exchange";
 
 interface StoredSecret {
   iv: string;
@@ -1027,7 +1027,7 @@ const inFlight = new Map<string, Promise<string>>();
  * second account with the same names be handed the first one's token
  * (Codex debate, 22 Oct 2026).
  */
-export function tokenCacheKey(kind: "oauth2" | "sa", storedValue: string, tenant?: string): string {
+export function tokenCacheKey(kind: "oauth2" | "sa" | "tx", storedValue: string, tenant?: string): string {
   return crypto.createHash("sha256").update(JSON.stringify([kind, tenant ?? "", storedValue])).digest("hex");
 }
 
@@ -1356,6 +1356,8 @@ export async function materializeSecrets(
         throw new Error(`secret ${name}: ${message}${link ? ` — reconnect it in one click: ${link}` : ""}`);
       }
       if (ctx) await platform.noteOAuthRefresh(ctx, name, null).catch(() => undefined);
+    } else if (value.startsWith(TOKEN_EXCHANGE_PREFIX)) {
+      out[name] = await materializeTokenExchange(name, value, env, ctx);
     } else if (value.startsWith(SERVICE_ACCOUNT_PREFIX)) {
       let config: ServiceAccountConfig;
       try {
@@ -1659,6 +1661,136 @@ const IDENTITY_PREFIX = "@identity ";
  *  file the sandbox driver keeps fresh through the egress proxy. */
 export interface IdentityConfig {
   audience: string;
+}
+
+// ---------------------------------------------------------------- token exchange
+
+// Token exchange (RFC 8693): a secret that is not a credential of its own but
+// a recipe for one — present another secret's token (the subject) at a token
+// endpoint and get back a narrower one: another audience, fewer scopes, a
+// token a downstream service accepts. Cached like an oauth2 token; the
+// subject is made live first, the same way it would be on its own.
+
+export const TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
+const ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token";
+const TOKEN_EXCHANGE_PREFIX = "@token-exchange ";
+
+export interface TokenExchangeConfig {
+  token_url: string;
+  client_id: string;
+  client_secret?: string;
+  token_auth?: TokenAuth;
+  client_assertion_key?: string;
+  client_assertion_kid?: string;
+  client_assertion_alg?: AssertionAlg;
+  client_assertion_cert?: string;
+  tls_client_cert?: string;
+  tls_client_key?: string;
+  tls_client_passphrase?: string;
+  /** The secret whose live token is the subject: an oauth2 or service-account
+   *  secret, or a static token. Declared beside this one, or found in the
+   *  vault at the same scope. */
+  subject_secret: string;
+  /** Default urn:ietf:params:oauth:token-type:access_token. */
+  subject_token_type?: string;
+  requested_token_type?: string;
+  audience?: string;
+  resource?: string;
+  scope?: string;
+}
+
+export function setTokenExchangeSecret(tenant: string, name: string, config: TokenExchangeConfig, workspace?: string, limit: SecretLimit = {}) {
+  for (const field of ["token_url", "client_id", "subject_secret"] as const) {
+    if (typeof config[field] !== "string" || !config[field].trim()) throw new Error(`a token-exchange secret needs ${field}`);
+  }
+  if (!SECRET_NAME.test(config.subject_secret)) throw new Error("subject_secret is a secret's name, UPPER_SNAKE_CASE");
+  if (config.subject_secret === name) throw new Error("a token exchange cannot be its own subject");
+  if (!isSecureUrl(config.token_url)) throw new Error("token_url must be https");
+  for (const k of ["subject_token_type", "requested_token_type", "audience", "resource", "scope"] as const) {
+    if (config[k] !== undefined && typeof config[k] !== "string") throw new Error(`${k} is a string`);
+  }
+  const authProblem = tokenAuthProblem(config);
+  if (authProblem) throw new Error(`token-exchange secret: ${authProblem}`);
+  setSecret(tenant, name, TOKEN_EXCHANGE_PREFIX + JSON.stringify(config), workspace, "token-exchange", limit);
+}
+
+export function isTokenExchangeValue(value: string): boolean {
+  return value.startsWith(TOKEN_EXCHANGE_PREFIX);
+}
+
+const txCache = new Map<string, { token: string; expiresAt: number }>();
+const txFlight = new Map<string, Promise<string>>();
+
+async function materializeTokenExchange(
+  name: string,
+  value: string,
+  env: Record<string, string>,
+  ctx?: { tenant: string; workspace?: string },
+): Promise<string> {
+  let config: TokenExchangeConfig;
+  try {
+    config = JSON.parse(value.slice(TOKEN_EXCHANGE_PREFIX.length));
+  } catch {
+    throw new Error(`secret ${name}: stored token-exchange config is unreadable`);
+  }
+  // The subject: declared beside this secret, else the vault at this scope.
+  const subjectName = config.subject_secret;
+  let subjectValue: string | undefined = env[subjectName];
+  if (subjectValue === undefined && ctx) subjectValue = getSecret(ctx.tenant, subjectName, ctx.workspace)?.value;
+  if (subjectValue === undefined) throw new Error(`secret ${name}: its subject ${subjectName} is not set — declare it in secrets: beside ${name}`);
+  if (isTokenExchangeValue(subjectValue)) throw new Error(`secret ${name}: its subject ${subjectName} is itself a token exchange — the subject must be a token`);
+  // Only a token may be sent as the subject: a file, ssh key, header set,
+  // certificate or identity recipe would hand its contents to the token
+  // endpoint (Codex review).
+  for (const p of [FILE_PREFIX, SSH_PREFIX, API_PREFIX, CLIENT_CERT_PREFIX, IDENTITY_PREFIX]) {
+    if (subjectValue.startsWith(p)) throw new Error(`secret ${name}: its subject ${subjectName} is a ${p.slice(1).trim()} secret — the subject must be a token (an oauth2, service-account or plain token secret)`);
+  }
+  // A subject bound to sites goes to those sites alone: an exchange whose
+  // token URL is not one of them would carry it elsewhere (Codex review).
+  if (ctx) {
+    const bound = secretSites(ctx.tenant, [subjectName], ctx.workspace)[subjectName] ?? [];
+    const host = new URL(config.token_url).host;
+    if (bound.length && !bound.some((site) => siteCovers(site, host))) {
+      throw new Error(`secret ${name}: its subject ${subjectName} is bound to ${bound.join(", ")} — the exchange's token URL (${host}) is not one of them; bind the subject to it too`);
+    }
+  }
+  const subjectToken = (await materializeSecrets({ [subjectName]: subjectValue }, ctx))[subjectName];
+  // Cached by the recipe and the subject token: a new subject is a new exchange.
+  const key = tokenCacheKey("tx", `${value}\n${crypto.createHash("sha256").update(subjectToken).digest("hex")}`, ctx?.tenant);
+  const hit = txCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.token;
+  const pending = txFlight.get(key);
+  if (pending) return pending;
+  const flight = (async () => {
+    const clientCert = config.tls_client_cert && config.tls_client_key ? { cert: config.tls_client_cert, key: config.tls_client_key, ...(config.tls_client_passphrase ? { passphrase: config.tls_client_passphrase } : {}) } : undefined;
+    const request = oauthTokenRequest(config, {
+      grant_type: TOKEN_EXCHANGE_GRANT,
+      subject_token: subjectToken,
+      subject_token_type: config.subject_token_type ?? ACCESS_TOKEN_TYPE,
+      ...(config.requested_token_type ? { requested_token_type: config.requested_token_type } : {}),
+      ...(config.audience ? { audience: config.audience } : {}),
+      ...(config.resource ? { resource: config.resource } : {}),
+      ...(config.scope ? { scope: config.scope } : {}),
+    }, { audience: config.token_url });
+    const res = await fetchUntrusted(config.token_url, { method: "POST", headers: request.headers, body: request.body, signal: AbortSignal.timeout(15_000) }, { sameOrigin: true, ...(clientCert ? { clientCert } : {}) });
+    const payload = readTokenResponse(await res.text().catch(() => ""), res.headers.get("content-type") ?? "");
+    if (!res.ok || !payload.access_token) {
+      throw new Error(`secret ${name}: the token exchange was refused (${res.status}): ${payload.error_description ?? payload.error ?? "no access_token in the reply"}`);
+    }
+    // Never cached past its life: a minute short of it, or half a short life.
+    const life = payload.expires_in ?? 3600;
+    const ttl = Math.max(0, life - Math.min(60, life / 2)) * 1000;
+    const now = Date.now();
+    for (const [k, v] of txCache) if (v.expiresAt <= now) txCache.delete(k);
+    txCache.set(key, { token: payload.access_token, expiresAt: now + ttl });
+    return payload.access_token;
+  })();
+  txFlight.set(key, flight);
+  try {
+    return await flight;
+  } finally {
+    txFlight.delete(key);
+  }
 }
 
 export function setIdentitySecret(tenant: string, name: string, config: IdentityConfig, workspace?: string, limit: SecretLimit = {}) {
