@@ -114,7 +114,8 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "client.device", role: "client", title: "Device authorization", spec: "RFC 8628",
-    status: "planned", note: "Part F: `foldrun connect --device`.",
+    status: "supported", note: "Connect with a code on any device: the Connections form, or `foldrun connect --device`. PKCE is sent with the device grant.",
+    proof: [core("tests/oauth-device.test.ts", "pending, then slow_down"), platform("tests/oauth-connect.test.ts", "device authorization (RFC 8628): started for a saved app"), platform(KC, "device authorization (RFC 8628): started for a saved app, approved by the person at Keycloak"), web("tests/oauth-device-route.test.ts", "start → pending → approved → stored"), cli("tests/cli-connect.test.ts", "connect --device (RFC 8628)")],
   },
   {
     id: "client.token-exchange", role: "client", title: "Token exchange", spec: "RFC 8693",
