@@ -5,6 +5,8 @@
 //     web.search: 40      # one action of the web tool
 //     web: 150            # every web action together
 //     crm: 20             # an API, script or MCP tool, by the name it is granted as
+//     a2a: 10             # messages to outside agents (a2a_send and a2a_reply)
+//     a2a.status: 30      # polls of them, apart from the sends
 //     calls: 300          # every tool call in the step, whatever the tool
 //     repeat: 5           # the same call — one tool, the same input — at most this often
 //
@@ -22,6 +24,7 @@
 import crypto from "node:crypto";
 import { WEB_ACTIONS } from "./providers.ts";
 import { DELEGATE_TOOLS } from "./subagents.ts";
+import { A2A_SERVER, A2A_LIMIT_KEY, A2A_LIMIT_ACTIONS } from "./a2a-remotes.ts";
 
 export type Limits = Record<string, number>;
 
@@ -103,8 +106,13 @@ export function readLimits(raw: unknown, where = "limits"): { limits: Limits; pr
     }
     if (k.includes(".")) {
       const [head, action] = k.split(".");
-      if (head !== "web" || !(WEB_ACTIONS as readonly string[]).includes(action)) {
-        problems.push(`${where}: "${k}" is not a key — the dotted keys are web.<action>: ${WEB_ACTIONS.map((a) => `web.${a}`).join(", ")}.`);
+      const web = head === "web" && (WEB_ACTIONS as readonly string[]).includes(action);
+      const a2a = head === A2A_LIMIT_KEY && (A2A_LIMIT_ACTIONS as readonly string[]).includes(action);
+      if (!web && !a2a) {
+        problems.push(
+          `${where}: "${k}" is not a key — the dotted keys are web.<action>: ${WEB_ACTIONS.map((a) => `web.${a}`).join(", ")}, ` +
+            `and ${A2A_LIMIT_ACTIONS.map((a) => `${A2A_LIMIT_KEY}.${a}`).join(", ")}.`,
+        );
         continue;
       }
     }
@@ -166,6 +174,15 @@ export function limitKeysFor(toolName: string, input: Record<string, unknown> | 
   if (toolName === "WebSearch") { webAction("search"); return keys; }
   if (toolName === "WebFetch") { webAction("fetch"); return keys; }
   if ((DELEGATE_TOOLS as readonly string[]).includes(toolName)) return keys;
+  // remotes: — a message to an outside agent (a2a_send, a2a_reply) counts
+  // under `a2a`; every tool also under its own `a2a.<action>`, so polling
+  // (`a2a.status`) is capped apart from sending.
+  const a2a = new RegExp(`^mcp__${A2A_SERVER}__a2a_([a-z]+)$`).exec(toolName);
+  if (a2a) {
+    if (a2a[1] === "send" || a2a[1] === "reply") keys.push(A2A_LIMIT_KEY);
+    keys.push(`${A2A_LIMIT_KEY}.${a2a[1]}`);
+    return keys;
+  }
   const owner = owners[toolName];
   const mcp = /^mcp__(.+?)__(.+)$/.exec(toolName);
   const name = owner
@@ -274,7 +291,7 @@ export function limitKeyProblems(
   ctx: { known: Iterable<string>; granted: Iterable<string> },
 ): { level: "error" | "warn"; message: string }[] {
   const out: { level: "error" | "warn"; message: string }[] = [];
-  const builtinKeys = ["read", "write", "code", ...Object.keys(BUILTIN_GROUP), "TodoWrite", "search", "history", "desks", "ask", "web"];
+  const builtinKeys = ["read", "write", "code", ...Object.keys(BUILTIN_GROUP), "TodoWrite", "search", "history", "desks", "ask", "web", A2A_LIMIT_KEY];
   const known = new Set([...builtinKeys, ...ctx.known].map(normKey));
   const granted = new Set([...ctx.granted].flatMap((g) => {
     const n = normKey(g);
@@ -287,10 +304,11 @@ export function limitKeyProblems(
   }).map(normKey));
   for (const key of Object.keys(limits)) {
     if (key === TOTAL_KEY || key === REPEAT_KEY) continue;
-    const base = key.startsWith("web.") ? "web" : key;
+    const base = key.startsWith("web.") ? "web" : key.startsWith(`${A2A_LIMIT_KEY}.`) ? A2A_LIMIT_KEY : key;
     const n = normKey(base);
     if (!known.has(n)) {
       const valid = [TOTAL_KEY, "web", ...WEB_ACTIONS.map((a) => `web.${a}`), ...[...new Set([...ctx.granted].map(String))].filter((g) => g !== "web")];
+      if ([...ctx.granted].map(String).includes(A2A_LIMIT_KEY)) valid.push(...A2A_LIMIT_ACTIONS.map((a) => `${A2A_LIMIT_KEY}.${a}`));
       out.push({ level: "error", message: `limits: ${key} — not a tool this agent could call. The keys: ${[...new Set(valid)].join(", ")}.` });
     } else if (!granted.has(n)) {
       out.push({ level: "warn", message: `limits: ${key} — this agent is not granted ${base}, so the limit never applies` });

@@ -50,6 +50,8 @@ export function readFrontmatter(file: string): Record<string, unknown> {
 import { ownToolNames, legacyUseNames, retiredToolNames } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import { checkFilter } from "./trigger-filter.ts";
+import { parseA2aPublish, type A2aPublication } from "./a2a-publish.ts";
+import { parseRemotes, remoteNetworkHosts, A2A_LIMIT_KEY, type RemoteSpec } from "./a2a-remotes.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
@@ -984,6 +986,9 @@ export interface AgentInfo {
   effort: string | null;
   tools: string[];
   apis: ApiSpec[];
+  /** `remotes:` — the outside A2A agents it may call, the entries that read
+   *  (a2a-remotes.ts). Never a token: names, card URLs, secret NAMES. */
+  remotes: RemoteSpec[];
   /** The author's own tools named in `tools:` — the subset that is not a
    *  built-in. Same list as `tools`, minus what the runtime provides. */
   ownTools: string[];
@@ -1518,6 +1523,11 @@ export interface FlowInfo {
   /** Which of the three `owner` came from. */
   ownerFrom: OwnerSource | null;
 
+  /** `a2a:` — whether outside agents may call this flow over A2A, and what
+   *  its agent card says (a2a-publish.ts). Null when absent or unreadable:
+   *  a block with a problem publishes nothing. */
+  a2a?: A2aPublication | null;
+
   /** Flow-level frontmatter values the parser could not read — a bad
    *  `overlap:`/`priority:`/`catchup:`/`on:`/`signature:`, or a step line
    *  whose `[[target]]` is malformed. Errors, the way a bad step option is,
@@ -1604,6 +1614,8 @@ function inlineToolNames(data: Record<string, unknown>): string[] {
     }
   }
   if (data.mcpServers && typeof data.mcpServers === "object") out.push(...Object.keys(data.mcpServers));
+  // remotes: grants the a2a tools, counted under `limits: {a2a: N}`.
+  if (parseRemotes(data.remotes).length) out.push(A2A_LIMIT_KEY);
   return out;
 }
 
@@ -1645,7 +1657,11 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
           workspace: workspaceFront.network,
           agent: data.network,
           readsWeb,
-          implied: parseApis(data.apis).map((a) => { try { return new URL(a.base).host; } catch { return ""; } }),
+          implied: [
+            ...parseApis(data.apis).map((a) => { try { return new URL(a.base).host; } catch { return ""; } }),
+            // remotes: — each card's own host, and nothing its card says.
+            ...remoteNetworkHosts(parseRemotes(data.remotes)),
+          ],
         }),
         readsWeb,
       };
@@ -1658,6 +1674,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         effort: data.effort ?? null,
         tools,
         apis: parseApis(data.apis),
+        remotes: parseRemotes(data.remotes),
         ownTools: ownToolNames(data),
         legacyUse: legacyUseNames(data),
         retiredTools: retiredToolNames(data),
@@ -2138,6 +2155,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     approveWithin: durationOf(data.approve_within),
     description: typeof data.description === "string" ? data.description.trim() || null : null,
     ...resolveOwner(data.owner, undefined, undefined, "flow"),
+    a2a: parseA2aPublish(data.a2a),
     frontProblems,
     steps,
   };
@@ -2985,7 +3003,9 @@ export function renameWorkspaceFile(tenant: string, workspace: string, from: str
   // Refuse with the reason before any path validation: "not an editable
   // path" is true of AGENTS.md too, and the generic sentence buries the
   // specific one worth reading.
-  const why = anchoredReason(from) ?? anchoredReason(to);
+  // Read as the paths the rename will use: `./AGENTS.md` is AGENTS.md
+  // (1 Nov 2026 — the raw spelling slipped past this and still moved it).
+  const why = anchoredReason(path.normalize(from)) ?? anchoredReason(path.normalize(to));
   if (why) throw new Error(why);
   const dir = workspaceDir(tenant, workspace);
   const src = path.join(dir, assertEditablePath(from));
@@ -3740,6 +3760,11 @@ export interface RunRecord {
    *  expressed only as a status, because "failed" and "someone stopped it"
    *  are different facts and the trace should not conflate them. */
   stopRequested?: boolean;
+  /** Who stopped it, as the trail says it, when that was not a person
+   *  stopping it from the dashboard, the CLI or the API: "A2A caller
+   *  <key label>" for an A2A CancelTask (1 Nov 2026). Absent: a person.
+   *  Written by stopRun beside stopRequested, carried the same way. */
+  stoppedBy?: string;
   /**
    * What this run concluded, in one line — the first line of the last step
    * that produced a result, captured when the run finishes.
@@ -3810,6 +3835,14 @@ export interface RunRecord {
    *  step of this run — never the tokens. A link is good once; the second
    *  click is a 409, not a second approval. Written by approvals.ts. */
   approvalLinksUsed?: string[];
+  /** What started it, when that is not a person, a schedule or an event the
+   *  flow's own trigger names: "a2a" — an outside agent, over A2A (1 Nov
+   *  2026). Absent for every other run. */
+  trigger?: "a2a";
+  /** For an A2A run: the A2A task it serves and the id of the A2A key (its
+   *  first id, kept across rotations) that asked. A correlation only — the
+   *  protocol's own state lives in the platform's a2a_tasks. */
+  a2a?: { task: string; key: string };
   steps: StepRecord[];
 }
 
@@ -4089,6 +4122,9 @@ export interface RunSummary {
   revision?: string | null;
   /** A step is parked for a person — what the approvals banner counts. */
   awaitingApproval: boolean;
+  /** RunRecord.trigger and .a2a: an outside agent started it. */
+  trigger?: "a2a";
+  a2a?: { task: string; key: string };
   steps: RunSummaryStep[];
 }
 
@@ -4131,6 +4167,8 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.startedBy ? { startedBy: run.startedBy } : {}),
     ...(run.parkedAt ? { parkedAt: run.parkedAt } : {}),
     ...(run.revision ? { revision: run.revision } : {}),
+    ...(run.trigger ? { trigger: run.trigger } : {}),
+    ...(run.a2a ? { a2a: run.a2a } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
       const error = s.status === "failed" ? s.events.filter((e) => e.type === "error").at(-1)?.text : undefined;
@@ -4317,6 +4355,13 @@ export function listAllRunSummaries(tenant: string): (RunSummary & { workspace: 
   return listWorkspaces(tenant)
     .flatMap((p) => listRunSummaries(tenant, p.name).map((s) => ({ ...s, workspace: p.name })))
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/** Who stopped a run, for a trail line: "a person" unless stopRun was told
+ *  otherwise (RunRecord.stoppedBy). */
+export function stoppedByText(run: Pick<RunRecord, "stoppedBy"> | null | undefined): string {
+  const by = run?.stoppedBy?.trim();
+  return by ? by : "a person";
 }
 
 /**

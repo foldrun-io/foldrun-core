@@ -162,6 +162,9 @@ export function classifyCall(tool: string, input: Record<string, unknown> | unde
   // tools: [peers] — reading the roster changes nothing; a message to a
   // colleague is said, and a re-run would say it twice.
   if (server === "foldrun_peers") return name === "peers_list" ? { write: false } : write("a message to a colleague");
+  // remotes: — reading where a request got to changes nothing; a send, a
+  // reply or a cancel acts on an outside agent's system.
+  if (server === "foldrun_a2a") return name === "a2a_status" ? { write: false } : write(`${name.replace(/^a2a_/, "")} to an outside agent`);
   if (server === "foldrun_scripts") {
     if (name !== "web") return write(`script ${name}`);
     const action = String(args.action ?? "").trim().toLowerCase();

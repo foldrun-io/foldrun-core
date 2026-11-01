@@ -10,6 +10,8 @@ import { cronProblem, parseCron, cronCanFire } from "./cron.ts";
 import { SECRET_NAME } from "./secrets.ts";
 import { modelSecretCollision } from "./model-credential.ts";
 import { resourcesProblem, computeProblem } from "./resources.ts";
+import { remotesProblem } from "./a2a-remotes.ts";
+import { a2aPublishProblem } from "./a2a-publish.ts";
 
 export { FRONTMATTER, schemaKindOf, type FieldSpec, type FieldType, type SchemaKind } from "./frontmatter-fields.ts";
 
@@ -33,6 +35,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
   "agent": {
     effort: (v) => (resolveEffort(v) ? null : `"${String(v)}" is not an effort — low, medium, high, xhigh or max; the step runs at the model's default`),
     apis: apisProblem,
+    remotes: remotesProblem,
     budget: (v) => budgetProblem(v, ["run"]),
     ask: (v) => askProblem(v),
     resources: resourcesProblem,
@@ -57,6 +60,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
     pause_when: (v) => (String(v).length <= 60 ? null : "is longer than 60 characters"),
     budget: (v) => budgetProblem(v, ["run"]),
     compute: computeProblem,
+    a2a: a2aPublishProblem,
   },
   "tool": {
     transport: (v) => (["http", "script", "mcp"].includes(String(v).toLowerCase()) ? null : `"${String(v)}" is not a transport — http, script or mcp`),

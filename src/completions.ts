@@ -394,9 +394,9 @@ export function completionsAt(
     // that field's files and nothing else. `[[search]]` in tools: is how a
     // tool named after a runtime group gets granted; offering the group
     // here would defeat the point of the brackets.
-    const inlineOwner = line.match(/^\s*([a-zA-Z_]+):\s*(?:\[.*)?\[\[[^\]]*$/)?.[1];
+    const inlineOwner = line.match(/^\s*([a-zA-Z_][a-zA-Z0-9_]*):\s*(?:\[.*)?\[\[[^\]]*$/)?.[1];
     const blockOwner = /^\s+-\s*\[\[/.test(line)
-      ? before.slice(0, lineStart).split("\n").reverse().find((l) => /^\s*[a-zA-Z_]+:\s*$/.test(l))?.trim().replace(":", "")
+      ? before.slice(0, lineStart).split("\n").reverse().find((l) => /^\s*[a-zA-Z_][a-zA-Z0-9_]*:\s*$/.test(l))?.trim().replace(":", "")
       : undefined;
     const owner = inlineOwner ?? blockOwner;
     const byField: Record<string, Completion[]> = {
@@ -460,7 +460,7 @@ export function completionsAt(
   //    been chosen yet, one at a time. Fixed combinations were the wrong
   //    model: nobody wants a menu of every permutation, they want to add the
   //    next verb.
-  const inlineList = line.match(/^(\s*)([a-zA-Z_]+):\s*\[([^\]]*)$/);
+  const inlineList = line.match(/^(\s*)([a-zA-Z_][a-zA-Z0-9_]*):\s*\[([^\]]*)$/);
   if (inlineList) {
     const [, , key, inside] = inlineList;
     // The inline and block forms of a list are the same field — `tools: [a, b]`
@@ -505,7 +505,7 @@ export function completionsAt(
   }
 
   // 4. `key: value` — the value side of a known field.
-  const kv = line.match(/^(\s*)([a-zA-Z_]+):\s*(\S*)$/);
+  const kv = line.match(/^(\s*)([a-zA-Z_][a-zA-Z0-9_]*):\s*(\S*)$/);
   if (kv) {
     const [, , key, partial] = kv;
     const from = cursor - partial.length;
@@ -587,7 +587,7 @@ export function completionsAt(
     const partial = listItem[2];
     const from = cursor - partial.length;
     const priorLines = before.slice(0, lineStart).split("\n").reverse();
-    const owner = priorLines.find((l) => /^\s*[a-zA-Z_]+:\s*$/.test(l))?.trim().replace(":", "");
+    const owner = priorLines.find((l) => /^\s*[a-zA-Z_][a-zA-Z0-9_]*:\s*$/.test(l))?.trim().replace(":", "");
     const byOwner: Record<string, Completion[]> = {
       // One list now: built-ins and your own tools are granted the same way.
       // Groups first (they cover most needs), then your own tools — the ones
@@ -629,7 +629,7 @@ export function completionsAt(
     const partial = mapping[2] ?? "";
     const priorLines = before.slice(0, lineStart).split("\n").reverse();
     const owner = priorLines
-      .find((l) => /^\s*[a-zA-Z_]+:\s*$/.test(l))
+      .find((l) => /^\s*[a-zA-Z_][a-zA-Z0-9_]*:\s*$/.test(l))
       ?.trim()
       .replace(":", "");
     const byOwner: Record<string, Completion[]> = {
@@ -666,7 +666,7 @@ export function completionsAt(
   //     kind of file — the block takes nothing else.
   const fmClose = text.indexOf("\n---", text.indexOf("---") + 3);
   const insideFrontmatter = text.startsWith("---") && (fmClose === -1 || cursor <= fmClose);
-  const nested = line.match(/^(\s+)([a-zA-Z_]*)$/);
+  const nested = line.match(/^(\s+)([a-zA-Z_][a-zA-Z0-9_]*|)$/);
   if (insideFrontmatter && nested) {
     const header = before.slice(0, lineStart).split("\n").reverse().find((l) => /^\S/.test(l));
     const job = JOBS.find((j) => new RegExp(`^${j.name}\\s*:\\s*$`).test(header ?? ""));
@@ -699,7 +699,7 @@ export function completionsAt(
   //    this kind of file. This is where you learn the format by writing it.
   const fmEnd = text.indexOf("\n---", text.indexOf("---") + 3);
   const inFrontmatter = text.startsWith("---") && (fmEnd === -1 || cursor <= fmEnd);
-  if (inFrontmatter && /^[a-zA-Z_][a-zA-Z_-]*$|^$/.test(line)) {
+  if (inFrontmatter && /^[a-zA-Z_][a-zA-Z0-9_-]*$|^$/.test(line)) {
     const from = cursor - line.length;
     return { from, query: line, items: filter(fieldsFor(path, kind), line), title: `${kind} fields` };
   }

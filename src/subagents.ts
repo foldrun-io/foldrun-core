@@ -28,6 +28,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { refNames } from "./refs.ts";
 import { TOOL_MAP } from "./tool-names.ts";
+import { A2A_SERVER } from "./a2a-remotes.ts";
+
+/**
+ * The a2a tools (remotes:) are the parent's: one server, built for the
+ * PARENT's remotes with the parent's credentials, under the same four names
+ * whatever remotes a sub-agent declares. Intersecting names would hand a
+ * shared-sandbox sub-agent every remote its parent may call. So they are
+ * withheld from it entirely — not in its list, and refused if it calls one.
+ * A `sandbox: own` sub-agent runs as a step of its own, from its own file,
+ * and gets its OWN remotes there (runner.ts delegateFor → runStep).
+ */
+export function isA2aTool(tool: string): boolean {
+  return tool === `mcp__${A2A_SERVER}` || tool.startsWith(`mcp__${A2A_SERVER}__`);
+}
+
+/** What a shared-sandbox sub-agent is told, and what its refused call says. */
+export const SUBAGENT_NO_REMOTES =
+  "remotes: are not available to shared-sandbox sub-agents yet — give the sub-agent `sandbox: own`, or call the remote from the parent";
 
 /** Plain JSON: this crosses into the run container. */
 export interface SubagentSpec {
@@ -95,7 +113,7 @@ export function subagentTools(own: string[], parent: string[]): string[] {
   );
   const out: string[] = [];
   for (const t of own) {
-    if ((DELEGATE_TOOLS as readonly string[]).includes(t) || out.includes(t)) continue;
+    if ((DELEGATE_TOOLS as readonly string[]).includes(t) || isA2aTool(t) || out.includes(t)) continue;
     const server = /^mcp__([^_].*?)__/.exec(t)?.[1];
     if (held.has(t) || (server && servers.has(`mcp__${server}`))) out.push(t);
   }
@@ -110,9 +128,14 @@ export function subagentPrompt(o: {
   parent: string;
   workspace: string;
   shared?: string | null;
+  /** It declares remotes:, which it does not get here. */
+  remotesWithheld?: boolean;
 }): string {
   return [
     o.body.trim(),
+    ...(o.remotesWithheld
+      ? [`# Outside agents\n\nYour remotes: are not available to you as ${o.parent}'s sub-agent: ${SUBAGENT_NO_REMOTES}. If the job needs an outside agent, say so in your reply and ${o.parent} can call it.`]
+      : []),
     `# Where you are\n\n` +
       `You are ${o.name}, a sub-agent started by ${o.parent} to do one job and report back. ` +
       `You work in ${o.parent}'s directory, \`agents/${o.parent}/\` in the \`${o.workspace}\` workspace: ` +
@@ -183,6 +206,8 @@ export function subagentGuard(specs: SubagentSpec[]): (call: GuardedCall) => str
     if (isDelegate(tool)) {
       return `${s.name} is a sub-agent and cannot start another — do the work with your own tools`;
     }
+    // The parent's remotes, with the parent's credentials: never a sub-agent's.
+    if (isA2aTool(tool)) return `${tool} is not available to ${s.name}: ${SUBAGENT_NO_REMOTES}`;
     if (s.disallowedTools.includes(tool)) return `${tool} is disallowed for ${s.name}`;
     if (subagentTools([tool], s.tools).length === 0) return `${tool} is not one of ${s.name}'s tools`;
     return null;

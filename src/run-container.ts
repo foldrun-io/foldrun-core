@@ -44,6 +44,7 @@ import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
 import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
 import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
+import type { RemoteSpec } from "./a2a-remotes.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -61,6 +62,10 @@ export interface ContainerStepInput {
   /** http/stdio configs only — in-process servers are rebuilt inside. */
   mcpServers: Record<string, McpServerConfig>;
   apis: ApiSpec[]; // headers pre-substituted from the vault, host-side
+  /** `remotes:` — outside A2A agents, each spec's `token` filled host-side
+   *  (`${NAME}` for the egress proxy, or the value with no proxy), and the
+   *  run and step its handles are kept under (a2a-tools.ts). */
+  a2a?: { remotes: RemoteSpec[]; runId: string | null; step: number | null };
   scripts: ScriptSpec[];
   /** The agent's `runtime:` declaration — the driver builds the venv/npm
    *  prefix inside the container, where the network is. Without this,
@@ -749,6 +754,7 @@ try {
   process.env.FOLDRUN_DATA = "/home/agent/.foldrun";
   const { executeStep } = await import("@foldrun/core/step-exec");
   const { buildApiTools } = await import("@foldrun/core/api-tools");
+  const { buildA2ATools } = await import("@foldrun/core/a2a-tools");
   const { buildScriptTools } = await import("@foldrun/core/script-tools");
   const { buildConsultTools } = await import("@foldrun/core/agent-tools");
   const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
@@ -825,6 +831,20 @@ try {
   const toolEnv = { ...env };
   for (const [k, v] of Object.entries(env)) if (k.startsWith("FOLDRUN_DECLARED_")) toolEnv[k.slice("FOLDRUN_DECLARED_".length)] = v;
   const api = buildApiTools("", input.apis, undefined, { env: toolEnv, missing: [] }, keepIn);
+  // remotes: — the four a2a tools, rebuilt from values. Each token crossed in
+  // its spec (a placeholder the proxy fills for the card's origin alone), so
+  // nothing here asks a vault; handles go under the workspace's state/.
+  const a2a = input.a2a && Array.isArray(input.a2a.remotes) && input.a2a.remotes.length
+    ? buildA2ATools("", input.a2a.remotes, undefined, { env: {}, missing: [] }, {
+        stateDir: "/workspace/state/a2a/" + input.agentRel.split("/").pop(),
+        runId: input.a2a.runId,
+        step: input.a2a.step,
+        egress: env.FOLDRUN_EGRESS || null,
+        test: env.FOLDRUN_TEST_MODE === "1",
+        keepIn,
+        emit,
+      })
+    : { server: null, drainLog: () => [] };
   const script = buildScriptTools(
     agentDir,
     input.scripts,
@@ -901,6 +921,7 @@ try {
     mcpNames: input.mcpNames,
     mcpServers: {
       ...(api.server ? { foldrun_apis: api.server } : {}),
+      ...(a2a.server ? { foldrun_a2a: a2a.server } : {}),
       ...(script.server ? { foldrun_scripts: script.server } : {}),
       ...(consult.server ? { foldrun_agents: consult.server } : {}),
       ...(search.server ? { foldrun_search: search.server } : {}),
@@ -940,6 +961,7 @@ try {
     emit,
   });
   for (const line of api.drainLog()) emit("info", "api: " + line);
+  for (const line of a2a.drainLog()) emit("info", "a2a: " + line);
   for (const line of script.drainLog()) emit("info", "script: " + line);
   if (translator) {
     for (const line of translator.drainLog()) emit("info", line.startsWith("translator") ? line : "translator: " + line);

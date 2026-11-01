@@ -88,6 +88,7 @@ const AGENT: FieldSpec[] = [
   { key: "scripts", type: "list", help: "programs in scripts/, each a tool" },
   { key: "apis", type: "list", help: "an HTTP API as a tool" },
   { key: "mcpServers", type: "object", help: "MCP servers, name → {command | url, args, env, headers}" },
+  { key: "remotes", type: "list", help: "outside A2A agents it may call — [{name, card: the https URL of its agent card, secret?: a vault NAME sent as a bearer token, description?}]" },
   { key: "agents", type: ["list", "string"], help: "colleagues it may consult" },
   { key: "subagents", type: ["list", "string"], help: "colleagues it may delegate to" },
   { key: "sandbox", type: "string", values: ["own", "parent"], help: "when delegated to as a sub-agent: own = its own sandbox, tools, secrets and network; parent (default) = inside the delegating step's" },
@@ -174,6 +175,7 @@ const FLOW: FieldSpec[] = [
   { key: "budget", type: ["number", "string"], help: "USD per run" },
   { key: "compute", type: "object", help: "{vcpu, memory, disk} one run's steps may hold together at once — only narrows the workspace's and account's" },
   { key: "live", type: "boolean", help: "true: steps may act for real in a test run" },
+  { key: "a2a", type: "object", help: "serve this flow to outside agents over A2A 1.0 — {publish: true, name?, description?, examples?, public_card?, input?}; changing it needs workspace:manage" },
 ];
 
 const TOOL: FieldSpec[] = [

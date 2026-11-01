@@ -17,6 +17,9 @@
   "foldrun": {
     "publicApi": [
       ".",
+      "./a2a-client",
+      "./a2a-publish",
+      "./a2a-remotes",
       "./agents-md",
       "./browser-pod",
       "./flow-patterns",

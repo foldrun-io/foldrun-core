@@ -31,6 +31,9 @@ import matter, { frontmatterErrorLine, frontmatterErrorText, parseLenient, confi
 import { refNames } from "./refs.ts";
 import { resolveNetwork } from "./network.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
+import { parseRemotes } from "./a2a-remotes.ts";
+import { isA2aPublished } from "./a2a-publish.ts";
+import { parseFlow, type FlowStep } from "./store.ts";
 
 export type ScanLevel = "error" | "warn" | "info";
 export type ScanCategory = "secret" | "security" | "content" | "supply-chain" | "config";
@@ -136,6 +139,31 @@ export const SCAN_RULES: readonly ScanRule[] = [
       "and an agent that reads the web stays open), split the reading and the sending into two agents (a step each, or a reader sub-agent with \`sandbox: own\`), " +
       "or guard its calls with a `hooks:` gate. An approval (`!`) on every outward step is the other answer.",
     owasp: ["ASI01", "ASI02", "ASI03"],
+  },
+  {
+    // 1 Nov 2026, with A2A: a published flow's first input is whatever an
+    // outside caller sends. Shipped as a warning, like every new rule.
+    id: "security/published-flow-trifecta",
+    category: "security",
+    level: "warn",
+    title: "A flow published over A2A runs an agent that holds private data and can send it out",
+    help:
+      "An outside agent's message is untrusted input to every step of a published flow. A step whose agent also holds a secret, " +
+      "an API or an MCP server, and can reach an open network, an outward tool or an API it may write to, can be told by the caller " +
+      "where to send what it holds. Take a leg away from that agent (network: { level: trusted, allow: [...] }, split it, a hooks: gate), " +
+      "or do not publish the flow.",
+    owasp: ["ASI01", "ASI02", "ASI03"],
+  },
+  {
+    id: "security/published-flow-ungated",
+    category: "security",
+    level: "warn",
+    title: "A flow published over A2A acts outside the workspace with no person in the way",
+    help:
+      "An outside caller can start a published flow as often as its key allows. A step that posts, sends, writes to an API or calls " +
+      "another outside agent, with no approval (`!`) or `ask:` before it or on it, does what any caller asked. Put a gate before the " +
+      "first such step — an approval is a person reading what it will do.",
+    owasp: ["ASI02", "ASI09"],
   },
   {
     id: "security/subagent-wider",
@@ -720,8 +748,20 @@ interface ToolFacts {
   lines: string[];
 }
 
-function scanAgents(agents: AgentFacts[], outward: Set<string>, toolDefs: Map<string, ToolFacts>, push: Push, networks: { account?: unknown; workspace?: unknown }) {
+/** What one agent can reach, as the trifecta and the published-flow rules
+ *  read it: each leg's items, for a message. */
+interface AgentLegs {
+  privateLeg: string[];
+  outLeg: string[];
+  /** What it can do outside the workspace: outward tools, API writes, sends
+   *  to outside agents. */
+  writes: string[];
+  gated: boolean;
+}
+
+function scanAgents(agents: AgentFacts[], outward: Set<string>, toolDefs: Map<string, ToolFacts>, push: Push, networks: { account?: unknown; workspace?: unknown }): Map<string, AgentLegs> {
   const byName = new Map(agents.map((a) => [a.name, a]));
+  const legs = new Map<string, AgentLegs>();
   for (const a of agents) {
     const d = a.data;
     const tools = refNames(d.tools);
@@ -731,6 +771,11 @@ function scanAgents(agents: AgentFacts[], outward: Set<string>, toolDefs: Map<st
     // Untrusted: it reads the open web. (A webhook body is the other source;
     // that is a flow's trigger, and the flow-level rule is a later one.)
     const readsWeb = has("web") || tools.some((t) => /browse|fetch|scrape|crawl/i.test(t) && has(t));
+    // An outside agent's reply is untrusted too, and a message to one is a
+    // way out (remotes:). Its own token is not private data the agent holds:
+    // the proxy fills it, for that remote's origin alone.
+    const remotes = parseRemotes(d.remotes);
+    const untrusted = [...(readsWeb ? ["reads the web"] : []), ...(remotes.length ? [`reads replies from outside agents (${remotes.slice(0, 3).map((r) => r.name).join(", ")}${remotes.length > 3 ? ", …" : ""})`] : [])];
     // Private: a secret it spends itself, an API or MCP server it holds.
     const secrets = Array.isArray(d.secrets) ? d.secrets.map(String) : [];
     const apis = Array.isArray(d.apis) ? d.apis : [];
@@ -743,14 +788,16 @@ function scanAgents(agents: AgentFacts[], outward: Set<string>, toolDefs: Map<st
     const openNet = resolveNetwork({ account: networks.account, workspace: networks.workspace, agent: d.network, readsWeb }).level === "open";
     const outwardTools = tools.filter((t) => outward.has(t) && !denied.has(t));
     const writeApis = apis.filter((x: any) => WRITE_METHODS.test(JSON.stringify(x?.methods ?? x?.method ?? "")));
-    const outLeg = [...(openNet ? ["an open network"] : []), ...outwardTools.map((t) => `outward tool ${t}`), ...writeApis.map((x: any) => `writes to api ${x?.name ?? "?"}`)];
+    const writes = [...outwardTools.map((t) => `outward tool ${t}`), ...writeApis.map((x: any) => `writes to api ${x?.name ?? "?"}`), ...remotes.map((r) => `outside agent ${r.name}`)];
+    const outLeg = [...(openNet ? ["an open network"] : []), ...writes];
     const gated = refNames(d.hooks).length > 0 || d.permissionMode === "plan";
+    legs.set(a.name, { privateLeg, outLeg, writes, gated });
 
-    if (readsWeb && privateLeg.length && outLeg.length && !gated) {
+    if (untrusted.length && privateLeg.length && outLeg.length && !gated) {
       push(
         "security/lethal-trifecta", a.file, a.line, `trifecta ${a.name}`,
-        `${a.name} reads the web, holds ${privateLeg.slice(0, 3).join(", ")}${privateLeg.length > 3 ? ", …" : ""} and can reach ${outLeg.slice(0, 2).join(" and ")} — ` +
-          `a page it reads can tell it where to send what it holds. Take it off the open network (network: { level: trusted, allow: [...] }), split it, or add a hooks: gate`,
+        `${a.name} ${untrusted.join(" and ")}, holds ${privateLeg.slice(0, 3).join(", ")}${privateLeg.length > 3 ? ", …" : ""} and can reach ${outLeg.slice(0, 2).join(" and ")} — ` +
+          `${readsWeb ? "a page it reads" : "a reply it reads"} can tell it where to send what it holds. Take it off the open network (network: { level: trusted, allow: [...] }), split it, or add a hooks: gate`,
       );
     }
 
@@ -783,6 +830,72 @@ function scanAgents(agents: AgentFacts[], outward: Set<string>, toolDefs: Map<st
     const pkg = unpinnedRunner(def.command, def.args);
     if (pkg) push("supply-chain/unpinned-mcp", file, keyLine(lines, "command"), `mcp ${pkg}`, `command runs \`${pkg}\` — whatever was published last; pin a version`);
     runtimePackages(def.runtime, file, lines, push);
+  }
+  return legs;
+}
+
+// ── flows published over A2A ───────────────────────────────────────────────
+
+interface FlowFacts {
+  file: string;
+  content: string;
+  lines: string[];
+}
+
+/** The agents a step may run: its own, a rescuer, the ones it delegates to. */
+function stepAgents(s: FlowStep): string[] {
+  if (s.subflow) return [];
+  return [...new Set([s.agent, ...(s.onFail ? [s.onFail] : []), ...(s.delegate ?? [])].filter(Boolean))];
+}
+
+/**
+ * A flow with `a2a: {publish: true}` takes its first input from an outside
+ * caller. Two findings: a step agent the caller could steer into sending
+ * what it holds (the trifecta, with the caller as the untrusted leg), and a
+ * step that acts outside the workspace with no person before it.
+ */
+function scanPublishedFlows(flows: FlowFacts[], legs: Map<string, AgentLegs>, push: Push) {
+  for (const fl of flows) {
+    let info: ReturnType<typeof parseFlow>;
+    try {
+      info = parseFlow(fl.file, fl.content);
+    } catch {
+      continue; // a flow that does not parse is check's finding
+    }
+    if (!isA2aPublished(info.a2a)) continue;
+    const at = keyLine(fl.lines, "a2a");
+    const said = new Set<string>();
+    for (const step of info.steps) {
+      for (const name of stepAgents(step)) {
+        const l = legs.get(name);
+        if (!l || said.has(name) || l.gated || !l.privateLeg.length || !l.outLeg.length) continue;
+        said.add(name);
+        push(
+          "security/published-flow-trifecta", fl.file, step.line ?? at, `published trifecta ${name}`,
+          `${info.name} is published over A2A, so what an outside caller sends reaches ${name}, which holds ${l.privateLeg.slice(0, 3).join(", ")}${l.privateLeg.length > 3 ? ", …" : ""} ` +
+            `and can reach ${l.outLeg.slice(0, 2).join(" and ")} — a caller can tell it where to send what it holds. Take a leg away from ${name}, or do not publish the flow`,
+        );
+      }
+    }
+    // Groups in order. A gate (an approval, or ask:, which is one with a
+    // question) on any step of a group parks the run before ANY step of that
+    // group launches (runner.ts driveRunInner), so it holds its parallel
+    // siblings as well as every group after.
+    let gated = false;
+    for (const g of [...new Set(info.steps.map((s) => s.group))].sort((a, b) => a - b)) {
+      const group = info.steps.filter((s) => s.group === g);
+      if (group.some((s) => s.approve || s.ask)) gated = true;
+      for (const s of group) {
+        if (gated) continue;
+        const writes = [...new Set(stepAgents(s).flatMap((n) => legs.get(n)?.writes ?? []))];
+        if (!writes.length) continue;
+        push(
+          "security/published-flow-ungated", fl.file, s.line ?? at, `published ungated ${g} ${s.agent}`,
+          `step ${g} ([[${s.agent}]]) can act outside the workspace (${writes.slice(0, 2).join(", ")}${writes.length > 2 ? ", …" : ""}) and ${info.name} is published over A2A, ` +
+            `with no approval or ask: before it — any caller with a key starts it. Put a gate (\`${g}!.\`) on it or before it`,
+        );
+      }
+    }
   }
 }
 
@@ -916,6 +1029,7 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
 
   const outward = new Set(options.outwardTools ?? []);
   const agents: AgentFacts[] = [];
+  const flows: FlowFacts[] = [];
   const toolDefs = new Map<string, ToolFacts>();
 
   for (const f of files.filter(isText)) {
@@ -970,6 +1084,8 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
       const rel = f.path.replace(/^library\//, "");
       const name = /^agents\/([^/]+)\//.exec(rel)?.[1] ?? rel.replace(/^.*\/|\.md$/g, "");
       agents.push({ name, file: f.path, line: 1, data, lines });
+    } else if (kind === "flow") {
+      if (!f.path.startsWith("library/")) flows.push({ file: f.path, content: f.content, lines });
     } else if (kind === "tool") {
       const name = typeof data.name === "string" ? data.name : f.path.replace(/^(?:library\/)?tools\//, "").replace(/(?:\/tool)?\.md$/, "");
       if (data.outward === true) outward.add(name);
@@ -978,7 +1094,8 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
   }
   // project.md is the older name the runtime still reads (Codex review, FOL-58).
   const workspaceMd = files.find((f) => f.path === "AGENTS.md") ?? files.find((f) => f.path === "project.md");
-  scanAgents(agents, outward, toolDefs, push, { account: options.accountNetwork, workspace: workspaceMd ? frontOf(workspaceMd.content, "AGENTS.md")?.network : undefined });
+  const legs = scanAgents(agents, outward, toolDefs, push, { account: options.accountNetwork, workspace: workspaceMd ? frontOf(workspaceMd.content, "AGENTS.md")?.network : undefined });
+  scanPublishedFlows(flows, legs, push);
   for (const m of more.values()) {
     findings.push({ rule: m.rule, level: m.level ?? scanRule(m.rule)?.level ?? "warn", file: m.file, message: `and ${m.n} more like this in this file, not listed`, fingerprint: m.hash.digest("hex").slice(0, 16), truncated: true });
   }

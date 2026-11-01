@@ -153,6 +153,31 @@ test("a person's stop mid-step is said on the step, and the step is not retried"
   });
 });
 
+test("a stop by an A2A caller is said as theirs on the step, and stoppedBy survives the loop's save", async () => {
+  const { readRun, writeRun, stoppedByText } = await import("../src/store.ts");
+  const fake: Fake = async (args) => {
+    // What stopRun(…, { by }) writes from another process (1 Nov 2026).
+    const rec = readRun("acme", "desk", args.runId!)!;
+    rec.stopRequested = true;
+    rec.stoppedBy = "A2A caller partner";
+    rec.status = "failed";
+    writeRun("acme", "desk", rec);
+    return { status: "failed", result: null, costUsd: null, reason: "Error (exit 143)" };
+  };
+  await withFake(fake, null, async () => {
+    const run = startFlowRun("acme", "desk", [step({ retry: 1 })], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    assert.equal(done?.stopRequested, true);
+    assert.equal(done?.stoppedBy, "A2A caller partner", "the loop's own save keeps who stopped it");
+    const texts = done!.steps[0].events.map((e) => e.text);
+    assert.ok(texts.some((t) => /stopped by A2A caller partner mid-step/.test(t)), texts.join(" | "));
+    assert.ok(!texts.some((t) => /stopped by a person mid-step — its sandbox/.test(t)), texts.join(" | "));
+  });
+  assert.equal(stoppedByText({}), "a person");
+  assert.equal(stoppedByText({ stoppedBy: "  " }), "a person");
+  assert.equal(stoppedByText(null), "a person");
+});
+
 test("token counts: cache traffic summed beside fresh input, hit rate from the reads", () => {
   assert.deepEqual(
     tokensOf({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 900, cacheWriteTokens: 0 }),

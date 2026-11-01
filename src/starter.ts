@@ -389,6 +389,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/export\` · \`/import\` | GET · POST | the workspace, a flow (\`?kind=flow&name=\`) or an agent as a .zip; take one in (\`?dryRun=1\` first, \`?overwrite=1\` to replace) |
 | \`/restore\` | POST | the workspace's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
 | \`/vocabulary\` | GET | what this workspace's documents may say |
+| \`/a2a\` | GET | what it serves to outside agents over A2A: flows that say \`a2a:\`, card URLs, recent tasks |
 | \`/check\` | GET | what \`foldrun check\` says about the deployed copy, as findings with rule ids (\`?security=1\`) |
 | \`/assistant\` | POST | ask the assistant, or have it write agents, flows, tools and skills — from the docs only; proposals come back, nothing is written |
 
@@ -398,7 +399,8 @@ Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/
 \`/api/me/inbox\` (what waits on you: gates, questions, issues, proposed fixes, your failed runs),
 \`/api/account/backups\` (snapshots, restore requests), \`/api/me/onboarding\` (getting started),
 \`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
-and \`/api/metrics\` (Prometheus).
+and \`/api/metrics\` (Prometheus). Outside \`/api\`: \`/a2a/<account>/<ws>/flows/<flow>\`
+(a published flow's agent card and A2A 1.0 JSON-RPC endpoint — an A2A key only, \`foldrun docs a2a\`).
 
 Every call answers — and the CLI sends — \`Foldrun-Version: YYYY-MM-DD\` (dated API
 versions; an account pin in Settings → API), \`X-RateLimit-*\` headers (a \`429\`
@@ -434,6 +436,7 @@ effort: low
 overlap: skip            # skip | queue — what a second run does while one is live
 priority: normal         # high | normal | low — where its runs stand in the queue
 compute: { vcpu: 4, memory: 8Gi, disk: 40Gi }  # optional: what one run may hold at once
+a2a: { publish: false }  # true: outside agents may call it over A2A (admin only; callers need an A2A key)
 ---
 
 1. [[researcher]] — Find three sources on {{topic}}.
@@ -499,6 +502,7 @@ hooks: [no-force-push]      # from hooks/ or the library: code at every tool cal
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool
 apis: [{ name: crm }]       # an HTTP API, as a tool
 mcpServers: {}              # an MCP server, as a tool
+remotes: []                 # outside A2A agents [{name, card, secret?}] — the a2a_send/status/reply/cancel tools
 agents: [writer]            # colleagues this one may consult (an answer, no tools)
 subagents: [researcher]     # colleagues it may delegate a job to (own context, own tools ≤ its own)
 sandbox: own                # delegated to: run each job in its own sandbox (own tools, secrets, network)

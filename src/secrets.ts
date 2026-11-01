@@ -278,6 +278,17 @@ function readFile(file: string): SecretsFile {
 }
 
 function lockVault(file: string): () => void {
+  return lockFileExclusive(file, "the vault is busy — another change is being saved; try again");
+}
+
+/**
+ * An exclusive lock on `file` for a read-change-write, across processes and
+ * pods: `<file>.lock` opened O_EXCL (NFS 4.1 and EFS honour it), taken over
+ * when older than LOCK_STALE_MS (a holder that died), waited for up to
+ * LOCK_WAIT_MS, then `busy` is thrown. Returns the release. The vault's,
+ * and any other small state file several runs write (a2a-tools' handles).
+ */
+export function lockFileExclusive(file: string, busy = `${path.basename(file)} is busy — another writer holds it; try again`): () => void {
   const lock = `${file}.lock`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
@@ -296,7 +307,7 @@ function lockVault(file: string): () => void {
       } catch {
         continue; // released between the open and the stat
       }
-      if (Date.now() > deadline) throw new Error("the vault is busy — another change is being saved; try again");
+      if (Date.now() > deadline) throw new Error(busy);
       sleep(25);
     }
   }
@@ -1174,6 +1185,37 @@ export async function materializeSecrets(
     // writable scratch.
   }
   return out;
+}
+
+/**
+ * materializeSecrets for a tool that holds secrets for a whole step and
+ * makes them live per call (the API tools, the a2a tools), on a host with
+ * the vault.
+ *
+ * Two things the step's copy of a recipe cannot do alone. A provider that
+ * rotates refresh tokens has spent the refresh token the step started with —
+ * the runner materialised it at step start, and any refresh since spent its
+ * successor — so an oauth2 recipe is read again from the vault as it is now
+ * (and `env` updated in place, for the next call). And it is made live in
+ * the account's scope, as the runner and the egress proxy do: the cached
+ * access token is keyed by account, and a rotation is written back to the
+ * vault by the compare-and-set above. Refreshing the starting recipe outside
+ * that scope missed the cache and sent a spent refresh token: invalid_grant.
+ *
+ * No `scope` (inside a sandbox, where there is no vault and the values
+ * crossed already made live): materializeSecrets as it was.
+ */
+export async function materializeCurrent(
+  env: Record<string, string>,
+  scope?: { tenant: string; workspace?: string } | null,
+): Promise<Record<string, string>> {
+  if (!scope?.tenant) return materializeSecrets(env);
+  for (const [name, value] of Object.entries(env)) {
+    if (typeof value !== "string" || !isOAuth2Value(value)) continue;
+    const current = getSecret(scope.tenant, name, scope.workspace)?.value;
+    if (current && isOAuth2Value(current)) env[name] = current;
+  }
+  return materializeSecrets(env, { tenant: scope.tenant, ...(scope.workspace ? { workspace: scope.workspace } : {}) });
 }
 
 // ---------------------------------------------------------------- service account

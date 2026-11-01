@@ -38,7 +38,7 @@ const isolatedRun = () => {
   return mode === "container" || (!!mode && mode in platform.isolation);
 };
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
-import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentTools, type DelegateSpec, type SubagentSpec } from "./subagents.ts";
+import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentTools, SUBAGENT_NO_REMOTES, type DelegateSpec, type SubagentSpec } from "./subagents.ts";
 import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNames, localDelegateChannel, readCopyBack } from "./delegate-tools.ts";
 import type { DelegationResult } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
@@ -91,14 +91,17 @@ import {
   adoptLegacyVersionKey,
   listAgents,
   isOneSegment,
+  stoppedByText,
 } from "./store.ts";
 import { canReadBack } from "./tool-output.ts";
 import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
-import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, EGRESS_CA_ENV } from "./network.ts";
+import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
+import { buildA2ATools } from "./a2a-tools.ts";
+import { parseRemotes, remoteSecretNames, remoteGrantHost, remoteNetworkHosts, remotesPromptLines, A2A_TOOLS, type RemoteSpec } from "./a2a-remotes.ts";
 import { attachOperations, prefetchOpenApi } from "./openapi.ts";
 import { buildSearchTools, buildHistoryTools, buildDeskTools, digestRuns, type SearchRoot, type RunDigest } from "./context-tools.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
@@ -632,6 +635,12 @@ export function buildSubagentSpecs(o: {
         continue;
       }
       const tools = subagentTools(own.allowed, o.parentAllowed);
+      // remotes: are the parent's server and credentials; withheld here
+      // (subagents.ts isA2aTool), and the sub-agent and the step are told.
+      const remotesWithheld = own.remotes.length > 0;
+      if (remotesWithheld) {
+        o.push("info", `subagents: "${sub.name}" declares remotes: (${own.remotes.map((r) => r.name).join(", ")}), which it does not get inside this step — ${SUBAGENT_NO_REMOTES}`);
+      }
       if (!tools.length) {
         o.push("error", `subagents: "${sub.name}" holds none of its tools inside this step — it can only answer from its prompt (use agents: for that)`);
       }
@@ -645,6 +654,7 @@ export function buildSubagentSpecs(o: {
           parent: o.self,
           workspace: path.basename(o.workspaceRoot),
           shared: sharedInstructions(sub.dir, o.tenant),
+          remotesWithheld,
         }),
         tools,
         disallowedTools: refNames(own.front.disallowedTools),
@@ -1134,6 +1144,10 @@ export function agentContext(
   // APIs — the agent's own definitions, plus workspace tools it granted by
   // name. Library tools are defined once and reused.
   const apis = parseApis(front.apis);
+  // remotes: — outside A2A agents (a2a-remotes.ts). The tools are built
+  // where the step runs (runStep, run-container.ts), like ask's: they keep
+  // handles under the run and the step, which only the step knows.
+  const remotes = parseRemotes(front.remotes);
   // Scripts declared inline on the agent, plus any script-type tool it
   // granted — one list grants both kinds.
   const scriptSpecs = parseScripts(front.scripts);
@@ -1212,6 +1226,10 @@ export function agentContext(
   if (apiTools.promptLines.length) {
     parts.add("apis", `# APIs you can call\n\n${apiTools.promptLines.join("\n")}`);
   }
+  // Read-only (permissionMode: plan) holds no tool that sends; nor the line.
+  if (remotes.length && front.permissionMode !== "plan") {
+    parts.add("remotes", `# Outside agents you can call (A2A)\n\n${remotesPromptLines(remotes).join("\n")}`);
+  }
 
   // Secrets an agent declared become env vars for its scripts and bash.
   //
@@ -1286,10 +1304,24 @@ export function agentContext(
   // One name once, however many places asked for it.
   declared.splice(0, declared.length, ...new Set(declared));
   const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
+  // A remote's secret travels with the remote, as an API's does: naming it
+  // under remotes: is enough. One nothing else in the step uses is resolved
+  // apart, into remoteSecretEnv, and reaches the a2a tools alone — never
+  // secretEnv, which every script, Bash, consult and the sandbox's
+  // environment are built from, on either path. On the isolated path it is
+  // then the egress proxy's to fill for the card's origin (runStep). A
+  // secret the agent also declares, or an API also uses, is the agent's own
+  // choice to expose, and stays where it was.
+  const remoteSecrets = remoteSecretNames(remotes);
+  const remoteOnlySecrets = remoteSecrets.filter((n) => !declared.includes(n) && !referenced.includes(n));
   const {
     env: secretEnv,
     from: secretScopes,
   } = resolveSecrets(tenant, [...new Set([...declared, ...referenced])], workspace);
+  const { env: remoteSecretEnv, from: remoteScopes } = resolveSecrets(tenant, remoteOnlySecrets, workspace);
+  // Which store each came from, for the trace's "secret X ← scope" lines and
+  // the proxy's health keys.
+  Object.assign(secretScopes, remoteScopes);
   const { missing: missingDeclared } = resolveSecrets(tenant, declared, workspace);
 
   // The step's pod size. Three classes, not a dial: a size is a price and a
@@ -1716,6 +1748,7 @@ export function agentContext(
     }
   }
   allowed.push(...apiTools.toolNames, ...scriptTools.toolNames);
+  if (remotes.length) allowed.push(...A2A_TOOLS);
 
   // tools: [search] — every place a fact of this agent's could be, in the
   // same nearest-wins order the prompt lists them. tools: [history] — the
@@ -1813,8 +1846,18 @@ export function agentContext(
     // path, which serialises specs across the container boundary rather
     // than using the servers built here.
     apiSpecs: apis,
+    // remotes: — the specs, and the secrets only they use (runStep binds
+    // those to each card's origin).
+    remotes,
+    remoteOnlySecrets,
+    // Never spread into an environment: the a2a tools' alone.
+    remoteSecretEnv,
     scriptSpecs,
-    outward: outward || scriptSpecs.some((sc) => sc.outward),
+    // A message to an outside agent acts outside the workspace as surely as
+    // an outward tool: a retry after a failed check could have the same work
+    // done twice, reworded past a2a_send's same-request guard. Granted only
+    // (permissionMode: plan withholds the tools), so only then.
+    outward: outward || scriptSpecs.some((sc) => sc.outward) || (remotes.length > 0 && finalAllowed.some((t) => A2A_TOOLS.includes(t))),
     searchRoots,
     historyDigest,
     deskDigest,
@@ -1861,7 +1904,7 @@ export function agentContext(
     // missing ones so the step can tell "you never made this" apart from
     // "it's right there with a typo in it".
     brokenTools: brokenToolReport(tenant, workspace),
-    missingSecrets: [...new Set([...missingDeclared, ...apiTools.missingSecrets])],
+    missingSecrets: [...new Set([...missingDeclared, ...apiTools.missingSecrets, ...remoteSecrets.filter((n) => !(n in secretEnv) && !(n in remoteSecretEnv))])],
   };
 }
 
@@ -2299,6 +2342,7 @@ async function runStep(
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, legacyUse, retiredTools, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
+      remotes, remoteOnlySecrets, remoteSecretEnv,
       providerEnv, providerLabel, providerSecrets, providerWarnings, formatWarning,
       searchChoice, fetchChoice, actionChoices, web, language, region,
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
@@ -2344,7 +2388,50 @@ async function runStep(
     // Populate before the first push: everything after this point may quote a
     // credential. Short values are skipped — a two-character secret would
     // redact half the English language, and anything that short is not one.
-    redactions = redactionsFor({ ...liveSecrets, ...providerSecrets, ...providerEnv });
+    // remotes: — the credentials only they use, made live apart and never
+    // merged into liveSecrets, which the scripts' and the sandbox's
+    // environments are built from.
+    const remoteLive = await materializeSecrets(remoteSecretEnv, { tenant, workspace: path.basename(workspaceRootOf(agentDir)) });
+    const remoteValue = (name: string): string | undefined => remoteLive[name] ?? liveSecrets[name];
+    redactions = redactionsFor({ ...liveSecrets, ...remoteLive, ...providerSecrets, ...providerEnv });
+
+    // remotes: a secret the vault binds to sites of its own is sent only to
+    // them (egress.ts). A remote whose card is on none of them is not sent
+    // it — not called at all — and the trace says why.
+    const remoteBindings: Record<string, string[]> = remotes.length
+      ? secretSites(tenant, remotes.flatMap((r) => (r.secret ? [r.secret] : [])), path.basename(workspaceRootOf(agentDir)))
+      : {};
+    // And the install's rule for a URL a tenant chose, decided here on the
+    // host, which knows the install (a sandbox does not): https only where
+    // untrusted fetches are guarded (platform.ts checkUntrustedUrl). A card a
+    // hosted install would not call is not called from its sandbox either.
+    const cardProblems = new Map<string, string>();
+    for (const r of remotes) {
+      const why = await platform.checkUntrustedUrl(r.card);
+      if (why) cardProblems.set(r.name, why);
+    }
+    const stepRemotes: RemoteSpec[] = remotes.map((r) => {
+      const refused = cardProblems.get(r.name);
+      if (refused) {
+        const why = `${r.name} cannot be called: ${refused}`;
+        push("error", `remotes: ${why}`);
+        return { ...r, unavailable: why };
+      }
+      const sites = r.secret ? remoteBindings[r.secret] : undefined;
+      let hostname = "";
+      try {
+        hostname = new URL(r.card).hostname;
+      } catch {
+        // parseRemotes kept only readable URLs
+      }
+      if (!sites?.length || sites.some((site) => siteCovers(site, hostname))) return r;
+      const why = `${r.name} cannot be called: its secret ${r.secret} is bound in the vault to ${sites.join(", ")}, not to ${hostname}. Bind it there too (\`foldrun secrets sites ${r.secret} …\`), or give the remote its own secret`;
+      push("error", `remotes: ${why}`);
+      return { ...r, unavailable: why };
+    });
+    if (stepRemotes.length) {
+      push("info", `remotes: ${stepRemotes.map((r) => `${r.name} (${r.origin})`).join(", ")} — A2A 1.0 over JSON-RPC; only these origins, and a card naming another is refused`);
+    }
 
     // One line for the clock: which zone this step works to, and which level
     // set it. "Why is this dated yesterday" should be answerable from the run.
@@ -2778,6 +2865,20 @@ async function runStep(
       for (const c of actionChoices) {
         if (c.provider && c.secret in liveSecrets) addGrant(grant, c.secret, liveSecrets[c.secret], c.host);
       }
+      // remotes: each secret granted to its card's host and no other — the
+      // origin the owner wrote. A card cannot move the call elsewhere
+      // (a2a-client.ts validateCard), so the token can only go there.
+      for (const r of stepRemotes) {
+        const host = remoteGrantHost(r);
+        const value = r.secret ? remoteValue(r.secret) : undefined;
+        if (!host || !r.secret || r.unavailable || value === undefined) continue;
+        addGrant(grant, r.secret, value, host);
+        (grant.healthKeys ??= {})[r.secret] = healthKey(
+          r.secret,
+          secretScopes[r.secret] === "workspace" ? "workspace" : "account",
+          path.basename(path.resolve(agentDir, "..", "..")),
+        );
+      }
       for (const api of apiSpecs) {
         const host = hostOf(api.base);
         if (!host) continue;
@@ -2814,6 +2915,8 @@ async function runStep(
           ...Object.values(mcpServers).map((m) => ("url" in m && typeof m.url === "string" ? hostOf(m.url) : null)).filter((h): h is string => !!h),
           ...Object.values(grant.secrets).flatMap((g) => g.hosts),
           ...Object.values(boundSites).flat(),
+          // remotes: each card's own host — never one its card names.
+          ...remoteNetworkHosts(stepRemotes),
         ],
       });
       grant.network = { level: network.level, hosts: network.hosts };
@@ -2904,7 +3007,10 @@ async function runStep(
       ];
       const declared = Object.keys(liveSecrets);
       // A bound secret is never materialised, whatever the step grants.
-      const unbound = declared.filter((name) => !bound.includes(name));
+      // A secret only remotes: use is the proxy's to fill for the card's
+      // origin, or crosses inside the remote's spec when there is no proxy —
+      // never as an environment variable every program in the sandbox reads.
+      const unbound = declared.filter((name) => !bound.includes(name) && !remoteOnlySecrets.includes(name));
       const materialise = (!lease || materialisers.length > 0) && unbound.length > 0;
       if (lease) {
         const boundNote = bound.length ? `${bound.join(", ")} bound to sites — filled by the egress proxy, never in the sandbox` : "";
@@ -2946,6 +3052,17 @@ async function runStep(
       // /identity door. Without a lease there is no door, and so no token.
       const identityDeclared = declared.filter((name) => typeof liveSecrets[name] === "string" && isIdentityValue(liveSecrets[name]!));
       for (const name of identityDeclared) delete sandboxSecrets[name];
+      for (const name of remoteOnlySecrets) delete sandboxSecrets[name];
+      // The remotes as they cross: with a lease the token is its `${NAME}`,
+      // which the proxy fills for the card's host alone; without one (no
+      // proxy configured) the value rides in the spec, as an API header's
+      // does. A test run with no proxy carries none: it sends nothing.
+      const remoteSpecs: RemoteSpec[] = stepRemotes.map((r) => {
+        const value = r.secret ? remoteValue(r.secret) : undefined;
+        if (!r.secret || r.unavailable || value === undefined) return r;
+        if (lease) return { ...r, token: `\${${r.secret}}` };
+        return testRun ? r : { ...r, token: value };
+      });
       for (const name of identitiesHeld) {
         push("info", `test: ${name} withheld — no identity token on a test run`, { effect: { kind: "withheld", summary: `${name} withheld from the sandbox` } });
       }
@@ -3047,6 +3164,7 @@ async function runStep(
           // a bound one goes back to its ${NAME} for the proxy to fill.
           mcpServers: bound.length ? unbindMcpHeaders(mcpServers, bound, liveSecrets, grant) : mcpServers,
           apis: substitutedApis,
+          ...(remoteSpecs.length && allowed.some((t) => A2A_TOOLS.includes(t)) ? { a2a: { remotes: remoteSpecs, runId: runId ?? null, step: stepIndex ?? null } } : {}),
           scripts: scriptSpecs,
           // The merged spec, not `front.runtime` — see the plan's `runtime`
           // field. A tool's own `runtime:` is part of what this step needs.
@@ -3495,6 +3613,18 @@ async function runStep(
       }
       // @file secrets become 0600 paths here (host run), cleaned up in the
       // finally — once, however many attempts follow.
+      // remotes: the four tools, here in this process. No proxy: the token
+      // goes straight to the card's origin, made live per request.
+      const a2aTools = stepRemotes.length && allowed.some((t) => A2A_TOOLS.includes(t))
+        ? buildA2ATools(tenant, stepRemotes, path.basename(workspaceRoot), { env: { ...secretEnv, ...remoteSecretEnv }, missing: [] }, {
+            stateDir: path.join(workspaceRoot, "state", "a2a", step.agent),
+            runId: runId ?? null,
+            step: stepIndex ?? null,
+            test: testRun,
+            keepIn: { dir: agentDir, readable: () => canReadBack(allowed) },
+            emit: (type, text) => push(type, text),
+          })
+        : null;
       const mat = materializeFileSecrets(agentDir, stepSecrets);
       fileDir = mat.dir;
       // install: pip and npm land in a directory of this step's own, gone in
@@ -3538,6 +3668,7 @@ async function runStep(
           ...(askTools ? { foldrun_ask: askTools.server } : {}),
           ...(peerTools ? { foldrun_peers: peerTools.server } : {}),
           ...(delegateTools?.server ? { foldrun_delegate: delegateTools.server } : {}),
+          ...(a2aTools?.server ? { foldrun_a2a: a2aTools.server } : {}),
           ...(installTools ? { foldrun_install: installTools.server } : {}),
           ...mcpServers,
         },
@@ -3651,6 +3782,7 @@ async function runStep(
       step.stopReason = outcome.stopReason ?? null;
       for (const line of apiTools.drainLog()) push("info", `api: ${line}`);
       for (const line of scriptTools.drainLog()) push("info", `script: ${line}`);
+      for (const line of a2aTools?.drainLog() ?? []) push("info", `a2a: ${line}`);
     }
   } catch (err) {
     step.status = "failed";
@@ -4195,7 +4327,7 @@ export function createFlowRun(
   status: "queued" | "running",
   tags: string[] = [],
   startedBy: string | null = null,
-  opts: { test?: boolean } = {},
+  opts: { test?: boolean; a2a?: { task: string; key: string } } = {},
 ): RunRecord {
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -4204,6 +4336,8 @@ export function createFlowRun(
     status,
     ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
     ...(opts.test ? { test: true } : {}),
+    // An outside agent asked, over A2A: the task it serves, and whose key.
+    ...(opts.a2a ? { trigger: "a2a" as const, a2a: { task: opts.a2a.task, key: opts.a2a.key } } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -4439,7 +4573,11 @@ function driveRunInner(
    */
   const save = () => {
     const disk = run.stopRequested ? null : readRun(tenant, workspace, run.id);
-    if (disk?.stopRequested) run.stopRequested = true;
+    if (disk?.stopRequested) {
+      run.stopRequested = true;
+      // Who stopped it (an A2A caller's cancel, say) travels with the flag.
+      if (disk.stoppedBy) run.stoppedBy ??= disk.stoppedBy;
+    }
     if (run.stopRequested) {
       if (run.status !== "completed" && run.status !== "failed") {
         run.status = "failed";
@@ -4891,6 +5029,7 @@ function driveRunInner(
         // this is what keeps the *next* group from starting.
         const stopCheck = readRun(tenant, workspace, run.id);
         if (stopCheck?.stopRequested) {
+          if (stopCheck.stoppedBy) run.stoppedBy ??= stopCheck.stoppedBy;
           let skipped = 0;
           for (const s of run.steps) {
             if (s.status === "pending" || s.status === "running") {
@@ -4908,7 +5047,7 @@ function driveRunInner(
           witness?.events.push({
             t: new Date().toISOString(),
             type: "info",
-            text: `run stopped by a person between groups — ${skipped} remaining step${skipped === 1 ? "" : "s"} skipped`,
+            text: `run stopped by ${stoppedByText(run)} between groups — ${skipped} remaining step${skipped === 1 ? "" : "s"} skipped`,
           });
           run.status = "failed";
           run.stopRequested = true;
@@ -5380,7 +5519,7 @@ function driveRunInner(
                   if (run.stopRequested) {
                     step.status = "skipped";
                     step.skipReason = "run stopped";
-                    step.events.push({ t: new Date().toISOString(), type: "info", text: "run stopped by a person while this step waited to start — skipped" });
+                    step.events.push({ t: new Date().toISOString(), type: "info", text: `run stopped by ${stoppedByText(run)} while this step waited to start — skipped` });
                     save();
                     gate.release(step);
                     return;
@@ -5497,7 +5636,7 @@ function driveRunInner(
                   step.events.push({
                     t: new Date().toISOString(),
                     type: "info",
-                    text: "stopped by a person mid-step — its sandbox was destroyed, which is what ended this attempt; not retried",
+                    text: `stopped by ${stoppedByText(run)} mid-step — its sandbox was destroyed, which is what ended this attempt; not retried`,
                   });
                   save();
                   break;

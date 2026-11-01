@@ -20,7 +20,12 @@ import { createSdkMcpServer, tool, type SdkMcpToolDefinition } from "@anthropic-
 import type { ApiSpec } from "./store.ts";
 import { previewOrKeep, RESULT_KEEP_CHARS, type KeepIn } from "./tool-output.ts";
 import type { OperationSpec } from "./openapi.ts";
-import { resolveSecrets, materializeSecrets } from "./secrets.ts";
+import { resolveSecrets, materializeCurrent } from "./secrets.ts";
+
+/** Whose vault the secrets came from, on a host step: the account (and
+ *  workspace) they are made live in. Null inside a sandbox, where the values
+ *  crossed already resolved and there is no vault. */
+type VaultScope = { tenant: string; workspace?: string } | null;
 
 // Collected whole up to this; the model sees a preview and where the rest is
 // kept (tool-output.ts), not a cut with the rest gone.
@@ -145,6 +150,7 @@ async function performRequest(
   req: Request,
   /** Where a long body is kept, when the agent can read it back (tool-output.ts). */
   keepIn?: KeepIn,
+  scope: VaultScope = null,
 ): Promise<ToolReply> {
   const started = Date.now();
   try {
@@ -153,8 +159,11 @@ async function performRequest(
     // Per call, not per build: an oauth2 secret's recipe becomes a
     // live access token here, so a step that runs for an hour keeps
     // getting fresh tokens (the exchange is cached until near expiry)
-    // — and a recipe can never end up inside a header.
-    const live = await materializeSecrets(env);
+    // — and a recipe can never end up inside a header. On a host, the
+    // vault's recipe as it is now, made live in the account's scope: a
+    // rotating refresh token the runner (or an earlier call) spent is never
+    // sent again (secrets.ts materializeCurrent).
+    const live = await materializeCurrent(env, scope);
     const path = req.path.startsWith("/") ? req.path : `/${req.path}`;
     const url = new URL(api.base + path);
     // Base-URL confinement: a path can't escape the declared host.
@@ -243,6 +252,7 @@ function typedTool(
   bucket: TokenBucket | null,
   log: string[],
   keepIn?: KeepIn,
+  scope: VaultScope = null,
 ) {
   const keys = argKeys(op);
   const shape: Record<string, z.ZodTypeAny> = {};
@@ -292,11 +302,11 @@ function typedTool(
       query,
       headers,
       body: typeof values.body === "string" ? values.body : undefined,
-    }, keepIn);
+    }, keepIn, scope);
   });
 }
 
-function genericTool(api: ApiSpec, env: Record<string, string>, bucket: TokenBucket | null, log: string[], keepIn?: KeepIn) {
+function genericTool(api: ApiSpec, env: Record<string, string>, bucket: TokenBucket | null, log: string[], keepIn?: KeepIn, scope: VaultScope = null) {
   const typed = api.resolvedOperations?.length
     ? ` Prefer the typed ${api.name}_* tools; this one is the escape hatch for operations they do not cover.`
     : "";
@@ -321,7 +331,7 @@ function genericTool(api: ApiSpec, env: Record<string, string>, bucket: TokenBuc
         query: args.query ?? {},
         headers: {},
         body: args.body,
-      }, keepIn),
+      }, keepIn, scope),
   );
 }
 
@@ -351,6 +361,8 @@ export function buildApiTools(
         missing: resolved.missing,
       }
     : resolveSecrets(tenant, neededSecrets, workspace);
+  // Read from the vault here: made live per call in its account's scope.
+  const scope: VaultScope = !resolved && tenant ? { tenant, ...(workspace ? { workspace } : {}) } : null;
   const log: string[] = [];
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the SDK types its own list this way
@@ -393,11 +405,11 @@ export function buildApiTools(
 
     const typedNames: string[] = [];
     for (const op of ops) {
-      tools.push(typedTool(api, op, env, bucket, log, keepIn));
+      tools.push(typedTool(api, op, env, bucket, log, keepIn, scope));
       typedNames.push(typedToolName(api.name, op.id));
       methods[`mcp__foldrun_apis__${typedToolName(api.name, op.id)}`] = String(op.method ?? "").toUpperCase();
     }
-    if (withGeneric) tools.push(genericTool(api, env, bucket, log, keepIn));
+    if (withGeneric) tools.push(genericTool(api, env, bucket, log, keepIn, scope));
 
     const names = [...typedNames, ...(withGeneric ? [`call_${api.name}`] : [])];
     for (const n of names) {
