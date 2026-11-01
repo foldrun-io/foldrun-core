@@ -654,8 +654,7 @@ export function buildSubagentSpecs(o: {
           parent: o.self,
           workspace: path.basename(o.workspaceRoot),
           shared: sharedInstructions(sub.dir, o.tenant),
-          remotesWithheld,
-        }),
+        }, { remotesWithheld }),
         tools,
         disallowedTools: refNames(own.front.disallowedTools),
         model: own.front.model ? resolveModel(own.front.model) : "inherit",
@@ -4327,7 +4326,10 @@ export function createFlowRun(
   status: "queued" | "running",
   tags: string[] = [],
   startedBy: string | null = null,
-  opts: { test?: boolean; a2a?: { task: string; key: string } } = {},
+  opts: { test?: boolean } = {},
+  /** An A2A task's correlation (foldrun-platform flow-admission.ts) — its
+   *  own trailing argument, so the signature only widened. */
+  a2a?: { task: string; key: string },
 ): RunRecord {
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -4337,7 +4339,7 @@ export function createFlowRun(
     ...(startedBy ? { startedBy: startedBy.trim().toLowerCase() } : {}),
     ...(opts.test ? { test: true } : {}),
     // An outside agent asked, over A2A: the task it serves, and whose key.
-    ...(opts.a2a ? { trigger: "a2a" as const, a2a: { task: opts.a2a.task, key: opts.a2a.key } } : {}),
+    ...(a2a ? { trigger: "a2a" as const, a2a: { task: a2a.task, key: a2a.key } } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({

@@ -128,12 +128,14 @@ export function subagentPrompt(o: {
   parent: string;
   workspace: string;
   shared?: string | null;
-  /** It declares remotes:, which it does not get here. */
+}, extra: {
+  /** It declares remotes:, which it does not get here. A second argument,
+   *  so the signature only widened. */
   remotesWithheld?: boolean;
-}): string {
+} = {}): string {
   return [
     o.body.trim(),
-    ...(o.remotesWithheld
+    ...(extra.remotesWithheld
       ? [`# Outside agents\n\nYour remotes: are not available to you as ${o.parent}'s sub-agent: ${SUBAGENT_NO_REMOTES}. If the job needs an outside agent, say so in your reply and ${o.parent} can call it.`]
       : []),
     `# Where you are\n\n` +

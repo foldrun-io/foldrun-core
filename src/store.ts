@@ -988,7 +988,7 @@ export interface AgentInfo {
   apis: ApiSpec[];
   /** `remotes:` — the outside A2A agents it may call, the entries that read
    *  (a2a-remotes.ts). Never a token: names, card URLs, secret NAMES. */
-  remotes: RemoteSpec[];
+  remotes?: RemoteSpec[];
   /** The author's own tools named in `tools:` — the subset that is not a
    *  built-in. Same list as `tools`, minus what the runtime provides. */
   ownTools: string[];
