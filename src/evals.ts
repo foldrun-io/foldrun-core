@@ -33,7 +33,7 @@
 
 import { accountModelEnv, withModelEnv, ModelKeyError } from "./model-env.ts";
 import type { TranslatorSpec } from "./translator.ts";
-import { sdkEnv } from "./step-exec.ts";
+import { sdkEnv, modelProcessError } from "./step-exec.ts";
 import { platformModelEnv } from "./runner.ts";
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -621,6 +621,18 @@ function shell(command: string, cwd: string): Promise<{ code: number | null; out
  *  sentence is seconds; a stalled model must not hold a grade pass. */
 export const JUDGE_TIMEOUT_MS = 120_000;
 
+/**
+ * The environment a judge's model process starts with: the host's PATH, HOME
+ * and temp folder under the model's own variables. An account's provider env
+ * is only its URL, key and models, and a CLI started with no HOME dies on
+ * uv_os_homedir in a pod whose user has no passwd entry (FOL-107). Never the
+ * host's secrets: hostSafeEnv is an allowlist, as for drafts and the
+ * assistant's tool loop.
+ */
+export function judgeSdkEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  return { ...hostSafeEnv(), ...env };
+}
+
 /** One judge call: its words and what it cost (the SDK's result line). */
 export async function judgeCall(
   rubric: string,
@@ -653,7 +665,7 @@ export async function judgeCall(
         allowedTools: [],
         settingSources: [],
         strictMcpConfig: true,
-        env,
+        env: judgeSdkEnv(env),
         maxTurns: 1,
         abortController: abort,
       },
@@ -669,7 +681,7 @@ export async function judgeCall(
     }
   } catch (err) {
     if (abort.signal.aborted) throw new Error(`the judge took longer than ${JUDGE_TIMEOUT_MS / 1000}s and was stopped`);
-    throw err;
+    throw modelProcessError(err, "judge");
   } finally {
     clearTimeout(timer);
   }

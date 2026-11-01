@@ -1309,7 +1309,7 @@ async function judgeReply(
       }
     }
   } catch (err) {
-    return `FAIL — the judge could not run: ${err instanceof Error ? err.message : String(err)}`;
+    return `FAIL — the judge could not run: ${modelProcessError(err, "verify judge").message}`;
   }
   return texts.join("\n").trim();
 }
@@ -1377,6 +1377,22 @@ function runVerify(
  * "the only tools I have are the Claude Docs ones". `strictMcpConfig` keeps
  * the rest of the on-disk MCP configuration out; this keeps the account's.
  */
+/**
+ * A model process's failure as a person should read it: one short line. The
+ * SDK's error for a CLI that died carries the CLI's stderr, which can be KBs
+ * of its minified bundle — internal prompt text included (FOL-107) — so that
+ * part goes to the server log, never to an eval result or a trace. An error
+ * that is already short (an API error the model answered) is kept as it is.
+ */
+export function modelProcessError(err: unknown, where: string): Error {
+  const full = err instanceof Error ? err.message : String(err);
+  const at = full.indexOf(" stderr:");
+  if (at < 0 && full.length <= 500) return err instanceof Error ? err : new Error(full);
+  console.error(`[foldrun] ${where}: ${full}`);
+  const head = (at >= 0 ? full.slice(0, at) : full.slice(0, 300)).trim().replace(/[.:]$/, "");
+  return new Error(`${head} — the model process failed; the details are in the server log`);
+}
+
 export function sdkEnv(base: Record<string, string | undefined> | undefined, extra: Record<string, string> = {}): Record<string, string | undefined> {
   return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
 }
