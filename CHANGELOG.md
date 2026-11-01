@@ -13,6 +13,27 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [9.3.0] — 2026-11-01
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `OAuth2Config` from `@foldrun/core`
+
+### New in the public API
+
+- `TOKEN_AUTH_METHODS` from `@foldrun/core`
+- `TokenAuth` from `@foldrun/core`
+- `parseTokenAuth` from `@foldrun/core`
+- `TokenClient` from `@foldrun/core`
+- `tokenAuthProblem` from `@foldrun/core`
+- `oauthTokenRequest` from `@foldrun/core`
+- `TokenResponse` from `@foldrun/core`
+- `readTokenResponse` from `@foldrun/core`
+
+- feat(oauth): client_secret_basic, and one token request builder and reader ([cd1bd52](https://github.com/foldrun-io/foldrun-core/commit/cd1bd52))
+
 ## [9.2.1] — 2026-11-01
 
 - docs(starter): name /api/mcp and `foldrun mcp` in the account CLAUDE.md ([ca325d4](https://github.com/foldrun-io/foldrun-core/commit/ca325d4))
