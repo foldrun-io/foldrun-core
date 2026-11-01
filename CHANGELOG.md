@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [11.2.0] — 2026-11-01
+
+### New in the public API
+
+- `judgeSdkEnv` from `@foldrun/core`
+
+- fix(evals): judges on an account's provider start with PATH and HOME; a dead model process answers one line (FOL-107) ([b5edc2b](https://github.com/foldrun-io/foldrun-core/commit/b5edc2b))
+
 ## [11.1.0] — 2026-11-01
 
 ### New in the public API
