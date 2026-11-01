@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [11.1.0] — 2026-11-01
+
+### New in the public API
+
+- `egressRefusal` from `@foldrun/core/a2a-client`
+
+- fix(a2a): an egress-shaped 403's words stay behind the untrusted fence ([895900d](https://github.com/foldrun-io/foldrun-core/commit/895900d))
+- fix(a2a): name the egress refusal for a remote, and log refused cards (FOL-114) ([d192065](https://github.com/foldrun-io/foldrun-core/commit/d192065))
+
 ## [11.0.0] — 2026-11-01
 
 ### Breaking changes
