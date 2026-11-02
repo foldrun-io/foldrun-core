@@ -12,6 +12,7 @@
 // and calls registerPlatform() once at boot. A process that forgets to is a
 // local install — which is exactly the failure that is safe.
 
+import type { SupplyAnswer } from "./model-supply.ts";
 import type { FlowInfo, FlowStep, RunRecord } from "./store.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.ts";
 import type { EgressHooks } from "./egress.ts";
@@ -149,6 +150,11 @@ export interface PlatformHooks {
    *  operator's accounts do so; every customer brings their own API key.
    *  Default: yes — a laptop or a self-hosted install is its own operator. */
   platformKeyAllowed(tenant: string): boolean;
+  /** foldrun's models (3 Nov 2026): whether this account chose to run on
+   *  the platform's own key for a provider, and whether it can now. Asked
+   *  only where no provider: block of the account's own says otherwise.
+   *  Absent: nobody can (a laptop, a self-hosted install). */
+  modelSupply?(tenant: string): SupplyAnswer;
   /**
    * An operator setting, by the environment variable that used to hold it
    * (30 Oct 2026): the platform answers with the operator's value where one

@@ -13,6 +13,8 @@ import { platform, hostUrlProblem } from "./platform.ts";
 import { accountModelBlock, isClaudeLoginToken } from "./model-credential.ts";
 import { providerPreset } from "./providers.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
+import { supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
+import { MODEL_KEY_NAME, grantModelKey, hostOf, type EgressGrant } from "./egress.ts";
 
 /** Refused for want of a usable key; `status` is what an HTTP layer answers. */
 export class ModelKeyError extends Error {
@@ -40,14 +42,43 @@ export function accountModelEnv(
   platformEnv: () => Record<string, string | undefined>,
 ): {
   env: Record<string, string | undefined>;
-  supply: "provider" | "platform";
+  /** "foldrun": the platform's key for a provider the account chose —
+   *  withModelEnv sends it through the egress proxy, which meters and bills
+   *  each call; the caller charges nothing for it itself. */
+  supply: "provider" | "platform" | "foldrun";
   format: string;
   translator: TranslatorSpec | null;
+  tenant?: string;
 } {
-  const raw =
+  const written =
     (readAgentsMd(workspaceDir(tenant, workspace))?.data?.provider as Record<string, unknown> | undefined) ??
-    (readAgentsMd(accountDir(tenant))?.data?.provider as Record<string, unknown> | undefined) ??
-    accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
+    (readAgentsMd(accountDir(tenant))?.data?.provider as Record<string, unknown> | undefined);
+  // foldrun's models, the same rung a step takes (runner.ts agentContext):
+  // after the written blocks, before the account's stored key; chosen but
+  // refused fails here, never onto the stored key or the operator's.
+  const supply: SupplyAnswer = written ? { kind: "none" } : platform.modelSupply?.(tenant) ?? { kind: "none" };
+  if (supply.kind === "refused") throw new ModelKeyError(`foldrun's models: ${supply.reason}`, 403);
+  if (supply.kind === "foldrun") {
+    const s = parseProvider(supplyProviderBlock(supply.provider, supply.tiers))!;
+    const preset = providerPreset(s.name);
+    return {
+      env: providerEnvFor({ baseUrl: s.baseUrl!, token: s.token, auth: s.auth, models: s.models, headers: {} }),
+      supply: "foldrun",
+      format: s.format,
+      translator: translatorSpecFor({
+        format: s.format,
+        baseUrl: s.baseUrl!,
+        token: s.token,
+        headers: {},
+        params: s.params,
+        name: s.name,
+        maxTokensParam: preset?.maxTokensParam,
+        reasoningEffort: preset?.reasoningEffort,
+      }),
+      tenant,
+    };
+  }
+  const raw = written ?? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
   const spec = parseProvider(raw);
   if (!spec?.baseUrl) {
     if (!platform.platformKeyAllowed(tenant)) throw new ModelKeyError(NO_MODEL_KEY);
@@ -95,9 +126,12 @@ export function accountModelEnv(
  * Started for this call and closed after it.
  */
 export async function withModelEnv<T>(
-  m: { env: Record<string, string | undefined>; translator?: TranslatorSpec | null; supply?: "provider" | "platform" },
+  m: { env: Record<string, string | undefined>; translator?: TranslatorSpec | null; supply?: "provider" | "platform" | "foldrun"; tenant?: string },
   fn: (env: Record<string, string | undefined>) => Promise<T>,
+  /** What is asking, for the gateway's record of a foldrun's-models call. */
+  job: { kind: HostJobKind; name?: string } = { kind: "judge" },
 ): Promise<T> {
+  if (m.supply === "foldrun") return withSupply(m, fn, job);
   const spec = m.translator ?? (m.supply === "provider" ? anthropicPassthrough(m.env) : null);
   if (!spec) return fn(m.env);
   const why = await platform.checkUntrustedUrl(spec.upstreamBase);
@@ -107,6 +141,35 @@ export async function withModelEnv<T>(
     return await fn({ ...m.env, ...t.env });
   } finally {
     await t.close();
+  }
+}
+
+export type HostJobKind = "grade" | "judge" | "draft" | "assistant";
+
+/**
+ * A host-side call on foldrun's models (an eval's judge, a grader, a draft):
+ * through a short lease on the egress proxy, like a step's — the platform's
+ * key is filled there and every call metered and billed by the gateway. No
+ * proxy: refused, never sent with the key from here.
+ */
+async function withSupply<T>(
+  m: { env: Record<string, string | undefined>; translator?: TranslatorSpec | null; tenant?: string },
+  fn: (env: Record<string, string | undefined>) => Promise<T>,
+  job: { kind: HostJobKind; name?: string },
+): Promise<T> {
+  const spec = m.translator ?? anthropicPassthrough(m.env);
+  const host = spec ? hostOf(spec.upstreamBase) : null;
+  if (!spec || !host || !m.tenant) throw new ModelKeyError("foldrun's models: no endpoint for this call", 500);
+  const grant: EgressGrant = { secrets: {} };
+  grantModelKey(grant, MODEL_KEY_NAME, spec.upstreamKey, host);
+  const lease = await platform.egress.lease({ tenant: m.tenant, runId: `${job.kind}:${job.name ?? "-"}`, grant, job });
+  if (!lease) throw new ModelKeyError("foldrun's models need the platform's egress proxy, and this install has none", 503);
+  const t = await startTranslator({ ...spec, egress: lease.url, upstreamKey: `\${${MODEL_KEY_NAME}}` });
+  try {
+    return await fn({ ...m.env, ...t.env });
+  } finally {
+    await t.close();
+    await lease.release().catch(() => {});
   }
 }
 

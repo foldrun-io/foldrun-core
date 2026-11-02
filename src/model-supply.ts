@@ -85,12 +85,47 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
 
 export const SUPPLY_PROVIDER_NAMES = Object.keys(SUPPLY_PROVIDERS) as SupplyProviderName[];
 
+/** How each reads to a person: on a step's credential line, in Settings. */
+export const SUPPLY_TITLES: Record<SupplyProviderName, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Google Gemini",
+  openrouter: "OpenRouter",
+};
+
 export function isSupplyProvider(name: unknown): name is SupplyProviderName {
   return typeof name === "string" && Object.hasOwn(SUPPLY_PROVIDERS, name);
 }
 
 /** The placeholder name a supply grant is filed under in a step's lease. */
 export const SUPPLY_KEY_NAME = "FOLDRUN_SUPPLY_KEY";
+
+/**
+ * What the platform says about one account's model supply, before any
+ * provider: block of its own is considered (a written block always wins):
+ *   none     — it did not choose foldrun's models: its own key, as before
+ *   foldrun  — it chose them and they are on: run on the platform's key
+ *   refused  — it chose them and they cannot be had now (switched off, the
+ *              provider withdrawn, the account refused). The step FAILS
+ *              with the reason: never quietly onto the account's stored
+ *              key, and never onto the operator's.
+ */
+export type SupplyAnswer =
+  | { kind: "none" }
+  | { kind: "foldrun"; provider: SupplyProviderName; tiers: Partial<Record<"fast" | "default" | "max", string>> }
+  | { kind: "refused"; reason: string };
+
+/** The token a supply provider block carries: a marker, not a secret. The
+ *  proxy grant built from it is a supply grant (egress.ts grantModelKey),
+ *  which the proxy fills with the platform's key. Sent anywhere unproxied
+ *  it is only a word a provider refuses. */
+const MARKER = "foldrun-supply:";
+export const supplyToken = (provider: SupplyProviderName) => `${MARKER}${provider}`;
+export function supplyProviderOfToken(value: string | null | undefined): SupplyProviderName | null {
+  if (typeof value !== "string" || !value.startsWith(MARKER)) return null;
+  const p = value.slice(MARKER.length);
+  return isSupplyProvider(p) ? p : null;
+}
 
 /** The provider block a step on foldrun's models runs with: the preset's
  *  endpoint and format, the operator's tier map, and the key as a
@@ -103,7 +138,7 @@ export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial
     name: p.preset,
     base_url: preset.baseUrl,
     format: p.format,
-    token: `\${${SUPPLY_KEY_NAME}}`,
+    token: supplyToken(provider),
     ...(Object.keys(tiers).length ? { models: tiers } : {}),
   };
 }

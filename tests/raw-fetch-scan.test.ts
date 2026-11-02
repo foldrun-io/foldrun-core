@@ -26,7 +26,7 @@ const RAW = /(^|[^.\w$])(fetch|undiciFetch)\(|\bhttps?\.(request|get)\(/g;
 
 const ALLOWED: Record<string, { count: number; why: string }> = {
   "platform.ts": { count: 1, why: "the laptop's own fetchUntrusted: single-tenant, its LAN on purpose; a platform replaces it" },
-  "translator.ts": { count: 1, why: "the step's egress-proxy path only — the proxy guards the address; without a proxy it is fetchUntrusted" },
+  "translator.ts": { count: 2, why: "the egress-proxy path only, on both wires (Chat Completions and the Anthropic passthrough) — the proxy guards the address; without a proxy it is fetchUntrusted" },
   "api-tools.ts": { count: 1, why: "an http tool's call inside the step, through the lease's egress proxy on a platform" },
   "run-container.ts": { count: 3, why: "the in-pod driver's /identity call to the egress proxy, and two curl install snippets — sandbox, not host" },
   "storage.ts": { count: 2, why: "S3: FOLDRUN_S3_ENDPOINT and the AWS container-credential endpoint, both operator env" },

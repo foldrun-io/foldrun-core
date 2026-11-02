@@ -3413,6 +3413,9 @@ export interface StepAttempt {
   status: "completed" | "failed" | "lost";
   costUsd: number | null;
   tokens: TokenUsage | null;
+  /** Whose key this attempt ran on (StepRecord.supply): a retry may run on
+   *  another, and the meter bills each attempt by its own. */
+  supply?: StepSupply;
   /** Model turns this attempt took; absent before 18 Oct 2026. */
   turns?: number | null;
   computeSecs: number | null;
@@ -3532,6 +3535,14 @@ export interface StepRecord {
    *  (ANTHROPIC_API_KEY)", "Claude login token (CLAUDE_CODE_OAUTH_TOKEN)",
    *  "provider: …" — or "none set" (model-credential.ts). */
   credential?: string;
+  /** Whose key paid for the step's model calls (3 Nov 2026): "own" — the
+   *  account's (a provider: block, Settings → Model), billed by its
+   *  provider; "operator" — the platform's own credential, billed from the
+   *  step's tokens; "foldrun" — foldrun's models, billed per call by the
+   *  model gateway, never from the step. Absent on older records. */
+  supply?: StepSupply;
+  /** With supply "foldrun": which provider's key. */
+  supplyProvider?: string;
   /** Slim browsing through the account's pod (browser-pod.ts): reconnect
    *  tries and how many got through; when the pod was lost, why and what
    *  the step had written by then; and what happened — `fallback` (the
@@ -4387,8 +4398,28 @@ export function runCost(run: RunRecord): number {
  *  a provider: block, or Settings → Model), which the provider bills. The
  *  meter, the Usage page and the ledger split all ask this one question, so
  *  what a page shows is what was charged. */
-export function stepBillsTokens(s: Pick<StepRecord, "credential">): boolean {
+export function stepBillsTokens(s: Pick<StepRecord, "credential" | "supply">): boolean {
+  if (s.supply) return supplyBillsTokens(s.supply);
   return !(s.credential ?? "").startsWith("provider:");
+}
+
+export type StepSupply = "own" | "operator" | "foldrun";
+
+/** Only the operator's credential is billed from what a step reports. The
+ *  account's own key is its provider's to bill; foldrun's models are billed
+ *  per call by the gateway, so billing the step too would charge twice. */
+export const supplyBillsTokens = (supply: StepSupply) => supply === "operator";
+
+/** The step's tokens the platform bills, attempt by attempt where the
+ *  attempts say whose key they ran on. */
+export function billedTokenCost(s: { credential?: string; supply?: StepSupply; costUsd?: number | null; tries?: StepAttempt[] }): number {
+  const tries = s.tries ?? [];
+  if (!tries.some((t) => t.supply)) return stepBillsTokens(s) ? s.costUsd ?? 0 : 0;
+  // Each attempt by its own supply — a lost slim go spent its tokens too,
+  // as the step's total says (sumAttempts) — and a row from before the
+  // field by the step's older rule (its credential).
+  const legacy = !(s.credential ?? "").startsWith("provider:");
+  return tries.reduce((n, t) => n + ((t.supply ? supplyBillsTokens(t.supply) : legacy) ? t.costUsd ?? 0 : 0), 0);
 }
 
 /**
@@ -4427,7 +4458,7 @@ export function runMeter(run: RunRecord): {
     // A carried step ran — and was billed — in the run it was carried from.
     if (s.carriedFrom) continue;
     steps += 1;
-    if (stepBillsTokens(s)) tokenCostUsd += s.costUsd ?? 0;
+    tokenCostUsd += billedTokenCost(s);
     const secs = s.computeSecs ?? 0;
     computeSecs += secs;
     if (s.size === "small") smallSecs += secs;

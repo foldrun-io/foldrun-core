@@ -1154,7 +1154,12 @@ async function passthrough(
   const target = `${base}${url.pathname}${url.search}`;
   let upstream: Response;
   try {
-    upstream = await fetchUntrusted(target, { method, headers, body: method === "GET" || method === "HEAD" ? undefined : raw }, { sameOrigin: true, maxBytes: UPSTREAM_MAX_BYTES });
+    const init = { method, headers, body: method === "GET" || method === "HEAD" ? undefined : raw };
+    // Through the lease when there is one (foldrun's models, host-side): the
+    // proxy fills the key and meters the call; the placeholder never leaves.
+    upstream = spec.egress
+      ? await fetch(viaEgress(spec.egress, target), init as RequestInit)
+      : await fetchUntrusted(target, init, { sameOrigin: true, maxBytes: UPSTREAM_MAX_BYTES });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.push(`${method} ${label}${url.pathname} → unreachable: ${message}`);

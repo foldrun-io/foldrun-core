@@ -43,6 +43,7 @@
 // platform's (it needs a long-lived process and a Service); the pod side is
 // here in core, because it is what the runner image runs.
 
+import { supplyProviderOfToken } from "./model-supply.ts";
 import type { DelegationResult, PeerInfo } from "./operator.ts";
 import { trimSlashes } from "./paths.ts";
 import type { TestEffect } from "./test-mode.ts";
@@ -175,7 +176,10 @@ export interface EgressHooks {
    *  `delegates` — the `sandbox: own` sub-agents this step may hand a job
    *  to over the delegate door (delegate-tools.ts); the proxy refuses any
    *  other name. */
-  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[] }): Promise<EgressLease | null>;
+  /** `job` — a lease for a host-side model call (an eval's judge, a
+   *  grader, a draft, the assistant) rather than a step: what the model
+   *  gateway records the call against. */
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[]; job?: { kind: "grade" | "judge" | "draft" | "assistant"; name?: string } }): Promise<EgressLease | null>;
   /** The run is still being driven: renew its leases' heartbeat. Optional —
    *  an install without leases has nothing to renew. */
   renew?(runId: string): Promise<number>;
@@ -236,7 +240,7 @@ export function proxyModelEnv(
   for (const key of credentialKeys) {
     const value = env[key];
     if (typeof value === "string" && value.length) {
-      addGrant(grant, name, value, host);
+      grantModelKey(grant, name, value, host);
       out[key] = `\${${name}}`;
     }
   }
@@ -244,6 +248,15 @@ export function proxyModelEnv(
     out.ANTHROPIC_CUSTOM_HEADERS = unsubstitute(env.ANTHROPIC_CUSTOM_HEADERS, knownSecrets, host, grant);
   }
   return out;
+}
+
+/** Grant a model credential under `name`: the platform's key when `value`
+ *  is a supply marker (foldrun's models — the proxy fills it and meters
+ *  the call), else the value itself. */
+export function grantModelKey(grant: EgressGrant, name: string, value: string, host: string): void {
+  const supply = supplyProviderOfToken(value);
+  if (supply) addSupplyGrant(grant, name, supply, host);
+  else addGrant(grant, name, value, host);
 }
 
 /** Put the `${NAME}` back where a known secret's value sits in `text`,

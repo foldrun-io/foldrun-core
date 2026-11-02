@@ -212,7 +212,7 @@ export async function gradeRun(
       for (const a of judges) {
         try {
           const m = accountModelEnv(tenant, workspace, judgeProcessEnv);
-          const said = await withModelEnv(m, (env) => ask(a.value, output, info.model, info.effort, env, task));
+          const said = await withModelEnv(m, (env) => ask(a.value, output, info.model, info.effort, env, task), { kind: "grade", name: info.name });
           costUsd += said.costUsd;
           const v = judgeVerdict(said.text);
           if (v.decided === false) {

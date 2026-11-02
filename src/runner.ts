@@ -25,7 +25,9 @@ import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
-import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
+import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
+import { SUPPLY_TITLES, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
+import type { StepSupply } from "./store.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
@@ -1351,7 +1353,18 @@ export function agentContext(
   // an account that brings its key need not write a block anywhere.
   const fileBlock =
     (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
-  const providerBlock = fileBlock ?? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
+  // foldrun's models (3 Nov 2026): an account that chose the platform's key
+  // for a provider runs on it here, between its written blocks (which still
+  // win) and its stored key. Chosen but not to be had now — refused, and
+  // the step fails with why (runStep); it never falls to the stored key.
+  const supply: SupplyAnswer = fileBlock ? { kind: "none" } : platform.modelSupply?.(tenant) ?? { kind: "none" };
+  const providerBlock =
+    fileBlock ??
+    (supply.kind === "foldrun"
+      ? supplyProviderBlock(supply.provider, supply.tiers)
+      : supply.kind === "refused"
+        ? undefined
+        : accountModelBlock((name) => getSecret(tenant, name)?.value ?? null));
   let providerEnv: Record<string, string> = {};
   let providerLabel: string | null = null;
   // Secret values pulled into the provider block, name → value. Kept apart
@@ -1826,6 +1839,8 @@ export function agentContext(
   return {
     front,
     clockEnv,
+    /** foldrun's models: what the platform said for this account. */
+    supply,
     /** The zone, where it came from, and anything unreadable on the way —
      *  reported by the step, not here, so it lands in the run's trace. */
     clock,
@@ -2006,7 +2021,7 @@ export function recordAttempt(
   };
   // A slim go the browser pod was lost under, before this attempt re-ran
   // on the full image: its own row, first (runStep set it aside).
-  const lost: StepAttempt[] = step.podLostTry ? [{ ...numbered(), ...step.podLostTry, startedAt }] : [];
+  const lost: StepAttempt[] = step.podLostTry ? [{ ...numbered(), ...step.podLostTry, startedAt, ...(step.supply ? { supply: step.supply } : {}) }] : [];
   const row: StepAttempt = {
     ...numbered(),
     status,
@@ -2014,6 +2029,7 @@ export function recordAttempt(
     tokens: step.tokens ?? null,
     ...(typeof step.turns === "number" ? { turns: step.turns } : {}),
     computeSecs: step.computeSecs ?? null,
+    ...(step.supply ? { supply: step.supply } : {}),
     startedAt: step.podLostTry?.finishedAt ?? startedAt,
     finishedAt: step.finishedAt ?? new Date().toISOString(),
     ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
@@ -2350,6 +2366,7 @@ async function runStep(
       peers,
       translator, fallbackTranslator,
       outward,
+      supply,
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
     disposeRuntime = runtime.dispose;
     canActOutward = outward;
@@ -2458,7 +2475,34 @@ async function runStep(
     const primaryOnPlatform = Object.keys(providerEnv).length === 0;
     const noKey = primaryOnPlatform && !platform.platformKeyAllowed(tenant);
     const credential = !primaryOnPlatform || noKey ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
-    step.credential = credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
+    const onSupply = supply.kind === "foldrun" && !primaryOnPlatform;
+    // Attempts recorded before supply was (older records) are stamped with
+    // the one their credential said, before this attempt overwrites it: a
+    // retry on another supply must not reclassify what they spent.
+    const before: StepSupply = (step.credential ?? "").startsWith("provider:") ? "own" : "operator";
+    for (const t of step.tries ?? []) t.supply ??= before;
+    step.credential = onSupply
+      ? `foldrun models · ${SUPPLY_TITLES[supply.provider]}`
+      : credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
+    step.supply = onSupply ? "foldrun" : primaryOnPlatform ? "operator" : "own";
+    if (onSupply) step.supplyProvider = supply.provider;
+    else delete step.supplyProvider;
+    // Chosen, but not to be had now: failed with why, before a sandbox —
+    // never onto the account's stored key or the operator's.
+    if (supply.kind === "refused") {
+      push("error", `foldrun's models: ${supply.reason} — or switch this account back to its own key (Settings → Model, \`foldrun account model use own\`)`);
+      step.status = "failed";
+      save();
+      return;
+    }
+    // The platform's key only ever crosses the egress proxy, which meters
+    // every call: a step that would run without one is refused.
+    if (onSupply && !isolatedRun()) {
+      push("error", "foldrun's models run only in the platform's sandbox, where every call is metered — this step would run here, so it is refused");
+      step.status = "failed";
+      save();
+      return;
+    }
     // Core's own Docker container has no login to fall back to (below):
     // there, "none set" is refused with what to do, not described.
     const noCredentialInContainer = credential?.kind === "none" && process.env.FOLDRUN_RUN_ISOLATION === "container";
@@ -2966,6 +3010,15 @@ async function runStep(
         // sandbox: own sub-agents: the only names the delegate door takes.
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
       });
+      // foldrun's models need the proxy: it holds the platform's key and
+      // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and
+      // nothing is sent; the marker token alone would only be refused.
+      if (step.supply === "foldrun" && !lease) {
+        push("error", "foldrun's models need the platform's egress proxy, and this step has none — refused before it ran");
+        step.status = "failed";
+        save();
+        return;
+      }
       // Serve those jobs while this step runs: each one becomes a step of
       // its own (delegateJob), and the door answers the long-poll with its
       // reply. No proxy, or a platform without the door: not offered — the
@@ -3140,7 +3193,7 @@ async function runStep(
         if (!spec || !lease) return spec;
         const host = hostOf(spec.upstreamBase);
         if (!host) return spec;
-        addGrant(grant, name, spec.upstreamKey, host);
+        grantModelKey(grant, name, spec.upstreamKey, host);
         return {
           ...spec,
           egress: lease.url,
