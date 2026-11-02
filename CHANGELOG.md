@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [12.0.2] — 2026-11-02
+
+### ci
+
+- one security gate in every repo (.githooks/security.sh) ([87769c2](https://github.com/foldrun-io/foldrun-core/commit/87769c2))
+
 ## [12.0.1] — 2026-11-02
 
 - chore(hooks): foldrun.checksHost github — the suites run on GitHub CI ([3a7aa2b](https://github.com/foldrun-io/foldrun-core/commit/3a7aa2b))
