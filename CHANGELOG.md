@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [12.0.0] — 2026-11-02
+
+### Breaking changes
+
+- `AgentInfo` from `@foldrun/core` — network changed
+- `BrowserApi` from `@foldrun/core` — egress is new and required
+- `BrowserApi` from `@foldrun/core/providers` — egress is new and required
+
+- feat(network): say when a browsing step is not held to network: (FOL-110 phase 1) ([d684047](https://github.com/foldrun-io/foldrun-core/commit/d684047))
+
 ## [11.2.2] — 2026-11-01
 
 - ci(hooks): box checks use a short TMPDIR and install nested packages ([aacb4c3](https://github.com/foldrun-io/foldrun-core/commit/aacb4c3))
