@@ -106,7 +106,7 @@ export interface LeaseWho {
 
 export interface EgressGrant {
   /** Secret name → the hosts that secret may be substituted for. */
-  secrets: Record<string, { value: string; hosts: string[] }>;
+  secrets: Record<string, { value: string; hosts: string[]; supply?: SupplyGrant }>;
   /** Secret name → the vault entry it came from, as secret-health keys it:
    *  "account:NAME" or "workspace:<ws>:NAME". Two workspaces each holding an
    *  API_KEY are two credentials, and one's refusal must not paint the
@@ -260,9 +260,34 @@ export function unsubstitute(text: string, knownSecrets: Record<string, string>,
   return out;
 }
 
+/** A grant of one of the PLATFORM's model keys ("foldrun's models",
+ *  model-supply.ts). It carries no value: the proxy reads the key from its
+ *  own environment per request, so the key is never in a lease, never in
+ *  Redis and never in the pod. The proxy fills it only in the provider's
+ *  auth header on the provider's model routes, and meters every call it
+ *  makes (foldrun-platform model-gateway.ts) — the bill comes from there,
+ *  not from what the step reports. */
+export interface SupplyGrant {
+  provider: string;
+}
+
+/** Grant the platform's key for `provider` under `name`, to its host. */
+export function addSupplyGrant(grant: EgressGrant, name: string, provider: string, host: string): void {
+  const h = host.toLowerCase();
+  const existing = grant.secrets[name];
+  // A name already granted as an ordinary secret is never turned into the
+  // platform's key, nor the other way round: two meanings under one name
+  // is how a value would be filled where it was not meant to be.
+  if (existing && existing.supply?.provider !== provider) throw new Error(`egress: ${name} is already granted as another credential`);
+  if (existing) {
+    if (!existing.hosts.includes(h)) existing.hosts.push(h);
+  } else grant.secrets[name] = { value: "", hosts: [h], supply: { provider } };
+}
+
 export function addGrant(grant: EgressGrant, name: string, value: string, host: string): void {
   const h = host.toLowerCase();
   const existing = grant.secrets[name];
+  if (existing?.supply) throw new Error(`egress: ${name} is the platform's model key and cannot be granted a value`);
   if (existing) {
     if (!existing.hosts.includes(h)) existing.hosts.push(h);
     // A name granted again with a different value is a rotation: the
