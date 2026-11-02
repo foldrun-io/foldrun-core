@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [12.1.0] — 2026-11-02
+
+### New in the public API
+
+- `stepBillsTokens` from `@foldrun/core`
+
+- fix(runner): a fallback-only provider: block no longer runs free on the platform key ([fb9dac5](https://github.com/foldrun-io/foldrun-core/commit/fb9dac5))
+
 ## [12.0.3] — 2026-11-02
 
 - chore(hooks): pre-push names where the suites run now (each repo's CI, the dev pipeline) ([e899b11](https://github.com/foldrun-io/foldrun-core/commit/e899b11))
