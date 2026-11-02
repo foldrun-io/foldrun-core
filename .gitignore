@@ -13,3 +13,6 @@ templates/*/runs/
 # FOLDRUN_DATA falls back to ./data (src/paths.ts): a test or server run
 # started here without it leaves accounts and a secret key behind.
 /data/
+
+# SBOMs the security gate writes (.githooks/security.sh); CI keeps them as artifacts
+sbom/
