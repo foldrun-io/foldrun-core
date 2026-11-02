@@ -13,6 +13,28 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [13.0.0] — 2026-11-02
+
+### Breaking changes
+
+- `stepBillsTokens` from `@foldrun/core` — parameter 1 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepAttempt` from `@foldrun/core`
+- `StepRecord` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+### New in the public API
+
+- `StepSupply` from `@foldrun/core`
+- `supplyBillsTokens` from `@foldrun/core`
+- `billedTokenCost` from `@foldrun/core`
+
+- feat(runner): foldrun's models — a step on the platform's key, metered at the proxy ([f9002fe](https://github.com/foldrun-io/foldrun-core/commit/f9002fe))
+
 ## [12.2.0] — 2026-11-02
 
 - feat(egress): supply grants and the provider table for foldrun's models ([341e9c6](https://github.com/foldrun-io/foldrun-core/commit/341e9c6))
