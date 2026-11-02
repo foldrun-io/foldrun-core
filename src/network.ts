@@ -312,7 +312,10 @@ export function networkLine(policy: NetworkPolicy, enforced: boolean | null): st
 
 /** What the proxy says when it refuses a site. */
 export function refusalText(policy: Pick<NetworkPolicy, "level">, host: string): string {
-  return `network: ${host} is not a site this step may reach (network: ${policy.level}). Add it to the agent's network: list — network: [${normalHost(host)}] — or set network: open.`;
+  // Only the one site, never "set network: open": that opened the whole web
+  // to an agent that needed one more host (FOL-110). The list form adds
+  // sites and keeps the level.
+  return `network: ${host} is not a site this step may reach (network: ${policy.level}). To allow it, add just this site to the agent's network: list — network: [${normalHost(host)}] — which keeps network: ${policy.level} for everything else.`;
 }
 
 /** The proxy variables a sandbox's programs read, for a forward-proxy URL

@@ -1048,7 +1048,8 @@ export interface AgentInfo {
    *  the default (open when it may fetch or browse the web, else trusted).
    *  `implied` here is its `apis:` hosts; a run also adds its MCP servers',
    *  its web providers' and its bound secrets' sites. */
-  network: NetworkPolicy & { readsWeb: boolean };
+  /** browses: the step may browse — not held to its list yet (FOL-110). */
+  network: NetworkPolicy & { readsWeb: boolean; browses: boolean };
   /** Tools this agent declares inline rather than in `tools:` — `apis:`,
    *  `scripts:` and `mcpServers:` names — which a limit may also name. */
   inlineTools: string[];
@@ -1664,6 +1665,9 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
           ],
         }),
         readsWeb,
+        // The runner's own test (runner.ts `browses`): such a step gets no
+        // forward proxy yet, so its list does not hold (FOL-110).
+        browses: tools.includes("web") && (!actions || actions.includes("browse")),
       };
       return {
         network,

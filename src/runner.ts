@@ -98,6 +98,7 @@ import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
 import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
+import { browseNetworkLine } from "./browse-egress.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildA2ATools } from "./a2a-tools.ts";
@@ -2990,7 +2991,9 @@ async function runStep(
       // and its bound secrets materialise as they did before the door.
       const browses = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse"));
       const forward = lease?.proxy && !browses ? lease : null;
-      push("info", networkLine(network, forward ? forward.enforce === true : null));
+      // A browsing step on an install with the door says it is not held to
+      // its list yet, and which tier its browser falls in (browse-egress.ts).
+      push("info", browses && lease?.proxy ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR) : networkLine(network, forward ? forward.enforce === true : null));
       const bound = forward ? Object.keys(boundSites).filter((name) => name in liveSecrets) : [];
       for (const name of bound) {
         for (const site of boundSites[name]) addGrant(grant, name, liveSecrets[name], site);

@@ -285,6 +285,11 @@ export interface BrowserApi {
   /** How a session is reached: a REST call that returns the endpoint, or a
    *  websocket URL the key goes straight into. */
   how: "session" | "direct";
+  /** Whether its browser can be sent through foldrun's egress proxy (FOL-110,
+   *  foldrun-docs/proposals/browse-egress.md): "proxy" — the vendor takes a
+   *  customer proxy, so it can come under `network:` once qualified; "own" —
+   *  it always browses through the vendor's own network and never can. */
+  egress: "proxy" | "own";
   host: string;
   secret: string;
   secretFormat?: string;
@@ -293,27 +298,27 @@ export interface BrowserApi {
 }
 
 export const BROWSER_APIS: readonly BrowserApi[] = [
-  { name: "browserbase", docs: "https://docs.browserbase.com/reference/api/create-a-session", checked: "2026-09-29", title: "Browserbase", how: "session", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
+  { name: "browserbase", docs: "https://docs.browserbase.com/reference/api/create-a-session", checked: "2026-09-29", title: "Browserbase", how: "session", egress: "proxy", host: "api.browserbase.com", secret: "BROWSERBASE_API_KEY",
     session: { proxy: { on: true, country: true, state: true, city: true, own: true, needsCountry: true }, captcha: true, stealth: true, region: ["us-west-2", "us-east-1", "eu-central-1", "ap-southeast-1"], timeout: [60, 21600], keep: true, record: true, block: ["ads"], options: "body" },
     what: "hosted Chromium with stealth; POST /v1/sessions (X-BB-API-Key) returns connectUrl" },
-  { name: "steel", docs: "https://docs.steel.dev/overview/sessions-api/quickstart", checked: "2026-09-29", gaps: "session field names are from the official steel-node SDK source; the API reference page is script-only", title: "Steel", how: "session", host: "api.steel.dev", secret: "STEEL_API_KEY",
+  { name: "steel", docs: "https://docs.steel.dev/overview/sessions-api/quickstart", checked: "2026-09-29", gaps: "session field names are from the official steel-node SDK source; the API reference page is script-only", title: "Steel", how: "session", egress: "proxy", host: "api.steel.dev", secret: "STEEL_API_KEY",
     session: { proxy: { on: true, country: true, state: true, city: true, own: true }, captcha: true, stealth: true, timeout: [15, 86400], keep: true, block: ["ads"], options: "body" },
     what: "hosted Chromium, open-source core; POST /v1/sessions (steel-api-key), then wss://connect.steel.dev?apiKey&sessionId" },
-  { name: "hyperbrowser", docs: "https://hyperbrowser.ai/docs/api-reference/create-new-session.md", checked: "2026-09-29", title: "Hyperbrowser", how: "session", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
+  { name: "hyperbrowser", docs: "https://hyperbrowser.ai/docs/api-reference/create-new-session.md", checked: "2026-09-29", title: "Hyperbrowser", how: "session", egress: "proxy", host: "api.hyperbrowser.ai", secret: "HYPERBROWSER_API_KEY",
     session: { proxy: { on: true, country: true, state: true, city: true, own: true, stateOrCity: true }, captcha: true, stealth: true, region: ["us", "us-central", "us-west", "us-east", "asia-south", "europe-west"], timeout: [60, 43200], keep: true, record: true, block: ["ads", "trackers", "cookies"], options: "body" },
     what: "hosted Chromium with built-in unblocking; a session returns its wsEndpoint" },
-  { name: "browserless", docs: "https://docs.browserless.io/baas/connection-url-patterns.md", checked: "2026-09-29", title: "Browserless", how: "direct", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
+  { name: "browserless", docs: "https://docs.browserless.io/baas/connection-url-patterns.md", checked: "2026-09-29", title: "Browserless", how: "direct", egress: "proxy", host: "production-sfo.browserless.io", secret: "BROWSERLESS_TOKEN",
     session: { proxy: { on: true, country: true, city: true, own: true }, captcha: true, stealth: true, region: ["sfo", "lon", "ams"], timeout: [1, 86400], block: ["ads"], options: "query" },
     what: "hosted Chrome; wss://production-sfo.browserless.io?token=… (other regions by name)",
     note: "SSPL-licensed: the free path is out for a paid service; the cloud is a plain vendor." },
-  { name: "brightdata", docs: "https://docs.brightdata.com/products/scraping-browser/configuration.md", checked: "2026-09-29", lacks: ["tab"], gaps: "the limits are from a summary of the configuration page, not quoted verbatim", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
+  { name: "brightdata", docs: "https://docs.brightdata.com/products/scraping-browser/configuration.md", checked: "2026-09-29", lacks: ["tab"], gaps: "the limits are from a summary of the configuration page, not quoted verbatim", aliases: ["bright-data", "bright_data"], title: "Bright Data Scraping Browser", how: "direct", egress: "own", host: "brd.superproxy.io", secret: "BRIGHTDATA_BROWSER_AUTH",
     session: { proxy: { always: true, country: true }, captcha: true, block: ["ads", "cookies"] },
     secretFormat: "the zone credentials as `brd-customer-<id>-zone-<zone>:<password>` — the whole user:pass, which goes into the websocket URL",
     what: "Chromium behind a residential proxy pool, port 9222 — the one worth paying for when a site refuses everything else" },
-  { name: "cdp", docs: "https://chromedevtools.github.io/devtools-protocol/", checked: "2026-09-29", aliases: ["devtools"], title: "Any DevTools address", how: "direct", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
+  { name: "cdp", docs: "https://chromedevtools.github.io/devtools-protocol/", checked: "2026-09-29", aliases: ["devtools"], title: "Any DevTools address", how: "direct", egress: "own", host: "(the address in the secret)", secret: "BROWSER_CDP_URL",
     secretFormat: "the ws://, wss:// or http(s):// DevTools address, token included where the browser needs one",
     what: "any browser that serves the DevTools protocol — a Chrome started with --remote-debugging-port, a self-hosted pool, a vendor not listed here" },
-  { name: "zenrows", docs: "https://docs.zenrows.com/browser-sessions/get-started/playwright.md", checked: "2026-09-29", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
+  { name: "zenrows", docs: "https://docs.zenrows.com/browser-sessions/get-started/playwright.md", checked: "2026-09-29", aliases: ["zen-rows", "zen_rows"], title: "ZenRows Scraping Browser", how: "direct", egress: "own", host: "browser.zenrows.com", secret: "ZENROWS_API_KEY",
     session: { proxy: { always: true, country: true }, timeout: [60, 900], options: "query", refuses: ["user_agent", "device"] },
     what: "hosted Chromium with residential IPs and fingerprinting; wss://browser.zenrows.com?apikey=…" },
 ];
