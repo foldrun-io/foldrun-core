@@ -2449,8 +2449,15 @@ async function runStep(
     // An account refused the platform's credential (below) is never shown
     // running on it: the record said "Claude login token" on a step that
     // was then refused for having no key (FOL-14, 18 Oct 2026).
-    const noKey = !providerLabel && !platform.platformKeyAllowed(tenant);
-    const credential = providerLabel || noKey ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
+    // Whether the PRIMARY call rides the platform's credential: only a block
+    // with a base_url fills providerEnv. A block with just a fallback: has a
+    // label ("platform (fallback: …)") yet its first call is the platform's,
+    // so it is judged here by the env, never by the label — the label let it
+    // past the refusal below and recorded it as "provider:", which the meter
+    // bills at $0 (3 Nov 2026).
+    const primaryOnPlatform = Object.keys(providerEnv).length === 0;
+    const noKey = primaryOnPlatform && !platform.platformKeyAllowed(tenant);
+    const credential = !primaryOnPlatform || noKey ? null : resolveModelCredential(isolatedRun() ? platformModelEnv() : process.env);
     step.credential = credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
     // Core's own Docker container has no login to fall back to (below):
     // there, "none set" is refused with what to do, not described.
@@ -2465,7 +2472,7 @@ async function runStep(
     // operator's key, and not failed later by a provider.
     if (!platform.platformKeyAllowed(tenant)) {
       const own = Object.values(providerSecrets).concat(Object.values(providerEnv));
-      if (!providerLabel) {
+      if (primaryOnPlatform) {
         push(
           "error",
           `no model key: this account runs on its own API key, and none is set. Add one in Settings → Model ` +

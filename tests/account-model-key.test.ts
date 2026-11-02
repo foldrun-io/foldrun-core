@@ -285,3 +285,17 @@ test("a registered executor with no platform credential is still offered the ste
     }
   });
 });
+
+test("a provider: block with only a fallback: is not a key of the account's own — refused, never run free on the platform's", async () => {
+  await withAccount({ allowed: false }, async (calls) => {
+    setSecret("acme", "GROQ_KEY", "gsk_the-customers-fallback-key-222222");
+    fs.writeFileSync(
+      path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/agents/worker/agent.md"),
+      "---\nname: worker\ndescription: works\nprovider:\n  fallback:\n    name: groq\n    token: ${GROQ_KEY}\n---\n\nWork.\n",
+    );
+    const done = await run();
+    assert.equal(done.status, "failed", done.steps[0].events.map((e) => e.text).join("\n"));
+    assert.equal(calls.length, 0, "no sandbox rented on the operator's key");
+    assert.doesNotMatch(done.steps[0].credential ?? "", /^provider:/, "never recorded as the account's own, which bills tokens at $0");
+  });
+});

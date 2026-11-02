@@ -4382,6 +4382,15 @@ export function runCost(run: RunRecord): number {
   return run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
 }
 
+/** Whether a step's tokens are the platform's to bill: it ran on the
+ *  platform's own model credential, not the account's key ("provider: …" —
+ *  a provider: block, or Settings → Model), which the provider bills. The
+ *  meter, the Usage page and the ledger split all ask this one question, so
+ *  what a page shows is what was charged. */
+export function stepBillsTokens(s: Pick<StepRecord, "credential">): boolean {
+  return !(s.credential ?? "").startsWith("provider:");
+}
+
 /**
  * What a finished run consumed, in the units the format itself has — the
  * shape ledger.ts prices. Structural, not an import, because ledger.ts
@@ -4418,7 +4427,7 @@ export function runMeter(run: RunRecord): {
     // A carried step ran — and was billed — in the run it was carried from.
     if (s.carriedFrom) continue;
     steps += 1;
-    if (!(s.credential ?? "").startsWith("provider:")) tokenCostUsd += s.costUsd ?? 0;
+    if (stepBillsTokens(s)) tokenCostUsd += s.costUsd ?? 0;
     const secs = s.computeSecs ?? 0;
     computeSecs += secs;
     if (s.size === "small") smallSecs += secs;
