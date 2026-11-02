@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [12.2.0] — 2026-11-02
+
+- feat(egress): supply grants and the provider table for foldrun's models ([341e9c6](https://github.com/foldrun-io/foldrun-core/commit/341e9c6))
+
 ## [12.1.0] — 2026-11-02
 
 ### New in the public API
