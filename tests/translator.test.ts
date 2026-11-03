@@ -509,3 +509,52 @@ test(`on the host, an answer past ${UPSTREAM_MAX_BYTES / (1024 * 1024)} MiB fail
     },
   );
 });
+
+test("Gemini's thought signature on a tool call comes back on the next turn — streamed and not (3 Nov 2026)", async () => {
+  const SIG = { google: { thought_signature: "c2lnLW9uZQ==" } };
+  const SIG2 = { google: { thought_signature: "c2lnLXR3bw==" } };
+  let turn = 0;
+  const up = await fakeUpstream((body) => {
+    turn++;
+    if (turn === 1)
+      return { json: { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "call_a", type: "function", function: { name: "Read", arguments: "{\"p\":1}" }, extra_content: SIG }] } }], usage: { prompt_tokens: 5, completion_tokens: 3 } } };
+    if (turn === 2)
+      return {
+        chunks: [
+          { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_b", type: "function", function: { name: "Bash", arguments: "" }, extra_content: SIG2 }] } }] },
+          { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "{\"c\":\"ls\"}" } }] } }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+          { choices: [], usage: { prompt_tokens: 9, completion_tokens: 4 } },
+        ],
+      };
+    return { json: { choices: [{ finish_reason: "stop", message: { content: "done" } }], usage: { prompt_tokens: 12, completion_tokens: 1 } } };
+  });
+  const t = await startTranslator({ upstreamBase: up.base, upstreamKey: "k" });
+  const call = (body: Json) =>
+    fetch(`${t.baseUrl}/v1/messages`, { method: "POST", headers: { "content-type": "application/json", "x-api-key": t.key, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+  try {
+    const user = { role: "user", content: "go" };
+    const first = (await (await call({ model: "gemini-x", max_tokens: 50, messages: [user] })).json()) as Json;
+    const useA = (first.content as Json[])[0];
+    assert.equal(useA.id, "call_a");
+    assert.ok(!("extra_content" in useA), "the transcript block stays Anthropic-shaped");
+
+    const r2 = await call({ model: "gemini-x", max_tokens: 50, stream: true, messages: [user, { role: "assistant", content: [useA] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "call_a", content: "x" }] }] });
+    await r2.text();
+    const sent2 = up.seen[1].body.messages as Json[];
+    assert.deepEqual((sent2.find((m) => m.role === "assistant")!.tool_calls as Json[])[0].extra_content, SIG, "turn 1's signature went back with its call");
+
+    const useB = { type: "tool_use", id: "call_b", name: "Bash", input: { c: "ls" } };
+    await (await call({ model: "gemini-x", max_tokens: 50, messages: [user, { role: "assistant", content: [useA] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "call_a", content: "x" }] }, { role: "assistant", content: [useB] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "call_b", content: "y" }] }] })).json();
+    const sent3 = (up.seen[2].body.messages as Json[]).filter((m) => m.role === "assistant").map((m) => (m.tool_calls as Json[])[0].extra_content);
+    assert.deepEqual(sent3, [SIG, SIG2], "the streamed call's signature too, and the older one still");
+  } finally {
+    await t.close();
+    up.close();
+  }
+});
+
+test("a provider that attaches nothing gets nothing extra back", () => {
+  const out = toChatCompletions({ model: "m", max_tokens: 5, messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: {} }] }] }, { stream: false });
+  assert.ok(!("extra_content" in ((out.messages as Json[])[0].tool_calls as Json[])[0]));
+});

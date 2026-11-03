@@ -200,6 +200,8 @@ export function toChatCompletions(
     cacheKey?: string;
     /** Merged in last, so the file wins over the translation. */
     params?: Record<string, unknown>;
+    /** What the provider attached to earlier tool calls, to send back. */
+    extras?: ToolCallExtras;
   },
   drop: Dropped = dropped(),
 ): Json {
@@ -217,10 +219,12 @@ export function toChatCompletions(
       const toolCalls: Json[] = [];
       for (const b of Array.isArray(content) ? (content as Json[]) : []) {
         if (b.type === "tool_use") {
+          const extra = opts.extras?.get(String(b.id));
           toolCalls.push({
             id: String(b.id),
             type: "function",
             function: { name: String(b.name), arguments: JSON.stringify(b.input ?? {}) },
+            ...(extra ? { extra_content: extra } : {}),
           });
         } else if (b.type === "thinking" || b.type === "redacted_thinking") {
           drop.add("thinking blocks in the transcript");
@@ -514,7 +518,7 @@ function parseArgs(raw: unknown): unknown {
 }
 
 /** A finished Chat Completion as an Anthropic message. Pure. */
-export function fromChatCompletion(res: Json, requestedModel: string, stopSequences?: unknown): Json {
+export function fromChatCompletion(res: Json, requestedModel: string, stopSequences?: unknown, extras?: ToolCallExtras): Json {
   const choice = ((res.choices as Json[] | undefined) ?? [])[0] ?? {};
   const msg = (choice.message as Json | undefined) ?? {};
   const content: Json[] = [];
@@ -522,9 +526,11 @@ export function fromChatCompletion(res: Json, requestedModel: string, stopSequen
   if (text) content.push({ type: "text", text });
   for (const tc of (Array.isArray(msg.tool_calls) ? msg.tool_calls : []) as Json[]) {
     const fn = (tc.function as Json | undefined) ?? {};
+    const id = String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`);
+    extras?.keep(id, tc.extra_content);
     content.push({
       type: "tool_use",
-      id: String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+      id,
       name: String(fn.name ?? ""),
       input: parseArgs(fn.arguments),
     });
@@ -550,21 +556,53 @@ export function fromChatCompletion(res: Json, requestedModel: string, stopSequen
  * stops — and a tool call's arguments arrive as fragments that the other
  * side wants as `input_json_delta`s inside one open block.
  */
+/**
+ * What a provider attached to a tool call that must come back with it.
+ * Gemini 3 and later put a thought signature on each tool call
+ * (`extra_content.google.thought_signature`) and refuse the next turn when
+ * it is missing; Claude's transcript has nowhere to keep it, so the
+ * translator — one per step, or per host call — remembers it by the call's
+ * id and puts it back when that call is sent again. Bounded: a step that
+ * makes more calls than this forgets the oldest.
+ */
+export class ToolCallExtras {
+  private byId = new Map<string, Json>();
+  private readonly max: number;
+  constructor(max = 5000) {
+    this.max = max;
+  }
+  keep(id: string, extra: unknown): void {
+    if (!id || !extra || typeof extra !== "object" || Array.isArray(extra)) return;
+    const prev = this.byId.get(id);
+    this.byId.delete(id);
+    this.byId.set(id, prev ? { ...prev, ...(extra as Json) } : (extra as Json));
+    while (this.byId.size > this.max) this.byId.delete(this.byId.keys().next().value as string);
+  }
+  get(id: string): Json | undefined {
+    return this.byId.get(id);
+  }
+  get size(): number {
+    return this.byId.size;
+  }
+}
+
 export class StreamTranslator {
   private started = false;
   private nextIndex = 0;
   private textIndex: number | null = null;
   /** Chat-Completions tool index → Anthropic block index. */
-  private tools = new Map<number, { block: number; argsSeen: boolean }>();
+  private tools = new Map<number, { block: number; argsSeen: boolean; id: string }>();
   /** The last choice's stop fields: finish_reason and any matched stop. */
   private finish: Json = {};
   private usage: { input: number; cached: number; output: number } | null = null;
   private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
   private readonly model: string;
   private readonly stops: string[];
-  constructor(model: string, stopSequences?: unknown) {
+  private readonly extras?: ToolCallExtras;
+  constructor(model: string, stopSequences?: unknown, extras?: ToolCallExtras) {
     this.model = model;
     this.stops = stopList(stopSequences);
+    this.extras = extras;
   }
 
   private event(name: string, data: Json): string {
@@ -640,7 +678,7 @@ export class StreamTranslator {
         // A new call: text stops here (a block is one thing), the tool
         // block opens with the id and name the first fragment carries.
         out.push(...this.closeText());
-        entry = { block: this.nextIndex++, argsSeen: false };
+        entry = { block: this.nextIndex++, argsSeen: false, id: String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`) };
         this.tools.set(idx, entry);
         out.push(
           this.event("content_block_start", {
@@ -648,13 +686,14 @@ export class StreamTranslator {
             index: entry.block,
             content_block: {
               type: "tool_use",
-              id: String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`),
+              id: entry.id,
               name: String(fn.name ?? ""),
               input: {},
             },
           }),
         );
       }
+      this.extras?.keep(entry.id, tc.extra_content);
       const args = typeof fn.arguments === "string" ? fn.arguments : "";
       if (args) {
         entry.argsSeen = true;
@@ -929,6 +968,9 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
   const log: string[] = [];
   const base = trimSlashes(spec.upstreamBase);
   const label = spec.label ?? base;
+  // One per translator (a step, or one host call): what the provider put on
+  // tool calls that must come back with them (Gemini's thought signatures).
+  const extras = new ToolCallExtras();
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
@@ -972,7 +1014,7 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
       const responses = spec.wire === "responses";
       const outbound = responses
         ? toResponses(body, { reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream }, drop)
-        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream }, drop);
+        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream, extras }, drop);
       for (const line of drop.lines()) if (!log.includes(line)) log.push(line);
 
       let upstream: Response;
@@ -1035,11 +1077,11 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
           return send(502, errorBody(502, `translator: ${label} answered with something that is not JSON`));
         }
         log.push(`POST ${label} → 200 (${Date.now() - started}ms, ${model})`);
-        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences)));
+        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences, extras)));
       }
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model, body.stop_sequences);
+      const machine = responses ? new ResponsesStreamTranslator(model) : new StreamTranslator(model, body.stop_sequences, extras);
       const reader = upstream.body?.getReader();
       if (!reader) {
         for (const e of machine.finishStream()) res.write(e);
