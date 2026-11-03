@@ -49,7 +49,9 @@ foldrun_version: "0.1"
 #
 # Your own model key needs no block: Settings → Model provider, or
 # \`foldrun account model set anthropic --key …\` (an API key, not a login).
-# A provider: block here or lower wins over it.
+# On foldrun's own platform you can run on foldrun's models instead, billed
+# in credits: \`foldrun account model use foldrun --provider anthropic\`.
+# A provider: block here or lower wins over either.
 #
 # provider:
 #   base_url: https://openrouter.ai/api
