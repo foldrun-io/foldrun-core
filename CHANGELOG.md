@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.2.0] — 2026-11-03
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `ScanOptions` from `@foldrun/core/scan`
+
+- feat(check): config/effort-fitted — an effort level the account's model does not have is warned, not refused ([3edd957](https://github.com/foldrun-io/foldrun-core/commit/3edd957))
+
 ## [14.1.0] — 2026-11-03
 
 ### New in the public API
