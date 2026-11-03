@@ -9,8 +9,9 @@
 //     that grant only in the provider's auth header, on the provider's model
 //     routes, and meters every call — the bill comes from the gateway.
 //
-// A provider here is offered only where the platform holds its key
-// (`env`), the operator lists it, and the price list names the model.
+// A provider here is offered only where the platform holds its key (set by
+// an operator in the console, sealed in the platform's store — never in the
+// environment), the operator lists it, and the price list names the model.
 
 import { providerPreset, type WireFormat } from "./providers.ts";
 
@@ -23,9 +24,6 @@ export interface SupplyProvider {
   format: WireFormat;
   /** The one host the key is granted to. */
   host: string;
-  /** Where the platform's key lives, in the worker's and the proxy's
-   *  environment. Never in the vault, never in a lease. */
-  env: string;
   /** The header the key may be filled in, and its exact shape: the whole
    *  value of x-api-key, or "Bearer <key>" in authorization. Anywhere else —
    *  the URL, the body, another header — is refused. */
@@ -43,7 +41,6 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     preset: "anthropic",
     format: "anthropic",
     host: "api.anthropic.com",
-    env: "FOLDRUN_SUPPLY_ANTHROPIC_API_KEY",
     auth: "x-api-key",
     metered: ["/v1/messages"],
     free: [
@@ -56,7 +53,6 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     preset: "openrouter",
     format: "anthropic",
     host: "openrouter.ai",
-    env: "FOLDRUN_SUPPLY_OPENROUTER_API_KEY",
     auth: "bearer",
     metered: ["/api/v1/messages"],
     free: [{ method: "GET", path: "/api/v1/models" }],
@@ -66,7 +62,6 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     preset: "openai",
     format: "openai",
     host: "api.openai.com",
-    env: "FOLDRUN_SUPPLY_OPENAI_API_KEY",
     auth: "bearer",
     metered: ["/v1/chat/completions"],
     free: [{ method: "GET", path: "/v1/models" }],
@@ -76,7 +71,6 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     preset: "gemini",
     format: "openai",
     host: "generativelanguage.googleapis.com",
-    env: "FOLDRUN_SUPPLY_GEMINI_API_KEY",
     auth: "bearer",
     metered: ["/v1beta/openai/chat/completions"],
     free: [{ method: "GET", path: "/v1beta/openai/models" }],
