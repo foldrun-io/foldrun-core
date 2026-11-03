@@ -13,6 +13,26 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.0.0] — 2026-11-03
+
+### Breaking changes
+
+- feat(model-supply): DeepSeek and Moonshot Kimi directly, in place of OpenRouter (c47e4d8)
+- `toChatCompletions` from `@foldrun/core` — parameter 2 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `fromChatCompletion` from `@foldrun/core`
+
+### New in the public API
+
+- `ToolCallExtras` from `@foldrun/core`
+
+- fix(translator): a tool call's provider extras go back with it — Gemini's thought signatures ([4552afa](https://github.com/foldrun-io/foldrun-core/commit/4552afa))
+- feat(model-supply)!: DeepSeek and Moonshot Kimi directly, in place of OpenRouter ([c47e4d8](https://github.com/foldrun-io/foldrun-core/commit/c47e4d8))
+
 ## [13.1.1] — 2026-11-03
 
 - docs(starter): the account AGENTS.md template names foldrun's models ([f767b89](https://github.com/foldrun-io/foldrun-core/commit/f767b89))
