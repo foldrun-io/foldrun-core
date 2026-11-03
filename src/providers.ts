@@ -436,9 +436,9 @@ export const PROVIDERS: readonly ProviderPreset[] = [
     note: "base_url is your server (default :8000). Start it with --enable-auto-tool-choice and a --tool-call-parser or no tool loop closes." },
 
   // ------------------------------------------- Chat-Completions, translated
-  { name: "openai", title: "OpenAI", format: "openai", baseUrl: "https://api.openai.com/v1", auth: "bearer", verified: true,
+  { name: "openai", title: "OpenAI", format: "responses", baseUrl: "https://api.openai.com/v1", auth: "bearer", verified: true,
     maxTokensParam: "max_completion_tokens", reasoningEffort: true, promptCacheKey: true,
-    note: "Reached over Chat Completions, which OpenAI keeps supporting; the Responses API is not spoken here, so a reasoning model's reasoning does not carry across tool calls." , search: "openai" },
+    note: "Reached over the Responses API (3 Nov 2026): GPT-6 Astra and GPT-6.1 Sol call tools there alone, GPT-6 Luna on Chat Completions only with reasoning off. `format: openai` still says Chat Completions, for an older model or a proxy that speaks only that." , search: "openai" },
   { name: "gemini", title: "Google Gemini", format: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", auth: "bearer",
     note: "Google's OpenAI-compatible route. Unknown parameters are ignored silently; reasoning cannot be switched off on the newest models." },
   { name: "xai", title: "xAI Grok", format: "openai", baseUrl: "https://api.x.ai/v1", auth: "bearer",

@@ -33,6 +33,23 @@ export interface SupplyProvider {
   /** Paths that cost nothing and may pass unmetered (GET model lists, a
    *  free token count). Anything not listed in either is refused. */
   free: { method: "GET" | "POST"; path: string }[];
+  /** How a request is reshaped before it leaves (the gateway applies it,
+   *  shapeRequest). The agent runtime sends Claude's whole surface —
+   *  `thinking: {type: adaptive, display}`, `output_config.effort` in five
+   *  words, `context_management` — and a compatible endpoint documents
+   *  less: what it does with the rest is not stated, so it is not sent. */
+  send?: SendShape;
+}
+
+export interface SendShape {
+  /** Only these top-level fields are sent; any other is dropped. */
+  fields?: string[];
+  /** These top-level fields are dropped. */
+  drop?: string[];
+  /** The keys of `thinking` that are sent; null drops `thinking` whole. */
+  thinking?: string[] | null;
+  /** `output_config.effort`, as this provider spells it. */
+  effort?: Record<string, string>;
 }
 
 export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
@@ -51,10 +68,13 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
   openai: {
     name: "openai",
     preset: "openai",
-    format: "openai",
+    // The Responses API, not Chat Completions: GPT-6 Astra and GPT-6.1 Sol
+    // call tools on Responses alone, GPT-6 Luna on Chat Completions only
+    // with reasoning off (OpenAI's model pages, 3 Nov 2026).
+    format: "responses",
     host: "api.openai.com",
     auth: "bearer",
-    metered: ["/v1/chat/completions"],
+    metered: ["/v1/responses"],
     free: [{ method: "GET", path: "/v1/models" }],
   },
   gemini: {
@@ -79,6 +99,11 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     auth: "x-api-key",
     metered: ["/anthropic/v1/messages"],
     free: [],
+    // api-docs.deepseek.com/api/create-message (3 Nov 2026): thinking.type
+    // enabled|disabled|adaptive (adaptive = enabled), budget_tokens ignored;
+    // effort takes every word ours does (medium and xhigh = high). Context
+    // editing and thinking.display are not in its schema.
+    send: { drop: ["context_management"], thinking: ["type", "budget_tokens"] },
   },
   moonshot: {
     name: "moonshot",
@@ -88,6 +113,15 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     auth: "bearer",
     metered: ["/anthropic/v1/messages"],
     free: [],
+    // platform.kimi.ai/docs/api/messages (3 Nov 2026): the request schema is
+    // these fields alone; `thinking` is K2-only (K3.1 Pro always thinks);
+    // effort is low | high | max; temperature and top_p are fixed (any
+    // other value is an error).
+    send: {
+      fields: ["model", "messages", "max_tokens", "system", "stream", "stop_sequences", "tools", "tool_choice", "metadata", "cache_control", "output_config"],
+      thinking: null,
+      effort: { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "max" },
+    },
   },
 };
 
@@ -150,4 +184,42 @@ export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial
     token: supplyToken(provider),
     ...(Object.keys(tiers).length ? { models: tiers } : {}),
   };
+}
+
+/**
+ * Reshape a request body for a provider (its `send`), in place. True when
+ * anything changed. What a provider's schema does not list is not sent,
+ * rather than trusted to be ignored; an effort word it does not spell is
+ * sent as the nearest one it does.
+ */
+export function shapeRequest(p: SupplyProvider, json: Record<string, unknown>): boolean {
+  const shape = p.send;
+  if (!shape) return false;
+  let changed = false;
+  if (shape.fields) {
+    for (const k of Object.keys(json)) if (!shape.fields.includes(k)) (delete json[k], (changed = true));
+  }
+  for (const k of shape.drop ?? []) if (k in json) (delete json[k], (changed = true));
+  if (shape.thinking !== undefined && "thinking" in json) {
+    if (shape.thinking === null) {
+      delete json.thinking;
+      changed = true;
+    } else if (json.thinking && typeof json.thinking === "object") {
+      const t = json.thinking as Record<string, unknown>;
+      for (const k of Object.keys(t)) if (!shape.thinking.includes(k)) (delete t[k], (changed = true));
+    }
+  }
+  const oc = json.output_config;
+  if (shape.effort && oc && typeof oc === "object" && typeof (oc as Record<string, unknown>).effort === "string") {
+    const word = (oc as Record<string, unknown>).effort as string;
+    const to = shape.effort[word];
+    if (to === undefined) {
+      delete (oc as Record<string, unknown>).effort;
+      changed = true;
+    } else if (to !== word) {
+      (oc as Record<string, unknown>).effort = to;
+      changed = true;
+    }
+  }
+  return changed;
 }

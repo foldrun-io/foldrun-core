@@ -227,3 +227,29 @@ test("outside a step (a judge, a grader, a draft): the same rung, through a host
     }
   });
 });
+
+test("each provider is sent only what its API documents: Kimi's schema, DeepSeek without context editing", async () => {
+  const { SUPPLY_PROVIDERS, shapeRequest } = await import("../src/model-supply.ts");
+  // What the agent runtime sends, captured from the SDK on 3 Nov 2026.
+  const sdk = () => ({
+    model: "m", max_tokens: 32000, stream: true, system: [{ type: "text", text: "s" }], messages: [{ role: "user", content: "hi" }],
+    tools: [{ name: "Read", input_schema: { type: "object" } }], metadata: { user_id: "u" },
+    thinking: { type: "adaptive", display: "updates" }, output_config: { effort: "medium" }, context_management: { edits: [] },
+  });
+  const kimi = sdk();
+  assert.equal(shapeRequest(SUPPLY_PROVIDERS.moonshot, kimi), true);
+  assert.deepEqual(Object.keys(kimi).sort(), ["max_tokens", "messages", "metadata", "model", "output_config", "stream", "system", "tools"]);
+  assert.deepEqual(kimi.output_config, { effort: "high" }, "medium is not a Kimi word");
+  for (const [w, to] of [["low", "low"], ["xhigh", "high"], ["max", "max"]]) {
+    const b = { ...sdk(), output_config: { effort: w } };
+    shapeRequest(SUPPLY_PROVIDERS.moonshot, b);
+    assert.equal(b.output_config.effort, to, w);
+  }
+  const ds = sdk();
+  assert.equal(shapeRequest(SUPPLY_PROVIDERS.deepseek, ds), true);
+  assert.ok(!("context_management" in ds));
+  assert.deepEqual(ds.thinking, { type: "adaptive" });
+  assert.deepEqual(ds.output_config, { effort: "medium" }, "DeepSeek spells every level");
+  const claude = sdk();
+  assert.equal(shapeRequest(SUPPLY_PROVIDERS.anthropic, claude), false, "Anthropic gets the request as written");
+});

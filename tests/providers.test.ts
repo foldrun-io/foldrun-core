@@ -15,7 +15,7 @@ test("every preset has a format, an auth shape, and either an address or a note 
   for (const p of PROVIDERS) {
     assert.ok(!names.has(p.name), `duplicate preset ${p.name}`);
     names.add(p.name);
-    assert.ok(["anthropic", "openai"].includes(p.format), p.name);
+    assert.ok(["anthropic", "openai", "responses"].includes(p.format), p.name);
     assert.ok(["bearer", "x-api-key"].includes(p.auth), p.name);
     assert.ok(p.baseUrl || p.note, `${p.name}: no base URL and no note explaining where it lives`);
     if (p.baseUrl) assert.match(p.baseUrl, /^https?:\/\//, p.name);
@@ -45,7 +45,9 @@ test("name: fills in the address, format and auth; explicit keys win", () => {
   const custom = parseProvider({ name: "openai", base_url: "https://proxy.example/v1", token: "x", auth: "x-api-key" })!;
   assert.equal(custom.baseUrl, "https://proxy.example/v1");
   assert.equal(custom.auth, "x-api-key");
-  assert.equal(custom.format, "openai");
+  assert.equal(custom.format, "responses", "the preset's format: OpenAI is reached over Responses");
+  const chat = parseProvider({ name: "openai", base_url: "https://proxy.example/v1", token: "x", format: "openai" })!;
+  assert.equal(chat.format, "openai", "a proxy that speaks only Chat Completions says so");
 });
 
 test("an unknown name warns and the block reads as spelled out", () => {
