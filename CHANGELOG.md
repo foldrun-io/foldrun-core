@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [13.1.0] — 2026-11-03
+
+- refactor(model-supply): the platform's provider keys are not environment variables ([0538f76](https://github.com/foldrun-io/foldrun-core/commit/0538f76))
+
 ## [13.0.0] — 2026-11-02
 
 ### Breaking changes
