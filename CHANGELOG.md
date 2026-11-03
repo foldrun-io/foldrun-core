@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.1.0] — 2026-11-03
+
+### New in the public API
+
+- `MODEL_EFFORTS` from `@foldrun/core`
+- `effortsOf` from `@foldrun/core`
+- `fitEffort` from `@foldrun/core`
+
+- feat(translator): each model is sent the effort levels it takes; images in tool results on Responses ([9a47bef](https://github.com/foldrun-io/foldrun-core/commit/9a47bef))
+
 ## [14.0.1] — 2026-11-03
 
 - fix(models): each provider is sent what its API documents; OpenAI over the Responses API ([5926632](https://github.com/foldrun-io/foldrun-core/commit/5926632))
