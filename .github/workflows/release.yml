@@ -13,9 +13,13 @@ name: release
 # one step. Runs are serial (concurrency), never cancelled mid-publish.
 #
 # The build runs here rather than on a laptop so what reaches npm is what is
-# in the tag. No provenance: the repository is private (since 17 Oct 2026),
-# and npm refuses a provenance statement from a private repository, so
-# NPM_CONFIG_PROVENANCE=false stops trusted publishing adding one by default.
+# in the tag. Every version carries a provenance statement (npm's signed
+# record of the repository, commit and workflow that built it), so anyone can
+# check a tarball came from this tag: `npm audit signatures`. It was off while
+# the repository was private (17–25 Oct 2026; npm refuses provenance from a
+# private repository); public again since 25 Oct, so it is on. It needs
+# `id-token: write` (below) and package.json's repository.url to name this
+# repository exactly.
 #
 # AUTHENTICATION IS TRUSTED PUBLISHING, NOT A TOKEN. npm disabled classic
 # (non-expiring) tokens in November 2025 and capped write-enabled granular
@@ -129,7 +133,7 @@ jobs:
           # `npm install` keeps resolving to the last stable release.
           tag=latest
           case "$V" in *-*) tag=next ;; esac
-          if NPM_CONFIG_PROVENANCE=false npm publish --access public --tag "$tag" 2> publish.err; then
+          if npm publish --provenance --access public --tag "$tag" 2> publish.err; then
             cat publish.err >&2
           elif grep -q "cannot publish over the previously published versions" publish.err; then
             cat publish.err >&2
