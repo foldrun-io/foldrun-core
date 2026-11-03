@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.3.1] — 2026-11-03
+
+- ci(release): publish with npm provenance ([663417c](https://github.com/foldrun-io/foldrun-core/commit/663417c))
+
 ## [14.3.0] — 2026-11-03
 
 ### Widened in the public API
