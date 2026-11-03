@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.2.1] — 2026-11-03
+
+- fix(models): what the e2e check found — Gemini's effort, no retry on the platform's refusals, the SDK's extras ([43df8f1](https://github.com/foldrun-io/foldrun-core/commit/43df8f1))
+
 ## [14.2.0] — 2026-11-03
 
 ### Widened in the public API
