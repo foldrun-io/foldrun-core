@@ -13,6 +13,25 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.3.0] — 2026-11-03
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `AgentInfo` from `@foldrun/core`
+- `FlowStep` from `@foldrun/core`
+- `FlowInfo` from `@foldrun/core`
+- `StepRecord` from `@foldrun/core`
+- `ScanOptions` from `@foldrun/core/scan`
+
+### New in the public API
+
+- `MAX_OUTPUT_TOKENS_CAP` from `@foldrun/core`
+- `parseMaxOutputTokens` from `@foldrun/core`
+
+- feat(format): max_output_tokens — the longest one model reply may be, on every provider; attribution only to Anthropic ([864d3a7](https://github.com/foldrun-io/foldrun-core/commit/864d3a7))
+
 ## [14.2.1] — 2026-11-03
 
 - fix(models): what the e2e check found — Gemini's effort, no retry on the platform's refusals, the SDK's extras ([43df8f1](https://github.com/foldrun-io/foldrun-core/commit/43df8f1))
