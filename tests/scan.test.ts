@@ -345,3 +345,19 @@ test("config/effort-fitted: an effort the account's model lacks is warned with w
   assert.equal(effortRunsAs("openai", "gpt-6.1-sol", "max"), "max");
   assert.equal(effortRunsAs("anthropic", "claude-opus-5-5", "xhigh"), "xhigh");
 });
+
+test("config/output-fitted: a max_output_tokens above the model's ceiling on foldrun's models is warned with what it runs as (3 Nov 2026)", () => {
+  const ceilingOf = (model: string) => {
+    const id = ({ default: "claude-sonnet-5-5", fast: "claude-haiku-5-5" } as Record<string, string>)[model] ?? model;
+    return { ceiling: 32000, model: id, on: "foldrun's models (Anthropic)" };
+  };
+  const files = [
+    { path: "agents/long/agent.md", content: "---\nname: long\nmax_output_tokens: 64000\n---\nWrite.\n" },
+    { path: "agents/short/agent.md", content: "---\nname: short\nmax_output_tokens: 8000\n---\nWrite.\n" },
+    { path: "flows/f.md", content: "---\ntrigger: manual\n---\n1. [[short]] — a\n   max_output_tokens: 50000\n2. [[short]] — b\n" },
+  ];
+  const found = scanFiles(files, { outputCeiling: ceilingOf }).filter((f) => f.rule === "config/output-fitted");
+  assert.deepEqual(found.map((f) => `${f.file}:${f.line}`).sort(), ["agents/long/agent.md:3", "flows/f.md:5"]);
+  assert.match(found[0].message, /runs as 32000 on foldrun's models \(Anthropic\)/);
+  assert.equal(scanFiles(files).filter((f) => f.rule === "config/output-fitted").length, 0, "offline: nothing to say");
+});

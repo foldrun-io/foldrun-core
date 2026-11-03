@@ -284,3 +284,70 @@ test("a refusal from foldrun's models is never retried as a busy provider (e2e, 
   assert.equal(isTransientOverload("503 egress: foldrun's models: gemini is not available on this platform right now"), false);
   assert.equal(isTransientOverload("429 Too Many Requests: overloaded"), true, "a provider's own overload still is");
 });
+
+test("max_output_tokens: the runtime is told its limit — the agent's, a step's, never above the price list's ceiling (3 Nov 2026)", async () => {
+  const anthropic = (): SupplyAnswer => ({ kind: "foldrun", provider: "anthropic", tiers: { default: "claude-sonnet-5-5" }, ceilings: { "claude-sonnet-5-5": 32000 } });
+  const out = (c: Captured) => (c.calls[0].env as Record<string, string>).CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+  // Unset: the ceiling, so the runtime never asks for more than may be sent.
+  await withAccount({ supply: anthropic() }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(out(c), "32000");
+  });
+  // The agent's own, under the ceiling.
+  await withAccount({ supply: anthropic(), agentProvider: "max_output_tokens: 16000\n" }, async (c) => {
+    await run();
+    assert.equal(out(c), "16000");
+  });
+  // Above it: the ceiling, said on the step.
+  await withAccount({ supply: anthropic(), agentProvider: "max_output_tokens: 64000\n" }, async (c) => {
+    const done = await run();
+    assert.equal(out(c), "32000");
+    assert.match(events(done.steps[0]), /max_output_tokens: 64000 runs as 32000 — the price list's ceiling/);
+  });
+  // A step's own wins over the agent's.
+  await withAccount({ supply: anthropic(), agentProvider: "max_output_tokens: 16000\n" }, async (c) => {
+    const r = startFlowRun("acme", "desk", [{ ...step, maxOutputTokens: 8000 }], "f");
+    await waitForRun("acme", "desk", r.id, 20_000);
+    assert.equal(out(c), "8000");
+  });
+});
+
+test("Claude Code's attribution line is switched off for a provider that is not Anthropic, and kept for Anthropic (3 Nov 2026)", async () => {
+  const attr = (c: Captured) => (c.calls[0].env as Record<string, string>).CLAUDE_CODE_ATTRIBUTION_HEADER;
+  await withAccount({ supply: { kind: "foldrun", provider: "deepseek", tiers: { default: "deepseek-v4-pro" } } }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(attr(c), "0");
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} } }, async (c) => {
+    await run();
+    assert.equal(attr(c), undefined);
+  });
+});
+
+test("a flow's max_output_tokens is snapshotted on the run and reaches its steps (3 Nov 2026)", async () => {
+  const supply: SupplyAnswer = { kind: "foldrun", provider: "anthropic", tiers: { default: "claude-sonnet-5-5" }, ceilings: { "claude-sonnet-5-5": 32000 } };
+  await withAccount({ supply }, async (c) => {
+    const flows = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/flows");
+    fs.mkdirSync(flows, { recursive: true });
+    fs.writeFileSync(path.join(flows, "f.md"), "---\ntrigger: manual\nmax_output_tokens: 12000\n---\n1. [[worker]] — work\n");
+    const r = startFlowRun("acme", "desk", [step], "f");
+    const done = (await waitForRun("acme", "desk", r.id, 20_000)).run!;
+    assert.equal(done.steps[0].flowMaxOutputTokens, 12000);
+    assert.equal(done.steps[0].maxOutputTokens, 12000);
+    assert.equal((c.calls[0].env as Record<string, string>).CLAUDE_CODE_MAX_OUTPUT_TOKENS, "12000");
+  });
+});
+
+test("a nested flow's max_output_tokens holds for its own steps; a step's own still wins (Codex review)", async () => {
+  const { loadFlow } = await import("../src/runner.ts");
+  await withAccount({ supply: { kind: "none" } }, async () => {
+    const flows = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/flows");
+    fs.mkdirSync(flows, { recursive: true });
+    fs.writeFileSync(path.join(flows, "child.md"), "---\ntrigger: manual\nmax_output_tokens: 4000\n---\n1. [[worker]] — a\n2. [[worker]] — b\n   max_output_tokens: 2000\n");
+    fs.writeFileSync(path.join(flows, "parent.md"), "---\ntrigger: manual\n---\n1. [[worker]] — first\n2. [[flow:child]]\n");
+    const f = loadFlow("acme", "desk", "parent")!;
+    assert.deepEqual(f.steps.map((s) => s.maxOutputTokens), [undefined, 4000, 2000]);
+  });
+});

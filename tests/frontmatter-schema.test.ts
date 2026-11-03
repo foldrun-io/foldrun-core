@@ -185,3 +185,20 @@ test("idempotency: false, the opt-out parseFlow reads, passes the schema; a list
   assert.equal(frontmatterProblems("flow", { trigger: "webhook", idempotency: ["x"] }, nearestField)[0]?.rule, "config/wrong-type");
 });
 
+
+test("max_output_tokens: a whole number of tokens on an agent, a flow and a step; anything else is said (3 Nov 2026)", async () => {
+  const { frontmatterProblems } = await import("../src/frontmatter-schema.ts");
+  const { parseFlow } = await import("../src/store.ts");
+  const near = () => null;
+  assert.deepEqual(frontmatterProblems("agent", { name: "a", max_output_tokens: 16000 }, near), []);
+  assert.deepEqual(frontmatterProblems("flow", { max_output_tokens: "8000" }, near), []);
+  for (const bad of [0, -5, 1.5, "lots", 2_000_000]) {
+    assert.ok(frontmatterProblems("agent", { name: "a", max_output_tokens: bad }, near).some((p) => p.key === "max_output_tokens"), String(bad));
+  }
+  const f = parseFlow("f.md", "---\nmax_output_tokens: 12000\n---\n1. [[a]] — go\n   max_output_tokens: 4000\n2. [[b]] — on\n");
+  assert.equal(f.maxOutputTokens, 12000);
+  assert.equal(f.steps[0].maxOutputTokens, 4000);
+  assert.equal(f.steps[1].maxOutputTokens, undefined, "the flow's default stays the flow's; the run snapshots it");
+  const bad = parseFlow("f.md", "1. [[a]] — go\n   max_output_tokens: many\n");
+  assert.match((bad.steps[0].problems ?? []).join(" "), /max_output_tokens: many — a whole number of tokens/);
+});

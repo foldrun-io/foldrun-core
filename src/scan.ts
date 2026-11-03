@@ -33,7 +33,7 @@ import { resolveNetwork } from "./network.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
 import { parseRemotes } from "./a2a-remotes.ts";
 import { isA2aPublished } from "./a2a-publish.ts";
-import { parseFlow, resolveEffort, type FlowStep } from "./store.ts";
+import { parseFlow, resolveEffort, parseMaxOutputTokens, type FlowStep } from "./store.ts";
 
 export type ScanLevel = "error" | "warn" | "info";
 export type ScanCategory = "secret" | "security" | "content" | "supply-chain" | "config";
@@ -85,6 +85,10 @@ export interface ScanOptions {
    *  (a `model:` word or id, an effort word), and where — or null when that
    *  is not known here (the CLI, offline: it knows no account's choice). */
   effortRunsAs?: (model: string, effort: string) => { effort: string; model: string; on: string } | null;
+  /** The most one reply may be on the model this account's steps run on
+   *  (a `model:` word or id) — the price list's ceiling on foldrun's
+   *  models — or null when that is not known here. */
+  outputCeiling?: (model: string) => { ceiling: number; model: string; on: string } | null;
 }
 
 export const OWASP_URL = "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026";
@@ -313,6 +317,16 @@ export const SCAN_RULES: readonly ScanRule[] = [
       "Each model takes its own effort levels: GPT-6 and Claude take all five, Gemini stops at high, Kimi has low, high and max. " +
       "The step still runs, at the nearest level the model has, and the step's log says so. Write the level it has, or choose " +
       "a provider whose model has the one you want (Settings → Model provider).",
+  },
+  {
+    id: "config/output-fitted",
+    category: "config",
+    level: "warn",
+    title: "A max_output_tokens above what the account's model allows",
+    help:
+      "On foldrun's models one reply may be at most the price list's ceiling for its model. The step still runs, with " +
+      "the ceiling as its limit, and the step's log says so. Write a number at or under the ceiling, or run the agent " +
+      "on your own key.",
   },
   {
     id: "config/cron-never-fires",
@@ -1079,6 +1093,65 @@ function scanEfforts(agents: AgentFacts[], flows: FlowFacts[], runsAs: NonNullab
   }
 }
 
+/**
+ * A `max_output_tokens:` above the ceiling of the model a step will run on:
+ * warned, not refused (the step runs at the ceiling). Resolved step → flow
+ * → agent, the written value first, as scanEfforts does.
+ */
+function scanOutputs(agents: AgentFacts[], flows: FlowFacts[], ceilingOf: NonNullable<ScanOptions["outputCeiling"]>, push: Push): void {
+  const say = (file: string, line: number | undefined, asked: number, model: string, whence: string) => {
+    const c = ceilingOf(model);
+    if (!c || asked <= c.ceiling) return;
+    push(
+      "config/output-fitted",
+      file,
+      line,
+      `config/output-fitted ${file} ${whence} ${asked} ${c.model}`,
+      `max_output_tokens: ${asked}${whence} runs as ${c.ceiling} on ${c.on} (${c.model}) — the price list's ceiling for that model.`,
+    );
+  };
+  const byName = new Map<string, { model: string; raw: unknown }>();
+  const ownProvider = new Set<string>();
+  for (const a of agents) {
+    const model = typeof a.data.model === "string" && a.data.model.trim() ? a.data.model.trim() : "default";
+    byName.set(a.name, { model, raw: a.data.max_output_tokens });
+    if (a.data.provider) {
+      ownProvider.add(a.name);
+      continue;
+    }
+    const n = parseMaxOutputTokens(a.data.max_output_tokens);
+    if (n) say(a.file, keyLine(a.lines, "max_output_tokens"), n, model, "");
+  }
+  for (const fl of flows) {
+    let info: ReturnType<typeof parseFlow>;
+    try {
+      info = parseFlow(fl.file, fl.content);
+    } catch {
+      continue;
+    }
+    const steps = [...(info.steps ?? [])].sort((x, y) => (x.line ?? 0) - (y.line ?? 0));
+    const flowLine = keyLine(fl.lines, "max_output_tokens");
+    steps.forEach((st, i) => {
+      if (st.subflow || ownProvider.has(st.agent)) return;
+      const agent = byName.get(st.agent);
+      const from = st.maxOutputTokens != null ? "step" : info.maxOutputTokens != null ? "flow" : "agent";
+      const n = from === "step" ? st.maxOutputTokens : from === "flow" ? info.maxOutputTokens : parseMaxOutputTokens(agent?.raw);
+      if (!n) return;
+      const model = st.model ?? info.model ?? agent?.model ?? "default";
+      if (from === "step") {
+        const to = steps[i + 1]?.line ?? fl.lines.length + 1;
+        let at: number | undefined;
+        for (let k = st.line ?? 1; k < to; k++) if (/^\s+max_output_tokens\s*:/.test(fl.lines[k - 1] ?? "")) at = k;
+        say(fl.file, at ?? st.line, n, model, ` (step ${st.agent})`);
+      } else if (from === "flow") {
+        say(fl.file, flowLine, n, model, ` (the flow's, on step ${st.agent})`);
+      } else if (st.model || info.model) {
+        say(fl.file, st.line, n, model, ` (${st.agent}'s own, on this step's model)`);
+      }
+    });
+  }
+}
+
 export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFinding[] {
   const want = options.only?.length ? new Set(options.only) : null;
   const enabled = (rule: string) => !want || want.has(rule) || want.has(scanRule(rule)?.category ?? "") || rule === "check/ignore-needs-reason";
@@ -1182,7 +1255,9 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
   scanPublishedFlows(flows, legs, push);
   // A workspace that names its own provider: does not run on the account's
   // choice, so the account's models say nothing about its efforts.
-  if (options.effortRunsAs && !(workspaceMd && frontOf(workspaceMd.content, "AGENTS.md")?.provider)) scanEfforts(agents, flows, options.effortRunsAs, push);
+  const ownWorkspaceProvider = Boolean(workspaceMd && frontOf(workspaceMd.content, "AGENTS.md")?.provider);
+  if (options.effortRunsAs && !ownWorkspaceProvider) scanEfforts(agents, flows, options.effortRunsAs, push);
+  if (options.outputCeiling && !ownWorkspaceProvider) scanOutputs(agents, flows, options.outputCeiling, push);
   for (const m of more.values()) {
     findings.push({ rule: m.rule, level: m.level ?? scanRule(m.rule)?.level ?? "warn", file: m.file, message: `and ${m.n} more like this in this file, not listed`, fingerprint: m.hash.digest("hex").slice(0, 16), truncated: true });
   }

@@ -984,6 +984,8 @@ export interface AgentInfo {
    *  the interface did not say so, so every consumer had to re-read the file
    *  to show it. */
   effort: string | null;
+  /** `max_output_tokens:` — the longest one reply may be, when it says. */
+  maxOutputTokens?: number;
   tools: string[];
   apis: ApiSpec[];
   /** `remotes:` — the outside A2A agents it may call, the entries that read
@@ -1360,6 +1362,14 @@ export interface FlowStep {
   parallel?: number;
   /** `max_turns:` — the most model turns this step may take before it is
    *  stopped, beside `budget:` (money) and `timeout:` (time). */
+  /** `max_output_tokens:` — the longest one model reply may be, in tokens.
+   *  On a run's step: the step's own, else the flow's, snapshotted when the
+   *  run was created (createFlowRun); the agent's is read at the step. */
+  maxOutputTokens?: number;
+  /** The `max_output_tokens:` default of the flow this step was written in
+   *  (a nested flow's own, when it came from one): what a `delegate:`
+   *  chooser's picks are held to. Set by expansion and createFlowRun. */
+  flowMaxOutputTokens?: number;
   maxTurns?: number;
   /** `limits: {web.search: 10}` — this step's call limits, over the agent's
    *  (nearest wins per key). See limits.ts. */
@@ -1386,6 +1396,8 @@ export interface FlowInfo {
   model: string | null;
   /** Same, for effort. */
   effort: string | null;
+  /** `max_output_tokens:` — every step's longest reply unless it says. */
+  maxOutputTokens?: number;
   /** What a new fire does while a run of this flow is still live:
    *  "skip" doesn't start one, "queue" starts it but the worker holds it
    *  until the live run finishes. Unset keeps today's behaviour (runs may
@@ -1676,6 +1688,7 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         ...resolveOwner(data.owner, workspaceFront.owner, accountFront.owner),
         model: data.model ?? "default",
         effort: data.effort ?? null,
+        ...(parseMaxOutputTokens(data.max_output_tokens) ? { maxOutputTokens: parseMaxOutputTokens(data.max_output_tokens) } : {}),
         tools,
         apis: parseApis(data.apis),
         remotes: parseRemotes(data.remotes),
@@ -1734,7 +1747,7 @@ const OPTION_RE = /^(\s+)([a-z_-]+):(.*)$/;
  *  swallowed as an unknown option, silently, along with any typo of a real
  *  key. The consistency suite reads this list against the docs. */
 export const STEP_OPTION_KEYS: ReadonlySet<string> = new Set([
-  "approve", "ask", "case", "delegate", "each", "effort", "else", "limits", "loop", "max", "max_turns", "model",
+  "approve", "ask", "case", "delegate", "each", "effort", "else", "limits", "loop", "max", "max_output_tokens", "max_turns", "model",
   "on-fail", "onfail", "output", "parallel", "preview", "retry", "schema", "timeout", "until", "verify", "wait", "when",
 ]);
 
@@ -1747,6 +1760,17 @@ const MARKDOWN_BLOCK_RE = /^(?:#{1,6}\s|[-*+]\s|>\s|\d+[.)]\s|\*\*|__|---|\|)/;
 /** The most fan-out instances `parallel:` may run at once — the fan-out's
  *  own hard cap, since more slots than items is no cap. */
 export const PARALLEL_CAP = 20;
+/** The most `max_output_tokens:` may say — 2^20, above any model's own
+ *  limit today (Kimi's 1,048,576): a ceiling on typos, not on models. */
+export const MAX_OUTPUT_TOKENS_CAP = 1_048_576;
+
+/** `max_output_tokens:` as a whole number of tokens, or undefined when it
+ *  is not one in range (YAML may hand over a number or a string). */
+export function parseMaxOutputTokens(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+\s*$/.test(v) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 1 && n <= MAX_OUTPUT_TOKENS_CAP ? n : undefined;
+}
+
 /** The most turns `max_turns:` may allow. A turn is one model reply, tool
  *  calls included; a step that needs more than this is not one step. */
 export const MAX_TURNS_CAP = 500;
@@ -2066,6 +2090,11 @@ export function parseFlow(file: string, raw: string): FlowInfo {
         if (n === undefined) problem(`a whole number of instances to run at once, 1 to ${PARALLEL_CAP}`);
         else step.parallel = n;
       }
+      else if (key === "max_output_tokens") {
+        const n = parseMaxOutputTokens(value);
+        if (n === undefined) problem(`a whole number of tokens, 1 to ${MAX_OUTPUT_TOKENS_CAP}`);
+        else step.maxOutputTokens = n;
+      }
       else if (key === "max_turns") {
         const n = parseCount(value, 1, MAX_TURNS_CAP);
         if (n === undefined) problem(`a whole number of turns, 1 to ${MAX_TURNS_CAP}`);
@@ -2115,6 +2144,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
     timezone: data.timezone ?? null,
     model: data.model ?? null,
     effort: data.effort ?? null,
+    ...(parseMaxOutputTokens(data.max_output_tokens) ? { maxOutputTokens: parseMaxOutputTokens(data.max_output_tokens) } : {}),
     overlap: data.overlap === "skip" || data.overlap === "queue" ? data.overlap : null,
     ...(data.issues === "auto-close" || data.issues === "stay-open" ? { issues: data.issues } : {}),
     live: data.live === true,
@@ -2388,7 +2418,7 @@ function updateFlowStepInstructionLF(raw: string, index: number, instruction: st
 function updateFlowStepLF(
   raw: string,
   index: number,
-  options: Partial<Record<"model" | "effort" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max" | "limits", string | number | null>>,
+  options: Partial<Record<"model" | "effort" | "max_output_tokens" | "retry" | "timeout" | "verify" | "when" | "case" | "else" | "loop" | "until" | "each" | "max" | "limits", string | number | null>>,
 ): string {
   const { head, preamble, blocks } = splitFlowBlocks(raw);
   if (!Number.isInteger(index) || index < 0 || index >= blocks.length) {
@@ -2398,6 +2428,12 @@ function updateFlowStepLF(
   const clamp: Record<string, (v: string) => string | null> = {
     model: (v) => v || null,
     effort: (v) => resolveEffort(v) ?? null,
+    max_output_tokens: (v) => {
+      if (!v) return null;
+      const n = parseMaxOutputTokens(v);
+      if (n === undefined) throw new Error(`max_output_tokens: ${v} is not a whole number of tokens, 1 to ${MAX_OUTPUT_TOKENS_CAP}`);
+      return String(n);
+    },
     verify: (v) => v || null,
     when: (v) => v || null,
     case: (v) => v || null,
@@ -3580,6 +3616,9 @@ export interface StepRecord {
   schema?: Record<string, unknown> | boolean;
   schemaPath?: string;
   parallel?: number;
+  maxOutputTokens?: number;
+  /** See FlowStep: the default of the flow this step was written in. */
+  flowMaxOutputTokens?: number;
   maxTurns?: number;
   limits?: Record<string, number>;
   /** The parsed JSON an `output: json` step returned. Kept beside the prose
@@ -4904,7 +4943,21 @@ export function providerEnvFor(spec: {
   }
   const lines = Object.entries(spec.headers).map(([k, v]) => `${k}: ${v}`);
   if (lines.length) env.ANTHROPIC_CUSTOM_HEADERS = lines.join("\n");
+  // Claude Code puts an attribution line in every request's system prompt,
+  // which means something to Anthropic only. Anywhere else it is prompt
+  // text the provider is sent for nothing (e2e check, 3 Nov 2026).
+  if (spec.baseUrl && !isAnthropicOrigin(spec.baseUrl)) env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0";
   return env;
+}
+
+/** Whether a base URL is Anthropic's own API (where the SDK's own
+ *  attribution belongs). */
+function isAnthropicOrigin(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.anthropic.com";
+  } catch {
+    return false;
+  }
 }
 
 // The workspace tree, for history's first commit — see registerTreeReader.

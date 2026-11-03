@@ -73,6 +73,7 @@ import {
   parseProvider,
   providerEnvFor,
   resolveEffort,
+  parseMaxOutputTokens,
   isEffortWord,
   EFFORT_LEVELS,
   checkFormatVersion,
@@ -2672,6 +2673,21 @@ async function runStep(
     // step was stopped at up to fifteen times what it had spent.
     tokenPrice ??= knownPrice(wireModel);
 
+    // `max_output_tokens:` — the step's own (or its flow's, snapshotted on
+    // the run), else the agent's; on foldrun's models never above the price
+    // list's ceiling for the model it runs, so the runtime knows its real
+    // limit up front instead of the gateway cutting it short (3 Nov 2026).
+    const askedOut = step.maxOutputTokens ?? parseMaxOutputTokens(front.max_output_tokens);
+    const outCeiling = onSupply && supply.kind === "foldrun" ? supply.ceilings?.[wireModel] : undefined;
+    const maxOut = askedOut && outCeiling ? Math.min(askedOut, outCeiling) : (askedOut ?? outCeiling);
+    if (askedOut && outCeiling && askedOut > outCeiling) {
+      push("info", `max_output_tokens: ${askedOut} runs as ${outCeiling} — the price list's ceiling for ${wireModel} on foldrun's models`);
+    }
+    const outputEnv: Record<string, string> = maxOut ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOut) } : {};
+    if (maxOut && !(askedOut && outCeiling && askedOut > outCeiling)) {
+      push("info", `max_output_tokens: ${maxOut}${askedOut ? "" : " — the price list's ceiling on foldrun's models"}`);
+    }
+
     fs.mkdirSync(path.join(agentDir, "outputs"), { recursive: true });
     fs.mkdirSync(path.join(agentDir, "memory"), { recursive: true });
 
@@ -3276,6 +3292,7 @@ async function runStep(
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
             ...proxied(Object.keys(providerEnv).length === 0 ? modelEnv : providerEnv, keyName),
+            ...outputEnv,
             ...(lease ? { [EGRESS_ENV]: lease.url } : {}),
             // Every program's HTTP(S) through the proxy's forward door, and
             // the CA it signs bound sites with, for the sandbox to trust.
@@ -3742,7 +3759,7 @@ async function runStep(
         // the allowlisted host environment, not process.env: the SDK's
         // Bash tool runs with this, and on a platform process.env holds
         // every tenant's root key and the datastore credentials.
-        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...installEnv, ...modelEnv },
+        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...installEnv, ...modelEnv, ...outputEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
         budgetNote: stepBudgetNote,
@@ -4401,6 +4418,12 @@ export function createFlowRun(
    *  own trailing argument, so the signature only widened. */
   a2a?: { task: string; key: string },
 ): RunRecord {
+  let flowMaxOut: number | undefined;
+  try {
+    flowMaxOut = readFlow(tenant, workspace, flowName)?.maxOutputTokens;
+  } catch {
+    flowMaxOut = undefined;
+  }
   const run: RunRecord = {
     id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     flow: flowName,
@@ -4419,6 +4442,11 @@ export function createFlowRun(
       optional: s.optional ?? false,
       model: s.model,
       effort: s.effort,
+      // The flow's default snapshotted here, as a step's own options are:
+      // what the run started with is what it runs with. A step from a
+      // nested flow carries that flow's own (expandSubflows).
+      ...((s.maxOutputTokens ?? s.flowMaxOutputTokens ?? flowMaxOut) ? { maxOutputTokens: s.maxOutputTokens ?? s.flowMaxOutputTokens ?? flowMaxOut } : {}),
+      ...((s.flowMaxOutputTokens ?? flowMaxOut) ? { flowMaxOutputTokens: s.flowMaxOutputTokens ?? flowMaxOut } : {}),
       approve: s.approve,
       when: s.when,
       case: s.case,
@@ -5387,6 +5415,8 @@ function driveRunInner(
             delegation: id,
             instruction: job,
             group: parent.group,
+            // A job done for a step is held to that step's output limit.
+            ...(parent.maxOutputTokens ? { maxOutputTokens: parent.maxOutputTokens } : {}),
             optional: true,
             timeout: parent.timeout,
             attempts: 1,
@@ -5901,6 +5931,9 @@ function driveRunInner(
             optional: false,
             model: step.model,
             effort: step.effort,
+            // The step's output limit (its own, or the flow's snapshotted
+            // on it) holds for whoever takes the step over (Codex review).
+            ...(step.maxOutputTokens ? { maxOutputTokens: step.maxOutputTokens } : {}),
             timeout: step.timeout,
             // The rescuer inherits the contract, not just the job: a step
             // that promised data still owes data when someone else does it,
@@ -5990,6 +6023,10 @@ function driveRunInner(
               instruction: m[2].trim(),
               group: chooser.group,
               optional: false,
+              // The output limit of the flow the chooser was written in, as a
+              // step of that file would have it (Codex review); the chooser's
+              // own options are its own.
+              ...(chooser.flowMaxOutputTokens ? { maxOutputTokens: chooser.flowMaxOutputTokens, flowMaxOutputTokens: chooser.flowMaxOutputTokens } : {}),
               attempts: 0,
               status: "pending",
               events: [],
@@ -6198,11 +6235,17 @@ function expandSubflows(
     for (const ns of nestedSteps) {
       const g = base + ns.group;
       maxGroup = Math.max(maxGroup, g);
+      // The nested flow's own output limit holds for its steps (a step's
+      // own still wins), as its file says (Codex review).
+      const flowMax = ns.flowMaxOutputTokens ?? nested.maxOutputTokens;
+      const maxOut = ns.maxOutputTokens ?? flowMax;
       out.push({
         ...ns,
         group: g,
         optional: ns.optional || step.optional,
         instruction: ns.instruction || step.instruction,
+        ...(maxOut ? { maxOutputTokens: maxOut } : {}),
+        ...(flowMax ? { flowMaxOutputTokens: flowMax } : {}),
       });
     }
     group = maxGroup;

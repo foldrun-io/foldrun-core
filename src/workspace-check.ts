@@ -46,7 +46,7 @@ export function checkOptions(tenant: string, workspace: string): ScanOptions {
  * and its tiers the platform knows). An account AGENTS.md provider: block
  * runs instead, and its own key's models are not the platform's to say.
  */
-function effortCheck(tenant: string, accountProvider: unknown): Pick<ScanOptions, "effortRunsAs"> {
+function effortCheck(tenant: string, accountProvider: unknown): Pick<ScanOptions, "effortRunsAs" | "outputCeiling"> {
   if (parseProvider(accountProvider)?.baseUrl) return {};
   let answer: ReturnType<NonNullable<typeof platform.modelSupply>> | undefined;
   try {
@@ -64,6 +64,12 @@ function effortCheck(tenant: string, accountProvider: unknown): Pick<ScanOptions
       if (!id) return null; // a Claude tier word: Claude takes every level
       const runs = effortRunsAs(provider, id, effort);
       return runs ? { effort: runs, model: id, on } : null;
+    },
+    outputCeiling: (model) => {
+      const tier = resolveTier(model);
+      const id = tier ? tiers[tier as "fast" | "default" | "max"] : model;
+      const ceiling = id ? answer.ceilings?.[id] : undefined;
+      return id && ceiling ? { ceiling, model: id, on } : null;
     },
   };
 }

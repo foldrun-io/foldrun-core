@@ -138,6 +138,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "description", insert: "description: ", hint: "required — what it does, and when" },
     { label: "model", insert: "model: default" },
     { label: "effort", insert: "effort: high", hint: "how hard it thinks" },
+    { label: "max_output_tokens", insert: "max_output_tokens: 16000", hint: "the longest one reply may be, in tokens" },
     { label: "tools", insert: "tools:\n  - write", hint: "what the runtime gives it" },
     { label: "secrets", insert: "secrets:\n  - ", hint: "credentials it may spend" },
     { label: "skills", insert: "skills:\n  - ", hint: "allowlist; omit to inherit all" },
@@ -212,6 +213,7 @@ const FIELDS: Record<string, Completion[]> = {
     { label: "timezone", insert: "timezone: Australia/Sydney" },
     { label: "model", insert: "model: fast", hint: "every step, unless the step says" },
     { label: "effort", insert: "effort: high", hint: "every step, unless the step says" },
+    { label: "max_output_tokens", insert: "max_output_tokens: 16000", hint: "every step's longest reply, unless the step says" },
   ],
   evalFile: [
     { label: "name", insert: "name: " },
@@ -322,6 +324,7 @@ const STEP_OPTIONS: Completion[] = [
   { label: "each", insert: "each: items", hint: "fan out: lines | items | rows of <csv>" },
   { label: "model", insert: "model: fast" },
   { label: "effort", insert: "effort: high", hint: "this step only" },
+  { label: "max_output_tokens", insert: "max_output_tokens: 16000", hint: "the longest one reply may be, this step only" },
   { label: "approve", insert: "approve: true", hint: "pause for a human" },
 ];
 

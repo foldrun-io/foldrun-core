@@ -165,7 +165,14 @@ export const SUPPLY_KEY_NAME = "FOLDRUN_SUPPLY_KEY";
  */
 export type SupplyAnswer =
   | { kind: "none" }
-  | { kind: "foldrun"; provider: SupplyProviderName; tiers: Partial<Record<"fast" | "default" | "max", string>> }
+  | {
+      kind: "foldrun";
+      provider: SupplyProviderName;
+      tiers: Partial<Record<"fast" | "default" | "max", string>>;
+      /** The price list's output ceiling per model id: the most one reply
+       *  may be on the platform's key, told to the runtime up front. */
+      ceilings?: Record<string, number>;
+    }
   | { kind: "refused"; reason: string };
 
 /** The token a supply provider block carries: a marker, not a secret. The

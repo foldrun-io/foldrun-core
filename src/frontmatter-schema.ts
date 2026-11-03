@@ -4,7 +4,7 @@
 
 import { FRONTMATTER, JOBS, type FieldType, type SchemaKind } from "./frontmatter-fields.ts";
 import { jobFold } from "./matter.ts";
-import { resolveEffort, parseDuration, parseInstant, parseRate, STEP_OPTION_KEYS } from "./store.ts";
+import { resolveEffort, parseDuration, parseInstant, parseRate, STEP_OPTION_KEYS, parseMaxOutputTokens, MAX_OUTPUT_TOKENS_CAP } from "./store.ts";
 import { budgetProblem } from "./budget.ts";
 import { cronProblem, parseCron, cronCanFire } from "./cron.ts";
 import { SECRET_NAME } from "./secrets.ts";
@@ -29,11 +29,17 @@ const DURATION = (min: number, max: number, unit = "") => (v: unknown) => {
   return null;
 };
 
+/** `max_output_tokens:` — a whole number of tokens the runtime can be told. */
+function maxOutputProblem(v: unknown): string | null {
+  return parseMaxOutputTokens(v) === undefined ? `${shown(v)} is not a number of tokens, 1 to ${MAX_OUTPUT_TOKENS_CAP}; the model's own limit applies` : null;
+}
+
 /** Why a value is wrong, or null — per kind, per field: the rules a list of
  *  values cannot say (aliases, durations, cron, budgets). */
 const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => string | null>>> = {
   "agent": {
     effort: (v) => (resolveEffort(v) ? null : `"${String(v)}" is not an effort — low, medium, high, xhigh or max; the step runs at the model's default`),
+    max_output_tokens: maxOutputProblem,
     apis: apisProblem,
     remotes: remotesProblem,
     budget: (v) => budgetProblem(v, ["run"]),
@@ -49,6 +55,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
   "flow": {
     schedule: cronProblem,
     effort: (v) => (resolveEffort(v) ? null : `"${String(v)}" is not an effort — low, medium, high, xhigh or max`),
+    max_output_tokens: maxOutputProblem,
     at: (v) => (parseInstant(v) ? null : `"${String(v)}" is not an ISO 8601 instant — a once flow with it never fires`),
     url: (v) => (/^https?:\/\//i.test(String(v)) ? null : `"${String(v)}" is not an http(s) URL`),
     every: DURATION(1, 30 * 86400, "1s to 30 days"),

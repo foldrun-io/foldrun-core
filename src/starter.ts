@@ -467,6 +467,7 @@ Indented under a step, any of:
 | \`verify: judge: <claim>\` | a model grades the claim against the output |
 | \`verify: contains:\` / \`not-contains:\` / \`matches:\` / \`file:\` | the cheap checks, no shell |
 | \`model:\` / \`effort:\` | override the flow's default for this step |
+| \`max_output_tokens:\` | the longest one reply may be, in tokens, for this step |
 | \`loop: 3\` / \`until: <condition>\` | repeat until it holds, at most 5 |
 | \`each: lines\` | run once per line of the previous result |
 | \`each: rows of <path>\` | run once per CSV row |
