@@ -440,6 +440,7 @@ export const PROVIDERS: readonly ProviderPreset[] = [
     maxTokensParam: "max_completion_tokens", reasoningEffort: true, promptCacheKey: true,
     note: "Reached over the Responses API (3 Nov 2026): GPT-6 Astra and GPT-6.1 Sol call tools there alone, GPT-6 Luna on Chat Completions only with reasoning off. `format: openai` still says Chat Completions, for an older model or a proxy that speaks only that." , search: "openai" },
   { name: "gemini", title: "Google Gemini", format: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", auth: "bearer",
+    reasoningEffort: true,
     note: "Google's OpenAI-compatible route. Unknown parameters are ignored silently; reasoning cannot be switched off on the newest models." },
   { name: "xai", title: "xAI Grok", format: "openai", baseUrl: "https://api.x.ai/v1", auth: "bearer",
     maxTokensParam: "max_completion_tokens", reasoningEffort: true },

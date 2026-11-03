@@ -284,6 +284,9 @@ export function toChatCompletions(
 
   const tools: Json[] = [];
   for (const t of (Array.isArray(req.tools) ? req.tools : []) as Json[]) {
+    // A tool deferred for Anthropic's tool search (the SDK always sends a
+    // placeholder) is not a tool this endpoint can call.
+    if (t.defer_loading === true) continue;
     if (t.type && t.type !== "custom") {
       drop.add(`server-side tool ${String(t.type)}`);
       continue;
@@ -441,6 +444,9 @@ export function toResponses(
 
   const tools: Json[] = [];
   for (const t of (Array.isArray(req.tools) ? req.tools : []) as Json[]) {
+    // A tool deferred for Anthropic's tool search (the SDK always sends a
+    // placeholder) is not a tool this endpoint can call.
+    if (t.defer_loading === true) continue;
     if (t.type && t.type !== "custom") {
       drop.add(`server-side tool ${String(t.type)}`);
       continue;
@@ -1089,6 +1095,13 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
         }
         // The status crosses unchanged, so a 401 or 429 from the provider
         // reads as one to the SDK — and to the fallback decision upstream.
+        // A refusal that says not to retry (the platform's gateway does)
+        // says so to the SDK too, or it retries a decision for minutes.
+        const noRetry = upstream.headers.get("x-should-retry");
+        if (noRetry) {
+          res.writeHead(upstream.status, { "content-type": "application/json", "x-should-retry": noRetry });
+          return void res.end(errorBody(upstream.status, message));
+        }
         return send(upstream.status, errorBody(upstream.status, message));
       }
 

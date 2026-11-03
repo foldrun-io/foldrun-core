@@ -51,6 +51,13 @@ export interface SendShape {
   thinking?: string[] | null;
   /** `output_config.effort`, as this provider spells it. */
   effort?: Record<string, string>;
+  /** A `system` message inside `messages` (Anthropic's mid-conversation
+   *  instructions, which the SDK sends) folded into the user turn before
+   *  it: the endpoint documents user and assistant roles only. */
+  mergeSystemMessages?: boolean;
+  /** Tools deferred for Anthropic's tool search (`defer_loading`; the SDK
+   *  always sends a placeholder) dropped: the endpoint cannot load them. */
+  dropDeferredTools?: boolean;
 }
 
 export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
@@ -104,7 +111,7 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     // enabled|disabled|adaptive (adaptive = enabled), budget_tokens ignored;
     // effort takes every word ours does (medium and xhigh = high). Context
     // editing and thinking.display are not in its schema.
-    send: { drop: ["context_management"], thinking: ["type", "budget_tokens"] },
+    send: { drop: ["context_management"], thinking: ["type", "budget_tokens"], mergeSystemMessages: true, dropDeferredTools: true },
   },
   moonshot: {
     name: "moonshot",
@@ -122,6 +129,8 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
       fields: ["model", "messages", "max_tokens", "system", "stream", "stop_sequences", "tools", "tool_choice", "metadata", "cache_control", "output_config"],
       thinking: null,
       effort: { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "max" },
+      mergeSystemMessages: true,
+      dropDeferredTools: true,
     },
   },
 };
@@ -209,6 +218,32 @@ export function shapeRequest(p: SupplyProvider, json: Record<string, unknown>): 
       const t = json.thinking as Record<string, unknown>;
       for (const k of Object.keys(t)) if (!shape.thinking.includes(k)) (delete t[k], (changed = true));
     }
+  }
+  if (shape.dropDeferredTools && Array.isArray(json.tools)) {
+    const kept = (json.tools as unknown[]).filter((t) => !(t && typeof t === "object" && (t as Record<string, unknown>).defer_loading === true));
+    if (kept.length !== json.tools.length) {
+      json.tools = kept;
+      changed = true;
+    }
+  }
+  if (shape.mergeSystemMessages && Array.isArray(json.messages)) {
+    const out: Record<string, unknown>[] = [];
+    const blocksOf = (c: unknown): Record<string, unknown>[] =>
+      typeof c === "string" ? [{ type: "text", text: c }] : Array.isArray(c) ? (c as Record<string, unknown>[]) : [];
+    for (const m of json.messages as Record<string, unknown>[]) {
+      if (!m || m.role !== "system") {
+        out.push(m);
+        continue;
+      }
+      changed = true;
+      // Its words only: an effort-only system message carries none.
+      const text = blocksOf(m.content).filter((b) => b && b.type === "text" && typeof b.text === "string" && b.text).map((b) => ({ type: "text", text: b.text }));
+      if (!text.length) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === "user") prev.content = [...blocksOf(prev.content), ...text];
+      else out.push({ role: "user", content: text });
+    }
+    json.messages = out;
   }
   const oc = json.output_config;
   if (shape.effort && oc && typeof oc === "object" && typeof (oc as Record<string, unknown>).effort === "string") {

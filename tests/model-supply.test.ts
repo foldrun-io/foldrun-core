@@ -253,3 +253,34 @@ test("each provider is sent only what its API documents: Kimi's schema, DeepSeek
   const claude = sdk();
   assert.equal(shapeRequest(SUPPLY_PROVIDERS.anthropic, claude), false, "Anthropic gets the request as written");
 });
+
+test("DeepSeek and Kimi: the SDK's mid-conversation system message joins the user turn; the deferred-tool placeholder is dropped (e2e, 3 Nov 2026)", async () => {
+  const { SUPPLY_PROVIDERS, shapeRequest } = await import("../src/model-supply.ts");
+  for (const p of [SUPPLY_PROVIDERS.deepseek, SUPPLY_PROVIDERS.moonshot]) {
+    const body: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: [{ type: "text", text: "# Environment\ncwd /work" }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "x" }] },
+        { role: "system", content: [] },
+      ],
+      tools: [{ name: "Read", input_schema: { type: "object" } }, { name: "DeferredToolPlaceholder", defer_loading: true, input_schema: { type: "object" } }],
+    };
+    assert.equal(shapeRequest(p, body), true);
+    assert.deepEqual(body.messages, [
+      { role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "# Environment\ncwd /work" }] },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "x" }] },
+    ], `${p.name}: no system role left, words kept, an empty one gone`);
+    assert.deepEqual((body.tools as { name: string }[]).map((t) => t.name), ["Read"]);
+  }
+});
+
+test("a refusal from foldrun's models is never retried as a busy provider (e2e, 3 Nov 2026)", async () => {
+  const { isTransientOverload } = await import("../src/runner.ts");
+  assert.equal(isTransientOverload("429 egress: the daily limit on foldrun's models is reached ($0.04 of $0.00 today, UTC)"), false);
+  assert.equal(isTransientOverload("503 egress: foldrun's models: gemini is not available on this platform right now"), false);
+  assert.equal(isTransientOverload("429 Too Many Requests: overloaded"), true, "a provider's own overload still is");
+});

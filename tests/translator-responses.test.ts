@@ -354,3 +354,16 @@ test("an image the agent opened reaches the model inside its tool result on Resp
   const out = (r.input as { type?: string; output?: unknown }[]).find((i) => i.type === "function_call_output")!;
   assert.deepEqual(out.output, [{ type: "input_text", text: "a.png" }, { type: "input_image", image_url: "data:image/png;base64,iVBOR", detail: "auto" }]);
 });
+
+test("Gemini is sent reasoning_effort; a deferred-tool placeholder is no tool on any translated endpoint (e2e, 3 Nov 2026)", async () => {
+  const { toChatCompletions, toResponses } = await import("../src/translator.ts");
+  const { providerPreset } = await import("../src/providers.ts");
+  const g = providerPreset("gemini")!;
+  assert.equal(g.reasoningEffort, true);
+  const req = { model: "gemini-3.8-flash", max_tokens: 10, messages: [], output_config: { effort: "xhigh" }, tools: [{ name: "Read", input_schema: { type: "object" } }, { name: "DeferredToolPlaceholder", defer_loading: true, input_schema: { type: "object" } }] };
+  const c = toChatCompletions(req, { stream: false, reasoningEffort: g.reasoningEffort });
+  assert.equal(c.reasoning_effort, "high");
+  assert.deepEqual((c.tools as { function: { name: string } }[]).map((t) => t.function.name), ["Read"]);
+  const r = toResponses({ ...req, model: "gpt-6.1-sol" }, { stream: false, reasoningEffort: true });
+  assert.deepEqual((r.tools as { name: string }[]).map((t) => t.name), ["Read"]);
+});

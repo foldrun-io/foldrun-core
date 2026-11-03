@@ -4168,6 +4168,10 @@ const MAX_BACKOFF_MS = 30_000;
  */
 export function isTransientOverload(text: string): boolean {
   if (/credits?\b|quota|billing|insufficient|payment|401|402|403/i.test(text)) return false;
+  // The platform's own answer on foldrun's models (no price, the day's cap,
+  // the provider withdrawn) is a decision, not load: a retry cannot change
+  // it (e2e check, 3 Nov 2026 — a cap refusal retried for minutes).
+  if (/foldrun's models/i.test(text)) return false;
   return /\b(429|503|529)\b|overloaded|rate.?limit|too many requests|try again/i.test(text);
 }
 
