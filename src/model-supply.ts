@@ -15,7 +15,7 @@
 
 import { providerPreset, type WireFormat } from "./providers.ts";
 
-export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "openrouter";
+export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "deepseek" | "moonshot";
 
 export interface SupplyProvider {
   name: SupplyProviderName;
@@ -48,15 +48,6 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
       { method: "GET", path: "/v1/models" },
     ],
   },
-  openrouter: {
-    name: "openrouter",
-    preset: "openrouter",
-    format: "anthropic",
-    host: "openrouter.ai",
-    auth: "bearer",
-    metered: ["/api/v1/messages"],
-    free: [{ method: "GET", path: "/api/v1/models" }],
-  },
   openai: {
     name: "openai",
     preset: "openai",
@@ -75,6 +66,29 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
     metered: ["/v1beta/openai/chat/completions"],
     free: [{ method: "GET", path: "/v1beta/openai/models" }],
   },
+  // DeepSeek and Moonshot (owner, 3 Nov 2026: directly, not through
+  // OpenRouter, whose price depends on which host it routes a call to).
+  // Both speak Anthropic's Messages API at /anthropic/v1/messages and report
+  // usage the same way; neither prices a provider-run tool we allow
+  // (DeepSeek's web search is a typed tool, refused like Anthropic's).
+  deepseek: {
+    name: "deepseek",
+    preset: "deepseek",
+    format: "anthropic",
+    host: "api.deepseek.com",
+    auth: "x-api-key",
+    metered: ["/anthropic/v1/messages"],
+    free: [],
+  },
+  moonshot: {
+    name: "moonshot",
+    preset: "moonshot",
+    format: "anthropic",
+    host: "api.moonshot.ai",
+    auth: "bearer",
+    metered: ["/anthropic/v1/messages"],
+    free: [],
+  },
 };
 
 export const SUPPLY_PROVIDER_NAMES = Object.keys(SUPPLY_PROVIDERS) as SupplyProviderName[];
@@ -84,7 +98,8 @@ export const SUPPLY_TITLES: Record<SupplyProviderName, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   gemini: "Google Gemini",
-  openrouter: "OpenRouter",
+  deepseek: "DeepSeek",
+  moonshot: "Moonshot Kimi",
 };
 
 export function isSupplyProvider(name: unknown): name is SupplyProviderName {
