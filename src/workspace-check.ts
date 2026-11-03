@@ -9,6 +9,9 @@ import { libraryTools } from "./library.ts";
 import { checkFiles, readTree } from "./deploy.ts";
 import type { DeployFile } from "./store.ts";
 import type { ScanFinding, ScanOptions } from "./scan.ts";
+import { platform } from "./platform.ts";
+import { SUPPLY_TITLES, effortRunsAs } from "./model-supply.ts";
+import { resolveTier, parseProvider } from "./store.ts";
 
 /** What the checks read of a workspace, at most. Data (state/ and memory/,
  *  what agents write) past these is left out and named; the rest past its
@@ -32,8 +35,37 @@ export function checkOptions(tenant: string, workspace: string): ScanOptions {
   const tools = { ...libraryTools(tenant), ...workspaceTools(tenant, workspace) };
   const outwardTools = Object.entries(tools).filter(([, d]) => (d as OutwardMark).outward === true).map(([n]) => n);
   // AGENTS.md, or the older project.md, as the runner reads it (Codex review).
-  const accountNetwork = readAgentsMdKeys(accountDir(tenant)).network;
-  return { outwardTools, accountNetwork };
+  const accountKeys = readAgentsMdKeys(accountDir(tenant));
+  const accountNetwork = accountKeys.network;
+  return { outwardTools, accountNetwork, ...effortCheck(tenant, accountKeys.provider) };
+}
+
+/**
+ * What an effort level runs at on the account's choice, for
+ * config/effort-fitted — when that choice is foldrun's models (a provider
+ * and its tiers the platform knows). An account AGENTS.md provider: block
+ * runs instead, and its own key's models are not the platform's to say.
+ */
+function effortCheck(tenant: string, accountProvider: unknown): Pick<ScanOptions, "effortRunsAs"> {
+  if (parseProvider(accountProvider)?.baseUrl) return {};
+  let answer: ReturnType<NonNullable<typeof platform.modelSupply>> | undefined;
+  try {
+    answer = platform.modelSupply?.(tenant);
+  } catch {
+    return {};
+  }
+  if (!answer || answer.kind !== "foldrun") return {};
+  const { provider, tiers } = answer;
+  const on = `foldrun's models (${SUPPLY_TITLES[provider]})`;
+  return {
+    effortRunsAs: (model, effort) => {
+      const tier = resolveTier(model);
+      const id = tier ? tiers[tier as "fast" | "default" | "max"] : model;
+      if (!id) return null; // a Claude tier word: Claude takes every level
+      const runs = effortRunsAs(provider, id, effort);
+      return runs ? { effort: runs, model: id, on } : null;
+    },
+  };
 }
 
 export function checkWorkspace(tenant: string, workspace: string, tree: DeployFile[] = checkTree(workspaceDir(tenant, workspace))): ScanFinding[] {

@@ -33,7 +33,7 @@ import { resolveNetwork } from "./network.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
 import { parseRemotes } from "./a2a-remotes.ts";
 import { isA2aPublished } from "./a2a-publish.ts";
-import { parseFlow, type FlowStep } from "./store.ts";
+import { parseFlow, resolveEffort, type FlowStep } from "./store.ts";
 
 export type ScanLevel = "error" | "warn" | "info";
 export type ScanCategory = "secret" | "security" | "content" | "supply-chain" | "config";
@@ -81,6 +81,10 @@ export interface ScanOptions {
   /** The account AGENTS.md's `network:` — the level above the workspace's,
    *  which the files of one workspace do not carry. */
   accountNetwork?: unknown;
+  /** What an effort level runs at on the model this account's steps run on
+   *  (a `model:` word or id, an effort word), and where — or null when that
+   *  is not known here (the CLI, offline: it knows no account's choice). */
+  effortRunsAs?: (model: string, effort: string) => { effort: string; model: string; on: string } | null;
 }
 
 export const OWASP_URL = "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026";
@@ -301,6 +305,16 @@ export const SCAN_RULES: readonly ScanRule[] = [
   {
     // 30 Oct 2026: check and the scheduler read a schedule with the same
     // cronCanFire (core cron.ts), so check says what the scheduler does.
+    id: "config/effort-fitted",
+    category: "config",
+    level: "warn",
+    title: "An effort level the model this account runs on does not have",
+    help:
+      "Each model takes its own effort levels: GPT-6 and Claude take all five, Gemini stops at high, Kimi has low, high and max. " +
+      "The step still runs, at the nearest level the model has, and the step's log says so. Write the level it has, or choose " +
+      "a provider whose model has the one you want (Settings → Model provider).",
+  },
+  {
     id: "config/cron-never-fires",
     category: "config",
     level: "warn",
@@ -995,6 +1009,76 @@ export const PER_FILE_RULE = 100;
  * then line, and one rule says one thing once per line, and at most
  * PER_FILE_RULE times in one file.
  */
+/**
+ * An `effort:` the model a step will run on does not have: warned, not
+ * refused — the step runs at the nearest level, and a file stays valid when
+ * the account changes provider. Agents' own effort, a flow's default and a
+ * step's override, each on the model it would run with.
+ */
+function scanEfforts(agents: AgentFacts[], flows: FlowFacts[], runsAs: NonNullable<ScanOptions["effortRunsAs"]>, push: Push): void {
+  const say = (file: string, line: number | undefined, effort: string, model: string, whence: string) => {
+    const r = runsAs(model, effort);
+    if (!r || r.effort === effort) return;
+    push(
+      "config/effort-fitted",
+      file,
+      line,
+      `config/effort-fitted ${file} ${whence} ${effort} ${r.model}`,
+      `effort: ${effort}${whence} runs as ${r.effort} on ${r.on} (${r.model}) — the nearest level that model has.`,
+    );
+  };
+  // Each agent: its own effort on its own model, as the runner reads them
+  // (resolveEffort: MAX, maximum, extra-high … are levels too).
+  const byName = new Map<string, { model: string; raw: unknown }>();
+  const ownProvider = new Set<string>();
+  for (const a of agents) {
+    const model = typeof a.data.model === "string" && a.data.model.trim() ? a.data.model.trim() : "default";
+    const effort = resolveEffort(a.data.effort);
+    byName.set(a.name, { model, raw: a.data.effort });
+    // An agent with its own provider: runs there, not on the account's choice.
+    if (a.data.provider) {
+      ownProvider.add(a.name);
+      continue;
+    }
+    if (effort) say(a.file, keyLine(a.lines, "effort"), effort, model, "");
+  }
+  // Each flow step: effort and model resolved step → flow → agent, the way
+  // runStep does, and said where the effort was written (Codex review).
+  for (const fl of flows) {
+    let info: ReturnType<typeof parseFlow>;
+    try {
+      info = parseFlow(fl.file, fl.content);
+    } catch {
+      continue;
+    }
+    const steps = [...(info.steps ?? [])].sort((x, y) => (x.line ?? 0) - (y.line ?? 0));
+    const flowEffortLine = keyLine(fl.lines, "effort");
+    steps.forEach((st, i) => {
+      if (st.subflow || ownProvider.has(st.agent)) return;
+      const agent = byName.get(st.agent);
+      // The written value that wins, then read — runStep's order: a step's
+      // effort (even one that names no level) is the step's (Codex review).
+      const from = st.effort != null ? "step" : info.effort != null ? "flow" : "agent";
+      const effort = resolveEffort(from === "step" ? st.effort : from === "flow" ? info.effort : agent?.raw);
+      if (!effort) return;
+      const model = st.model ?? info.model ?? agent?.model ?? "default";
+      if (from === "step") {
+        // The step's own `effort:` line, within this step's lines.
+        const from = st.line ?? 1;
+        const to = steps[i + 1]?.line ?? fl.lines.length + 1;
+        let at: number | undefined;
+        for (let n = from; n < to; n++) if (/^\s+effort\s*:/.test(fl.lines[n - 1] ?? "")) at = n;
+        say(fl.file, at ?? st.line, effort, model, ` (step ${st.agent})`);
+      } else if (from === "flow") {
+        say(fl.file, flowEffortLine, effort, model, ` (the flow's, on step ${st.agent})`);
+      } else if (st.model || info.model) {
+        // The agent's own effort, on a model this flow chose for it.
+        say(fl.file, st.line, effort, model, ` (${st.agent}'s own, on this step's model)`);
+      }
+    });
+  }
+}
+
 export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFinding[] {
   const want = options.only?.length ? new Set(options.only) : null;
   const enabled = (rule: string) => !want || want.has(rule) || want.has(scanRule(rule)?.category ?? "") || rule === "check/ignore-needs-reason";
@@ -1096,6 +1180,9 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
   const workspaceMd = files.find((f) => f.path === "AGENTS.md") ?? files.find((f) => f.path === "project.md");
   const legs = scanAgents(agents, outward, toolDefs, push, { account: options.accountNetwork, workspace: workspaceMd ? frontOf(workspaceMd.content, "AGENTS.md")?.network : undefined });
   scanPublishedFlows(flows, legs, push);
+  // A workspace that names its own provider: does not run on the account's
+  // choice, so the account's models say nothing about its efforts.
+  if (options.effortRunsAs && !(workspaceMd && frontOf(workspaceMd.content, "AGENTS.md")?.provider)) scanEfforts(agents, flows, options.effortRunsAs, push);
   for (const m of more.values()) {
     findings.push({ rule: m.rule, level: m.level ?? scanRule(m.rule)?.level ?? "warn", file: m.file, message: `and ${m.n} more like this in this file, not listed`, fingerprint: m.hash.digest("hex").slice(0, 16), truncated: true });
   }

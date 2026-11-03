@@ -14,6 +14,7 @@
 // environment), the operator lists it, and the price list names the model.
 
 import { providerPreset, type WireFormat } from "./providers.ts";
+import { fitEffort, EFFORT_ORDER } from "./effort-fit.ts";
 
 export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "deepseek" | "moonshot";
 
@@ -222,4 +223,24 @@ export function shapeRequest(p: SupplyProvider, json: Record<string, unknown>): 
     }
   }
   return changed;
+}
+
+/** DeepSeek takes every foldrun word but runs three levels (its docs:
+ *  "medium and xhigh both map to high"). Said, not rewritten. */
+const DEEPSEEK_RUNS: Record<string, string> = { low: "low", medium: "high", high: "high", xhigh: "high", max: "max" };
+
+/**
+ * The effort a foldrun level actually runs at on one of foldrun's models:
+ * the provider's own aliases (DeepSeek), its reshaping (Kimi), the model's
+ * levels on an OpenAI-shaped endpoint (OpenAI, Gemini), or the level itself
+ * (Claude takes all five). Null for a word that is not one of ours. What a
+ * check tells a developer, from the same tables the wire uses.
+ */
+export function effortRunsAs(provider: SupplyProviderName, model: string, word: string): string | null {
+  if (!(EFFORT_ORDER as readonly string[]).includes(word)) return null;
+  const p = SUPPLY_PROVIDERS[provider];
+  if (p.send?.effort) return p.send.effort[word] ?? null;
+  if (provider === "deepseek") return DEEPSEEK_RUNS[word] ?? null;
+  if (p.format === "anthropic") return word;
+  return fitEffort(model, word);
 }

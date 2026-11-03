@@ -302,3 +302,46 @@ test("the count past PER_FILE_RULE is marked truncated, and a baseline of it doe
   assert.equal(changed.length, PER_FILE_RULE + 1, "the same count");
   assert.equal(applyBaseline(changed, baseline).kept.length, 1, "but what it counts changed, so it is new");
 });
+
+test("config/effort-fitted: an effort the account's model lacks is warned with what it runs as — never refused (3 Nov 2026)", async () => {
+  const { effortRunsAs } = await import("../src/model-supply.ts");
+  // The account runs on foldrun's models, Gemini: default → gemini-3.8-flash.
+  const tiers: Record<string, string> = { fast: "gemini-3.5-flash-lite", default: "gemini-3.8-flash", max: "gemini-4-argon" };
+  const gemini = (model: string, effort: string) => {
+    const id = tiers[model] ?? model;
+    const runs = effortRunsAs("gemini", id, effort);
+    return runs ? { effort: runs, model: id, on: "foldrun's models (Google Gemini)" } : null;
+  };
+  const files = [
+    { path: "agents/deep/agent.md", content: "---\nname: deep\nmodel: max\neffort: max\n---\nThink hard.\n" },
+    { path: "agents/fine/agent.md", content: "---\nname: fine\neffort: high\n---\nOk.\n" },
+    { path: "agents/own/agent.md", content: "---\nname: own\neffort: max\nprovider: { name: openai, token: \"${OPENAI_API_KEY}\" }\n---\nMine.\n" },
+    { path: "flows/f.md", content: "---\ntrigger: manual\neffort: xhigh\n---\n1. [[fine]] — go\n   effort: max\n2. [[own]] — mine\n   effort: max\n3. [[fine]] — inherits the flow's xhigh\n" },
+  ];
+  const found = scanFiles(files, { effortRunsAs: gemini }).filter((f) => f.rule === "config/effort-fitted");
+  assert.deepEqual(found.map((f) => `${f.file}:${f.line}`).sort(), ["agents/deep/agent.md:4", "flows/f.md:3", "flows/f.md:6"], "step 3 inherits the flow's xhigh");
+  assert.ok(found.every((f) => f.level === "warn"));
+  assert.match(found.find((f) => f.file === "agents/deep/agent.md")!.message, /effort: max runs as high on foldrun's models \(Google Gemini\) \(gemini-4-argon\)/);
+  assert.equal(scanFiles(files).filter((f) => f.rule === "config/effort-fitted").length, 0, "offline (no account): nothing to say");
+  // Codex review: inherited effort on each step's own model; the right
+  // step's line when two say the same; the runner's spellings.
+  const more = [
+    { path: "agents/plain/agent.md", content: "---\nname: plain\nmodel: fast\neffort: MAX\n---\nGo.\n" },
+    { path: "agents/calm/agent.md", content: "---\nname: calm\neffort: high\n---\nGo.\n" },
+    { path: "flows/g.md", content: "---\ntrigger: manual\n---\n1. [[calm]] — a\n   effort: max\n2. [[calm]] — b\n   model: fast\n   effort: max\n3. [[plain]] — c\n" },
+  ];
+  const g = scanFiles(more, { effortRunsAs: gemini }).filter((f) => f.rule === "config/effort-fitted");
+  const at = g.map((f) => `${f.file}:${f.line}`).sort();
+  assert.ok(at.includes("agents/plain/agent.md:4"), "MAX is max, as the runner reads it");
+  assert.ok(at.includes("flows/g.md:5") && at.includes("flows/g.md:8"), `each step's own line: ${at.join(", ")}`);
+  assert.match(g.find((f) => f.line === 8)!.message, /gemini-3.5-flash-lite/, "step 2 on the model it chose");
+  // A step whose effort names no level runs at the model's default, as the
+  // runner does: the flow's level is not it.
+  const bad = scanFiles([{ path: "agents/calm/agent.md", content: "---\nname: calm\n---\nGo.\n" }, { path: "flows/h.md", content: "---\ntrigger: manual\neffort: max\n---\n1. [[calm]] — a\n   effort: loudly\n" }], { effortRunsAs: gemini });
+  assert.equal(bad.filter((f) => f.rule === "config/effort-fitted").length, 0);
+  // Kimi: medium runs as high; Claude and GPT-6: as written.
+  assert.equal(effortRunsAs("moonshot", "kimi-k3.1-pro", "medium"), "high");
+  assert.equal(effortRunsAs("deepseek", "deepseek-flash", "xhigh"), "high");
+  assert.equal(effortRunsAs("openai", "gpt-6.1-sol", "max"), "max");
+  assert.equal(effortRunsAs("anthropic", "claude-opus-5-5", "xhigh"), "xhigh");
+});
