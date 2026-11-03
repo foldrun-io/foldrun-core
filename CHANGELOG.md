@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [13.1.1] — 2026-11-03
+
+- docs(starter): the account AGENTS.md template names foldrun's models ([f767b89](https://github.com/foldrun-io/foldrun-core/commit/f767b89))
+
 ## [13.1.0] — 2026-11-03
 
 - refactor(model-supply): the platform's provider keys are not environment variables ([0538f76](https://github.com/foldrun-io/foldrun-core/commit/0538f76))
