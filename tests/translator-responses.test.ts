@@ -321,3 +321,36 @@ test("responses: cached input tokens come back as cache reads", () => {
   ) as { usage: Record<string, number> };
   assert.deepEqual(msg.usage, { input_tokens: 500, output_tokens: 7, cache_read_input_tokens: 1500 });
 });
+
+test("each model is sent the effort levels it takes: GPT-6 all five, Gemini up to high, an unknown model the safe three (3 Nov 2026)", async () => {
+  const { toResponses, toChatCompletions, fitEffort } = await import("../src/translator.ts");
+  for (const w of ["low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(fitEffort("gpt-6.1-sol", w), w);
+    assert.equal(fitEffort("openai/gpt-6-astra", w), w, "a provider prefix is ignored");
+  }
+  assert.equal(fitEffort("gemini-3.8-flash", "xhigh"), "high");
+  assert.equal(fitEffort("gemini-4-argon", "max"), "high");
+  assert.equal(fitEffort("gpt-5.4", "max"), "high", "not listed: never a word it may not know");
+  assert.equal(fitEffort("gpt-6.1-sol", "loud"), null);
+  const r = toResponses({ model: "gpt-6-luna", max_tokens: 10, messages: [], output_config: { effort: "max" } }, { stream: false, reasoningEffort: true });
+  assert.deepEqual(r.reasoning, { effort: "max" });
+  const c = toChatCompletions({ model: "gemini-3.8-flash", max_tokens: 10, messages: [], output_config: { effort: "xhigh" } }, { stream: false, reasoningEffort: true });
+  assert.equal(c.reasoning_effort, "high");
+});
+
+test("an image the agent opened reaches the model inside its tool result on Responses", async () => {
+  const { toResponses } = await import("../src/translator.ts");
+  const r = toResponses(
+    {
+      model: "gpt-6.1-sol",
+      max_tokens: 10,
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "Read", input: { p: "a.png" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: [{ type: "text", text: "a.png" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBOR" } }] }] },
+      ],
+    },
+    { stream: false },
+  );
+  const out = (r.input as { type?: string; output?: unknown }[]).find((i) => i.type === "function_call_output")!;
+  assert.deepEqual(out.output, [{ type: "input_text", text: "a.png" }, { type: "input_image", image_url: "data:image/png;base64,iVBOR", detail: "auto" }]);
+});

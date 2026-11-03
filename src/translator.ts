@@ -125,14 +125,18 @@ export interface RunningTranslator {
 
 interface Dropped {
   add(what: string): void;
+  /** Something sent differently, not dropped: said as written. */
+  note(what: string): void;
   lines(): string[];
 }
 
 function dropped(): Dropped {
   const seen = new Set<string>();
+  const notes = new Set<string>();
   return {
     add: (w) => void seen.add(w),
-    lines: () => [...seen].map((w) => `translator: dropped ${w} — the endpoint has no equivalent`),
+    note: (w) => void notes.add(w),
+    lines: () => [...[...seen].map((w) => `translator: dropped ${w} — the endpoint has no equivalent`), ...[...notes].map((w) => `translator: ${w}`)],
   };
 }
 
@@ -159,6 +163,55 @@ function stableId(id: string): string {
  * gemini, deepseek-r, qwen thinking) keeps getting the knob, because on a
  * gateway the id alone cannot say and an ignored field costs nothing.
  */
+/** foldrun's effort words, low to high (frontmatter-fields EFFORT_LEVELS). */
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * The reasoning-effort words each model takes on an OpenAI-shaped endpoint
+ * (Chat Completions' reasoning_effort, Responses' reasoning.effort), from
+ * the providers' own pages; the first match wins. A model not listed gets
+ * low | medium | high, which every reasoning model there has taken — a
+ * word it might not know is never sent on a guess. Add a row when a model
+ * documents more (or fewer).
+ */
+export const MODEL_EFFORTS: readonly { match: RegExp; levels: readonly string[]; source: string }[] = [
+  {
+    // "reasoning.effort supports low, medium (default), high, xhigh, and max"
+    // (Luna also none, which no foldrun word asks for).
+    match: /^gpt-6(?:\.\d+)?-(?:astra|sol|luna)(?:$|-)/,
+    levels: ["low", "medium", "high", "xhigh", "max"],
+    source: "developers.openai.com/api/docs/models, 3 Nov 2026",
+  },
+  {
+    // reasoning_effort minimal | low | medium | high; thinking cannot be
+    // turned off on Gemini 3 and later.
+    match: /^gemini-/,
+    levels: ["low", "medium", "high"],
+    source: "ai.google.dev/gemini-api/docs/openai, 3 Nov 2026",
+  },
+];
+const DEFAULT_EFFORTS = ["low", "medium", "high"] as const;
+
+/** The levels a model takes, by its id (a provider prefix ignored). */
+export function effortsOf(model: string): readonly string[] {
+  const id = String(model).split("/").pop()?.toLowerCase() ?? "";
+  return MODEL_EFFORTS.find((m) => m.match.test(id))?.levels ?? DEFAULT_EFFORTS;
+}
+
+/**
+ * A foldrun effort word as this model takes it: the word itself when the
+ * model has it, else the nearest level below that it has (xhigh on a model
+ * that stops at high runs as high), else its lowest. Null for a word that
+ * is not one of ours.
+ */
+export function fitEffort(model: string, word: string): string | null {
+  const want = (EFFORT_ORDER as readonly string[]).indexOf(word);
+  if (want < 0) return null;
+  const levels = effortsOf(model);
+  for (let i = want; i >= 0; i--) if (levels.includes(EFFORT_ORDER[i]!)) return EFFORT_ORDER[i]!;
+  return EFFORT_ORDER.find((l) => levels.includes(l)) ?? null;
+}
+
 export function modelRejectsReasoning(model: string): boolean {
   const id = String(model).split("/").pop()?.toLowerCase() ?? "";
   return /^(gpt-3|gpt-4|chatgpt|gpt-5-chat|davinci|babbage)/.test(id);
@@ -314,7 +367,10 @@ export function toChatCompletions(
   const effortWord =
     typeof req.effort === "string" ? req.effort : (req.output_config as Json | undefined)?.effort;
   let effort: string | null = null;
-  if (typeof effortWord === "string") effort = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" }[effortWord] ?? null;
+  if (typeof effortWord === "string") {
+    effort = fitEffort(String(req.model), effortWord);
+    if (effort && effort !== effortWord) drop.note(`effort ${effortWord} runs as ${effort} on ${String(req.model)} — the nearest level it takes`);
+  }
   else if (thinking && thinking.type === "enabled") {
     const b = Number(thinking.budget_tokens) || 0;
     effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
@@ -387,8 +443,18 @@ export function toResponses(
       if (b.type === "tool_result") {
         const inner = b.content;
         const text = typeof inner === "string" ? inner : textOf(inner);
-        input.push({ type: "function_call_output", call_id: String(b.tool_use_id), output: text || (b.is_error ? "error" : "ok") });
-        if (Array.isArray(inner) && (inner as Json[]).some((x) => x.type === "image")) drop.add("images inside tool results");
+        // A tool result that holds images (a picture the agent opened) is
+        // sent as a list of parts, which Responses takes in a tool output.
+        const images = Array.isArray(inner)
+          ? (inner as Json[]).flatMap((x) => {
+              const src = x.type === "image" ? (x.source as Json | undefined) : undefined;
+              if (src?.type === "base64" && typeof src.data === "string") return [{ type: "input_image", image_url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}`, detail: "auto" }];
+              if (src?.type === "url" && typeof src.url === "string") return [{ type: "input_image", image_url: src.url, detail: "auto" }];
+              return [];
+            })
+          : [];
+        const output = images.length ? [...(text ? [{ type: "input_text", text }] : []), ...images] : text || (b.is_error ? "error" : "ok");
+        input.push({ type: "function_call_output", call_id: String(b.tool_use_id), output });
       } else if (b.type === "text") {
         parts.push({ type: "input_text", text: String(b.text ?? "") });
       } else if (b.type === "image") {
@@ -454,7 +520,10 @@ export function toResponses(
   const effortWord =
     typeof req.effort === "string" ? req.effort : (req.output_config as Json | undefined)?.effort;
   let effort: string | null = null;
-  if (typeof effortWord === "string") effort = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" }[effortWord] ?? null;
+  if (typeof effortWord === "string") {
+    effort = fitEffort(String(req.model), effortWord);
+    if (effort && effort !== effortWord) drop.note(`effort ${effortWord} runs as ${effort} on ${String(req.model)} — the nearest level it takes`);
+  }
   else if (thinking && thinking.type === "enabled") {
     const b = Number(thinking.budget_tokens) || 0;
     effort = b <= 2048 ? "low" : b <= 8192 ? "medium" : "high";
