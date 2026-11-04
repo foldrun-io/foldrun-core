@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.3.2] — 2026-11-04
+
+- chore(deps): bump the minor-and-patch group across 1 directory with 2 updates (#40) ([efac52b](https://github.com/foldrun-io/foldrun-core/commit/efac52b))
+
 ## [14.3.1] — 2026-11-03
 
 - ci(release): publish with npm provenance ([663417c](https://github.com/foldrun-io/foldrun-core/commit/663417c))
