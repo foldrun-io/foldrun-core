@@ -232,9 +232,12 @@ export async function decideApproval(
   }
   assertMayDecide(tenant, workspace, run, d);
 
+  // With no step named, a decision is for the gates waiting on a person: a
+  // `wait: event` step waits on its event, and is approved by its payload or
+  // rejected by name (5 Nov 2026: an unnamed reject failed it too).
   const waiting = run.steps
     .map((s, i) => ({ s, i }))
-    .filter(({ s, i }) => s.status === "awaiting-approval" && (d.step === undefined || d.step === i) && (allowed === null || allowed.includes(i)));
+    .filter(({ s, i }) => s.status === "awaiting-approval" && (d.step === undefined ? s.waitFor !== "event" : d.step === i) && (allowed === null || allowed.includes(i)));
   if (waiting.length === 0) throw new ApprovalError("nothing is awaiting approval", 409);
 
   const note = typeof d.note === "string" ? d.note.trim() : "";

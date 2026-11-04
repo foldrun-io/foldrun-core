@@ -191,3 +191,27 @@ test("a decided gate leaves no deadline behind for the next one", () =>
     await decideApproval("acme", "desk", "run-1", { decision: "approve", by: "by a human" });
     assert.equal(readRun("acme", "desk", "run-1")!.approveBy, null);
   }));
+
+// ------------------------------------------------------- wait: event beside a gate
+
+test("a decision that names no step is for the person's gates: a wait: event step beside them keeps waiting", () =>
+  withFlow("description: plain", async () => {
+    const run = park();
+    run.steps.push({ ...run.steps[0], agent: "listener", instruction: "wait for the webhook", approve: false, waitFor: "event" } as RunRecord["steps"][number]);
+    writeRun("acme", "desk", run);
+    const { steps } = await decideApproval("acme", "desk", "run-1", { decision: "reject", by: "by a human", actor: { email: "sam@example.com", role: "editor" } });
+    assert.deepEqual(steps, [0]);
+    const after = readRun("acme", "desk", "run-1")!;
+    assert.equal(after.steps[0].status, "failed");
+    assert.equal(after.steps[1].status, "awaiting-approval", "the event step is not rejected by an unnamed reject");
+  }));
+
+test("a wait: event step named by its number is still rejected", () =>
+  withFlow("description: plain", async () => {
+    const run = park();
+    run.steps[0] = { ...run.steps[0], approve: false, waitFor: "event" } as RunRecord["steps"][number];
+    writeRun("acme", "desk", run);
+    await assert.rejects(() => decideApproval("acme", "desk", "run-1", { decision: "reject", by: "by a human", actor: null }), /nothing is awaiting approval/);
+    const { steps } = await decideApproval("acme", "desk", "run-1", { decision: "reject", step: 0, by: "by a human", actor: null });
+    assert.deepEqual(steps, [0]);
+  }));
