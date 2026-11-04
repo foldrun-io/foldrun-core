@@ -87,4 +87,13 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run release-merge.yml -R "$GITHUB_REPOSITORY" --ref main
+        # GitHub answers this with a 5xx now and then (4 Nov 2026). This job is
+        # part of ci, and release-merge.yml merges only on a green ci, so a red
+        # hint held release 14.3.3 for an hour. Three tries, then a warning:
+        # release-merge's own schedule merges the release anyway.
+        run: |
+          for n in 1 2 3; do
+            gh workflow run release-merge.yml -R "$GITHUB_REPOSITORY" --ref main && exit 0
+            if [ "$n" -lt 3 ]; then sleep $((n * 20)); fi
+          done
+          echo "::warning::could not start release-merge.yml — its schedule merges this release"

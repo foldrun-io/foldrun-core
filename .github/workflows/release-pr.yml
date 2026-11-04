@@ -69,7 +69,12 @@ jobs:
             exit 0
           fi
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-          git push --force origin release/next
+          # Three tries: a GitHub 5xx failed this push on 4 Nov 2026.
+          for n in 1 2 3; do
+            git push --force origin release/next && break
+            if [ "$n" -eq 3 ]; then exit 1; fi
+            sleep $((n * 20))
+          done
 
       - name: open or update the pull request
         if: steps.draft.outputs.version
