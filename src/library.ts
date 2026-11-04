@@ -28,6 +28,8 @@ import {
   listWorkspaces,
   listAgents,
   workspaceDir,
+  deleteWorkspacePath,
+  assertDeletable,
   type ToolDef,
 } from "./store.ts";
 
@@ -438,3 +440,183 @@ registerTreeReader((tenant, scope) => {
 });
 
 
+
+
+/** The workspace folders "Move to shared" applies to: the library's kinds
+ *  but hooks, whose run.mjs is code a shared hook is made for on purpose. */
+export const SHAREABLE_KINDS = ["skills", "tools", "scripts", "knowledge", "memory"] as const;
+
+const refusal = (message: string, status: number) => Object.assign(new Error(message), { status });
+
+/**
+ * Move a workspace's skill, tool, script, knowledge or memory file into the
+ * account library — the dashboard's and `foldrun source share`'s "Move to
+ * shared", done here in one call (5 Nov 2026). Done by the client it copied
+ * one file and deleted the folder (a skill's other files were lost), and a
+ * folder tool's path was flattened.
+ *
+ * A skill or folder tool moves as its whole folder; anything else names one
+ * file. Everything is checked before anything is written: a file the library
+ * cannot hold (an image, a binary), one too large, broken frontmatter, or a
+ * library file already at a path (unless `overwrite`) refuses the move and
+ * nothing changes. Then every file is copied and the original deleted, in
+ * one synchronous step. `dryRun` answers what would move.
+ */
+export function moveToLibrary(
+  tenant: string,
+  workspace: string,
+  rel: string,
+  opts: { overwrite?: boolean; dryRun?: boolean; by?: string } = {},
+): { kind: LibraryKind; unit: string; files: { from: string; to: string; replaces: boolean }[]; moved: boolean } {
+  const clean = path.normalize(String(rel ?? "")).replaceAll("\\", "/").replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+  if (!clean || clean === "." || clean.startsWith("..") || path.isAbsolute(clean)) throw refusal(`illegal path: ${rel}`, 400);
+  const [kind, ...rest] = clean.split("/");
+  if (kind === "hooks") throw refusal("a hook is a folder whose run.mjs goes with it — make a shared one with `foldrun hook add <name> --library`", 400);
+  if (!(SHAREABLE_KINDS as readonly string[]).includes(kind) || !rest.length) {
+    throw refusal(`"${rel}" is not under ${SHAREABLE_KINDS.join("/, ")}/ — only those move to the shared library`, 400);
+  }
+  const dir = workspaceDir(tenant, workspace);
+  const folderKind = kind === "skills" || kind === "tools";
+  // skills/x/SKILL.md or tools/x/tool.md names its folder: the folder is the unit.
+  const unit = folderKind && rest.length >= 2 ? `${kind}/${rest[0]}` : clean;
+  const full = path.join(dir, unit);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(full);
+  } catch {
+    throw refusal(`no ${unit} in ${workspace}`, 404);
+  }
+  if (stat.isSymbolicLink()) throw refusal(`${unit} is a link — move what it points at instead`, 400);
+  if (stat.isDirectory() && !(folderKind && unit.split("/").length === 2)) {
+    throw refusal(`${unit} is a folder — name a file in it (only a skill or a folder tool moves as a folder)`, 400);
+  }
+  const realDir = fs.realpathSync(dir);
+  if (!fs.realpathSync(full).startsWith(realDir + path.sep)) throw refusal(`illegal path: ${rel}`, 400);
+  // The original is deleted last, so ask now whether that delete would go
+  // through: a file the workspace cannot do without (knowledge/index.md, a
+  // memory log) or a folder that is not a whole unit is refused before the
+  // library is touched.
+  try {
+    const d = assertDeletable(tenant, workspace, unit);
+    if (stat.isDirectory() !== d.folder) throw new Error(`${unit} cannot be moved as one thing`);
+  } catch (err) {
+    throw refusal(`${(err as Error).message} — nothing was moved`, 409);
+  }
+
+  const members: string[] = stat.isDirectory()
+    ? (fs.readdirSync(full, { recursive: true }) as string[])
+        .map((e) => path.join(full, String(e)))
+        .filter((e) => {
+          const st = fs.lstatSync(e);
+          if (st.isSymbolicLink()) throw refusal(`${path.relative(dir, e)} is a link — the library holds files, not links; nothing was moved`, 409);
+          return st.isFile();
+        })
+        .map((e) => path.relative(dir, e).split(path.sep).join("/"))
+        .sort()
+    : [unit];
+  if (!members.length) throw refusal(`${unit} is empty — nothing to move`, 400);
+
+  const files: { from: string; to: string; replaces: boolean; content: string }[] = [];
+  const cannot: string[] = [];
+  for (const from of members) {
+    const to = from.slice(kind.length + 1);
+    try {
+      assertLibraryPath(kind as LibraryKind, to);
+    } catch {
+      cannot.push(from);
+      continue;
+    }
+    // Text in the library's sense: an allowed extension AND bytes that are
+    // UTF-8, or reading it as text would change it and the original goes.
+    const bytes = fs.readFileSync(path.join(dir, from));
+    const content = bytes.toString("utf8");
+    if (!Buffer.from(content, "utf8").equals(bytes)) {
+      cannot.push(from);
+      continue;
+    }
+    if (content.length > MAX_EDITABLE_FILE) throw refusal(`${from} is too large for the library (over ${Math.round(MAX_EDITABLE_FILE / 1024)} KB); nothing was moved`, 409);
+    if (to.endsWith(".md")) {
+      try {
+        matter(content);
+      } catch {
+        throw refusal(`${from} has frontmatter that does not parse; fix it first — nothing was moved`, 409);
+      }
+    }
+    files.push({ from, to, replaces: libraryFileExists(tenant, kind as LibraryKind, to), content });
+  }
+  if (cannot.length) {
+    throw refusal(`${unit} holds files the shared library cannot hold (${cannot.join(", ")}) — only text files go there; nothing was moved`, 409);
+  }
+  // A file already where one of these needs a folder (or a folder where one
+  // needs a file) would stop the copy halfway: refuse it now.
+  // And no link anywhere on the library side: a write through one could land
+  // back in the workspace, and the delete after it would take the only copy.
+  const shelf = libraryDir(tenant, kind as LibraryKind);
+  const linked = (p: string) => {
+    try {
+      return fs.lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  for (const up of [path.dirname(shelf), shelf]) {
+    if (linked(up)) throw refusal(`the library's ${kind} shelf is a link — nothing was moved`, 409);
+  }
+  for (const f of files) {
+    const parts = f.to.split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const at = path.join(shelf, ...parts.slice(0, i));
+      if (linked(at)) throw refusal(`the library has a link at ${kind}/${parts.slice(0, i).join("/")} — nothing was moved`, 409);
+      if (i < parts.length && fs.existsSync(at) && !fs.statSync(at).isDirectory()) throw refusal(`the library has a file at ${kind}/${parts.slice(0, i).join("/")}, where ${kind}/${f.to} needs a folder — nothing was moved`, 409);
+      if (i === parts.length && fs.existsSync(at) && fs.statSync(at).isDirectory()) throw refusal(`the library has a folder at ${kind}/${f.to} — nothing was moved`, 409);
+    }
+    // The bundle files a write keeps beside it (syncBundleFor) are written too.
+    for (const keeper of ["index.md", "log.md"]) {
+      const at = path.join(shelf, path.dirname(f.to), keeper);
+      if (linked(at)) throw refusal(`the library has a link at ${kind}/${path.join(path.dirname(f.to), keeper)} — nothing was moved`, 409);
+    }
+  }
+  const taken = files.filter((f) => f.replaces);
+  const answer = { kind: kind as LibraryKind, unit, files: files.map(({ from, to, replaces }) => ({ from, to, replaces })) };
+  if (taken.length && !opts.overwrite && !opts.dryRun) {
+    throw refusal(`the library already has ${taken.map((f) => `${kind}/${f.to}`).join(", ")} — nothing was moved; overwrite replaces ${taken.length === 1 ? "it" : "them"}`, 409);
+  }
+  if (opts.dryRun) return { ...answer, moved: false };
+  // Copy, then delete; if anything fails on the way, put the library back
+  // as it was (each undo is a revision too), so a move is all or nothing.
+  const done: { to: string; before: string | null }[] = [];
+  try {
+    for (const f of files) {
+      // On the undo list before the write: a writer that fails after the
+      // file landed (its chmod, index or revision) is undone too.
+      done.push({ to: f.to, before: f.replaces ? readLibraryFile(tenant, kind as LibraryKind, f.to) : null });
+      writeLibraryFile(tenant, kind as LibraryKind, f.to, f.content, { by: opts.by, message: `moved from ${workspace}/${f.from}` });
+    }
+  } catch (err) {
+    undo(err);
+  }
+  try {
+    deleteWorkspacePath(tenant, workspace, unit, { by: opts.by, message: `moved ${unit} to the shared library` });
+  } catch (err) {
+    // Gone already, even in part (the delete landed, or stopped halfway, or
+    // its bookkeeping failed): the library copy is now the only whole one —
+    // keep it, and say so. Undo only while every original is still there.
+    if (!members.every((m) => fs.existsSync(path.join(dir, m)))) {
+      throw refusal(`moved ${unit} to the shared library, but recording it in ${workspace}'s history failed — ${(err as Error).message}`, 500);
+    }
+    undo(err);
+  }
+  return { ...answer, moved: true };
+
+  function undo(err: unknown): never {
+    for (const d of done.reverse()) {
+      try {
+        if (d.before === null) deleteLibraryPath(tenant, kind as LibraryKind, d.to, { by: opts.by, message: "move to shared undone" });
+        else writeLibraryFile(tenant, kind as LibraryKind, d.to, d.before, { by: opts.by, message: "move to shared undone" });
+      } catch {
+        // best effort: the error below says the move failed
+      }
+    }
+    throw refusal(`could not move ${unit} — ${(err as Error).message}; the library was put back and ${unit} is still in ${workspace}`, (err as { status?: number }).status ?? 500);
+  }
+}

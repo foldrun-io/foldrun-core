@@ -3104,7 +3104,14 @@ function deletionsUnder(dir: string, norm: string): RevisionFile[] {
     }));
 }
 
-export function deleteWorkspacePath(tenant: string, workspace: string, rel: string, meta: ChangeMeta = {}) {
+/**
+ * What deleteWorkspacePath(rel) would delete, or the refusal it would throw —
+ * without deleting anything. A whole-folder unit (an agent, a skill, a folder
+ * tool) is `folder: true`. For a caller that must know a delete will go
+ * through before it changes something else (moveToLibrary: the library is
+ * written first, the original deleted after).
+ */
+export function assertDeletable(tenant: string, workspace: string, rel: string): { norm: string; folder: boolean } {
   const norm = path.normalize(rel).replaceAll("\\", "/");
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
   const dir = workspaceDir(tenant, workspace);
@@ -3133,13 +3140,23 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
     // The last part may be a link — rmSync removes the link, not what it
     // names — but a linked folder ABOVE it would delete outside.
     assertLandsInside(dir, path.join(dir, norm), norm, false);
+    return { norm, folder: true };
+  }
+  const p = path.join(dir, assertEditablePath(norm));
+  assertLandsInside(dir, p, norm, false);
+  return { norm, folder: false };
+}
+
+export function deleteWorkspacePath(tenant: string, workspace: string, rel: string, meta: ChangeMeta = {}) {
+  const { norm, folder } = assertDeletable(tenant, workspace, rel);
+  const dir = workspaceDir(tenant, workspace);
+  if (folder) {
     const gone = deletionsUnder(dir, norm);
     fs.rmSync(path.join(dir, norm), { recursive: true, force: true });
     recordRevision(tenant, workspace, gone, { message: `deleted ${norm}/`, ...meta });
     return;
   }
-  const p = path.join(dir, assertEditablePath(norm));
-  assertLandsInside(dir, p, norm, false);
+  const p = path.join(dir, norm);
   const gone = deletionsUnder(dir, norm);
   fs.rmSync(p, { force: true });
   recordRevision(tenant, workspace, gone, meta);
