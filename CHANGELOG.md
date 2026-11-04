@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.4.0] — 2026-11-04
+
+### New in the public API
+
+- `assertDeletable` from `@foldrun/core`
+- `SHAREABLE_KINDS` from `@foldrun/core`
+- `moveToLibrary` from `@foldrun/core`
+
+- feat(library): moveToLibrary — Move to shared in one call, all or nothing ([d1dc8eb](https://github.com/foldrun-io/foldrun-core/commit/d1dc8eb))
+
 ## [14.3.5] — 2026-11-04
 
 - fix(approvals): a decision naming no step leaves wait: event steps waiting ([c79521e](https://github.com/foldrun-io/foldrun-core/commit/c79521e))
