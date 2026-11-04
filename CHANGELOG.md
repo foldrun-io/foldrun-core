@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.3.3] — 2026-11-04
+
+- chore(deps): bump @hono/node-server from 2.1.1 to 2.1.6 (#56) ([1e9bdad](https://github.com/foldrun-io/foldrun-core/commit/1e9bdad))
+
 ## [14.3.2] — 2026-11-04
 
 - chore(deps): bump the minor-and-patch group across 1 directory with 2 updates (#40) ([efac52b](https://github.com/foldrun-io/foldrun-core/commit/efac52b))
