@@ -1404,6 +1404,11 @@ export const DOCKERFILE = runnerDockerfile();
 export const ENTRY = `#!/bin/sh
 set +e
 ${ROOT_SHELL_GUARD_SH}
+# docker cp keeps the host's owner: from a non-root host (a laptop) the job
+# files arrive as uid 501, and root without CAP_DAC_OVERRIDE cannot read its
+# own 0600 root-env.sh. Root's first, before any of them is read; the agent
+# gets the folder below as before.
+chown -R 0:0 /opt/runner/job 2>/dev/null || true
 # The runtime cache, when one is mounted. NOT recursive: a warm cache is tens
 # of thousands of files and its contents are already agent-owned from the step
 # that built them — only the mount point itself arrives owned by root. Before

@@ -33,6 +33,7 @@ import {
   runnerImageTag,
   runtimeCacheMount,
   packInstalledCore,
+  ENTRY,
 } from "../src/run-container.ts";
 
 function withRunnerImage<T>(value: string | undefined, body: () => T): T {
@@ -937,4 +938,11 @@ test("the runner image packs the installed core without running its scripts — 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the docker entry gives the job folder to root before root reads root-env.sh (docker cp keeps a laptop's uid)", () => {
+  const own = ENTRY.indexOf("chown -R 0:0 /opt/runner/job");
+  assert.ok(own > 0, "the job folder is root's first");
+  assert.ok(own < ENTRY.indexOf("/opt/runner/job/root-env.sh"), "before root-env.sh is read");
+  assert.ok(own < ENTRY.indexOf("chown -R agent:agent /workspace /library /opt/runner/job"), "and the agent still gets it afterwards");
 });
