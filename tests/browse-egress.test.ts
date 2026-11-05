@@ -109,8 +109,10 @@ test("the verdict refuses every vendor under a held list — the never-enforceab
 test("a held step's trace line says enforced — hosted, and what the wall is", () => {
   const line = browseNetworkLine(trusted, undefined, { hosted: true });
   assert.match(line, /^network: trusted \(agent\) — the trusted list/);
-  assert.match(line, /enforced — hosted: the browser runs inside this step's sandbox, whose network reaches only the egress proxy \(which holds the list\) and DNS/);
-  assert.match(line, /DNS lookups themselves are not restricted/, "what the wall admits is said, not hidden");
+  assert.match(line, /enforced — hosted: the browser runs inside this step's sandbox, whose network reaches only the egress proxy \(which holds the list\), so/);
+  // Whether the sandbox may look names up is the platform's to say, on its
+  // own dns: line (foldrun-platform run-dns.ts): this line claims neither.
+  assert.doesNotMatch(line, /DNS/);
   assert.doesNotMatch(line, /not enforced/);
 });
 

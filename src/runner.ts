@@ -3357,7 +3357,8 @@ async function runStep(
         size,
         limits,
         // The pod's network, for the executor's own wall (the k8s tier's
-        // network policy): a filtered pod reaches the proxy and DNS only.
+        // network policy): a filtered pod reaches the proxy only (and DNS,
+        // unless the platform walls that too).
         network: { level: network.level, enforced: forward?.enforce === true },
         // A test run's state/ and storage/ changes come out under the run.
         divert: testRun && runId ? divertFor(runId) : undefined,

@@ -15,11 +15,12 @@
 // executor can wall the step's network (the k8s tier, with the install's
 // FOLDRUN_BROWSE_ENFORCE=1 — Platform.confinesBrowsing). Such a step gets the
 // forward proxy like any other, so its run pod is `filtered`: it reaches the
-// egress proxy and DNS and nothing else, and the browser runs inside it, in
-// the step's own pod. A client that sets another proxy, a CDP context with
-// its own proxyServer, a curl that ignores HTTPS_PROXY — each finds no route,
-// never a way round the list. Not covered: DNS lookups through the cluster's
-// resolver, which the wall admits and nothing here restricts. browseVerdict
+// egress proxy and nothing else, and the browser runs inside it, in the
+// step's own pod. A client that sets another proxy, a CDP context with its
+// own proxyServer, a curl that ignores HTTPS_PROXY — each finds no route,
+// never a way round the list. DNS is the platform's to wall too (FOL-128:
+// foldrun-platform run-dns.ts, FOLDRUN_RUN_DNS_WALL), and its trace says on
+// a `dns:` line whether this sandbox may look names up. browseVerdict
 // says, for one step, which of the three ways it goes; everywhere else (no
 // wall, an open or report-only list) the step browses as it did before
 // phase 3, and the trace says so.
@@ -59,7 +60,7 @@ export function browseTier(vendor: string | null | undefined): { tier: BrowseTie
  *             report-only install, or an executor that cannot wall the
  *             step's network.
  *   hosted  — enforced: the step gets the forward proxy, its pod is walled
- *             to the egress proxy and DNS, and foldrun's browser runs in it.
+ *             to the egress proxy, and foldrun's browser runs in it.
  *   refuse  — a vendor's browser under a restricted, enforced list on an
  *             install that holds browsing: it browses from the vendor's
  *             network, which nothing here can hold to the list, so the step
@@ -102,7 +103,7 @@ export function browseVerdict(o: {
 export function browseNetworkLine(policy: NetworkPolicy, vendor: string | null | undefined, opts: { hosted?: boolean } = {}): string {
   const what = networkLine(policy, true);
   if (opts.hosted) {
-    return `${what} — enforced — hosted: the browser runs inside this step's sandbox, whose network reaches only the egress proxy (which holds the list) and DNS, so a page, a script or a changed proxy setting reaches no site off the list; DNS lookups themselves are not restricted.`;
+    return `${what} — enforced — hosted: the browser runs inside this step's sandbox, whose network reaches only the egress proxy (which holds the list), so a page, a script or a changed proxy setting reaches no site off the list.`;
   }
   const { tier, title } = browseTier(vendor);
   const now = " — not enforced in this step: it may browse, and browsing does not go through the egress proxy here, so the browser and every other program in this step reach sites directly";

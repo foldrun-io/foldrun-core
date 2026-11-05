@@ -23,7 +23,7 @@
 // The rule is enforced at the egress proxy, which every request from a
 // sandbox goes through (HTTPS_PROXY in the pod), and, on the Kubernetes
 // tier, by the pod's network policy: a `trusted` or `none` pod reaches the
-// proxy and DNS and nothing else, so a program that ignores the proxy
+// proxy and nothing else (DNS too, unless the platform walls it — FOL-128), so a program that ignores the proxy
 // variables fails instead of going round. This file is the vocabulary; the
 // proxy (foldrun-platform egress-proxy.ts) holds the rule per request.
 
