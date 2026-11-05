@@ -647,66 +647,120 @@ export const SYSTEM_LOG_FILE = "/opt/runner/job/system-install.log";
 
 /**
  * The root start-up's half of `runtime: system:` — one shell snippet, used by
- * the k8s run pod, the docker entry and the deploy-time warm pod alike.
- * Reads the package names from $FOLDRUN_SYSTEM_PACKAGES (space-separated,
- * each re-checked against DEB_PACKAGE's shape here too, so nothing else can
- * ride in), installs them with apt as root BEFORE the drop to the agent user,
- * and writes SYSTEM_STATUS_FILE for prepareRuntime to read.
+ * the k8s run pod, the docker entry, the deploy-time warm pod and the install
+ * helper alike. Reads the package names from $FOLDRUN_SYSTEM_PACKAGES
+ * (space-separated, each re-checked against DEB_PACKAGE's shape here too, so
+ * nothing else can ride in), installs them with apt as root BEFORE the drop to
+ * the agent user, and writes SYSTEM_STATUS_FILE for prepareRuntime to read.
  *
  * The first step to need a package set installs it with apt (the .debs kept
  * in `<cache>/.apt/archives`) and then saves the files those packages added,
- * with their dpkg records, as a snapshot: `<cache>/.apt/snapshots/<key>.tar`.
- * Every later step restores the snapshot instead — measured 11 Oct 2026 in a
- * gVisor run pod on the NFS cache: build-essential, pkg-config, python3-dev,
- * libcairo2-dev and libpango1.0-dev (154 packages, 432 MB) took 23-30 s
- * through apt and 0.76 s from the snapshot, gcc and pkg-config working after.
- * The key is the package set AND a checksum of the image's own dpkg status,
- * so a new runner image never restores files built against the old one. A
- * snapshot is written under a temporary name and renamed, so two pods
- * building it at once cannot leave a torn one; a restore that fails falls
- * back to apt, and prepareRuntime verifies the result either way. Unused for
- * 30 days, one is pruned. Package lists stay per pod: two pods updating one
- * lists directory on a shared volume would corrupt it.
+ * with their dpkg records, as a snapshot. Every later step restores the
+ * snapshot instead — measured 11 Oct 2026 in a gVisor run pod on the NFS
+ * cache: build-essential, pkg-config, python3-dev, libcairo2-dev and
+ * libpango1.0-dev (154 packages, 432 MB) took 23-30 s through apt and 0.76 s
+ * from the snapshot, gcc and pkg-config working after. Package lists stay per
+ * pod: two pods updating one lists directory on a shared volume would
+ * corrupt it.
+ *
+ * Layout, format v4 (FOL-50, 5 Nov 2026):
+ *
+ *   <cache>/.apt/snapshots/v4-<key>/<base>/snap.tar, base
+ *
+ * The KEY is what the snapshot is of: the package set, the Debian release
+ * (os-release ID and VERSION_ID) and the machine (uname -m). Under it, one
+ * GENERATION per base, named by and holding the sha256 of the dpkg status
+ * file it was built on, and restored only onto a base whose status is
+ * byte-identical — the guarantee v3 had (its key held a CRC of the same
+ * file), because the tar carries that status whole and files built against
+ * those exact packages. Only an identical package set makes replaying them
+ * safe: a maintainer script reads the base as well as writing to it, and a
+ * changed base can need different results (two rounds of review, 5 Nov). So
+ * what keeps a snapshot valid across releases is the image keeping its OS
+ * layers (run-container.ts, FOLDRUN_OS_REFRESH); this layout makes the
+ * misses visible and bounded:
+ *
+ *  - a base change is a new generation beside the old ones, counted in the
+ *    status file as `stale` (the run log says "N snapshots did not fit this
+ *    image"), and the four newest generations per key are kept, so the slim
+ *    and the full image keep theirs; v3 kept every image's tar for 30 days;
+ *  - a generation is restored for 14 days from when it was built, then
+ *    rebuilt — so the packages it added pick up Debian's fixes (v3 kept one
+ *    for as long as it was used) — and removed;
+ *  - it is built in a staging directory and published with one rename, so
+ *    a reader never sees half of one, and v3's flat tars are deleted.
+ *
+ * A restore that fails falls back to apt, and prepareRuntime verifies the
+ * result either way.
  */
 export function systemInstallSh(cacheDir: string, logDir = "/opt/runner/job"): string {
-  return `if [ -n "$FOLDRUN_SYSTEM_PACKAGES" ]; then
+  // String.raw so the shell's backslashes are its own. No shell `${…}` may
+  // appear below (it would be a JS interpolation): defaults are spelled out.
+  return String.raw`if [ -n "$FOLDRUN_SYSTEM_PACKAGES" ]; then
   SYS=""; for p in $FOLDRUN_SYSTEM_PACKAGES; do case "$p" in -*|*[!a-z0-9+.-]*) ;; *) SYS="$SYS $p";; esac; done
-  D=\${FOLDRUN_DPKG_DIR:-/var/lib/dpkg}; R=\${FOLDRUN_SYS_ROOT:-/}
+  D=$FOLDRUN_DPKG_DIR; [ -n "$D" ] || D=/var/lib/dpkg
+  R=$FOLDRUN_SYS_ROOT; [ -n "$R" ] || R=/
+  SCAN=$FOLDRUN_SYS_SCAN; [ -n "$SCAN" ] || SCAN="/etc /usr /var/lib"
+  OSR=$FOLDRUN_OS_RELEASE; [ -n "$OSR" ] || OSR=/etc/os-release
   C=${cacheDir}/.apt; A=$C/archives; S=$C/snapshots
   mkdir -p "$A/partial" "$S" 2>/dev/null || { A=/var/cache/apt/archives; S=""; }
-  KEY=v3-$( { printf '%s\\n' $SYS | sort -u; cksum < "$D/status"; } | cksum | tr ' ' '-')
-  T0=$(date +%s); MODE=apt; RC=1
-  if [ -n "$S" ] && [ -f "$S/$KEY.tar" ] && tar -xf "$S/$KEY.tar" -C "$R" > ${logDir}/system-install.log 2>&1; then
-    MODE=snapshot; RC=0; touch "$S/$KEY.tar" 2>/dev/null
-    # apt runs ldconfig through dpkg's trigger; a restore must too, or a
-    # library the snapshot brought is missing from /etc/ld.so.cache.
-    [ "$R" = / ] && ldconfig 2>/dev/null
-  else
-    ls "$D"/info/*.list 2>/dev/null | sort > /tmp/.sys-before
-    touch /tmp/.sys-mark; sleep 1
+  W=$(mktemp -d /tmp/.foldrun-sys.XXXXXX 2>/dev/null) || { W=/tmp/.foldrun-sys.$$; mkdir -p "$W"; }
+  _fh() { if command -v sha256sum > /dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
+  KEY=v4-$( { printf '%s\n' $SYS | LC_ALL=C sort -u; grep -E '^(ID|VERSION_ID)=' "$OSR" 2>/dev/null; uname -m; } | _fh | cut -c1-16)
+  BASE=$(_fh < "$D/status"); K=$S/$KEY; G=$K/$(echo "$BASE" | cut -c1-16)
+  [ -n "$BASE" ] && [ "$KEY" != v4- ] || S=""
+  T0=$(date +%s); MODE=apt; RC=1; STALE=0
+  if [ -n "$S" ] && [ -d "$K" ]; then
+    if [ -f "$G/snap.tar" ] && [ "$(cat "$G/base" 2>/dev/null)" = "$BASE" ] && [ -z "$(find "$G" -maxdepth 0 -mtime +14 2>/dev/null)" ] \
+      && tar -xf "$G/snap.tar" -C "$R" > ${logDir}/system-install.log 2>&1; then
+      MODE=snapshot; RC=0; touch "$G/snap.tar" 2>/dev/null
+      # apt runs ldconfig through dpkg's trigger; a restore must too, or a
+      # library the snapshot brought is missing from /etc/ld.so.cache.
+      [ "$R" = / ] && ldconfig 2>/dev/null
+    else
+      # Generations of this package set built on other bases: why apt runs.
+      STALE=$(ls "$K" 2>/dev/null | grep -cvx "$(basename "$G")")
+    fi
+  fi
+  if [ "$MODE" != snapshot ]; then
+    ls "$D"/info/*.list 2>/dev/null | sort > "$W/before"
+    touch "$W/mark"; sleep 1
     { apt-get -o Acquire::Retries=3 -qq update && DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Cache::Archives="$A" -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y -qq --no-install-recommends $SYS; } > ${logDir}/system-install.log 2>&1
     RC=$?
     if [ $RC -eq 0 ] && [ -n "$S" ]; then
-      ls "$D"/info/*.list 2>/dev/null | sort > /tmp/.sys-after
-      comm -13 /tmp/.sys-before /tmp/.sys-after > /tmp/.sys-new
-      if [ -s /tmp/.sys-new ]; then
-        { cat $(cat /tmp/.sys-new) | sort -u | while read -r f; do if [ -f "$f" ] || [ -L "$f" ]; then echo "$f"; fi; done
-          for l in $(cat /tmp/.sys-new); do ls "\${l%.list}".* 2>/dev/null; done
+      ls "$D"/info/*.list 2>/dev/null | sort > "$W/after"
+      comm -13 "$W/before" "$W/after" > "$W/new"
+      if [ -s "$W/new" ]; then
+        { cat $(cat "$W/new") | sort -u | while read -r f; do if [ -f "$f" ] || [ -L "$f" ]; then echo "$f"; fi; done
+          for l in $(cat "$W/new"); do ls "$(dirname "$l")/$(basename "$l" .list)".* 2>/dev/null; done
           echo "$D/status"
           # What the packages' install scripts made, which dpkg's lists do not
           # name: update-alternatives links (libblas.so.3 → /etc/alternatives),
           # generated caches and configs. By ctime, not mtime: those links carry
           # the package's own (2025) mtime, and only ctime cannot be backdated.
-          find \${FOLDRUN_SYS_SCAN:-/etc /usr /var/lib} -xdev \\( -path /var/lib/apt -o -path /var/lib/dpkg/info \\) -prune -o \\( -type f -o -type l \\) -cnewer /tmp/.sys-mark -print 2>/dev/null
-        } | sort -u > /tmp/.sys-files
-        tar -cf "$S/.$KEY.$$.tar" -T /tmp/.sys-files 2>/dev/null && mv -f "$S/.$KEY.$$.tar" "$S/$KEY.tar" 2>/dev/null
-        rm -f "$S/.$KEY.$$.tar" 2>/dev/null
+          find $SCAN -xdev \( -path /var/lib/apt -o -path "$D/info" \) -prune -o \( -type f -o -type l \) -cnewer "$W/mark" -print 2>/dev/null
+        } | sort -u > "$W/files"
+        if mkdir -p "$K" 2>/dev/null && T=$(mktemp -d "$K/.stage.XXXXXX" 2>/dev/null); then
+          if tar -cf "$T/snap.tar" -T "$W/files" 2>/dev/null && echo "$BASE" > "$T/base"; then
+            # One rename publishes it; one this replaces (expired, or a
+            # restore of it failed) is moved aside first and removed.
+            [ -e "$G" ] && mv "$G" "$K/.gone.$(basename "$T")" 2>/dev/null
+            [ -e "$G" ] || mv "$T" "$G" 2>/dev/null
+          fi
+          rm -rf "$T" "$K/.gone.$(basename "$T")" "$G"/.stage.* 2>/dev/null
+        fi
+        ls -t "$K" 2>/dev/null | tail -n +5 | while read -r o; do rm -rf "$K/$o"; done
       fi
-      find "$S" -name '*.tar' -mtime +30 -delete 2>/dev/null
+      # Generations past their 14 days; stages a killed pod left; v3's flat
+      # tars, which no v4 key reads; keys left empty.
+      find "$S" -mindepth 2 -maxdepth 2 -type d ! -name '.*' -mtime +14 -exec rm -rf {} + 2>/dev/null
+      find "$S" -mindepth 2 -maxdepth 2 -type d -name '.*' -mmin +120 -exec rm -rf {} + 2>/dev/null
+      find "$S" -maxdepth 1 -type f -name '*.tar' -delete 2>/dev/null
+      find "$S" -mindepth 1 -maxdepth 1 -type d -empty -mmin +120 -delete 2>/dev/null
     fi
   fi
-  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "packages": "%s"}\\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$SYS" > ${logDir}/system-install.json
-  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "stale": %s, "packages": "%s"}\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$STALE" "$SYS" > ${logDir}/system-install.json
+  rm -rf "$W" /var/lib/apt/lists/* 2>/dev/null || true
 fi`;
 }
 
@@ -720,7 +774,7 @@ export function checkSystemPackages(pkgs: string[]): { log: string[]; error: str
   if (!pkgs.length) return { log: [], error: null };
   const statusFile = process.env.FOLDRUN_SYSTEM_STATUS ?? SYSTEM_STATUS_FILE;
   const logFile = process.env.FOLDRUN_SYSTEM_LOG ?? SYSTEM_LOG_FILE;
-  let status: { ok?: boolean; seconds?: number; mode?: string } | null = null;
+  let status: { ok?: boolean; seconds?: number; mode?: string; stale?: number } | null = null;
   try {
     status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
   } catch {
@@ -739,7 +793,10 @@ export function checkSystemPackages(pkgs: string[]): { log: string[]; error: str
   );
   const missing = pkgs.filter((p) => !installed.has(p));
   if (!missing.length) {
-    return { log: [`system packages ready: ${pkgs.join(", ")}${status?.seconds !== undefined ? ` (${status.mode === "snapshot" ? "snapshot" : "apt"}, ${status.seconds}s)` : ""}`], error: null };
+    // `stale`: snapshots of this package set that were there but did not fit
+    // this image (systemInstallSh) — what says why a step paid apt again.
+    const stale = status?.mode !== "snapshot" && status?.stale ? `, ${status.stale} snapshot${status.stale === 1 ? "" : "s"} did not fit this image` : "";
+    return { log: [`system packages ready: ${pkgs.join(", ")}${status?.seconds !== undefined ? ` (${status.mode === "snapshot" ? "snapshot" : "apt"}, ${status.seconds}s${stale})` : ""}`], error: null };
   }
   let aptOut = "";
   try {

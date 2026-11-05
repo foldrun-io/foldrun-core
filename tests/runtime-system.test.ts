@@ -133,6 +133,21 @@ test("checkSystemPackages: assumed present without dpkg, verified and explained 
   }
 });
 
+test("checkSystemPackages says when an existing snapshot did not fit the image", () => {
+  const hasDpkg = spawnSync("dpkg-query", ["-W", "bash"]).status === 0;
+  if (!hasDpkg) return; // the line is only written where dpkg can verify (Linux CI, run pods)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sys-stale-"));
+  process.env.FOLDRUN_SYSTEM_STATUS = path.join(dir, "status.json");
+  try {
+    fs.writeFileSync(process.env.FOLDRUN_SYSTEM_STATUS, JSON.stringify({ ok: true, exit: 0, seconds: 30, mode: "apt", stale: 1 }));
+    assert.match(checkSystemPackages(["bash"]).log[0], /\(apt, 30s, 1 snapshot did not fit this image\)$/);
+    fs.writeFileSync(process.env.FOLDRUN_SYSTEM_STATUS, JSON.stringify({ ok: true, exit: 0, seconds: 1, mode: "snapshot", stale: 0 }));
+    assert.match(checkSystemPackages(["bash"]).log[0], /\(snapshot, 1s\)$/);
+  } finally {
+    delete process.env.FOLDRUN_SYSTEM_STATUS;
+  }
+});
+
 test("prepareRuntime with only system packages builds no environment", () => {
   const hasDpkg = spawnSync("dpkg-query", ["--version"]).status === 0;
   if (hasDpkg) return; // on Linux CI the packages are genuinely absent — covered above
@@ -142,57 +157,154 @@ test("prepareRuntime with only system packages builds no environment", () => {
   assert.match(r.log.join("\n"), /assumed present/);
 });
 
-test("system packages: apt once, then a snapshot restore — and a new image means a new snapshot", () => {
+// Snapshots, format v4 (FOL-50). A stand-in dpkg tree and apt-get whose
+// `install` lays down one package's files, its dpkg list and an
+// update-alternatives link, and appends its record to the status file.
+function snapFixture() {
   // realpath: macOS keeps tmp behind /var -> /private/var, and its tar will not
   // extract through a symlink (Linux run pods have no such link).
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sys-snap-")));
   const dpkg = path.join(dir, "dpkg");
   const pkgRoot = path.join(dir, "usr");
-  fs.mkdirSync(path.join(dpkg, "info"), { recursive: true });
-  fs.writeFileSync(path.join(dpkg, "status"), "Package: base\nStatus: install ok installed\n");
-  fs.writeFileSync(path.join(dpkg, "info", "base.list"), "/bin/sh\n");
   const bin = path.join(dir, "bin");
+  fs.mkdirSync(path.join(dpkg, "info"), { recursive: true });
   fs.mkdirSync(bin);
-  // A stand-in apt-get: `install` lays down one package's files and its dpkg list.
+  const BASE = "Package: base\nStatus: install ok installed\nVersion: 1\n";
+  // A fresh pod: the package's files and records gone, the image's status.
+  const freshPod = (status = BASE) => {
+    fs.rmSync(pkgRoot, { recursive: true, force: true });
+    fs.rmSync(path.join(dir, "alt"), { recursive: true, force: true });
+    fs.rmSync(path.join(dpkg, "info", "fake.list"), { force: true });
+    fs.writeFileSync(path.join(dpkg, "status"), status);
+    fs.writeFileSync(path.join(dpkg, "info", "base.list"), "/bin/sh\n");
+  };
   fs.writeFileSync(
     path.join(bin, "apt-get"),
     `#!/bin/sh\necho "$@" >> ${dir}/calls\ncase "$*" in *" install "*)\n  mkdir -p ${pkgRoot}/lib && echo lib > ${pkgRoot}/lib/libfake.so\n  printf '%s\\n' ${pkgRoot}/lib/libfake.so > ${dpkg}/info/fake.list\n  mkdir -p ${dir}/alt && ln -sf ${pkgRoot}/lib/libfake.so ${dir}/alt/libfake.so.3\n  echo "Package: fake" >> ${dpkg}/status ;;\nesac\n`,
     { mode: 0o755 },
   );
+  const osRelease = path.join(dir, "os-release");
+  fs.writeFileSync(osRelease, 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nID=debian\nVERSION_ID="13"\n');
   const sh = systemInstallSh(path.join(dir, "cache"), dir);
-  const env = { PATH: `${bin}:${process.env.PATH}`, FOLDRUN_SYSTEM_PACKAGES: "fake", FOLDRUN_DPKG_DIR: dpkg, FOLDRUN_SYS_ROOT: "/", FOLDRUN_SYS_SCAN: dir };
-  const go = () => {
-    const r = spawnSync("sh", ["-c", sh], { env, encoding: "utf8" });
+  const env = { PATH: `${bin}:${process.env.PATH}`, FOLDRUN_SYSTEM_PACKAGES: "fake", FOLDRUN_DPKG_DIR: dpkg, FOLDRUN_SYS_ROOT: "/", FOLDRUN_SYS_SCAN: dir, FOLDRUN_OS_RELEASE: osRelease };
+  const go = (more: Record<string, string> = {}) => {
+    const r = spawnSync(process.env.FOLDRUN_TEST_SH ?? "sh", ["-c", sh], { env: { ...env, ...more }, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(fs.readFileSync(path.join(dir, "system-install.json"), "utf8"));
   };
   const calls = () => (fs.existsSync(path.join(dir, "calls")) ? fs.readFileSync(path.join(dir, "calls"), "utf8").split("\n").filter(Boolean).length : 0);
+  const snapRoot = path.join(dir, "cache", ".apt", "snapshots");
+  const keys = () => (fs.existsSync(snapRoot) ? fs.readdirSync(snapRoot).filter((k) => !k.startsWith(".")).sort() : []);
+  const gens = (key: string) => fs.readdirSync(path.join(snapRoot, key)).filter((g) => !g.startsWith(".")).sort();
+  const sha = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
+  freshPod();
+  return { dir, dpkg, pkgRoot, BASE, freshPod, go, calls, keys, gens, snapRoot, sha, osRelease };
+}
 
-  const first = go();
+test("system packages: apt once, then a snapshot restore", () => {
+  const f = snapFixture();
+  const first = f.go();
   assert.equal(first.mode, "apt");
-  const snaps = fs.readdirSync(path.join(dir, "cache", ".apt", "snapshots")).filter((f) => f.endsWith(".tar") && !f.startsWith("."));
-  assert.equal(snaps.length, 1, "the install was saved");
-  const aptCalls = calls();
+  const [key] = f.keys();
+  assert.match(key, /^v4-[0-9a-f]{16}$/);
+  const [gen] = f.gens(key);
+  assert.equal(gen, f.sha(f.BASE).slice(0, 16), "one generation, named by the base it was built on");
+  assert.equal(fs.readFileSync(path.join(f.snapRoot, key, gen, "base"), "utf8").trim(), f.sha(f.BASE), "the base's whole sha256 beside it");
+  const aptCalls = f.calls();
 
-  // A fresh pod: the package's files and records are gone — and come back from the snapshot.
-  fs.rmSync(pkgRoot, { recursive: true });
-  fs.rmSync(path.join(dir, "alt"), { recursive: true });
-  fs.rmSync(path.join(dpkg, "info", "fake.list"));
-  fs.writeFileSync(path.join(dpkg, "status"), "Package: base\nStatus: install ok installed\n");
-  const second = go();
+  f.freshPod();
+  const second = f.go();
   assert.equal(second.mode, "snapshot");
-  assert.equal(calls(), aptCalls, "apt is not called on a restore");
-  assert.equal(fs.readFileSync(path.join(pkgRoot, "lib", "libfake.so"), "utf8"), "lib\n");
-  assert.ok(fs.existsSync(path.join(dpkg, "info", "fake.list")), "dpkg's record comes back with the files");
+  assert.equal(f.calls(), aptCalls, "apt is not called on a restore");
+  assert.equal(fs.readFileSync(path.join(f.pkgRoot, "lib", "libfake.so"), "utf8"), "lib\n");
+  assert.ok(fs.existsSync(path.join(f.dpkg, "info", "fake.list")), "dpkg's record comes back with the files");
   // What an install script made (an update-alternatives link), which dpkg's
   // list does not name: missing it broke ffmpeg's libblas.so.3 on 11 Oct 2026.
-  assert.equal(fs.readlinkSync(path.join(dir, "alt", "libfake.so.3")), path.join(pkgRoot, "lib", "libfake.so"));
+  assert.equal(fs.readlinkSync(path.join(f.dir, "alt", "libfake.so.3")), path.join(f.pkgRoot, "lib", "libfake.so"));
+});
 
-  // A different runner image (its own dpkg status) never restores the old files.
-  fs.rmSync(pkgRoot, { recursive: true });
-  fs.rmSync(path.join(dpkg, "info", "fake.list"));
-  fs.writeFileSync(path.join(dpkg, "status"), "Package: base\nStatus: install ok installed\nPackage: newer-image-tool\n");
-  const third = go();
-  assert.equal(third.mode, "apt");
-  assert.ok(calls() > aptCalls);
+test("system snapshot key: same base on a new release → same key; changed list or Debian release → new key", () => {
+  const f = snapFixture();
+  f.go();
+  const [key] = f.keys();
+  // The key is the package set, Debian release and machine — never the base:
+  // a new image is a new generation under the same key, not a new key.
+  f.freshPod(f.BASE + "Package: chrome\nVersion: 151\n");
+  f.go();
+  assert.deepEqual(f.keys(), [key], "a base change keeps the key");
+  f.freshPod();
+  f.go({ FOLDRUN_SYSTEM_PACKAGES: "fake  fake" });
+  assert.deepEqual(f.keys(), [key], "the same set, however it is written");
+  f.freshPod();
+  f.go({ FOLDRUN_SYSTEM_PACKAGES: "fake other-pkg" });
+  assert.equal(f.keys().length, 2, "a changed package list is a new key");
+  fs.writeFileSync(f.osRelease, 'ID=debian\nVERSION_ID="14"\n');
+  f.freshPod();
+  assert.equal(f.go().mode, "apt", "a new Debian release never restores the old one's files");
+  assert.equal(f.keys().length, 3, "and is a new key");
+});
+
+test("system snapshot restore: only onto a byte-identical base; another base builds its own beside it", () => {
+  const f = snapFixture();
+  f.go();
+  const [key] = f.keys();
+  let aptCalls = f.calls();
+  // A rebuilt image whose packages moved (a Chrome release, a Debian fix).
+  const moved = f.BASE + "Package: chrome\nVersion: 151\n";
+  f.freshPod(moved);
+  const r = f.go();
+  assert.equal(r.mode, "apt", "a changed base never restores files built on the old one");
+  assert.equal(r.stale, 1, "the run says a snapshot was there and did not fit");
+  assert.ok(f.calls() > aptCalls);
+  assert.deepEqual(f.gens(key), [f.sha(f.BASE).slice(0, 16), f.sha(moved).slice(0, 16)].sort(), "one generation per base, side by side");
+  aptCalls = f.calls();
+  // Each base restores its own — the slim and the full image alike.
+  for (const base of [f.BASE, moved]) {
+    f.freshPod(base);
+    assert.equal(f.go().mode, "snapshot");
+  }
+  assert.equal(f.calls(), aptCalls);
+  // A generation whose recorded base is not this one is never restored, even
+  // under this base's name (a torn or tampered copy).
+  const g = path.join(f.snapRoot, key, f.sha(f.BASE).slice(0, 16));
+  fs.writeFileSync(path.join(g, "base"), "0".repeat(64) + "\n");
+  f.freshPod();
+  assert.equal(f.go().mode, "apt");
+  assert.equal(fs.readFileSync(path.join(g, "base"), "utf8").trim(), f.sha(f.BASE), "and is replaced by a good one");
+});
+
+test("system snapshot generations: four kept per key, none restored 14 days after it was built", () => {
+  const f = snapFixture();
+  for (let i = 0; i < 6; i++) {
+    f.freshPod(`${f.BASE}Package: image-${i}\n`);
+    assert.equal(f.go().mode, "apt");
+  }
+  const [key] = f.keys();
+  assert.equal(f.gens(key).length, 4, "the four newest");
+  f.freshPod(`${f.BASE}Package: image-5\n`);
+  assert.equal(f.go().mode, "snapshot", "the newest is among them");
+
+  const g = path.join(f.snapRoot, key, f.sha(`${f.BASE}Package: image-5\n`).slice(0, 16));
+  const old = new Date(Date.now() - 15 * 86_400_000);
+  fs.utimesSync(g, old, old);
+  f.freshPod(`${f.BASE}Package: image-5\n`);
+  assert.equal(f.go().mode, "apt", "built 15 days ago: rebuilt, so the packages it added pick up Debian's fixes");
+  f.freshPod(`${f.BASE}Package: image-5\n`);
+  assert.equal(f.go().mode, "snapshot", "the rebuilt one restores");
+});
+
+test("system snapshot: v3's flat tars are deleted, an incomplete generation is never restored", () => {
+  const f = snapFixture();
+  fs.mkdirSync(f.snapRoot, { recursive: true });
+  fs.writeFileSync(path.join(f.snapRoot, "v3-123-456.tar"), "old");
+  f.go();
+  assert.equal(fs.existsSync(path.join(f.snapRoot, "v3-123-456.tar")), false);
+  const [key] = f.keys();
+  const [gen] = f.gens(key);
+  fs.rmSync(path.join(f.snapRoot, key, gen, "base"));
+  f.freshPod();
+  assert.equal(f.go().mode, "apt", "no base file: not restored");
+  fs.rmSync(path.join(f.snapRoot, key, gen, "snap.tar"));
+  f.freshPod();
+  assert.equal(f.go().mode, "apt", "no tar: not restored");
 });
