@@ -168,6 +168,14 @@ export interface PlatformHooks {
    */
   confinesBrowsing?(isolation: string): boolean;
   /**
+   * Does this isolation mode wall a step whose `network:` is restricted and
+   * enforced to the egress proxy alone (a `filtered` pod)? True: such a
+   * step's web search goes through the proxy's search door (FOL-128,
+   * search-egress.ts), since the account's search engine is out of its
+   * reach. Absent or false: it reaches the engine as it always did.
+   */
+  wallsRestricted?(isolation: string): boolean;
+  /**
    * An operator setting, by the environment variable that used to hold it
    * (30 Oct 2026): the platform answers with the operator's value where one
    * is set (its settings store) and the variable otherwise, spelled as the

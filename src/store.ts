@@ -58,6 +58,7 @@ import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
 import { networkEnforceWanted, networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
 import { browseVendorOf } from "./browse-egress.ts";
+import { searchProvided, type SearchingAction } from "./search-egress.ts";
 import { webProblems, webWarnings, runnerEngines, webConfig } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
@@ -1054,7 +1055,16 @@ export interface AgentInfo {
    *  its web providers' and its bound secrets' sites. */
   /** browses: the step may browse; enforceWanted and browseVendor are what
    *  this folder says toward browseVerdict (FOL-110) — the install says the rest. */
-  network: NetworkPolicy & { readsWeb: boolean; browses: boolean; enforceWanted: boolean; browseVendor: string | null };
+  /** search: this folder's half of search-egress.ts searchDoorWanted — the
+   *  web tool, the actions written in web: (null: all), and the searching
+   *  actions a provider answers (FOL-128). */
+  network: NetworkPolicy & {
+    readsWeb: boolean;
+    browses: boolean;
+    enforceWanted: boolean;
+    browseVendor: string | null;
+    search: { web: boolean; actions: string[] | null; provided: SearchingAction[] };
+  };
   /** Tools this agent declares inline rather than in `tools:` — `apis:`,
    *  `scripts:` and `mcpServers:` names — which a limit may also name. */
   inlineTools: string[];
@@ -1688,6 +1698,11 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
         enforceWanted: networkEnforceWanted(accountFront.network_enforce, workspaceFront.network_enforce),
         // The vendor its web.browse names, null for foldrun's own browser.
         browseVendor: browseVendorOf(webConfig(data, { ...accountFront, ...workspaceFront }).raw.browse),
+        search: {
+          web: tools.includes("web"),
+          actions: actions ? [...actions] : null,
+          provided: searchProvided(webConfig(data, { ...accountFront, ...workspaceFront }).raw),
+        },
       };
       return {
         network,

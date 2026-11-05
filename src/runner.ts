@@ -103,6 +103,7 @@ import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPric
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
 import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
 import { BROWSER_CONFINED_ENV, browseNetworkLine, browseVerdict } from "./browse-egress.ts";
+import { SEARCH_DOOR_ENV, searchDoorWanted, searchProvided } from "./search-egress.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildA2ATools } from "./a2a-tools.ts";
@@ -3094,6 +3095,26 @@ async function runStep(
       // A browsing step on an install with the door says whether it is held
       // to its list, and which tier its browser falls in (browse-egress.ts).
       push("info", browse ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR, { hosted: browse.kind === "hosted" }) : networkLine(network, forward ? forward.enforce === true : null));
+      // Web search under a held list (FOL-128, search-egress.ts): the
+      // account's engine through the proxy's search door, for the actions
+      // our engine answers — decided here, from this step's own config and
+      // the lease's effective enforce, and carried on the grant, which the
+      // pod cannot write. Only where the executor walls such a step (the
+      // others reach the engine directly). Off a held list: nothing here.
+      const searchDoor = forward && !!isolation && platform.wallsRestricted?.(isolation) === true
+        ? searchDoorWanted({
+            level: network.level,
+            defaults: network.defaults,
+            enforce: forward.enforce === true,
+            web: scriptSpecs.some((sc) => sc.name === "web"),
+            actions: web.actions ?? null,
+            provided: searchProvided(web.raw),
+            limits: stepLimits,
+          })
+        : { door: null };
+      if (searchDoor.door) grant.search = searchDoor.door;
+      else delete grant.search;
+      if (searchDoor.line) push("info", searchDoor.line);
       const bound = forward ? Object.keys(boundSites).filter((name) => name in liveSecrets) : [];
       for (const name of bound) {
         for (const site of boundSites[name]) addGrant(grant, name, liveSecrets[name], site);
@@ -3326,6 +3347,9 @@ async function runStep(
             // cannot go through it, and the platform starts no account
             // browser pod for it (browse-egress.ts, FOL-110 phase 3).
             ...(browse?.kind === "hosted" ? { [BROWSER_CONFINED_ENV]: "1" } : {}),
+            // The search door's address, for the driver: a step it walls
+            // searches there, with the tool told it is held (search-egress.ts).
+            ...(grant.search && lease?.search ? { [SEARCH_DOOR_ENV]: lease.search } : {}),
             // Only a step with a bound secret has a site the proxy
             // intercepts, so only that step's TLS clients are pointed at a
             // bundle with the egress CA in it; every other step's are as

@@ -128,6 +128,10 @@ export interface EgressGrant {
   /** Identity name → the audience its tokens are for: the only identities
    *  this step may ask the proxy's /identity door to mint (oidc-issuer.ts). */
   identities?: Record<string, { audience: string }>;
+  /** The proxy's search door is open for this step (search-egress.ts
+   *  searchDoorWanted): a held step's way to the account's search engine.
+   *  `max` caps how many searches go through it. Absent: the door refuses. */
+  search?: { max?: number };
 }
 
 export interface EgressLease {
@@ -140,6 +144,9 @@ export interface EgressLease {
   /** The PEM of the CA the forward door signs with for a host a secret is
    *  bound to, so the sandbox can trust exactly those interceptions. */
   ca?: string;
+  /** The proxy's search door for this lease (`…/s/<token>`), when the
+   *  proxy has one: where a held step's web search is sent. */
+  search?: string;
   /** Whether a site off the step's list is refused (true) or only named
    *  in the trace (false). */
   enforce?: boolean;
