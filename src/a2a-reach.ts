@@ -112,7 +112,10 @@ export function agentReach(front: Record<string, unknown>, ctx: ReachContext = {
       if (ref.linked || !TOOL_MAP[ref.name]) own.push(ref.name);
     }
   }
-  const tools = plan ? sorted([...TOOL_MAP.read!, ...own].filter((t) => !denied.has(t) && t !== "Bash")) : sorted(granted.filter((t) => !denied.has(t)));
+  // `install` is every agent's unless plan mode or disallowedTools: [install]
+  // takes it away (runner.ts, install-tool.ts): dropping that deny widens.
+  if (!plan) granted.push("install");
+  const tools = plan ? sorted([...TOOL_MAP.read!, ...own].filter((t) => !denied.has(t) && t !== "Bash" && t !== "install")) : sorted(granted.filter((t) => !denied.has(t)));
   const runsCode = tools.includes("Bash");
 
   const apis: Record<string, string> = {};
