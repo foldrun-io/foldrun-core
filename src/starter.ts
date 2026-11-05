@@ -342,6 +342,9 @@ agents reference them by name. Bind one to the sites it is for
 the egress proxy fills \`\${NAME}\` in requests to those sites alone. Which sites
 a sandbox may reach at all is \`network:\` — open for an agent that reads the web,
 the trusted list plus what it declares for every other (\`foldrun agent network\`).
+A step held to its list still searches the web through the proxy's search door;
+at \`none\` or \`defaults: false\` write it out — \`web: {actions: [search, fetch]}\` —
+because a query's words leave (\`foldrun docs network\`).
 
 ## Talking to a deployed workspace
 
