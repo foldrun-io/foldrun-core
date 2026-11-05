@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
+import { LOADER_ENV_CASE } from "./env-names.ts";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 
@@ -655,9 +656,53 @@ export const SNAPSHOT_KEY_FILE = "/opt/runner/job/snapshot.key";
  *  /var/tmp is everyone's — the verifier refuses both on what is on disk. */
 export const SNAPSHOT_ALLOWED = "etc usr var bin sbin lib lib32 lib64 libx32 opt";
 
-/** The environment variables root's start-up keeps from the step's (the
- *  proxy apt downloads through); every other exported name is unset. */
-const ROOT_ENV_KEEP = "HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy|FOLDRUN_INSTALL_SOCKET";
+/** The step's environment as the worker stages it in a run container: one
+ *  `export NAME='value'` per line (stepEnvShell). Only the agent reads it —
+ *  the drop's own shell, after runuser (agentStartSh, FOL-130). */
+export const STEP_ENV_FILE = "/opt/runner/job/env.sh";
+
+/** The part of the step's environment root's start-up may see: the proxy
+ *  apt downloads through, and nothing else. The worker writes it beside
+ *  STEP_ENV_FILE (rootEnvShell); rootStartSh's subshell reads it. */
+export const ROOT_ENV_FILE = "/opt/runner/job/root-env.sh";
+
+/** The names root's start-up takes from the step's environment (FOL-130). */
+export const ROOT_ENV_NAMES: readonly string[] = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"];
+
+/** The environment variables root's start-up keeps (the proxy apt
+ *  downloads through); every other exported name is unset. */
+const ROOT_ENV_KEEP = [...ROOT_ENV_NAMES, "FOLDRUN_INSTALL_SOCKET"].join("|");
+
+/** An environment as a file a POSIX shell sources: `export NAME='value'`,
+ *  single-quoted, so sourcing it assigns and never runs anything. Names a
+ *  shell cannot hold are left out. The same shape as the k8s worker's
+ *  envFileShell. */
+export function stepEnvShell(env: Record<string, string>): string {
+  return Object.entries(env)
+    .filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string")
+    .map(([k, v]) => `export ${k}='${v.replaceAll("'", `'\\''`)}'`)
+    .join("\n");
+}
+
+/** ROOT_ENV_FILE's content: the step's environment cut to ROOT_ENV_NAMES. */
+export function rootEnvShell(env: Record<string, string>): string {
+  return stepEnvShell(Object.fromEntries(Object.entries(env).filter(([k]) => ROOT_ENV_NAMES.includes(k))));
+}
+
+/** IFS made a shell's own again, then every exported name `arms` (a shell
+ *  `case` body for "$_fn") picks unset — read from `export -p` with builtins
+ *  only, so nothing is executed while the environment is still the one being
+ *  cleaned. */
+const exportedNamesSh = (arms: string) => String.raw`IFS=$(printf ' \t\nx'); IFS=${"$"}{IFS%x}
+_fx=$(export -p)
+while read -r _fl; do
+  case "$_fl" in "export "*|"declare -x "*) ;; *) continue;; esac
+  _fn=${"$"}{_fl#export }; _fn=${"$"}{_fn#declare -x }; _fn=${"$"}{_fn%%=*}
+  case "$_fn" in ${arms} esac
+done <<FOLDRUN_ENV
+$_fx
+FOLDRUN_ENV
+unset _fx _fl _fn`;
 
 /**
  * The first lines of root's start-up section (rootStartSh), run in a
@@ -667,19 +712,25 @@ const ROOT_ENV_KEEP = "HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no
  * IFS are assigned before anything is executed, then `export -p` is read
  * with builtins only and every exported name but the proxy's is unset. The
  * test-only FOLDRUN_SYS_* / FOLDRUN_DPKG_DIR overrides go with the rest.
+ * Since FOL-130 the step's environment is not there to begin with — the
+ * subshell starts from the root shell's own and ROOT_ENV_FILE's proxy
+ * lines — and this stays as the lock behind that.
  */
-export const ROOT_ENV_RESET_SH = String.raw`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-IFS=$(printf ' \t\nx'); IFS=${"$"}{IFS%x}
-_fx=$(export -p)
-while read -r _fl; do
-  case "$_fl" in "export "*|"declare -x "*) ;; *) continue;; esac
-  _fn=${"$"}{_fl#export }; _fn=${"$"}{_fn#declare -x }; _fn=${"$"}{_fn%%=*}
-  case "$_fn" in ${ROOT_ENV_KEEP}|PATH) ;; ""|*[!A-Za-z0-9_]*) ;; *) unset "$_fn" 2>/dev/null;; esac
-done <<FOLDRUN_ENV
-$_fx
-FOLDRUN_ENV
-unset _fx _fl _fn
+export const ROOT_ENV_RESET_SH = `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+${exportedNamesSh(`${ROOT_ENV_KEEP}|PATH) ;; ""|*[!A-Za-z0-9_]*) ;; *) unset "$_fn" 2>/dev/null;;`)}
 HOME=/root; export PATH HOME`;
+
+/**
+ * The first lines of a run container's root shell (the k8s SHIM, the docker
+ * ENTRY), FOL-130: the loader's and the shells' variables (env-names.ts
+ * LOADER_ENV — LD_*, BASH_ENV, ENV, NODE_OPTIONS, PYTHONPATH…) unset and IFS
+ * made the shell's own. That shell's environment is the image's and the pod
+ * spec's, never the step's — the step's reaches the agent alone, after the
+ * drop (agentStartSh) — so this is the second lock: nothing the platform
+ * itself might one day set there can steer chown, runuser or date as root.
+ * PATH and NODE_PATH stay the image's: the agent's programs are found by them.
+ */
+export const ROOT_SHELL_GUARD_SH = exportedNamesSh(`${LOADER_ENV_CASE}) unset "$_fn" 2>/dev/null;; *) ;;`);
 
 /**
  * The snapshot verifier and sealer, a CommonJS script the snippet writes to

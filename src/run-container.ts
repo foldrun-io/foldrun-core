@@ -34,7 +34,7 @@ import { refusedBack, refusedLine, keptLine, type RefusedPath } from "./copy-bac
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
 import { isFileValue, fileContent, installKeyMaterial } from "./secrets.ts";
-import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, ROOT_ENV_RESET_SH, SNAPSHOT_KEY_FILE, type RuntimeSpec } from "./runtime.ts";
+import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, ROOT_ENV_RESET_SH, ROOT_SHELL_GUARD_SH, ROOT_ENV_FILE, STEP_ENV_FILE, stepEnvShell, rootEnvShell, SNAPSHOT_KEY_FILE, type RuntimeSpec } from "./runtime.ts";
 import { egressCaSh, type NetworkLevel } from "./network.ts";
 import { anyMemoryMi, quantityMi, type ResourceOverride } from "./resources.ts";
 import type { ScriptSpec } from "./script-tools.ts";
@@ -632,19 +632,28 @@ export function aptSnapshotKey(tenant: string | undefined | null): string | null
 }
 
 /**
- * Root's part of a run container's start-up, after the step's env is read
- * and before the chown and the drop to the agent user (k8s SHIM, docker
- * ENTRY): the snapshot key moved where only root can read it, then — in a
- * subshell whose environment is reset to the proxy's variables alone
- * (ROOT_ENV_RESET_SH) — the declared system packages and the install helper.
- * The key never enters an environment: root's commands and the helper get
- * only its path, and the copy in the job folder (which is chowned to the
- * agent next) is gone before the subshell ends, or the start-up stops.
+ * Root's part of a run container's start-up, before the chown and the drop
+ * to the agent user (k8s SHIM, docker ENTRY): the snapshot key moved where
+ * only root can read it, then — in a subshell whose environment is the root
+ * shell's own plus the proxy's variables (ROOT_ENV_FILE), reset to those
+ * alone (ROOT_ENV_RESET_SH) — the declared system packages and the install
+ * helper. The key never enters an environment: root's commands and the
+ * helper get only its path, and the copy in the job folder (which is chowned
+ * to the agent next) is gone before the subshell ends, or the start-up stops.
+ *
+ * The step's own environment (STEP_ENV_FILE) is never read here (FOL-130):
+ * its names are the account's to choose, and an LD_PRELOAD or PATH there
+ * pointing into the agent-writable cache would run the agent's code as root.
+ * ROOT_ENV_FILE is the worker's cut of it to ROOT_ENV_NAMES, sourced before
+ * the reset so even a name that should not be there is unset again; the
+ * socket and the locale are set after it, so nothing read can move them.
  */
 export function rootStartSh(cacheDir: string = RUNTIME_CACHE): string {
   return `FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET}; export FOLDRUN_INSTALL_SOCKET
 (
+if [ -f ${ROOT_ENV_FILE} ] && [ ! -L ${ROOT_ENV_FILE} ]; then . ${ROOT_ENV_FILE}; fi
 ${ROOT_ENV_RESET_SH}
+FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET} LANG=C.UTF-8 LC_ALL=C.UTF-8; export FOLDRUN_INSTALL_SOCKET LANG LC_ALL
 unset FOLDRUN_SNAP_KEY_FILE; FOLDRUN_SNAP_KEY_FILE=""
 if [ -e ${SNAPSHOT_KEY_FILE} ] || [ -L ${SNAPSHOT_KEY_FILE} ]; then
   _fk=$(mktemp -d /tmp/.foldrun-key.XXXXXX 2>/dev/null) && [ ! -L ${SNAPSHOT_KEY_FILE} ] && cat ${SNAPSHOT_KEY_FILE} > "$_fk/key" 2>/dev/null && FOLDRUN_SNAP_KEY_FILE=$_fk/key
@@ -655,6 +664,31 @@ ${systemInstallSh(cacheDir)}
 FOLDRUN_SNAP_KEY_FILE="$FOLDRUN_SNAP_KEY_FILE" node /opt/runner/node_modules/@foldrun/core/dist/src/install-helper.js "$FOLDRUN_INSTALL_SOCKET" ${cacheDir} >/dev/null 2>&1 &
 )
 if [ -e ${SNAPSHOT_KEY_FILE} ] || [ -L ${SNAPSHOT_KEY_FILE} ]; then echo "the snapshot key could not be removed from the job folder — not starting the step" >&2; exit 1; fi`;
+}
+
+/**
+ * The drop to the agent user, and the only place the step's environment is
+ * read (FOL-130): runuser starts with the root shell's own environment — the
+ * image's and the pod spec's, which ROOT_SHELL_GUARD_SH has already cleaned —
+ * and the agent's shell then sources STEP_ENV_FILE, sets up the egress
+ * proxy's CA (which root never needs: apt goes through the proxy unopened),
+ * and execs `command`, so its exit status is the step's.
+ *
+ * What the agent ends with is what it had when root sourced the file before
+ * the drop: the step's names over the root shell's, the CA's variables over
+ * those, runuser's HOME/USER/LOGNAME over all (kept in positional
+ * parameters, which no sourced name can reach), and the install socket at
+ * its fixed path. No `set -e`: an egress CA that cannot be written leaves
+ * the step without it, as before, rather than stopping it.
+ */
+export function agentStartSh(command = "node /opt/runner/driver.mjs"): string {
+  const inner = `set -- "$HOME" "$USER" "$LOGNAME"
+set -a; if [ -f ${STEP_ENV_FILE} ]; then . ${STEP_ENV_FILE}; fi; set +a
+HOME=$1 USER=$2 LOGNAME=$3; export HOME USER LOGNAME; shift 3
+FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET}; export FOLDRUN_INSTALL_SOCKET
+${egressCaSh("/opt/runner/job")}
+exec ${command}`;
+  return `runuser -u agent -- /bin/sh -c '${inner.replaceAll("'", `'\\''`)}'`;
 }
 
 /**
@@ -1263,9 +1297,10 @@ ${CORE_INSTALL}`;
 // runtime: system: — apt as root, before the drop (runtime.ts systemInstallSh).
 // set -e is off around it: a failed install is reported by the driver, which
 // reads the status file and fails the step with apt's own words.
-const ENTRY = `#!/bin/sh
+/** The docker run container's entrypoint (entry.sh), exported for its tests. */
+export const ENTRY = `#!/bin/sh
 set +e
-${egressCaSh("/opt/runner/job")}
+${ROOT_SHELL_GUARD_SH}
 # The runtime cache, when one is mounted. NOT recursive: a warm cache is tens
 # of thousands of files and its contents are already agent-owned from the step
 # that built them — only the mount point itself arrives owned by root. Before
@@ -1274,7 +1309,7 @@ chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
 ${rootStartSh(RUNTIME_CACHE)}
 set -e
 chown -R agent:agent /workspace /library /opt/runner/job
-exec runuser -u agent -- node /opt/runner/driver.mjs
+exec ${agentStartSh()}
 `;
 
 function corePackageDir(): string {
@@ -1702,8 +1737,10 @@ export interface WriteDivert {
 /**
  * What crosses into the container as its environment, and how.
  *
- * A docker --env-file is one `KEY=value` per line and cannot carry a
- * newline. @file secrets are multi-line by nature (a PEM key, a cert), so
+ * It crosses as a file the agent's shell sources after the drop (env.sh,
+ * FOL-130); until then it was a docker --env-file, one `KEY=value` per
+ * line, which cannot carry a newline — and what a step sees stays the shape
+ * that file set. @file secrets are multi-line by nature (a PEM key, a cert), so
  * they are staged as files NOW, into the copied-in workspace, and the env
  * carries the container path — the one place a path is stable across the
  * boundary. A plain secret whose value happens to hold a newline gets the
@@ -1918,12 +1955,12 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
     const containerEnv = stageContainerEnv(args.env, wsIn, args.input.agentRel, args.emit);
 
-    const envFile = path.join(staging, "env");
-    fs.writeFileSync(
-      envFile,
-      Object.entries(containerEnv).map(([k, v]) => `${k}=${v}`).join("\n"),
-      { mode: 0o600 },
-    );
+    // Files in the job folder, not the container's environment (FOL-130): a
+    // docker --env-file is PID 1's environment, so a secret named LD_PRELOAD
+    // reached the root shell before its first line. The agent's shell sources
+    // env.sh after the drop; root's start-up reads only the proxy's lines.
+    fs.writeFileSync(path.join(jobIn, "env.sh"), stepEnvShell(containerEnv), { mode: 0o600 });
+    fs.writeFileSync(path.join(jobIn, "root-env.sh"), rootEnvShell(containerEnv), { mode: 0o600 });
 
     const lim = args.limits ?? resolveResources(args.size);
     const cpus = dockerCpus(lim.cpus);
@@ -1941,7 +1978,6 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       // the whole machine from the steps beside it.
       "--memory", dockerMemory(lim.memory),
       ...(cpus ? ["--cpus", cpus] : []),
-      "--env-file", envFile,
     ];
     // gVisor (or kata) where the host has it: one env var, because the flag
     // is the same docker invocation everywhere else.
@@ -1994,6 +2030,8 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     cp(`${wsIn}/.`, `${containerId}:/workspace`);
     cp(`${libIn}/.`, `${containerId}:/library`);
     cp(`${jobIn}/input.json`, `${containerId}:/opt/runner/job/input.json`);
+    cp(`${jobIn}/env.sh`, `${containerId}:${STEP_ENV_FILE}`);
+    cp(`${jobIn}/root-env.sh`, `${containerId}:${ROOT_ENV_FILE}`);
     if (snapKey) cp(`${jobIn}/snapshot.key`, `${containerId}:${SNAPSHOT_KEY_FILE}`);
     phases.files = Date.now() - t0;
 
