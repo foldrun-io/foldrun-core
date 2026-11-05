@@ -116,6 +116,8 @@ test("a direct agent run is not a workflow; foldrun's models name their provider
   assert.deepEqual(at(m!, "gen_ai.provider.name"), { stringValue: "moonshot_ai" });
   const own = { ...adhoc, steps: [{ ...adhoc.steps[0]!, supply: "own" }] } as unknown as RunRecord;
   assert.equal(at(spansOf(own)[2]!, "gen_ai.provider.name"), undefined, "an own provider: block could be anyone's");
+  const fellBack = { ...adhoc, steps: [{ ...adhoc.steps[0]!, events: [{ t: T(2), type: "info", text: "primary model supply refused (429) — retrying this step on the fallback provider" }, ...adhoc.steps[0]!.events] }] } as unknown as RunRecord;
+  assert.equal(at(spansOf(fellBack)[2]!, "gen_ai.provider.name"), undefined, "after a fallback the record cannot say which call went where");
   const keys = new Set(spansOf(run).flatMap((s) => s.attributes.map((a) => a.key)));
   for (const k of ["gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.system_instructions", "gen_ai.tool.call.arguments", "gen_ai.tool.call.result"]) assert.ok(!keys.has(k), `${k} is opt-in content`);
   for (const s of spansOf(adhoc)) assert.equal(s.status.code, 0);

@@ -102,6 +102,10 @@ const lastError = (s: StepRecord | undefined) => {
 const PROVIDER: Record<string, string> = { anthropic: "anthropic", openai: "openai", gemini: "gcp.gemini", deepseek: "deepseek", moonshot: "moonshot_ai" };
 function providerOf(step: StepRecord | undefined): string | null {
   if (!step) return null;
+  // A refusal retried on the fallback supply (runner.ts) runs calls the
+  // step's `supply` does not describe; the record does not say which call
+  // went where, so none of them claims a provider.
+  if (step.events.some((e) => e.type === "info" && /retrying this step on the fallback provider/.test(e.text))) return null;
   if (step.supply === "operator") return "anthropic";
   if (step.supply === "foldrun" && step.supplyProvider) return PROVIDER[step.supplyProvider] ?? step.supplyProvider;
   return null;
