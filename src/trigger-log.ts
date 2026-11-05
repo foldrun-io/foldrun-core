@@ -43,6 +43,9 @@ export type TriggerOutcome =
   | "overlap-skipped"
   | "missed"
   | "filtered"
+  /** The account already had its most runs waiting for their turn
+   *  (FOL-100, 5 Nov 2026): this one was refused, not lined up. */
+  | "queue-full"
   | "failed";
 
 export interface TriggerEvent {
@@ -55,6 +58,20 @@ export interface TriggerEvent {
    *  is one search away in their own flow file. */
   detail?: string;
   runId?: string;
+}
+
+/** A refused start's own code, for rollbackTrigger: a lowercase word an
+ *  error that carries an HTTP status also carries (`waiting_cap`), never a
+ *  system errno (`ENOENT`). Undefined for anything else. */
+export function refusalCode(err: unknown): string | undefined {
+  const o = err as { code?: unknown; status?: unknown } | null;
+  return o && typeof o.status === "number" && typeof o.code === "string" && /^[a-z][a-z0-9_]*$/.test(o.code) ? o.code : undefined;
+}
+
+/** The outcome a start that threw is logged as: `queue-full` for the
+ *  account's waiting cap, else `failed`. */
+export function failedOutcome(code: string | undefined): TriggerOutcome {
+  return code === "waiting_cap" ? "queue-full" : "failed";
 }
 
 function logFile(tenant: string, workspace: string) {

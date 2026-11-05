@@ -105,7 +105,9 @@ export interface PlatformHooks {
     tenant: string,
     workspace: string,
     flow: FlowInfo,
-    opts?: { deliveryKey?: string | null; reason?: string },
+    /** `code`: the refusal's own code, when it had one — `waiting_cap`
+     *  is logged as `queue-full` rather than `failed`. */
+    opts?: { deliveryKey?: string | null; reason?: string; code?: string },
   ): Promise<void>;
   /** Step executors by FOLDRUN_RUN_ISOLATION value, beyond the `container`
    *  one core ships. The platform adds `k8s`. */
