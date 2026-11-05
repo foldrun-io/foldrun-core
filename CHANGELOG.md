@@ -13,6 +13,13 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.0.1] — 2026-11-05
+
+- fix(run-container): pack a script-free copy of the installed core ([3a46532](https://github.com/foldrun-io/foldrun-core/commit/3a46532))
+- fix(step): the model process sends no nonessential traffic (FOL-49) ([e3efc7a](https://github.com/foldrun-io/foldrun-core/commit/e3efc7a))
+- fix(container): the docker entry gives the job folder to root first — from a laptop every container step stopped at root-env.sh: Permission denied ([3a246a5](https://github.com/foldrun-io/foldrun-core/commit/3a246a5))
+- fix(container): pack the installed core without its scripts — container steps from an installed CLI failed with "npm pack failed" and deleted the install's dist/ ([3e9782d](https://github.com/foldrun-io/foldrun-core/commit/3e9782d))
+
 ## [17.0.0] — 2026-11-05
 
 ### Breaking changes
