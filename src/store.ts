@@ -4267,7 +4267,11 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.a2a ? { a2a: run.a2a } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
-      const error = s.status === "failed" ? s.events.filter((e) => e.type === "error").at(-1)?.text : undefined;
+      // A failed step's last error — and, on a run that failed between
+      // groups, the budget's error the runner wrote onto the step before
+      // (runFailure reads it from there; FOL-124, Codex review).
+      const last = s.events.filter((e) => e.type === "error").at(-1)?.text;
+      const error = s.status === "failed" || (run.status === "failed" && last !== undefined && /^over budget/.test(last)) ? last : undefined;
       const failureFacts = s.status === "failed" ? failureFactsOf(s) : undefined;
       return {
         agent: s.agent,

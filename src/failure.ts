@@ -92,6 +92,8 @@ export interface FailureFacts {
   secretHosts?: string[];
   /** Its error was a security stop (securityStopEvent). */
   security?: true;
+  /** Its error was a failed check's (verify:, output: json, schema:). */
+  check?: true;
 }
 
 /** As much of a step as this reads. */
@@ -153,6 +155,7 @@ export function failureFactsOf(step: FailedStepLike): FailureFacts | undefined {
     ...(hosts.length ? { refusedHosts: hosts } : {}),
     ...(secretHosts.length ? { secretHosts } : {}),
     ...(step.events.some((e) => e.type === "error" && e.security === true) ? { security: true as const } : {}),
+    ...(step.events.filter((e) => e.type === "error").at(-1)?.check ? { check: true as const } : {}),
   };
   return Object.keys(facts).length ? facts : undefined;
 }
@@ -322,7 +325,7 @@ export function explainFailure(reason: string, step?: FailedStepLike | null): Fa
   }
 
   const lastError = step?.events.filter((e) => e.type === "error").at(-1);
-  if (lastError?.check || /^verify\b|^output: json/.test(text)) {
+  if (lastError?.check || facts?.check || /^verify\b|^output: json|^schema:/.test(text)) {
     return { class: "user_code_error", kind: "check", message: `The step's check did not hold: ${firstSentence(text)}`, fix: "Read the step's reply against what the check asks; change the check or the agent's instructions." };
   }
   if (/\b(Claude Code process|model process|the model stream ended|api\.anthropic\.com)\b/.test(text)) {

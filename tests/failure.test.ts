@@ -147,6 +147,12 @@ test("model causes reuse the issues' labels; budget, stop, checks and code keep 
   assert.equal(explainFailure("stopped by a person mid-step — its sandbox was destroyed").class, "cancelled");
   const check = step({ events: [ev("error", "verify `test -s out.csv` → exit 1", { check: true })] });
   assert.deepEqual([explainFailure("verify `test -s out.csv` → exit 1", check).kind], ["check"]);
+  // A schema check reads as one on the run page and in the list alike.
+  const schema = step({ events: [ev("error", "schema: the value does not fit — /title is required", { check: true })] });
+  assert.equal(runFailure(run(schema))!.kind, "check");
+  assert.equal(runFailure(runFromSummary(summarizeRun(run(schema))))!.kind, "check");
+  const flagged = step({ events: [ev("error", "the reply is not what was asked", { check: true })] });
+  assert.equal(runFailure(runFromSummary(summarizeRun(run(flagged))))!.kind, "check", "the check flag survives the index");
   assert.equal(explainFailure("Traceback (most recent call last):\n  File x").class, "user_code_error");
   const other = explainFailure("something odd");
   assert.deepEqual([other.class, other.kind, other.message, other.fix], ["platform_error", "other", "something odd", null]);
@@ -193,6 +199,13 @@ test("a run that failed with no failed step still says why: a stop, or a budget 
   const r = runFailure(run(done))!;
   assert.equal(r.kind, "budget");
   assert.equal(r.agent, "writer");
+  // The same through the runs index, which keeps that one error on the
+  // completed step's row (Codex review).
+  const listed = runFailure(runFromSummary(summarizeRun(run(done))))!;
+  assert.deepEqual([listed.kind, listed.agent, listed.message], [r.kind, r.agent, r.message]);
+  // An error on a completed step of a run that did NOT fail stays off the row.
+  const fine = { ...run(step({ status: "completed", events: [ev("error", "attempt 1: exit 1")] })), status: "completed" } as RunRecord;
+  assert.equal(summarizeRun(fine).steps[0].error, undefined);
   const stopped = { ...run(step({ status: "completed" })), stopRequested: true } as RunRecord;
   assert.deepEqual([runFailure(stopped)!.kind, runFailure(stopped)!.class, runFailure(stopped)!.reason], ["stopped", "cancelled", "stopped by a person"]);
   // Nothing to say: still null, as before.
