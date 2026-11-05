@@ -1117,7 +1117,7 @@ export const RETRY_SH = `retry() { what=$1; shift; n=1; until "$@"; do if [ "$n"
  *  RCE, TLS hostname bypasses); the pin before carried 22.23.3. */
 export const NODE_BASE = "node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173bffab391592812e85136452f781741c7242ddf";
 
-// Two images from one file, as build targets.
+// Two images from one file, as build targets, in two parts.
 //
 //   full  (the default, the last stage) — everything, browsers included. The
 //         per-account browser pod runs it, and so does any step that may
@@ -1130,10 +1130,44 @@ export const NODE_BASE = "node:22-trixie-slim@sha256:8eb619e402eaede1748a3c8173b
 //         (run-k8s.ts picks), and its declared packages arrive at run time
 //         through the runtime cache — uv is in the base for exactly that.
 //
+// The parts (FOL-50, 5 Nov 2026):
+//
+//   the OS   RUNNER_OS_DOCKERFILE: Debian, every apt package, uv, the
+//            Playwright client and, for full, the browsers (Google's Chrome
+//            included). Targets `slim-os` and `browsers`. Everything that
+//            writes /var/lib/dpkg/status is here and nowhere else.
+//   the app  core and the driver on top (CORE_STAGE, CORE_INSTALL): files
+//            only, no apt.
+//
+// Built together (runnerDockerfile() — a laptop, a self-hoster, images.yml)
+// it is one image as before. The hosted platform builds the OS part on its
+// own as the runner BASE image, pins it by digest (foldrun-infra
+// images/runner-base.env, refreshed weekly and at once for a fixable critical
+// vulnerability) and builds the app part FROM it (FOLDRUN_RUNNER_BASE_SLIM /
+// _FULL). A release that changes only foldrun's code then keeps the base's
+// bytes, so the dpkg status a `runtime: system:` snapshot was built on is
+// still there after the deploy (runtime.ts systemInstallSh) — rebuilding the
+// OS on every core change moved Chrome, the apt index and every package's
+// status line, and each release cost each package set a full apt install.
+//
 // The browsers sit BELOW the core install in `full`, as they always have,
 // so a core change rebuilds one thin layer and not 1.4 GB of Chromium.
-export const DOCKERFILE = `FROM ${NODE_BASE} AS base
+
+/** Stands for the OS definition's id inside its own text: the id is the
+ *  sha256 of the text with this in place, then substituted in. */
+const OS_ID_SLOT = "@@FOLDRUN_RUNNER_OS@@";
+/** The end of each OS target: which definition built it, as a label and as
+ *  a file the app part checks (OS_GUARD). Not under /var/lib/dpkg. */
+const OS_MARK = `LABEL io.foldrun.runner-os=${OS_ID_SLOT}
+RUN echo ${OS_ID_SLOT} > /etc/foldrun-runner-os`;
+
+const OS_TEMPLATE = `FROM ${NODE_BASE} AS base
+# upgrade: node's image lags Debian security (the platform images learnt it
+# on 6 Oct 2026, perl-base), and the hosted runner's base is rebuilt weekly
+# precisely so those fixes arrive; without it a refresh changed nothing the
+# node image already carried.
 RUN apt-get update \\
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends \\
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates bash util-linux tar openssh-client sshpass git curl \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd -m -u 10001 agent
@@ -1142,8 +1176,7 @@ RUN apt-get update \\
 COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/browser NODE_PATH=/usr/local/lib/node_modules
 
-${CORE_STAGE}
-FROM base AS slim
+FROM base AS slim-os
 # Fonts, because a step that draws text without a browser still needs them:
 # the full image gets 51 from Playwright's --with-deps, slim had none, so from
 # 2026-09-29 (when non-browsing steps moved to slim) every resvg/sharp diagram
@@ -1169,7 +1202,8 @@ RUN apt-get update \\
 # npm's download cache is dropped in the same layer: it was 190 MB of every
 # image, read by nothing after the build.
 RUN npm install -g playwright@1.63.0 axe-core@4.13.0 >/dev/null && npm cache clean --force >/dev/null 2>&1
-${CORE_INSTALL}
+${OS_MARK}
+
 FROM base AS browsers
 # Real browsers, because directories and portals increasingly render with
 # JavaScript and a plain fetch sees only the empty shell. Chromium is the one the
@@ -1294,9 +1328,74 @@ RUN node -e ' \\
   if (missing.length) console.error("runner image: built without " + missing.join(", ") + " on " + arch); \\
  ' \\
  && chmod a+r /opt/browser/engines.json
+${OS_MARK}
+`;
 
+/** Which definition of the OS part this core holds: 16 hex of the sha256 of
+ *  its text. A base image carries it (label io.foldrun.runner-os and
+ *  /etc/foldrun-runner-os); a base from another definition is refused. */
+export const RUNNER_OS_ID = crypto.createHash("sha256").update(OS_TEMPLATE).digest("hex").slice(0, 16);
+
+/** The runner's OS part on its own — what the base image is built from
+ *  (targets RUNNER_OS_TARGETS). No build context: it copies nothing local. */
+export const RUNNER_OS_DOCKERFILE = OS_TEMPLATE.split(OS_ID_SLOT).join(RUNNER_OS_ID);
+
+/** The OS part's build target for each runner variant. */
+export const RUNNER_OS_TARGETS = { slim: "slim-os", full: "browsers" } as const;
+
+/** The app part's first word in both variants: the OS under it is the one
+ *  this core's text describes. A base built from an older definition (a
+ *  Playwright bump, a new apt package) would otherwise ship a runner whose
+ *  browsers or packages are not the ones its core expects. */
+const OS_GUARD = `RUN test "$(cat /etc/foldrun-runner-os 2>/dev/null)" = "${RUNNER_OS_ID}" \\
+ || { echo "runner image: its base was built from another definition (wants ${RUNNER_OS_ID}, has $(cat /etc/foldrun-runner-os 2>/dev/null || echo none)) - build the base again: bash foldrun-infra/dev/ci/runner-base.sh refresh" >&2; exit 1; }`;
+
+/** The base images a runner is built FROM, by digest, one per variant. */
+export type RunnerBase = { slim: string; full: string };
+
+const BASE_REF = /^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$/;
+
+/**
+ * The runner base from FOLDRUN_RUNNER_BASE_SLIM and FOLDRUN_RUNNER_BASE_FULL:
+ * both or neither (empty counts as unset, as FOLDRUN_RUNNER_IMAGE does), each
+ * an image by digest — a tag would let the same runner tag hold another
+ * base's bytes. Anything else throws: a half-set base is a broken deploy,
+ * not a reason to quietly build the OS again.
+ */
+export function runnerBase(env: NodeJS.ProcessEnv = process.env): RunnerBase | null {
+  const slim = env.FOLDRUN_RUNNER_BASE_SLIM ?? "";
+  const full = env.FOLDRUN_RUNNER_BASE_FULL ?? "";
+  if (!slim && !full) return null;
+  if (!slim || !full) {
+    throw new Error("FOLDRUN_RUNNER_BASE_SLIM and FOLDRUN_RUNNER_BASE_FULL go together: set both (the base's two images, by digest) or neither");
+  }
+  for (const [k, v] of [["FOLDRUN_RUNNER_BASE_SLIM", slim], ["FOLDRUN_RUNNER_BASE_FULL", full]] as const) {
+    if (!BASE_REF.test(v)) throw new Error(`${k} must name an image by digest (name@sha256:<64 hex>), not ${JSON.stringify(v.slice(0, 120))}`);
+  }
+  return { slim, full };
+}
+
+/**
+ * The runner's Dockerfile: with no base, the OS part and the app part in one
+ * file (a self-contained build); with one, the app part FROM the base's two
+ * images. The app part's text is the same either way.
+ */
+export function runnerDockerfile(base: RunnerBase | null = null): string {
+  const os = base
+    ? `FROM ${base.slim} AS slim-os\nFROM ${base.full} AS browsers\nFROM slim-os AS base\n`
+    : RUNNER_OS_DOCKERFILE;
+  return `${os}
+${CORE_STAGE}
+FROM slim-os AS slim
+${OS_GUARD}
+${CORE_INSTALL}
 FROM browsers AS full
+${OS_GUARD}
 ${CORE_INSTALL}`;
+}
+
+/** The self-contained runner Dockerfile (no base): runnerDockerfile(). */
+export const DOCKERFILE = runnerDockerfile();
 
 // runtime: system: — apt as root, before the drop (runtime.ts systemInstallSh).
 // set -e is off around it: a failed install is reported by the driver, which
@@ -1342,7 +1441,9 @@ export function runnerImageTag(variant: RunnerVariant = "full"): string {
   // The fingerprint hashes the *built code*, not the version — a version
   // string that nobody bumped would pin every future run to the runner
   // image of whatever core happened to build first.
-  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + DOCKERFILE + "\n" + ENTRY);
+  // The Dockerfile as it will be built — with the base's digests in it when
+  // one is set, so a new base is a new tag.
+  const hash = crypto.createHash("sha256").update(DRIVER + "\n" + runnerDockerfile(runnerBase()) + "\n" + ENTRY);
   const dist = path.join(corePackageDir(), "dist");
   if (fs.existsSync(dist)) {
     for (const entry of fs.readdirSync(dist, { recursive: true }).sort()) {
@@ -1391,6 +1492,12 @@ export function ensureRunnerImage(
   const { tag, explicit } = runnerImageRef(opts);
   const log: string[] = [];
   if (explicit) return { tag, log };
+  const base = runnerBase();
+  // A base is one platform's images (the hosted base is linux/amd64): a
+  // cross-build on it would pull the wrong arch or none.
+  if (base && opts.platform) {
+    throw new Error(`a runner base names one platform's images: unset FOLDRUN_RUNNER_BASE_SLIM and FOLDRUN_RUNNER_BASE_FULL to build for ${opts.platform}`);
+  }
 
   const have = spawnSync(cli(), ["image", "inspect", tag], { stdio: "ignore" });
   if (have.status === 0) return { tag, log };
@@ -1405,8 +1512,9 @@ export function ensureRunnerImage(
     fs.renameSync(path.join(build, tarball), path.join(build, "foldrun-core.tgz"));
     fs.writeFileSync(path.join(build, "driver.mjs"), DRIVER);
     fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
-    fs.writeFileSync(path.join(build, "Dockerfile"), DOCKERFILE);
-    log.push(`building runner image ${tag} (first run only)`);
+    // The same text the tag hashed (runnerImageTag), base and all.
+    fs.writeFileSync(path.join(build, "Dockerfile"), runnerDockerfile(base));
+    log.push(`building runner image ${tag} (first run only)${base ? ` on base ${base.full.split("@")[1].slice(7, 19)}` : ""}`);
     const args = [
       "build",
       ...(opts.platform ? ["--platform", opts.platform] : []),

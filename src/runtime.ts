@@ -1093,7 +1093,10 @@ exit 0`;
  * byte-identical (FOL-50): the tar carries that status whole and files built
  * against those exact packages, and a maintainer script reads the base as
  * well as writing to it. What keeps a snapshot valid across releases is the
- * image keeping its OS layers (run-container.ts, FOLDRUN_OS_REFRESH):
+ * image keeping its OS layers: the hosted runner is built FROM a base image
+ * pinned by digest (run-container.ts RUNNER_OS_DOCKERFILE, FOLDRUN_RUNNER_BASE_*;
+ * foldrun-infra images/runner-base.env), refreshed weekly or for a fixable
+ * critical vulnerability, so only a refresh moves the status file:
  *
  *  - a base change is a new generation beside the old ones, counted in the
  *    status file as `stale` (the run log says "N snapshots did not fit this
