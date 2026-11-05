@@ -19,6 +19,14 @@ npx tsc --noEmit -p .
 Node 22 or newer. No model key is needed: every test that would call a model
 uses the stub executor.
 
+foldrun-cli, foldrun-platform and foldrun-web build on core's source, so a
+change here can break them while this suite stays green. When main passes,
+ci's `dependents` job dispatches a `core-main` run of each one's CI against
+that commit (as the foldrun-bot App); each also runs nightly against main.
+Before merging a change to something they import, run their tests against
+your checkout: `npm test` in a sibling `../foldrun-cli`, `../foldrun-platform`
+or `../foldrun-web`.
+
 ## Git hooks
 
 Problems are caught before the push, not in CI or the deploy. `.githooks/` is

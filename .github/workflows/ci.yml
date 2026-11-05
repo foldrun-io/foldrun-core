@@ -2,7 +2,8 @@ name: ci
 
 # Every push and every pull request. The tests are the specification here —
 # `foldrun check`'s rules, the grammar, the runner's contracts — so a red
-# build is a broken promise, not a style complaint.
+# build is a broken promise, not a style complaint. When main passes, the
+# repositories built on core re-run their own CI against it (dependents).
 on:
   push:
     branches: [main]
@@ -70,6 +71,51 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit -p .
       - run: npm test
+
+  # core's main passed: re-run the CI of the repositories that build on it,
+  # against this commit (FOL-92 — on 23 Oct the CLI went red against core
+  # main while its own CI stayed green, because nothing re-ran it). A
+  # `core-main` repository_dispatch to each, with the sha; each one's ci.yml
+  # checks core out at it. As the foldrun-bot App, the way release.yml tells
+  # the CLI about a release: a dispatch needs contents: write on the target,
+  # which GITHUB_TOKEN never has on another repository. One token per
+  # repository, so one the App cannot reach does not stop the others; a
+  # failure here is a warning, never a red core — each dependent also runs
+  # nightly against core's main.
+  dependents:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [foldrun-cli, foldrun-platform, foldrun-web]
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: bot
+        continue-on-error: true
+        with:
+          client-id: ${{ vars.FOLDRUN_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.FOLDRUN_BOT_PRIVATE_KEY }}
+          owner: foldrun-io
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+      - name: re-run ${{ matrix.repo }} against this core
+        if: steps.bot.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          REPO: ${{ matrix.repo }}
+          SHA: ${{ github.sha }}
+        run: |
+          for n in 1 2 3; do
+            gh api "repos/foldrun-io/$REPO/dispatches" -f event_type=core-main -f "client_payload[sha]=$SHA" && exit 0
+            if [ "$n" -lt 3 ]; then sleep $((n * 10)); fi
+          done
+          echo "::warning::could not dispatch $REPO — its nightly run tests against core's main"
+      - name: no token for ${{ matrix.repo }}
+        if: steps.bot.outputs.token == ''
+        run: echo "::warning::the foldrun-bot App gave no token for ${{ matrix.repo }} — its nightly run tests against core's main"
 
   # The release pull request passed: wake release-merge.yml (27 Oct 2026).
   # Its own workflow_run never fires for this run — GITHUB_TOKEN started it —
