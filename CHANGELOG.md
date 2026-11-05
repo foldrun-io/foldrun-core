@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [14.5.0] — 2026-11-05
+
+- feat(startup): startupBreakdown, one overlap-aware reading of a step's start-up marks (FOL-74) ([980115b](https://github.com/foldrun-io/foldrun-core/commit/980115b))
+
 ## [14.4.0] — 2026-11-04
 
 ### New in the public API
