@@ -12,6 +12,7 @@
 // read that run's fields; it receives what the run concluded, as text, and
 // an agent reads it — the same rule as every other handoff in the format.
 
+import { opsLog, opsError } from "./ops-log.ts";
 import crypto from "node:crypto";
 import { platform } from "./platform.ts";
 import { refusalCode } from "./trigger-log.ts";
@@ -93,7 +94,7 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
     try {
       const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "previous_run", fields: chainFields(finished) });
       if (!gate.admit) {
-        console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
+        opsLog("info", "trigger.flow_not_started", { tenant, workspace, flow: flow.name, reason: gate.reason });
         continue;
       }
       try {
@@ -103,13 +104,13 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
           `after:${finished.flow}`,
         ], null, finished.test ? { test: true } : {});
         started.push(run.id);
-        console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
+        opsLog("info", "trigger.flow_started", { tenant, workspace, flow: flow.name, runId: run.id, kind: "previous_run", outcome: finished.status });
       } catch (err) {
         await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err), code: refusalCode(err) });
         throw err;
       }
     } catch (err) {
-      console.error(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
+      opsError("trigger.flow_failed", err, { tenant, workspace, flow: flow.name });
     }
   }
   return started;
@@ -158,7 +159,7 @@ export async function fireStorageTriggers(
       // forty runs — which is exactly what `debounce:` is for.
       const gate = await platform.admitTrigger(tenant, workspace, flow, { body, tag: "storage_event", fields: { by, paths: hits } });
       if (!gate.admit) {
-        console.log(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name} not started: ${gate.detail}`);
+        opsLog("info", "trigger.storage_not_started", { tenant, workspace, flow: flow.name, reason: gate.reason });
         continue;
       }
       try {
@@ -171,7 +172,7 @@ export async function fireStorageTriggers(
         throw err;
       }
     } catch (err) {
-      console.error(`[foldrun] trigger: storage — ${tenant}/${workspace}/${flow.name}:`, err instanceof Error ? err.message : err);
+      opsError("trigger.storage_failed", err, { tenant, workspace, flow: flow.name });
     }
   }
   return started;

@@ -8,6 +8,7 @@
 // results. That is what lets the same function run somewhere the vault, the
 // library and the account do not exist.
 
+import { opsError } from "./ops-log.ts";
 import { judgeVerdict, JUDGE_VERDICT_INSTRUCTION } from "./judge-verdict.ts";
 import { runHook, runToolCallHooks, matchesTool, hookLine, resolveHooks, type HookDef, type HookRecord } from "./hooks.ts";
 import fs from "node:fs";
@@ -1381,16 +1382,21 @@ function runVerify(
  * A model process's failure as a person should read it: one short line. The
  * SDK's error for a CLI that died carries the CLI's stderr, which can be KBs
  * of its minified bundle — internal prompt text included (FOL-107) — so that
- * part goes to the server log, never to an eval result or a trace. An error
- * that is already short (an API error the model answered) is kept as it is.
+ * part goes neither to an eval result or a trace, nor to a hosted log
+ * (FOL-121): there the log line is the failure's class and our frames. An
+ * error that is already short (an API error the model answered) is kept as
+ * it is.
  */
 export function modelProcessError(err: unknown, where: string): Error {
   const full = err instanceof Error ? err.message : String(err);
   const at = full.indexOf(" stderr:");
   if (at < 0 && full.length <= 500) return err instanceof Error ? err : new Error(full);
-  console.error(`[foldrun] ${where}: ${full}`);
+  // Inside the hosted boundary this is the class, name and our frames only:
+  // the stderr is the CLI's, and can carry the prompt (FOL-107, FOL-121).
+  // On a laptop the full text comes along, for the person it belongs to.
+  opsError("model.process_failed", err, { where: where.replace(/\W+/g, "_").toLowerCase(), errorClass: "model_error" });
   const head = (at >= 0 ? full.slice(0, at) : full.slice(0, 300)).trim().replace(/[.:]$/, "");
-  return new Error(`${head} — the model process failed; the details are in the server log`);
+  return new Error(`${head} — the model process failed`);
 }
 
 export function sdkEnv(base: Record<string, string | undefined> | undefined, extra: Record<string, string> = {}): Record<string, string | undefined> {
