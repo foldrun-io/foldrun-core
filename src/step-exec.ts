@@ -1400,7 +1400,11 @@ export function modelProcessError(err: unknown, where: string): Error {
 }
 
 export function sdkEnv(base: Record<string, string | undefined> | undefined, extra: Record<string, string> = {}): Record<string, string | undefined> {
-  return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
+  // No telemetry, error reports, update checks or feature-flag fetches from
+  // the model process: none of it is the step, and it held back the SDK's
+  // start by ~0.85 s a step on an open network (FOL-49: init median 1.4 s →
+  // 0.56 s, 9 runs each); behind the egress filter those hosts are refused.
+  return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
 }
 
 /** The text of a tool result, whichever shape it came in: a string, or a

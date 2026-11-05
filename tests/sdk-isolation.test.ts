@@ -41,6 +41,11 @@ test("a step's SDK session loads no claude.ai connectors and no on-disk MCP conf
   }
 });
 
+test("sdkEnv: the model process sends no telemetry, update checks or flag fetches (FOL-49)", () => {
+  assert.equal(sdkEnv({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "" }).CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+  assert.equal(sdkEnv(undefined, { A: "b" }).CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+});
+
 test("sdkEnv cannot be talked out of it: the step's env does not switch connectors back on", () => {
   assert.equal(sdkEnv({ ENABLE_CLAUDEAI_MCP_SERVERS: "true" }).ENABLE_CLAUDEAI_MCP_SERVERS, "false");
   assert.equal(sdkEnv(undefined).ENABLE_CLAUDEAI_MCP_SERVERS, "false");
