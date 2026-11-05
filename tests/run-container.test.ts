@@ -13,6 +13,12 @@ import crypto from "node:crypto";
 import { spawnSync as spawnSh } from "node:child_process";
 import {
   DOCKERFILE,
+  RUNNER_OS_DOCKERFILE,
+  RUNNER_OS_ID,
+  RUNNER_OS_TARGETS,
+  runnerBase,
+  runnerDockerfile,
+  ensureRunnerImage,
   ENGINE_DOWNLOAD_ATTEMPTS,
   RETRY_SH,
   allowedBack,
@@ -489,10 +495,137 @@ test("mtimeManifest + APPLY_MTIMES_JS put back the times a copy lost", async () 
   assert.equal(Math.round(fs.statSync(f).mtimeMs / 1000), Math.round(old.getTime() / 1000));
 });
 
+/** One stage of a Dockerfile: from its `FROM … AS <name>` line to the next FROM. */
+function stage(text: string, name: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => new RegExp(`^FROM \\S+ AS ${name}$`).test(l));
+  assert.ok(at >= 0, `there is a stage ${name}`);
+  const next = lines.findIndex((l, i) => i > at && l.startsWith("FROM "));
+  return lines.slice(at, next < 0 ? undefined : next).join("\n");
+}
+
 test("the base image is pinned by digest — the same runner tag must always hold the same base", () => {
   const from = DOCKERFILE.split("\n")[0];
   assert.match(from, /^FROM node:\d+-[a-z]+-slim@sha256:[0-9a-f]{64} AS base$/);
   assert.doesNotMatch(DOCKERFILE, /FROM node:[^@\s]+ /, "no floating node tag anywhere");
+});
+
+// FOL-50 part 2: the OS part is a base image of its own on the hosted
+// platform, so a release that changes only core keeps the dpkg status a
+// runtime: system: snapshot was built on.
+const BASE = { slim: `ghcr.io/foldrun-io/runner-base@sha256:${"a".repeat(64)}`, full: `ghcr.io/foldrun-io/runner-base@sha256:${"b".repeat(64)}` };
+
+test("every apt and browser install is in the OS part; the app part only copies files", () => {
+  for (const name of ["core", "slim", "full"]) {
+    const s = stage(DOCKERFILE, name).split("\n").filter((l) => !l.startsWith("#")).join("\n");
+    assert.doesNotMatch(s, /apt-get|dpkg|playwright install|npm install -g/, `${name} writes nothing dpkg or the browsers own`);
+  }
+  for (const target of Object.values(RUNNER_OS_TARGETS)) assert.match(RUNNER_OS_DOCKERFILE, new RegExp(`^FROM \\S+ AS ${target}$`, "m"));
+  assert.ok(DOCKERFILE.startsWith(RUNNER_OS_DOCKERFILE), "a self-contained build is the OS part then the app part");
+  // Node's image lags Debian security: a refresh must pick fixes up.
+  assert.match(stage(DOCKERFILE, "base"), /DEBIAN_FRONTEND=noninteractive apt-get upgrade -y/);
+});
+
+test("each OS target records its definition, and the app part refuses a base from another one", () => {
+  assert.match(RUNNER_OS_ID, /^[0-9a-f]{16}$/);
+  assert.doesNotMatch(RUNNER_OS_DOCKERFILE, /@@/, "the id is substituted in");
+  for (const target of Object.values(RUNNER_OS_TARGETS)) {
+    const s = stage(RUNNER_OS_DOCKERFILE, target);
+    assert.match(s, new RegExp(`LABEL io\\.foldrun\\.runner-os=${RUNNER_OS_ID}\\n`));
+    assert.match(s, new RegExp(`^RUN echo ${RUNNER_OS_ID} > /etc/foldrun-runner-os$`, "m"));
+  }
+  for (const name of ["slim", "full"]) {
+    const run = stage(DOCKERFILE, name).split("\n")[1];
+    assert.match(run, new RegExp(`^RUN test "\\$\\(cat /etc/foldrun-runner-os 2>/dev/null\\)" = "${RUNNER_OS_ID}"`));
+  }
+  // The guard itself, run by sh: the right id passes, another fails naming both.
+  const guard = stage(DOCKERFILE, "slim").split("\n").slice(1, 3).join("\n").replace(/^RUN /, "").replace(/\\\n/g, "");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "os-guard-"));
+  try {
+    const run = (id: string | null) => {
+      const f = path.join(dir, "foldrun-runner-os");
+      if (id === null) fs.rmSync(f, { force: true });
+      else fs.writeFileSync(f, id + "\n");
+      return spawnSh("sh", ["-c", guard.replaceAll("/etc/foldrun-runner-os", f)], { encoding: "utf8" });
+    };
+    assert.equal(run(RUNNER_OS_ID).status, 0);
+    const other = run("0123456789abcdef");
+    assert.notEqual(other.status, 0);
+    assert.match(other.stderr, new RegExp(`runner image: its base was built from another definition \\(wants ${RUNNER_OS_ID}, has 0123456789abcdef\\)`));
+    assert.match(run(null).stderr, /has none/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with a base, the app part is built FROM its two images by digest and is otherwise the same text", () => {
+  const on = runnerDockerfile(BASE);
+  assert.deepEqual(on.split("\n").slice(0, 3), [`FROM ${BASE.slim} AS slim-os`, `FROM ${BASE.full} AS browsers`, "FROM slim-os AS base"]);
+  assert.doesNotMatch(on, /apt-get|node:22/, "no OS in it");
+  assert.equal(on.slice(on.indexOf("FROM base AS core")), DOCKERFILE.slice(DOCKERFILE.indexOf("FROM base AS core")));
+  assert.equal(runnerDockerfile(), DOCKERFILE);
+});
+
+test("FOLDRUN_RUNNER_BASE_SLIM and _FULL: both or neither, each by digest", () => {
+  assert.equal(runnerBase({}), null);
+  assert.equal(runnerBase({ FOLDRUN_RUNNER_BASE_SLIM: "", FOLDRUN_RUNNER_BASE_FULL: "" }), null, "empty is unset");
+  assert.deepEqual(runnerBase({ FOLDRUN_RUNNER_BASE_SLIM: BASE.slim, FOLDRUN_RUNNER_BASE_FULL: BASE.full }), BASE);
+  assert.deepEqual(runnerBase({ FOLDRUN_RUNNER_BASE_SLIM: "localhost:5000/base@sha256:" + "c".repeat(64), FOLDRUN_RUNNER_BASE_FULL: BASE.full })?.slim, "localhost:5000/base@sha256:" + "c".repeat(64));
+  assert.throws(() => runnerBase({ FOLDRUN_RUNNER_BASE_FULL: BASE.full }), /go together/);
+  assert.throws(() => runnerBase({ FOLDRUN_RUNNER_BASE_SLIM: BASE.slim, FOLDRUN_RUNNER_BASE_FULL: "ghcr.io/foldrun-io/runner-base:latest" }), /FOLDRUN_RUNNER_BASE_FULL must name an image by digest/);
+  assert.throws(() => runnerBase({ FOLDRUN_RUNNER_BASE_SLIM: `${BASE.slim}\nRUN id`, FOLDRUN_RUNNER_BASE_FULL: BASE.full }), /by digest/, "no Dockerfile text through the variable");
+});
+
+function withBase<T>(base: typeof BASE | null, body: () => T): T {
+  const prev = [process.env.FOLDRUN_RUNNER_BASE_SLIM, process.env.FOLDRUN_RUNNER_BASE_FULL];
+  if (base) { process.env.FOLDRUN_RUNNER_BASE_SLIM = base.slim; process.env.FOLDRUN_RUNNER_BASE_FULL = base.full; }
+  else { delete process.env.FOLDRUN_RUNNER_BASE_SLIM; delete process.env.FOLDRUN_RUNNER_BASE_FULL; }
+  try {
+    return body();
+  } finally {
+    for (const [k, v] of [["FOLDRUN_RUNNER_BASE_SLIM", prev[0]], ["FOLDRUN_RUNNER_BASE_FULL", prev[1]]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("a base is part of the runner tag: a new base is a new tag, the same base the same tag", () => {
+  const none = withRunnerImage(undefined, () => withBase(null, () => runnerImageTag()));
+  const one = withRunnerImage(undefined, () => withBase(BASE, () => runnerImageTag()));
+  const again = withRunnerImage(undefined, () => withBase(BASE, () => runnerImageTag()));
+  const other = withRunnerImage(undefined, () => withBase({ ...BASE, full: BASE.full.replace(/b{64}$/, "d".repeat(64)) }, () => runnerImageTag()));
+  assert.notEqual(none, one);
+  assert.equal(one, again);
+  assert.notEqual(one, other);
+});
+
+test("ensureRunnerImage builds the Dockerfile the tag hashed, base and all", () => {
+  // A fake container CLI: `image inspect` misses, `build` records the
+  // Dockerfile it was given and succeeds.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fake-docker-"));
+  const cli = path.join(dir, "docker");
+  fs.writeFileSync(cli, `#!/bin/sh\nif [ "$1" = image ]; then exit 1; fi\nfor a; do last=$a; done\ncp "$last/Dockerfile" "${dir}/built"\necho "$@" > "${dir}/args"\n`, { mode: 0o755 });
+  // And a fake npm: `npm pack <dir> --pack-destination <build>` leaves a
+  // tarball name, without running core's prepare build.
+  fs.writeFileSync(path.join(dir, "npm"), `#!/bin/sh\ntouch "$4/foldrun-core-0.0.0.tgz"\necho foldrun-core-0.0.0.tgz\n`, { mode: 0o755 });
+  const prev = process.env.FOLDRUN_CONTAINER_CLI;
+  const prevPath = process.env.PATH;
+  process.env.FOLDRUN_CONTAINER_CLI = cli;
+  process.env.PATH = `${dir}:${prevPath}`;
+  try {
+    const r = withRunnerImage(undefined, () => withBase(BASE, () => ensureRunnerImage({ variant: "slim" })));
+    assert.equal(r.tag, withRunnerImage(undefined, () => withBase(BASE, () => runnerImageTag("slim"))));
+    assert.equal(fs.readFileSync(path.join(dir, "built"), "utf8"), runnerDockerfile(BASE));
+    assert.match(fs.readFileSync(path.join(dir, "args"), "utf8"), /--target slim /);
+    assert.match(r.log.join("\n"), /on base bbbbbbbbbbbb/);
+    assert.throws(() => withRunnerImage(undefined, () => withBase(BASE, () => ensureRunnerImage({ platform: "linux/arm64" }))), /names one platform's images/);
+  } finally {
+    if (prev === undefined) delete process.env.FOLDRUN_CONTAINER_CLI;
+    else process.env.FOLDRUN_CONTAINER_CLI = prev;
+    process.env.PATH = prevPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Lightpanda past 0.3.6 needs glibc 2.38 — the base must not be Debian 12", () => {
@@ -504,21 +637,21 @@ test("Lightpanda past 0.3.6 needs glibc 2.38 — the base must not be Debian 12"
 });
 
 test("the slim runner ships fonts — without them every non-browser render draws empty boxes", () => {
-  const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
+  const slim = stage(DOCKERFILE, "slim-os");
   assert.match(slim, /fonts-dejavu-core/);
   assert.match(slim, /fontconfig/);
   // Emoji, CJK, Devanagari and Thai drew as empty boxes with DejaVu alone.
   for (const pkg of ["fonts-symbola", "fonts-wqy-microhei", "fonts-lohit-deva", "fonts-tlwg-loma-otf"]) assert.match(slim, new RegExp(pkg));
   // Not in base: the full image's browser layers must stay cached.
-  assert.doesNotMatch(DOCKERFILE.split("FROM base AS slim")[0], /fonts-dejavu/);
+  assert.doesNotMatch(stage(DOCKERFILE, "base"), /fonts-dejavu/);
 });
 
 test("core is installed in its own stage — the tarball and core's README never become a layer of slim or full", () => {
-  const core = DOCKERFILE.split("FROM base AS core")[1].split("FROM base AS slim")[0];
+  const core = stage(DOCKERFILE, "core");
   assert.match(core, /COPY foldrun-core\.tgz/);
   assert.match(core, /rm -f foldrun-core\.tgz node_modules\/@foldrun\/core\/README\.md/);
-  const slim = DOCKERFILE.split("FROM base AS slim")[1].split("FROM base AS browsers")[0];
-  const full = DOCKERFILE.split("FROM browsers AS full")[1];
+  const slim = stage(DOCKERFILE, "slim");
+  const full = stage(DOCKERFILE, "full");
   for (const stage of [slim, full]) {
     assert.match(stage, /COPY --from=core --chown=agent:agent \/opt\/runner\/ \.\//);
     assert.doesNotMatch(stage, /foldrun-core\.tgz/);
@@ -526,14 +659,14 @@ test("core is installed in its own stage — the tarball and core's README never
 });
 
 test("the browsers stage installs Xvfb by name — headless: false must not hang on a Playwright dependency list", () => {
-  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  const browsers = stage(DOCKERFILE, "browsers");
   assert.match(browsers, /apt-get install -y --no-install-recommends xvfb\b/);
   const commands = browsers.split("\n").filter((l) => !l.startsWith("#")).join("\n");
   assert.doesNotMatch(commands, /xauth/, "nothing runs xvfb-run, so nothing needs xauth");
 });
 
 test("the full image writes down which engines it has, and an x86_64 build missing one fails", () => {
-  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  const browsers = stage(DOCKERFILE, "browsers");
   assert.match(browsers, /\/opt\/browser\/engines\.json/);
   for (const e of ["chromium", "chrome", "firefox", "webkit", "lightpanda", "obscura"]) assert.match(browsers, new RegExp(`"${e}"|\\b${e}: one\\(`), `${e} is in the manifest`);
   assert.match(browsers, /arch === "x86_64"\) \{[^}]*process\.exit\(1\)/);
@@ -543,7 +676,7 @@ test("the full image writes down which engines it has, and an x86_64 build missi
 });
 
 test("every best-effort engine download retries before the build gives up on it", () => {
-  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  const browsers = stage(DOCKERFILE, "browsers");
   const runs = browsers.replace(/\\\n/g, "").split("\n").filter((l) => l.startsWith("RUN "));
   for (const engine of ["chrome", "chrome-beta", "lightpanda", "obscura"]) {
     const run = runs.find((r) => new RegExp(`retry ${engine} `).test(r));
@@ -576,7 +709,7 @@ retry broken false || echo "broken gave up"`;
 });
 
 test("a missing engine on x86_64 is named on a line of its own that leads the failure", () => {
-  const browsers = DOCKERFILE.split("FROM base AS browsers")[1].split("FROM browsers AS full")[0];
+  const browsers = stage(DOCKERFILE, "browsers");
   assert.match(browsers, /"runner image: MISSING ENGINES on x86_64: " \+ missing\.join\(", "\)/);
 });
 
