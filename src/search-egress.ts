@@ -35,19 +35,6 @@ import { resolveActionApi } from "./web-actions.ts";
 export const SEARCHING_ACTIONS = ["search", "answer", "monitor"] as const;
 export type SearchingAction = (typeof SEARCHING_ACTIONS)[number];
 
-/**
- * Does this step ask the account's own engine? The web tool, one of
- * search/answer/monitor allowed (FOLDRUN_WEB_ACTIONS, empty: all), and no
- * provider named for that action (FOLDRUN_WEB_<ACTION>_VIA). Read from the
- * step's environment — the platform's driver's question, which decides
- * whether to start the account's search pod at all.
- */
-export function searchesAccountEngine(scripts: { name: string }[], env: Record<string, string | undefined>): boolean {
-  if (!scripts.some((s) => s.name === "web")) return false;
-  const allowed = (env.FOLDRUN_WEB_ACTIONS ?? "").split(",").map((a) => a.trim()).filter(Boolean);
-  return SEARCHING_ACTIONS.some((a) => (!allowed.length || allowed.includes(a)) && !env[`FOLDRUN_WEB_${a.toUpperCase()}_VIA`]);
-}
-
 /** The searching actions a provider answers instead of our engine, from an
  *  agent's resolved `web:` block (webConfig(...).raw) — the runner's reading
  *  of it: a search API or a model provider's own search for `search`, an
