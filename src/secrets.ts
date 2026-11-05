@@ -19,6 +19,7 @@
 // Secrets are injected as environment variables into the agent's tools at run
 // time and are never returned by the API.
 
+import { opsLog, withOpsReason } from "./ops-log.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { dataRoot } from "./paths.ts";
@@ -71,7 +72,7 @@ export function installKeyMaterial(): string {
   // so; without this, asking for it would quietly mint a NEW random key on
   // the shared data volume — a second root key nobody chose.
   if (process.env.FOLDRUN_INSTALL_KEY_ABSENT === "1") {
-    throw new Error("this process runs without the install key (FOLDRUN_INSTALL_KEY_ABSENT=1) — whatever asked for it belongs in the worker");
+    throw withOpsReason(new Error("this process runs without the install key (FOLDRUN_INSTALL_KEY_ABSENT=1) — whatever asked for it belongs in the worker"), "install_key_absent");
   }
   fs.mkdirSync(dataRoot(), { recursive: true });
   if (!fs.existsSync(keyFile())) {
@@ -549,10 +550,8 @@ function decrypt(tenant: string, rec: StoredSecret | undefined, aad?: Buffer): s
         // "no such secret" — a process that forgot to load the account keys
         // would look exactly like an account that never set one, which is the
         // most expensive kind of wrong answer to debug.
-        console.error(
-          `[secrets] ${tenant} has account-keyed secrets but no key is loaded — ` +
-            `call loadTenantKeys() before reading, or the value will read as absent`,
-        );
+        // loadTenantKeys() was not called before reading: the value reads as absent.
+        opsLog("error", "secrets.account_key_not_loaded", { tenant });
         return null;
       }
       key = own;

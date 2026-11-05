@@ -5,6 +5,7 @@
 // is not in the vault, and is still a key. Masked first, cut second, so a
 // secret on the cap's edge is never kept half. Recording never fails the step.
 
+import { opsError } from "./ops-log.ts";
 import { redactText } from "./scan.ts";
 import { writeCapturedCall, CAPTURE_CAP } from "./store.ts";
 import { isFileValue, fileContent, isApiValue, apiConfigOf, isClientCertValue, clientCertOf } from "./secrets.ts";
@@ -114,7 +115,7 @@ export function recordCallIo(
     });
     return true;
   } catch (err) {
-    console.error(`[capture] ${tool} (${callId}) for ${runId}:`, err instanceof Error ? err.message : err);
+    opsError("capture.write_failed", err, { tool, runId });
     return false;
   }
 }

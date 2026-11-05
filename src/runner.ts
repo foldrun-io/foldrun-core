@@ -3,6 +3,7 @@
 // fail without failing the flow. A direct agent run is a one-step ad-hoc
 // flow, so there is a single execution path.
 
+import { opsLog, opsError } from "./ops-log.ts";
 import { globMatch } from "./bounded-match.ts";
 import { latestRevisionId } from "./history.ts";
 import { recordCallIo, redactionsFor } from "./capture.ts";
@@ -2428,7 +2429,7 @@ async function runStep(
       const why = await platform.checkUntrustedUrl(r.card);
       if (why) {
         cardProblems.set(r.name, why);
-        console.warn(`[a2a] remotes: ${r.name} refused for ${tenant}/${path.basename(workspaceRootOf(agentDir))} (${step.agent}): ${why}`);
+        opsLog("warn", "a2a.remote_refused", { tenant, workspace: path.basename(workspaceRootOf(agentDir)), agent: step.agent, tool: r.name });
       }
     }
     const stepRemotes: RemoteSpec[] = remotes.map((r) => {
@@ -4255,7 +4256,8 @@ export function platformModelCredential(env: NodeJS.ProcessEnv = process.env): s
       // thing an operator needs to know about before the next step fails.
       if (!credentialFileWarned) {
         credentialFileWarned = true;
-        console.warn(`[model] FOLDRUN_MODEL_KEY_FILE=${file} could not be read; falling back to the environment`);
+        // FOLDRUN_MODEL_KEY_FILE could not be read: the environment's key is used.
+        opsLog("warn", "model.key_file_unreadable", { outcome: "environment" });
       }
     }
   }
@@ -6377,7 +6379,7 @@ export function reconcileRuns(tenant: string, now = Date.now(), live?: ReadonlyS
             const after = readRun(tenant, workspace.name, run.id);
             if (onEnd && after && (after.status === "completed" || after.status === "failed")) return onEnd(tenant, workspace.name, run.id);
           })
-          .catch((err) => console.error(`[foldrun] reconcile: ${tenant}/${workspace.name}/${run.id} after resume:`, err));
+          .catch((err) => opsError("reconcile.after_resume_failed", err, { tenant, workspace: workspace.name, runId: run.id }));
         closed.push({
           runId: run.id,
           tenant,
@@ -6425,7 +6427,7 @@ export function reconcileRuns(tenant: string, now = Date.now(), live?: ReadonlyS
       if (onEnd) {
         void Promise.resolve()
           .then(() => onEnd(tenant, workspace.name, run.id))
-          .catch((err) => console.error(`[foldrun] reconcile: ${tenant}/${workspace.name}/${run.id} after close:`, err));
+          .catch((err) => opsError("reconcile.after_close_failed", err, { tenant, workspace: workspace.name, runId: run.id }));
       }
     }
   }

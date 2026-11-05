@@ -2,6 +2,7 @@
 // identity under the install's secret key. Stable across restarts, unique
 // per flow, and rotating FOLDRUN_SECRET_KEY invalidates every hook at once.
 
+import { opsLog } from "./ops-log.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { workspaceDir } from "./store.ts";
@@ -225,8 +226,8 @@ function noteRefusal(tenant: string, workspace: string, delivery: HookDelivery) 
     seen.since++;
     return;
   }
-  const more = seen?.since ? ` (and ${seen.since} more since the last note)` : "";
-  console.warn(`[hooks] refused a delivery to ${key}/${delivery.flow}: ${delivery.outcome}${more}`);
+  // count: this one and those refused since the last note.
+  opsLog("warn", "webhook.delivery_refused", { tenant, workspace, flow: delivery.flow, outcome: delivery.outcome, count: (seen?.since ?? 0) + 1 });
   refusalNotes.set(key, { at: now, since: 0 });
   if (refusalNotes.size > 10_000) refusalNotes.clear(); // bounded: a note lost beats memory
 }

@@ -24,6 +24,7 @@
 // — the platform keeps them as records. A laptop has no preferences store and
 // sends everything, which is what it always did.
 
+import { opsError } from "./ops-log.ts";
 import crypto from "node:crypto";
 import { platform } from "./platform.ts";
 import { installKey, publicUrl } from "./webhook.ts";
@@ -247,7 +248,7 @@ export async function mailWanted(tenant: string, email: string, category: MailCa
   } catch (err) {
     // A preferences store that cannot be read sends: a missed alert is
     // worse than one unwanted mail, and the next send asks again.
-    console.error(`[foldrun] mail: preference for ${category} unreadable, sending:`, err instanceof Error ? err.message : err);
+    opsError("mail.preference_unreadable", err, { tenant, kind: category, outcome: "sent" }, "warn");
     return true;
   }
 }

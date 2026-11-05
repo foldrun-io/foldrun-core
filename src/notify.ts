@@ -31,6 +31,7 @@
 // that works is the quiet kind of good news, and a channel that pings on
 // every success gets muted, which un-pings the failures too.
 
+import { opsLog, opsError } from "./ops-log.ts";
 import crypto from "node:crypto";
 import { readAgentsMd } from "./runner.ts";
 import { accountDir, workspaceDir, runCost, readFlow, runVerdict, type RunRecord } from "./store.ts";
@@ -179,9 +180,7 @@ export function signatureHeaders(
   if (!config.signingSecret) return {};
   const secret = getSecret(tenant, config.signingSecret, workspace);
   if (!secret) {
-    console.error(
-      `[foldrun] notify: signing_secret names ${signingSecretShown(config.signingSecret)}, which is not in the vault for ${tenant}/${workspace} — sending unsigned`,
-    );
+    opsLog("warn", "notify.signing_secret_missing", { tenant, workspace, outcome: "sent_unsigned" });
     return {};
   }
   const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -503,7 +502,7 @@ export async function sendPlainNotificationOutcome(
     const r = await platform.deliverWebhook(tenant, workspace, { event: msg.event, body: JSON.stringify(body), retry: true });
     return { ok: r.ok, retrying: r.retrying === true };
   } catch (err) {
-    console.error(`[foldrun] notify (${msg.event}): ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
+    opsError("notify.event_failed", err, { tenant, workspace, kind: msg.event });
     return no;
   }
 }
@@ -672,7 +671,9 @@ export async function sendRunNotification(
     if (config.email) {
       const mail = notifyMail(tenant, workspace);
       if (!mail) {
-        console.error(`[foldrun] notify: email configured but no mail credential — set RESEND_API_KEY (and EMAIL_FROM) on the account ${tenant}, or FOLDRUN_RESEND_API_KEY on the platform`);
+        // RESEND_API_KEY (and EMAIL_FROM) on the account, or
+        // FOLDRUN_RESEND_API_KEY on the platform.
+        opsLog("error", "notify.no_mail_credential", { tenant, workspace });
         return false;
       }
       // A gate is its own category: a person may want failures and not
@@ -707,7 +708,9 @@ export async function sendRunNotification(
         // Resend's body says WHY — "domain not verified", "can only send to
         // your own address" — and a status alone sent someone to the wrong
         // dashboard for twenty minutes on 2026-09-06.
-        console.error(`[foldrun] notify email: ${tenant}/${workspace} → ${r.status ? `HTTP ${r.status} ` : ""}${r.error ?? ""}`);
+        // The provider's words stay out of our log (they quote what was
+        // sent); the status is what an operator can act on.
+        opsLog("error", "notify.email_failed", { tenant, workspace, status: r.status });
         return false;
       }
       return true;
@@ -717,18 +720,18 @@ export async function sendRunNotification(
     // vault instead of in a file that gets committed.
     const target = webhookTarget(tenant, workspace, config);
     if (!target.url) {
-      console.error(`[foldrun] notify: ${target.refused ?? "secret in URL not set"} for ${tenant}/${workspace}`);
+      opsLog("error", "notify.no_webhook_url", { tenant, workspace, reason: target.refused ? "refused" : "secret_not_set" });
       return false;
     }
     const event = blocked ? "blocked" : run.status;
     const r = await platform.deliverWebhook(tenant, workspace, { event, body: JSON.stringify(body), retry: true });
     if (!r.ok) {
-      console.error(`[foldrun] notify: ${tenant}/${workspace} → ${r.statusCode ? `HTTP ${r.statusCode}` : r.detail}${r.retrying ? " (will retry)" : ""}`);
+      opsLog("error", "notify.webhook_failed", { tenant, workspace, status: r.statusCode, retrying: r.retrying === true });
       return false;
     }
     return true;
   } catch (err) {
-    console.error(`[foldrun] notify: ${tenant}/${workspace} →`, err instanceof Error ? err.message : err);
+    opsError("notify.failed", err, { tenant, workspace });
     return false;
   }
 }

@@ -48,6 +48,7 @@
 //   FOLDRUN_STORAGE_MAX_MB        per object, default 512
 //   FOLDRUN_STORAGE_QUOTA_MB      per workspace, default 5120
 
+import { opsError } from "./ops-log.ts";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -686,7 +687,7 @@ async function announceFiles(tenant: string, workspace: string, paths: string[],
     const { fireStorageTriggers } = await import("./triggers.ts");
     await fireStorageTriggers(tenant, workspace, paths, by);
   } catch (err) {
-    console.error(`[foldrun] storage trigger ${tenant}/${workspace}:`, err instanceof Error ? err.message : err);
+    opsError("trigger.storage_failed", err, { tenant, workspace });
   }
 }
 
