@@ -156,6 +156,16 @@ export interface PlatformHooks {
    *  Absent: nobody can (a laptop, a self-hosted install). */
   modelSupply?(tenant: string): SupplyAnswer;
   /**
+   * Does this isolation mode wall a step's network to the egress proxy and
+   * DNS when its `network:` is restricted and enforced — and is browsing
+   * put under that wall (FOL-110 phase 3, browse-egress.ts browseVerdict)?
+   * True: a browsing step gets the forward proxy like any other and its
+   * browser runs inside the walled sandbox, so the list holds for it.
+   * Absent or false: a browsing step browses as before phase 3, said in the
+   * trace as not enforced.
+   */
+  confinesBrowsing?(isolation: string): boolean;
+  /**
    * An operator setting, by the environment variable that used to hold it
    * (30 Oct 2026): the platform answers with the operator's value where one
    * is set (its settings store) and the variable otherwise, spelled as the

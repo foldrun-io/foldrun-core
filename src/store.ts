@@ -55,7 +55,8 @@ import { parseRemotes, remoteNetworkHosts, A2A_LIMIT_KEY, type RemoteSpec } from
 import { parseBudget, budgetProblem } from "./budget.ts";
 import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
-import { networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
+import { networkEnforceWanted, networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
+import { browseVendorOf } from "./browse-egress.ts";
 import { webProblems, webWarnings, runnerEngines, webConfig } from "./providers.ts";
 import { actionProblems } from "./web-actions.ts";
 import { languageProblem } from "./language.ts";
@@ -1050,8 +1051,9 @@ export interface AgentInfo {
    *  the default (open when it may fetch or browse the web, else trusted).
    *  `implied` here is its `apis:` hosts; a run also adds its MCP servers',
    *  its web providers' and its bound secrets' sites. */
-  /** browses: the step may browse — not held to its list yet (FOL-110). */
-  network: NetworkPolicy & { readsWeb: boolean; browses: boolean };
+  /** browses: the step may browse; enforceWanted and browseVendor are what
+   *  this folder says toward browseVerdict (FOL-110) — the install says the rest. */
+  network: NetworkPolicy & { readsWeb: boolean; browses: boolean; enforceWanted: boolean; browseVendor: string | null };
   /** Tools this agent declares inline rather than in `tools:` — `apis:`,
    *  `scripts:` and `mcpServers:` names — which a limit may also name. */
   inlineTools: string[];
@@ -1677,9 +1679,14 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
           ],
         }),
         readsWeb,
-        // The runner's own test (runner.ts `browses`): such a step gets no
-        // forward proxy yet, so its list does not hold (FOL-110).
+        // The runner's own test (runner.ts `browses`). Whether its list holds
+        // for such a step depends on the install too (browse-egress.ts
+        // browseVerdict): the two fields below are this folder's half of it.
         browses: tools.includes("web") && (!actions || actions.includes("browse")),
+        // network_enforce: true in the account's or workspace's AGENTS.md.
+        enforceWanted: networkEnforceWanted(accountFront.network_enforce, workspaceFront.network_enforce),
+        // The vendor its web.browse names, null for foldrun's own browser.
+        browseVendor: browseVendorOf(webConfig(data, { ...accountFront, ...workspaceFront }).raw.browse),
       };
       return {
         network,

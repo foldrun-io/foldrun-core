@@ -101,7 +101,7 @@ import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
 import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
-import { browseNetworkLine } from "./browse-egress.ts";
+import { BROWSER_CONFINED_ENV, browseNetworkLine, browseVerdict } from "./browse-egress.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
 import { buildA2ATools } from "./a2a-tools.ts";
@@ -3035,6 +3035,27 @@ async function runStep(
         save();
         return;
       }
+      // A step that may browse, on an install with the forward door: held to
+      // its list where the executor walls the step's network, refused when
+      // it names a vendor that list cannot hold, else as before phase 3
+      // (browse-egress.ts browseVerdict, FOL-110).
+      const browses = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse"));
+      const browse = browses && lease?.proxy
+        ? browseVerdict({
+            level: network.level,
+            enforce: lease.enforce === true,
+            vendor: clockEnv.FOLDRUN_BROWSER_VENDOR,
+            confines: !!isolation && platform.confinesBrowsing?.(isolation) === true,
+          })
+        : null;
+      if (lease && browse?.kind === "refuse") {
+        push("info", networkLine(network, true));
+        push("error", browse.message);
+        await lease.release();
+        step.status = "failed";
+        save();
+        return;
+      }
       // Serve those jobs while this step runs: each one becomes a step of
       // its own (delegateJob), and the door answers the long-poll with its
       // reply. No proxy, or a platform without the door: not offered — the
@@ -3060,16 +3081,18 @@ async function runStep(
       // The forward door: every program in the sandbox sends through the
       // proxy, which holds the site list and fills bound secrets. A proxy
       // without the door (an older platform) leaves programs going direct.
-      // A step that may browse gets no proxy variables: the browser in it
-      // reads HTTPS_PROXY too, and Chromium cannot send credentials written
-      // into a proxy URL — every page failed ERR_INVALID_AUTH_CREDENTIALS
-      // (14 Oct 2026, the reel posters). Such a step is open by default,
-      // and its bound secrets materialise as they did before the door.
-      const browses = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse"));
-      const forward = lease?.proxy && !browses ? lease : null;
-      // A browsing step on an install with the door says it is not held to
-      // its list yet, and which tier its browser falls in (browse-egress.ts).
-      push("info", browses && lease?.proxy ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR) : networkLine(network, forward ? forward.enforce === true : null));
+      // A step that may browse gets no proxy variables unless it is held
+      // (browse.kind "hosted"): the browser in it reads HTTPS_PROXY too, and
+      // Chromium cannot send credentials written into a proxy URL — every
+      // page failed ERR_INVALID_AUTH_CREDENTIALS (14 Oct 2026, the reel
+      // posters). A held step's web tool hands the browser the proxy and its
+      // credential as launch options instead (FOLDRUN_BROWSER_CONFINED).
+      // Every other browsing step is open by default, and its bound secrets
+      // materialise as they did before the door.
+      const forward = lease?.proxy && (!browses || browse?.kind === "hosted") ? lease : null;
+      // A browsing step on an install with the door says whether it is held
+      // to its list, and which tier its browser falls in (browse-egress.ts).
+      push("info", browse ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR, { hosted: browse.kind === "hosted" }) : networkLine(network, forward ? forward.enforce === true : null));
       const bound = forward ? Object.keys(boundSites).filter((name) => name in liveSecrets) : [];
       for (const name of bound) {
         for (const site of boundSites[name]) addGrant(grant, name, liveSecrets[name], site);
@@ -3297,11 +3320,20 @@ async function runStep(
             // Every program's HTTP(S) through the proxy's forward door, and
             // the CA it signs bound sites with, for the sandbox to trust.
             ...(forward ? proxyEnv(forward.proxy!) : {}),
+            // A browsing step held to its list: the web tool gives its
+            // browser the forward door as launch options, refuses what
+            // cannot go through it, and the platform starts no account
+            // browser pod for it (browse-egress.ts, FOL-110 phase 3).
+            ...(browse?.kind === "hosted" ? { [BROWSER_CONFINED_ENV]: "1" } : {}),
             // Only a step with a bound secret has a site the proxy
             // intercepts, so only that step's TLS clients are pointed at a
             // bundle with the egress CA in it; every other step's are as
             // they always were.
-            ...(forward?.ca && bound.length ? { [EGRESS_CA_ENV]: Buffer.from(forward.ca).toString("base64") } : {}),
+            // A browser held to its list (browse "hosted") meets the proxy's
+            // leaf on any host a secret is granted to — an api tool's, a web
+            // provider's — not only a bound site, so it is handed the CA
+            // whenever the step has one: the web tool trusts it for Chromium.
+            ...(forward?.ca && (bound.length || (browse?.kind === "hosted" && Object.keys(grant.secrets).length)) ? { [EGRESS_CA_ENV]: Buffer.from(forward.ca).toString("base64") } : {}),
             ...clockEnv,
             // Who is running: the in-process path stamps scripts with these
             // host-side, but a container rebuilds its tools from its own
