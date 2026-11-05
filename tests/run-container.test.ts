@@ -769,9 +769,16 @@ test("rootStartSh moves the snapshot key where only root reads it, keeps it out 
   assert.equal(aptSnapshotKey("acme"), a);
 });
 
-test("the docker entry reads the step env, hands the cache to the agent, runs root's start-up, then drops", async () => {
+test("the docker entry hands the cache to the agent, runs root's start-up, then drops", async () => {
   const { rootStartSh } = await import("../src/run-container.ts");
-  assert.match(rootStartSh(), /^FOLDRUN_INSTALL_SOCKET=\/opt\/runner\/job\/install\.sock; export FOLDRUN_INSTALL_SOCKET\n\(\nPATH=/, "the reset is the subshell's first line");
+  // FOL-130: the proxy's lines (root-env.sh) are read first, then the reset —
+  // before anything is executed; the step's env.sh is not read by root at all.
+  assert.match(
+    rootStartSh(),
+    /^FOLDRUN_INSTALL_SOCKET=\/opt\/runner\/job\/install\.sock; export FOLDRUN_INSTALL_SOCKET\n\(\nif \[ -f \/opt\/runner\/job\/root-env\.sh \] && \[ ! -L \/opt\/runner\/job\/root-env\.sh \]; then \. \/opt\/runner\/job\/root-env\.sh; fi\nPATH=/,
+    "the proxy's lines, then the reset, as the subshell's first lines",
+  );
+  assert.ok(!rootStartSh().includes("/opt/runner/job/env.sh"));
   const s = rootStartSh();
   const reset = s.indexOf("export -p"), key = s.indexOf("snapshot.key"), apt = s.indexOf("apt-get"), helper = s.indexOf("install-helper.js"), close = s.lastIndexOf("\n)\n");
   assert.ok(reset > 0 && key > reset && apt > key && helper > apt && close > helper, "reset, key, apt, helper — all inside the subshell");

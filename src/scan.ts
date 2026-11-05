@@ -35,6 +35,7 @@ import { parseRemotes } from "./a2a-remotes.ts";
 import { isA2aPublished } from "./a2a-publish.ts";
 import { a2aTree, flowSecretCode, type A2aTree } from "./a2a-reach.ts";
 import { parseFlow, resolveEffort, parseMaxOutputTokens, type FlowStep } from "./store.ts";
+import { reservedEnvName } from "./env-names.ts";
 
 export type ScanLevel = "error" | "warn" | "info";
 export type ScanCategory = "secret" | "security" | "content" | "supply-chain" | "config";
@@ -368,6 +369,20 @@ export const SCAN_RULES: readonly ScanRule[] = [
       "Anything else is looked up as a name and never found — every signed delivery is refused, every notification goes unsigned — " +
       "and the value itself is deployed and versioned in plain text. Put it in the vault (`foldrun secrets set NAME`), write the name, and rotate it.",
     owasp: ["ASI03"],
+  },
+  {
+    // 5 Nov 2026 (FOL-130): a secret is exported to the sandbox under its name.
+    id: "secret/reserved-env-name",
+    category: "security",
+    level: "warn",
+    title: "A secret named after a variable that steers every program",
+    help:
+      "A secret reaches the sandbox as an environment variable of the same name, so one called LD_PRELOAD, PATH, BASH_ENV, IFS, " +
+      "NODE_OPTIONS or PYTHONPATH replaces what every program the agent starts loads or looks up — almost never what was meant, and " +
+      "a value pointing into a folder the agent writes runs whatever is put there. Root's start-up never reads the step's environment, " +
+      "so this is the agent's own sandbox at stake, not the platform. Give the secret a name of its own (`STRIPE_KEY`, `CRM_TOKEN`) " +
+      "and have the script read that.",
+    owasp: ["ASI03", "ASI05"],
   },
   {
     id: "check/ignore-needs-reason",
@@ -777,6 +792,28 @@ function docKind(p: string): Kind {
   if (/^flows\/[^/]+\.md$/.test(rel)) return "flow";
   if (/^tools\/[^/]+\/tool\.md$/.test(rel) || /^tools\/[^/]+\.md$/.test(rel)) return "tool";
   return null;
+}
+
+// ── secret names that are not data ─────────────────────────────────────────
+
+/** secret/reserved-env-name: an agent's or a tool's `secrets:` naming a
+ *  variable that steers programs (env-names.ts). `${NAME}` reads as NAME. */
+function scanSecretNames(f: ScanFile, data: Record<string, unknown>, lines: string[], push: Push): void {
+  const raw = data.secrets;
+  const names = (Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [])
+    .filter((n): n is string => typeof n === "string")
+    .map((n) => n.trim().replace(/^\$\{(.*)\}$/, "$1"));
+  for (const name of new Set(names)) {
+    const why = reservedEnvName(name);
+    if (!why) continue;
+    const word = new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`);
+    const from = keyLine(lines, "secrets");
+    const at = from ? (lines.slice(from - 1).findIndex((l) => word.test(l)) + from) || from : undefined;
+    push(
+      "secret/reserved-env-name", f.path, at, `reserved-env ${name}`,
+      `secrets: ${name} — the secret is exported under that name, and ${why}. Rename it (and what reads it) to a name of its own`,
+    );
+  }
 }
 
 // ── agents: what one can reach, taken together ─────────────────────────────
@@ -1270,6 +1307,7 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
     }
     const kind = docKind(f.path);
     if (!kind) continue;
+    if (kind === "agent" || kind === "tool") scanSecretNames(f, data, lines, push);
     if (kind === "agent") {
       const rel = f.path.replace(/^library\//, "");
       const name = /^agents\/([^/]+)\//.exec(rel)?.[1] ?? rel.replace(/^.*\/|\.md$/g, "");
