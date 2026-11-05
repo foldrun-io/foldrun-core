@@ -32,6 +32,7 @@ import {
   runnerImageRef,
   runnerImageTag,
   runtimeCacheMount,
+  packInstalledCore,
 } from "../src/run-container.ts";
 
 function withRunnerImage<T>(value: string | undefined, body: () => T): T {
@@ -916,4 +917,24 @@ test("the docker entry hands the cache to the agent, runs root's start-up, then 
   const reset = s.indexOf("export -p"), key = s.indexOf("snapshot.key"), apt = s.indexOf("apt-get"), helper = s.indexOf("install-helper.js"), close = s.lastIndexOf("\n)\n");
   assert.ok(reset > 0 && key > reset && apt > key && helper > apt && close > helper, "reset, key, apt, helper — all inside the subshell");
   assert.match(s.slice(helper - 200, helper), /FOLDRUN_SNAP_KEY_FILE="\$FOLDRUN_SNAP_KEY_FILE" node /, "the helper gets the key's path, nothing else");
+});
+
+test("the runner image packs the installed core without running its scripts — a failing prepare neither stops it nor deletes dist/", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-pack-"));
+  const pkg = path.join(dir, "core");
+  fs.mkdirSync(path.join(pkg, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(pkg, "dist", "index.js"), "export {};\n");
+  // An installed core's prepare: clear dist/, then a build that cannot run here.
+  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "fake-core", version: "1.0.0", files: ["dist"], scripts: { prepare: "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && exit 1" } }));
+  const dest = path.join(dir, "out", "foldrun-core.tgz");
+  fs.mkdirSync(path.dirname(dest));
+  try {
+    packInstalledCore(pkg, dest);
+    assert.ok(fs.statSync(dest).size > 0, "the tarball is there");
+    assert.ok(fs.existsSync(path.join(pkg, "dist", "index.js")), "the install keeps its dist/");
+    const list = spawnSh("tar", ["tzf", dest], { encoding: "utf8" }).stdout;
+    assert.match(list, /package\/dist\/index\.js/, "the built files are what is packed");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

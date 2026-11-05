@@ -1455,6 +1455,21 @@ export function runnerImageTag(variant: RunnerVariant = "full"): string {
 }
 
 /**
+ * `npm pack` an installed, already built core into `dest`, running none of
+ * its scripts. Its `prepare` (npm run build: clear dist/, then tsc) used to
+ * run on every pack, and in an install with no TypeScript — every CLI from
+ * npm — it failed half way: each container step failed with "npm pack
+ * failed", and the first one deleted the install's own dist/.
+ */
+export function packInstalledCore(pkgDir: string, dest: string): void {
+  const out = path.dirname(dest);
+  const pack = spawnSync("npm", ["pack", pkgDir, "--pack-destination", out, "--ignore-scripts"], { encoding: "utf8" });
+  if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
+  const tarball = pack.stdout.trim().split("\n").at(-1)!;
+  fs.renameSync(path.join(out, tarball), dest);
+}
+
+/**
  * Build the runner image if this exact (core version, driver, dockerfile)
  * has not been built before. `npm pack` of the installed core, so the image
  * runs the same bytes the server does.
@@ -1504,12 +1519,7 @@ export function ensureRunnerImage(
 
   const build = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-runner-build-"));
   try {
-    const pack = spawnSync("npm", ["pack", corePackageDir(), "--pack-destination", build], {
-      encoding: "utf8",
-    });
-    if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
-    const tarball = pack.stdout.trim().split("\n").at(-1)!;
-    fs.renameSync(path.join(build, tarball), path.join(build, "foldrun-core.tgz"));
+    packInstalledCore(corePackageDir(), path.join(build, "foldrun-core.tgz"));
     fs.writeFileSync(path.join(build, "driver.mjs"), DRIVER);
     fs.writeFileSync(path.join(build, "entry.sh"), ENTRY);
     // The same text the tag hashed (runnerImageTag), base and all.
