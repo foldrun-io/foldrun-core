@@ -13,6 +13,62 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [16.0.0] — 2026-11-05
+
+### Breaking changes
+
+- span names in an exported trace change — run <flow> is (bf33b76)
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunEvent` from `@foldrun/core`
+- `StepRecord` from `@foldrun/core`
+- `deleteRun` from `@foldrun/core`
+- `RunSummaryStep` from `@foldrun/core`
+- `A2aPublication` from `@foldrun/core/a2a-publish`
+
+### New in the public API
+
+- `RunFailure` from `@foldrun/core`
+- `@foldrun/core/a2a-reach`
+- `AgentReach` from `@foldrun/core/a2a-reach`
+- `ReachContext` from `@foldrun/core/a2a-reach`
+- `agentReach` from `@foldrun/core/a2a-reach`
+- `reachWidening` from `@foldrun/core/a2a-reach`
+- `flowAgents` from `@foldrun/core/a2a-reach`
+- `acceptedRisk` from `@foldrun/core/a2a-reach`
+- `publishedFlow` from `@foldrun/core/a2a-reach`
+- `SecretCodeExposure` from `@foldrun/core/a2a-reach`
+- `secretCodeExposures` from `@foldrun/core/a2a-reach`
+- `secretCodeSentence` from `@foldrun/core/a2a-reach`
+- `TreeFile` from `@foldrun/core/a2a-reach`
+- `A2aTree` from `@foldrun/core/a2a-reach`
+- `a2aTree` from `@foldrun/core/a2a-reach`
+- `flowSecretCode` from `@foldrun/core/a2a-reach`
+- `A2aWriteEffect` from `@foldrun/core/a2a-reach`
+- `a2aWriteEffect` from `@foldrun/core/a2a-reach`
+
+- fix(browse): the hosted trace line no longer claims DNS either way (FOL-128) ([92de4de](https://github.com/foldrun-io/foldrun-core/commit/92de4de))
+- feat(run-event): a run's wide event, its SLO outcome and its ops trace (FOL-122) ([0c644b4](https://github.com/foldrun-io/foldrun-core/commit/0c644b4))
+- fix(run-container): root's start-up never holds the step's environment (FOL-130) ([50abb5d](https://github.com/foldrun-io/foldrun-core/commit/50abb5d))
+- fix(runtime): read a snapshot's seal and base bounded (FOL-129, Codex review) ([1509d66](https://github.com/foldrun-io/foldrun-core/commit/1509d66))
+- fix(runtime): seal system-package snapshots; root never trusts the agent's cache (FOL-129) ([5802389](https://github.com/foldrun-io/foldrun-core/commit/5802389))
+- fix(a2a): install is every agent's — dropping its deny or plan mode widens (FOL-112, Codex review) ([a2eadf9](https://github.com/foldrun-io/foldrun-core/commit/a2eadf9))
+- fix(runtime): apt snapshot generations per base under a stable key (FOL-50) ([b91f9c8](https://github.com/foldrun-io/foldrun-core/commit/b91f9c8))
+- fix(a2a): reach matches the runner — scripts by spec, every named tool's secrets, folder-tool specs, web actions (FOL-112, Codex review) ([0071820](https://github.com/foldrun-io/foldrun-core/commit/0071820))
+- fix(failure): the runs list says the same as the run page for budget and schema failures (FOL-124) ([ce173f3](https://github.com/foldrun-io/foldrun-core/commit/ce173f3))
+- feat(failure): one customer-facing reason for a failed run (FOL-124) ([ddb7c61](https://github.com/foldrun-io/foldrun-core/commit/ddb7c61))
+- fix(otel): no gen_ai.provider.name on a step retried on its fallback model (FOL-73) ([2ff1537](https://github.com/foldrun-io/foldrun-core/commit/2ff1537))
+- fix(otel): the run's error.type is the step that failed it; a stop cancels the run, not earlier failures (FOL-73) ([50a99ed](https://github.com/foldrun-io/foldrun-core/commit/50a99ed))
+- feat(otel)!: spans follow the OpenTelemetry GenAI semantic conventions (FOL-73) ([bf33b76](https://github.com/foldrun-io/foldrun-core/commit/bf33b76))
+- feat(a2a): the answer is a way out — reach, widening and secret-and-code for published flows (FOL-112) ([aeb5888](https://github.com/foldrun-io/foldrun-core/commit/aeb5888))
+
+### ci
+
+- re-run cli, platform and web against core main when it passes (FOL-92) ([f1a0096](https://github.com/foldrun-io/foldrun-core/commit/f1a0096))
+
 ## [15.1.0] — 2026-11-05
 
 - fix(ops-log): the guard sees a call with comments between its tokens; frames from the published package count (FOL-121) ([503e9d0](https://github.com/foldrun-io/foldrun-core/commit/503e9d0))
