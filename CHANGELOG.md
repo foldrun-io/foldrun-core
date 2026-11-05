@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [15.0.0] — 2026-11-05
+
+### Breaking changes
+
+- `AgentInfo` from `@foldrun/core` — network changed
+- `PlatformHooks` from `@foldrun/core` — rollbackTrigger changed
+
+- feat(network): hold a browsing step to its network: list where the platform walls it (FOL-110 phase 3) ([eead367](https://github.com/foldrun-io/foldrun-core/commit/eead367))
+- feat(triggers): queue-full outcome; rollbackTrigger takes the refusal's code (FOL-100) ([b9a14fd](https://github.com/foldrun-io/foldrun-core/commit/b9a14fd))
+
 ## [14.5.0] — 2026-11-05
 
 - feat(startup): startupBreakdown, one overlap-aware reading of a step's start-up marks (FOL-74) ([980115b](https://github.com/foldrun-io/foldrun-core/commit/980115b))
