@@ -14,6 +14,7 @@
 
 import crypto from "node:crypto";
 import { platform } from "./platform.ts";
+import { refusalCode } from "./trigger-log.ts";
 import { listFlows, readRun, runVerdict, type FlowInfo, type FlowStep, type RunRecord } from "./store.ts";
 import { getSecret, signingSecretShown } from "./secrets.ts";
 
@@ -104,7 +105,7 @@ export async function fireChainedFlows(tenant: string, workspace: string, finish
         started.push(run.id);
         console.log(`[foldrun] trigger: flow — ${tenant}/${workspace}/${flow.name} started after ${finished.flow} ${finished.status}`);
       } catch (err) {
-        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err), code: refusalCode(err) });
         throw err;
       }
     } catch (err) {
@@ -166,7 +167,7 @@ export async function fireStorageTriggers(
         ]);
         started.push(run.id);
       } catch (err) {
-        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err) });
+        await platform.rollbackTrigger(tenant, workspace, flow, { reason: err instanceof Error ? err.message : String(err), code: refusalCode(err) });
         throw err;
       }
     } catch (err) {

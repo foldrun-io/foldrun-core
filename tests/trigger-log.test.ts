@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordTriggerEvent, readTriggerEvents, summariseTriggers } from "../src/trigger-log.ts";
+import { recordTriggerEvent, readTriggerEvents, summariseTriggers, refusalCode, failedOutcome } from "../src/trigger-log.ts";
 import { outcomeFor, noteSecretUse, secretHealth, failingSecrets, forgetSecretHealth, flushSecretHealth, healthKey } from "../src/secret-health.ts";
 
 async function withWorkspace(body: () => void | Promise<void>) {
@@ -172,3 +172,13 @@ test("a secret nothing has used has no health, which is a third state", () =>
     fs.mkdirSync(path.join(process.env.FOLDRUN_DATA!, "acme"), { recursive: true });
     assert.equal((await secretHealth("acme")).NEVER_USED, undefined);
   }));
+
+test("a refused start's code: a lowercase word on an error that carries a status — waiting_cap logs queue-full (FOL-100)", () => {
+  const cap = Object.assign(new Error("50 runs waiting"), { status: 409, code: "waiting_cap" });
+  assert.equal(refusalCode(cap), "waiting_cap");
+  assert.equal(failedOutcome(refusalCode(cap)), "queue-full");
+  assert.equal(refusalCode(Object.assign(new Error("gone"), { code: "ENOENT" })), undefined, "a system errno is no refusal code");
+  assert.equal(refusalCode(Object.assign(new Error("x"), { code: "waiting_cap" })), undefined, "no status, no code");
+  assert.equal(refusalCode(new Error("out of credit")), undefined);
+  assert.equal(failedOutcome(undefined), "failed");
+});
