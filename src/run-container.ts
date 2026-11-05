@@ -1468,10 +1468,23 @@ export function runnerImageTag(variant: RunnerVariant = "full"): string {
  */
 export function packInstalledCore(pkgDir: string, dest: string): void {
   const out = path.dirname(dest);
-  const pack = spawnSync("npm", ["pack", pkgDir, "--pack-destination", out, "--ignore-scripts"], { encoding: "utf8" });
-  if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
-  const tarball = pack.stdout.trim().split("\n").at(-1)!;
-  fs.renameSync(path.join(out, tarball), dest);
+  // A copy with no scripts, because npm 10 (Node 22's) runs `prepare` on a
+  // pack even with --ignore-scripts; npm 11 does not. The copy leaves out
+  // node_modules, which a pack never takes anyway.
+  const copy = fs.mkdtempSync(path.join(out, ".core-pack-"));
+  try {
+    fs.cpSync(pkgDir, copy, { recursive: true, filter: (src) => path.basename(src) !== "node_modules" });
+    const manifest = path.join(copy, "package.json");
+    const pkg = JSON.parse(fs.readFileSync(manifest, "utf8")) as Record<string, unknown>;
+    delete pkg.scripts;
+    fs.writeFileSync(manifest, JSON.stringify(pkg, null, 2) + "\n");
+    const pack = spawnSync("npm", ["pack", copy, "--pack-destination", out, "--ignore-scripts"], { encoding: "utf8" });
+    if (pack.status !== 0) throw new Error(`npm pack failed:\n${pack.stderr}`);
+    const tarball = pack.stdout.trim().split("\n").at(-1)!;
+    fs.renameSync(path.join(out, tarball), dest);
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true });
+  }
 }
 
 /**
