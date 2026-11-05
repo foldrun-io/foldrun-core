@@ -210,3 +210,32 @@ test("token counts: cache traffic summed beside fresh input, hit rate from the r
   assert.equal(measuredHitRate([old, fresh, null]), 0.9);
   assert.equal(measuredHitRate([old]), null);
 });
+
+test("FOL-122: the start-up marks and the origin they count from are recorded together, attempt by attempt", async () => {
+  const origin = Date.parse("2026-11-05T10:00:00.000Z");
+  let calls = 0;
+  const fake: Fake = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return { status: "failed", result: null, costUsd: 0, reason: "OOMKilled (exit 137)", timing: { sandboxMs: 500, firstOutputMs: null, totalMs: 4000, phases: { ready: 1200, model: 3000 }, origin } };
+    }
+    // A driver that reports no phases (a resumed one): neither is kept.
+    return { status: "completed", result: "done", costUsd: 0, timing: { sandboxMs: 500, firstOutputMs: null, totalMs: 6000 } };
+  };
+  await withFake(fake, null, async () => {
+    const run = startFlowRun("acme", "desk", [step({ retry: 1 })], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    const s = done!.steps[0];
+    assert.equal(s.startup, null);
+    assert.equal(s.startupAt, null, "no origin without the marks it is the origin of");
+  });
+  // A run whose only attempt reports both: both are on the step.
+  const once: Fake = async () => ({ status: "completed", result: "done", costUsd: 0, timing: { sandboxMs: 500, firstOutputMs: null, totalMs: 4000, phases: { ready: 1200, model: 3000 }, origin } });
+  await withFake(once, null, async () => {
+    const run = startFlowRun("acme", "desk", [step()], "f");
+    const { run: done } = await waitForRun("acme", "desk", run.id, 20_000);
+    const s = done!.steps[0];
+    assert.deepEqual(s.startup, { ready: 1.2, model: 3 });
+    assert.equal(s.startupAt, new Date(origin).toISOString());
+  });
+});

@@ -3664,6 +3664,12 @@ async function runStep(
       step.startup = phases && Object.keys(phases).length
         ? Object.fromEntries(Object.entries(phases).map(([k, v]) => [k, secs(v)]))
         : null;
+      // When those seconds count from (FOL-122): what places the marks on
+      // the clock for the run's funnel. Beside the marks only — a resumed
+      // driver reports none, and then neither.
+      step.startupAt = phases && Object.keys(phases).length && typeof outcome.timing?.origin === "number"
+        ? new Date(outcome.timing.origin).toISOString()
+        : null;
       // Which reservation those seconds held — as numbers, because the bill
       // is per core-second and per GiB-second, and what was held must come
       // from the record, never from what the config says at billing time.

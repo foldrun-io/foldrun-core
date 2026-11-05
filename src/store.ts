@@ -3756,6 +3756,11 @@ export interface StepRecord {
    *  #STARTUP_PHASES). Only the phases this step went through; null from
    *  an executor that marks none, absent on steps from before 17 Oct 2026. */
   startup?: Record<string, number> | null;
+  /** When the executor began the attempt those marks belong to — what they
+   *  count from, so a mark is an instant (FOL-122's run funnel). Set beside
+   *  `startup`; null where it is; absent before 5 Nov 2026, when readers
+   *  fall back to the attempt's own start, an estimate. */
+  startupAt?: string | null;
   /** Which reservation class the sandbox held (small | large), and the
    *  actual limits it held, as numbers. Facts of the step: a price is per
    *  core-second, so what was reserved must come from the record, never

@@ -109,6 +109,10 @@ export const FIELDS: Record<string, Kind> = {
   // What kind.
   op: "word", role: "word", outcome: "word", reason: "word", stream: "word", kind: "word",
   verdict: "word", phase: "word", signal: "code", where: "word",
+  // A run's sandbox (FOL-122): the runner image and size class — the
+  // platform's own words — and the model, an identifier like a flow's name
+  // (one with `/` or `:` in it does not fit, and is dropped).
+  image: "word", size: "word", model: "id",
   // A failure.
   errorClass: "class", errorName: "errorName", code: "code", syscall: "word", cause: "cause",
   at: "frame", frames: "frames", retrying: "bool", ok: "bool",
