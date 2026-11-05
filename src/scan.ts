@@ -33,6 +33,7 @@ import { resolveNetwork } from "./network.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
 import { parseRemotes } from "./a2a-remotes.ts";
 import { isA2aPublished } from "./a2a-publish.ts";
+import { a2aTree, flowSecretCode, type A2aTree } from "./a2a-reach.ts";
 import { parseFlow, resolveEffort, parseMaxOutputTokens, type FlowStep } from "./store.ts";
 
 export type ScanLevel = "error" | "warn" | "info";
@@ -154,13 +155,32 @@ export const SCAN_RULES: readonly ScanRule[] = [
     id: "security/published-flow-trifecta",
     category: "security",
     level: "warn",
-    title: "A flow published over A2A runs an agent that holds private data and can send it out",
+    title: "A flow published over A2A runs an agent that holds private data — its answer, or its network, can carry it out",
     help:
-      "An outside agent's message is untrusted input to every step of a published flow. A step whose agent also holds a secret, " +
-      "an API or an MCP server, and can reach an open network, an outward tool or an API it may write to, can be told by the caller " +
-      "where to send what it holds. Take a leg away from that agent (network: { level: trusted, allow: [...] }, split it, a hooks: gate), " +
-      "or do not publish the flow.",
+      "An outside agent's message is untrusted input to every step of a published flow, and the flow's answer goes back to that caller — " +
+      "so the answer is a way out too (5 Nov 2026). A step whose agent holds a secret, an API or an MCP server can be told by the caller " +
+      "to put what it holds or reads in its answer, or to send it to an open network, an outward tool or an API it may write to. A hooks: " +
+      "gate guards tool calls, not the answer. Give that agent only what a stranger may see, move the private part to a flow that is not " +
+      "published, or do not publish the flow.",
     owasp: ["ASI01", "ASI02", "ASI03"],
+  },
+  {
+    // 5 Nov 2026 (FOL-112): the answer is a way out. A published flow's last
+    // step answers the outside caller, and an agent that holds a secret in
+    // its sandbox and may run code can be told to put the secret in it —
+    // no network needed. The platform refuses to publish such a flow unless
+    // an admin names the agent under `a2a.accept_risk`; this is check's half.
+    id: "security/published-flow-secret-code",
+    category: "security",
+    level: "warn",
+    title: "A flow published over A2A runs an agent that holds a secret and can run code",
+    help:
+      "Its answer goes back to the outside caller, and code (Bash) can read every secret in the sandbox's environment — so a caller can ask " +
+      "for the secret in the reply. Take Bash away from that agent (disallowedTools: [Bash], or a step without code), take the secret away " +
+      "(or bind it to its sites with `foldrun secrets sites NAME host` so it never enters the sandbox), or have an admin accept the risk: " +
+      "`a2a: { accept_risk: [<agent>] }` (`foldrun a2a publish <flow> --accept-risk <agent>`). Until one of those, the platform refuses to " +
+      "publish the flow and refuses new A2A tasks for it.",
+    owasp: ["ASI01", "ASI03"],
   },
   {
     id: "security/published-flow-ungated",
@@ -882,28 +902,41 @@ function stepAgents(s: FlowStep): string[] {
  * what it holds (the trifecta, with the caller as the untrusted leg), and a
  * step that acts outside the workspace with no person before it.
  */
-function scanPublishedFlows(flows: FlowFacts[], legs: Map<string, AgentLegs>, push: Push) {
+function scanPublishedFlows(flows: FlowFacts[], legs: Map<string, AgentLegs>, tree: A2aTree, push: Push) {
   for (const fl of flows) {
     let info: ReturnType<typeof parseFlow>;
     try {
-      info = parseFlow(fl.file, fl.content);
+      info = parseFlow(fl.file.replace(/^.*\//, ""), fl.content); // named as the platform names it: leads, not flows/leads
     } catch {
       continue; // a flow that does not parse is check's finding
     }
     if (!isA2aPublished(info.a2a)) continue;
     const at = keyLine(fl.lines, "a2a");
-    const said = new Set<string>();
-    for (const step of info.steps) {
-      for (const name of stepAgents(step)) {
-        const l = legs.get(name);
-        if (!l || said.has(name) || l.gated || !l.privateLeg.length || !l.outLeg.length) continue;
-        said.add(name);
-        push(
-          "security/published-flow-trifecta", fl.file, step.line ?? at, `published trifecta ${name}`,
-          `${info.name} is published over A2A, so what an outside caller sends reaches ${name}, which holds ${l.privateLeg.slice(0, 3).join(", ")}${l.privateLeg.length > 3 ? ", …" : ""} ` +
-            `and can reach ${l.outLeg.slice(0, 2).join(" and ")} — a caller can tell it where to send what it holds. Take a leg away from ${name}, or do not publish the flow`,
-        );
-      }
+    // Each agent at the first step line that runs it; a sub-agent or a
+    // subflow's agent at the a2a: line.
+    const lineOf = (name: string) => info.steps.find((s) => !s.subflow && [s.agent, s.onFail, ...(s.delegate ?? [])].includes(name))?.line ?? at;
+    // The answer goes back to the caller (FOL-112): any private leg is
+    // enough, and a hooks: gate (which guards tool calls) does not close it.
+    for (const name of tree.flows.get(info.name)?.file === fl.file ? tree.agentsOf(info.name) : []) {
+      const l = legs.get(name);
+      if (!l || !l.privateLeg.length) continue;
+      const out = !l.gated && l.outLeg.length ? ` and can reach ${l.outLeg.slice(0, 2).join(" and ")}` : "";
+      push(
+        "security/published-flow-trifecta", fl.file, lineOf(name), `published trifecta ${name}`,
+        `${info.name} is published over A2A, so what an outside caller sends reaches ${name}, which holds ${l.privateLeg.slice(0, 3).join(", ")}${l.privateLeg.length > 3 ? ", …" : ""}${out} — ` +
+          `and the flow's answer goes back to that caller, so a caller can ask for what it holds. Give ${name} only what a stranger may see, or do not publish the flow`,
+      );
+    }
+    for (const e of flowSecretCode(tree, info.name)) {
+      const held = `${e.secrets.slice(0, 3).join(", ")}${e.secrets.length > 3 ? ", …" : ""}`;
+      push(
+        "security/published-flow-secret-code", fl.file, lineOf(e.agent), `published secret-code ${e.agent}`,
+        e.accepted
+          ? `${e.agent} holds ${held} and can run code, and ${info.name} is published over A2A — accepted by an admin (a2a: accept_risk: [${e.agent}])`
+          : `${e.agent} holds ${held} and can run code (Bash), and ${info.name} is published over A2A — its answer goes back to the outside caller, who can ask for the secret in it. ` +
+              `Take Bash or the secret away from ${e.agent}, or have an admin accept it (a2a: accept_risk: [${e.agent}]); until then the platform refuses new A2A tasks for ${info.name}`,
+        e.accepted ? "info" : undefined,
+      );
     }
     // Groups in order. A gate (an approval, or ask:, which is one with a
     // question) on any step of a group parks the run before ANY step of that
@@ -1252,7 +1285,7 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
   // project.md is the older name the runtime still reads (Codex review, FOL-58).
   const workspaceMd = files.find((f) => f.path === "AGENTS.md") ?? files.find((f) => f.path === "project.md");
   const legs = scanAgents(agents, outward, toolDefs, push, { account: options.accountNetwork, workspace: workspaceMd ? frontOf(workspaceMd.content, "AGENTS.md")?.network : undefined });
-  scanPublishedFlows(flows, legs, push);
+  scanPublishedFlows(flows, legs, a2aTree(files.filter((f) => isText(f) && !RUNTIME_WRITTEN.test(f.path)), { accountNetwork: options.accountNetwork }), push);
   // A workspace that names its own provider: does not run on the account's
   // choice, so the account's models say nothing about its efforts.
   const ownWorkspaceProvider = Boolean(workspaceMd && frontOf(workspaceMd.content, "AGENTS.md")?.provider);

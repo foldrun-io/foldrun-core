@@ -177,7 +177,7 @@ const FLOW: FieldSpec[] = [
   { key: "budget", type: ["number", "string"], help: "USD per run" },
   { key: "compute", type: "object", help: "{vcpu, memory, disk} one run's steps may hold together at once — only narrows the workspace's and account's" },
   { key: "live", type: "boolean", help: "true: steps may act for real in a test run" },
-  { key: "a2a", type: "object", help: "serve this flow to outside agents over A2A 1.0 — {publish: true, name?, description?, examples?, public_card?, input?}; changing it needs workspace:manage" },
+  { key: "a2a", type: "object", help: "serve this flow to outside agents over A2A 1.0 — {publish: true, name?, description?, examples?, public_card?, input?, accept_risk?: [agent]}; changing it needs workspace:manage" },
 ];
 
 const TOOL: FieldSpec[] = [
