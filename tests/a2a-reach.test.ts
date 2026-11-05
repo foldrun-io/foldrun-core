@@ -35,7 +35,10 @@ test("agentReach: secrets from secrets:, ${NAME} in apis:, a granted folder tool
     { toolDefs },
   );
   assert.deepEqual(r.secrets, ["A_KEY", "CRM_TOKEN", "EXA_API_KEY", "RESEND_API_KEY", "X_KEY"]);
-  assert.deepEqual(agentReach({ tools: ["mailer"], disallowedTools: ["mailer"] }, { toolDefs }).secrets, [], "a tool taken away brings nothing");
+  // The runner loads a named tool's secrets before it filters what may be
+  // called (Codex review): disallowed or ask-mode, they still reach Bash.
+  assert.deepEqual(agentReach({ tools: ["code", "mailer"], disallowedTools: ["mailer"] }, { toolDefs }).secrets, ["RESEND_API_KEY"]);
+  assert.deepEqual(agentReach({ tools: ["code", { mailer: "ask" }] }, { toolDefs }).secrets, ["RESEND_API_KEY"]);
 });
 
 test("reachWidening: what is new counts; order, aliases and narrowing do not", () => {
@@ -50,7 +53,18 @@ test("reachWidening: what is new counts; order, aliases and narrowing do not", (
   assert.deepEqual(reachWidening(agentReach({ permissionMode: "plan" }), agentReach({})), ["permissionMode: plan removed"]);
   assert.deepEqual(reachWidening(agentReach({}), agentReach({ sandbox: "own" })), ["sandbox: own"]);
   const api = (base: string) => agentReach({ apis: [{ name: "crm", base }] });
-  assert.deepEqual(reachWidening(api("https://crm.example.com"), api("https://attacker.example")), ["apis crm (changed)"]);
+  assert.deepEqual(reachWidening(api("https://crm.example.com"), api("https://attacker.example")), ["network sites attacker.example", "apis crm (changed)"], "the base's host is implied, as the runner adds it");
+  // Scripts by name and spec (Codex review: objects used to collapse into one).
+  const sc = (scripts: unknown[]) => agentReach({ scripts });
+  assert.deepEqual(reachWidening(sc([{ name: "a", run: "echo ok" }]), sc([{ name: "a", run: "echo ok" }, { name: "b", run: "curl x" }])), ["scripts b"]);
+  assert.deepEqual(reachWidening(sc([{ name: "a", run: "echo ok" }]), sc([{ name: "a", run: "curl x" }])), ["scripts a (changed)"]);
+  // A granted folder tool's definition changed.
+  const withTool = (base: string) => agentReach({ tools: ["crm"] }, { toolDefs: new Map([["crm", { transport: "http", base }]]) });
+  assert.deepEqual(reachWidening(withTool("https://crm.example.com"), withTool("https://crm.example.com/v2")), ["tools crm (changed)"]);
+  // The web tool reads the open web only with fetch or browse among its actions.
+  const web = (actions: string[]) => agentReach({ tools: ["web"], web: { actions } });
+  assert.equal(web(["search"]).network.level, "trusted");
+  assert.deepEqual(reachWidening(web(["search"]), web(["search", "fetch"])), ["network trusted → open"]);
   assert.deepEqual(reachWidening(null, agentReach({ tools: ["read"] })), ["tools Glob, Grep, Read", "network trusted"], "a new agent: all of it");
   // The workspace's own hooks and network count for every agent.
   assert.deepEqual(reachWidening(agentReach({}, { workspace: { hooks: ["audit"] } }), agentReach({}, { workspace: {} })), ["hooks removed: audit"]);

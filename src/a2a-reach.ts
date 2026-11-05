@@ -20,7 +20,7 @@
 // write doors (before/after trees) and the dashboard read the same answer.
 
 import { refList, refNames } from "./refs.ts";
-import { TOOL_MAP } from "./tool-names.ts";
+import { TOOL_MAP, ownToolNames } from "./tool-names.ts";
 import { resolveNetwork, type NetworkLevel } from "./network.ts";
 import { parseRemotes } from "./a2a-remotes.ts";
 import { isA2aPublished, parseA2aPublish } from "./a2a-publish.ts";
@@ -56,7 +56,13 @@ export interface AgentReach {
   mcpServers: Record<string, string>;
   /** name → card URL. */
   remotes: Record<string, string>;
-  scripts: string[];
+  /** name → the entry as written (stable JSON): a new script, or a changed
+   *  command, is a change. */
+  scripts: Record<string, string>;
+  /** The author's own folder tools named in `tools:` → their definition as
+   *  written (stable JSON), when the file is known: a changed base URL or
+   *  MCP server is a change, as an inline API's is. */
+  toolSpecs: Record<string, string>;
   subagents: string[];
   /** Hooks that run at its tool calls — its own and its workspace's. Fewer
    *  is wider: a hook is a gate. */
@@ -128,17 +134,54 @@ export function agentReach(front: Record<string, unknown>, ctx: ReachContext = {
     for (const m of (JSON.stringify(v ?? null) ?? "").matchAll(/\$\{([A-Z][A-Z0-9_]*)\}/g)) secrets.add(m[1]!);
   };
   named(front.apis);
-  for (const name of own) {
-    if (denied.has(name)) continue;
+  // Every folder tool `tools:` names — ask-mode and disallowed ones too: the
+  // runner resolves them (ownToolNames) and loads their secrets into the
+  // step's environment before it filters what may be called (Codex review).
+  const toolSpecs: Record<string, string> = {};
+  for (const name of ownToolNames(front)) {
     const def = ctx.toolDefs?.get(name);
     if (!def) continue;
+    toolSpecs[name] = stable(def);
     for (const s of listOf(def.secrets)) if (SECRET_NAME.test(s)) secrets.add(s);
     named(def);
   }
   for (const s of webSecrets(front, ctx.workspace ?? undefined)) secrets.add(s);
 
-  const readsWeb = tools.includes("web") || tools.some((t) => /browse|fetch|scrape|crawl/i.test(t));
-  const net = resolveNetwork({ account: ctx.accountNetwork, workspace: ctx.workspace?.network, agent: front.network, readsWeb });
+  const scripts: Record<string, string> = {};
+  for (const [i, e] of (Array.isArray(front.scripts) ? front.scripts : listOf(front.scripts)).entries()) {
+    const name = typeof e === "string" ? e : e && typeof e === "object" && typeof (e as { name?: unknown }).name === "string" ? (e as { name: string }).name : `#${i + 1}`;
+    scripts[name] = stable(e);
+  }
+
+  // The runner's own test (runner.ts, the network: lease): the web tool
+  // granted, and fetch or browse among its actions (all, when unsaid).
+  let actions: string[] | null = null;
+  try {
+    actions = webConfig(front, ctx.workspace ?? undefined).actions;
+  } catch {
+    actions = null;
+  }
+  const readsWeb = tools.includes("web") && (!actions || actions.some((a) => a === "fetch" || a === "browse"));
+  // Hosts a grant implies (an API's base, an MCP server's url, a remote's
+  // card): the runner adds them to the list, so a new one is a wider list.
+  const implied: string[] = [];
+  const hostOf = (u: unknown) => {
+    if (typeof u !== "string") return;
+    try {
+      implied.push(new URL(u).hostname);
+    } catch {
+      // not a URL: nothing implied
+    }
+  };
+  for (const a of Array.isArray(front.apis) ? front.apis : []) hostOf((a as { base?: unknown } | null)?.base);
+  for (const m of Object.values((front.mcpServers && typeof front.mcpServers === "object" ? front.mcpServers : {}) as Record<string, { url?: unknown } | null>)) hostOf(m?.url);
+  for (const r of Object.values(remotes)) hostOf(r);
+  for (const name of Object.keys(toolSpecs)) {
+    const def = ctx.toolDefs?.get(name);
+    hostOf(def?.base);
+    hostOf(def?.url);
+  }
+  const net = resolveNetwork({ account: ctx.accountNetwork, workspace: ctx.workspace?.network, agent: front.network, readsWeb, implied });
 
   return {
     tools,
@@ -148,7 +191,8 @@ export function agentReach(front: Record<string, unknown>, ctx: ReachContext = {
     apis,
     mcpServers,
     remotes,
-    scripts: sorted(listOf(front.scripts)),
+    scripts,
+    toolSpecs,
     subagents: sorted(refNames(front.subagents)),
     hooks: sorted([...refNames(front.hooks), ...refNames(ctx.workspace?.hooks)]),
     plan,
@@ -199,7 +243,7 @@ export function reachWidening(before: AgentReach | null, after: AgentReach): str
     if (after.secrets.length) out.push(`secrets ${after.secrets.join(", ")}`);
     if (after.network.level !== "none") out.push(`network ${after.network.level}`);
     for (const k of ["apis", "mcpServers", "remotes"] as const) if (Object.keys(after[k]).length) out.push(`${k} ${Object.keys(after[k]).sort().join(", ")}`);
-    if (after.scripts.length) out.push(`scripts ${after.scripts.join(", ")}`);
+    if (Object.keys(after.scripts).length) out.push(`scripts ${Object.keys(after.scripts).sort().join(", ")}`);
     if (after.subagents.length) out.push(`subagents ${after.subagents.join(", ")}`);
     return out.length ? out : ["a new agent behind the flow"];
   }
@@ -207,11 +251,12 @@ export function reachWidening(before: AgentReach | null, after: AgentReach): str
   added("secrets", b.secrets, after.secrets);
   if (OPENNESS[after.network.level] > OPENNESS[b.network.level]) out.push(`network ${b.network.level} → ${after.network.level}`);
   else if (after.network.level !== "open") added("network sites", b.network.hosts, after.network.hosts);
-  for (const k of ["apis", "mcpServers", "remotes"] as const) {
+  for (const k of ["apis", "mcpServers", "remotes", "scripts", "toolSpecs"] as const) {
     const changed = Object.keys(after[k]).filter((n) => b[k][n] !== after[k][n]).sort();
-    if (changed.length) out.push(`${k} ${changed.map((n) => (n in b[k] ? `${n} (changed)` : n)).join(", ")}`);
+    // A new folder tool is already a new tool above; here only a changed one.
+    const said = k === "toolSpecs" ? changed.filter((n) => n in b[k]) : changed;
+    if (said.length) out.push(`${k === "toolSpecs" ? "tools" : k} ${said.map((n) => (n in b[k] ? `${n} (changed)` : n)).join(", ")}`);
   }
-  added("scripts", b.scripts, after.scripts);
   added("subagents", b.subagents, after.subagents);
   const gone = b.hooks.filter((h) => !after.hooks.includes(h));
   if (gone.length) out.push(`hooks removed: ${gone.join(", ")}`);
