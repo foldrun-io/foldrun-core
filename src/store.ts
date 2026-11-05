@@ -53,6 +53,7 @@ import { checkFilter } from "./trigger-filter.ts";
 import { parseA2aPublish, type A2aPublication } from "./a2a-publish.ts";
 import { parseRemotes, remoteNetworkHosts, A2A_LIMIT_KEY, type RemoteSpec } from "./a2a-remotes.ts";
 import { parseBudget, budgetProblem } from "./budget.ts";
+import { explainFailure, failureFactsOf, type FailureExplained, type FailureFacts } from "./failure.ts";
 import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
 import { networkEnforceWanted, networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
@@ -3367,6 +3368,10 @@ export interface RunEvent {
   /** Set on a tool event a SUB-AGENT made (`subagents:`): its name. The
    *  trace labels the call with it; cost stays the step's. */
   subagent?: string;
+  /** Set on the error a platform security control wrote (failure.ts
+   *  securityStopEvent) — host-side only, never from a sandbox's output.
+   *  The customer is told the generic sentence and nothing else. */
+  security?: true;
   /** Set on an error a failed check wrote — `verify:` (its headline and its
    *  detail), `output: json`, a schema. What the runner reads to decline a
    *  retry of an outward step whose tools already ran. */
@@ -3758,6 +3763,10 @@ export interface StepRecord {
    *  from before sizes existed — billing falls back to the flat rate. */
   size?: "small" | "large" | "heavy";
   reserved?: { cpus: number; memGiB: number; diskGiB?: number } | null;
+  /** Only on a record rebuilt from the runs index (runFromSummary), for a
+   *  failed step: the figures and refused sites its failure message names,
+   *  which a full record carries in `reserved`, `actual` and its events. */
+  failureFacts?: FailureFacts;
   /** The agent's `resources:` as applied (resources.ts), when it set any:
    *  why `reserved` differs from the class's figures. Absent before 26 Oct
    *  2026 and on steps of an agent that wrote none. */
@@ -3988,16 +3997,22 @@ export function runFilePath(tenant: string, workspace: string, runId: string) {
  * the same append-only file the charge lives in. The balance is untouched;
  * the story is complete.
  */
-export function deleteRun(tenant: string, workspace: string, runId: string): boolean {
+export function deleteRun(tenant: string, workspace: string, runId: string, opts: { pruned?: boolean } = {}): boolean {
   const file = runFilePath(tenant, workspace, runId);
-  if (!fs.existsSync(file)) return false;
+  const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
+  const had = fs.existsSync(file);
+  if (!had && !fs.existsSync(dir)) return false;
+  // The folder first (archived outputs, captured calls), the record last:
+  // a delete that fails halfway leaves the record, so a retry finds the run
+  // and finishes — the other order left the content with nothing pointing
+  // at it (Codex review, FOL-124).
+  fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(file, { force: true });
-  fs.rmSync(path.join(workspaceDir(tenant, workspace), "runs", runId), {
-    recursive: true,
-    force: true,
-  });
   noteRunDeleted(path.dirname(file), runId);
-  onRunDeleted?.(tenant, workspace, runId);
+  if (!had) return true;
+  // The retention window's prune (`pruned`) is policy, not a person erasing
+  // history: no per-run ledger note. The charge stands either way.
+  if (!opts.pruned) onRunDeleted?.(tenant, workspace, runId);
   return true;
 }
 
@@ -4166,6 +4181,9 @@ export interface RunSummaryStep {
   skipReason?: string;
   /** The last error event, for a failed step — what runFailure reads. */
   error?: string;
+  /** For a failed step: the figures and refused sites runFailure's message
+   *  names (failure.ts). Absent before 5 Nov 2026. */
+  failureFacts?: FailureFacts;
   item?: string;
   waitFor?: "event";
   ask?: string;
@@ -4249,7 +4267,12 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.a2a ? { a2a: run.a2a } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
-      const error = s.status === "failed" ? s.events.filter((e) => e.type === "error").at(-1)?.text : undefined;
+      // A failed step's last error — and, on a run that failed between
+      // groups, the budget's error the runner wrote onto the step before
+      // (runFailure reads it from there; FOL-124, Codex review).
+      const last = s.events.filter((e) => e.type === "error").at(-1)?.text;
+      const error = s.status === "failed" || (run.status === "failed" && last !== undefined && /^over budget/.test(last)) ? last : undefined;
+      const failureFacts = s.status === "failed" ? failureFactsOf(s) : undefined;
       return {
         agent: s.agent,
         group: s.group,
@@ -4259,6 +4282,7 @@ export function summarizeRun(run: RunRecord): RunSummary {
         ...(s.computeSecs !== undefined ? { computeSecs: s.computeSecs } : {}),
         ...(s.skipReason ? { skipReason: s.skipReason } : {}),
         ...(error ? { error: error.slice(0, 500) } : {}),
+        ...(failureFacts ? { failureFacts } : {}),
         ...(s.item ? { item: s.item } : {}),
         ...(s.waitFor ? { waitFor: s.waitFor } : {}),
         ...(s.ask ? { ask: s.ask } : {}),
@@ -4574,14 +4598,33 @@ export function runDurationSecs(run: RunRecord): number | null {
  * sentence — "failed" with no reason makes every diagnosis start by opening
  * the run, and the answer was sitting in the record all along.
  */
-export function runFailure(run: RunRecord): { agent: string; reason: string } | null {
+export function runFailure(run: RunRecord): RunFailure | null {
   if (run.status !== "failed") return null;
   const step = run.steps.find((s) => s.status === "failed");
-  if (!step) return null;
+  if (!step) {
+    // A run can fail with no failed step: a budget hit or a stop between
+    // groups writes its error onto the last step that ran (FOL-124).
+    if (run.stopRequested) {
+      const reason = `stopped by ${run.stoppedBy ?? "a person"}`;
+      return { agent: run.steps.findLast((s) => s.status === "completed")?.agent ?? run.steps[0]?.agent ?? "run", reason, ...explainFailure(reason, null) };
+    }
+    const holder = run.steps.findLast((s) => s.events.some((e) => e.type === "error" && /^over budget/.test(e.text)));
+    const text = holder?.events.filter((e) => e.type === "error" && /^over budget/.test(e.text)).at(-1)?.text;
+    if (holder && text) return { agent: holder.agent, reason: text, ...explainFailure(text, null) };
+    return null;
+  }
   const errors = step.events.filter((e) => e.type === "error");
   const last = errors[errors.length - 1];
-  return { agent: step.agent, reason: last?.text ?? "failed without an error event" };
+  const raw = last?.text ?? "failed without an error event";
+  // The customer's sentence, its class and its fix (failure.ts, FOL-124).
+  // A security stop's reason is that sentence too: nothing else is said.
+  const explained = explainFailure(raw, step);
+  return { agent: step.agent, reason: explained.kind === "security" ? explained.message : raw, ...explained };
 }
+
+/** Why a failed run failed: the step, its last error, and what that means
+ *  for the customer (failure.ts). */
+export type RunFailure = { agent: string; reason: string } & FailureExplained;
 
 /**
  * The one-line outcome, pulled out of the reply that already says it.

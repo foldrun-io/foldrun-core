@@ -127,7 +127,8 @@ test("listAllRuns: a finished run is the row's shape, a live one is read whole",
     const done = all.find((r) => r.id === "done")!;
     assert.equal(done.steps[0].instruction, "", "a finished run is the row: no instruction");
     assert.equal(done.steps[0].result, null, "no reply");
-    assert.deepEqual(runFailure(done), { agent: "writer", reason: "the build broke" }, "but the list's rollups still read true");
+    const f = runFailure(done)!;
+    assert.deepEqual({ agent: f.agent, reason: f.reason }, { agent: "writer", reason: "the build broke" }, "but the list's rollups still read true");
     assert.equal(runCost(done), 0.25);
     assert.deepEqual(listAllRunSummaries(t).map((r) => r.id), ["parked", "done"]);
     assert.equal(listAllRunSummaries(t)[0].awaitingApproval, true);
