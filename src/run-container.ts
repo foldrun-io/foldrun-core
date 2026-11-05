@@ -152,6 +152,10 @@ export interface StepTiming {
    *  from an executor that marks none, and from a resumed driver (the
    *  first driver's phases are on the record already). */
   phases?: StartupPhases;
+  /** When the phases count from: the epoch ms the executor began the step
+   *  (FOL-122) — what places them on the clock (StepRecord.startupAt). Set
+   *  beside `phases` only. */
+  origin?: number;
 }
 
 /** The start-up phases and what each marks — startup.ts, where every
@@ -2080,6 +2084,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       firstOutputMs: firstOutputAt === null ? null : firstOutputAt - t0 - sandboxMs,
       totalMs: Date.now() - t0,
       phases,
+      origin: t0,
     };
     args.emit("info", timingLine(timing));
     return { ...outcome, timing, applied, ...(refused.length ? { refused } : {}) };
