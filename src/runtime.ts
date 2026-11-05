@@ -1087,8 +1087,10 @@ ${SNAPSHOT_JS}
 FOLDRUN_SNAPSHOT_JS
   fi
   if [ -n "$S" ] && $AS test -f "$G/snap.tar" 2>/dev/null; then
-    if [ "$($AS cat "$G/base" 2>/dev/null)" = "$BASE" ]; then
-      SEAL=$($AS cat "$G/seal" 2>/dev/null)
+    # Read bounded: the seal is one line of ~150 bytes, the base 65 — a file
+    # the agent made endless must not fill root's memory.
+    if [ "$($AS head -c 128 "$G/base" 2>/dev/null)" = "$BASE" ]; then
+      SEAL=$($AS head -c 512 "$G/seal" 2>/dev/null)
       V=$($AS cat "$G/snap.tar" 2>/dev/null | node "$W/v.cjs" verify "$KF" "$KEY" "$BASE" "$R" "$ALLOW" "$AU" "$W/snap.tar" "$SEAL" 2>/dev/null); VR=$?
       if [ $VR -eq 0 ] && [ "$V" = ok ] && tar -xf "$W/snap.tar" -C "$R" $XF > ${logDir}/system-install.log 2>&1; then
         MODE=snapshot; RC=0

@@ -474,11 +474,13 @@ test("a rewritten snapshot without the account's key is refused: nothing lands o
     ["the genuine seal kept", genuine, /^its contents do not match its seal$/],
     ["a seal made with the agent's own key", f.sealOf(key, f.BASE, f.now(), evil, crypto.randomBytes(32).toString("hex")), /^its seal was not made with the account key$/],
     ["no seal", null, /^it carries no seal$/],
+    ["a seal that never ends", "/dev/zero", /^it carries no seal$/],
     ["a seal dated in the future", f.sealOf(key, f.BASE, f.now() + 86_400, evil, crypto.randomBytes(32).toString("hex")), /^its seal is dated in the future$/],
   ];
   for (const [what, seal, why] of attempts) {
     f.freshPod();
-    f.plant(key, f.BASE, evil, seal);
+    const g = f.plant(key, f.BASE, evil, seal === "/dev/zero" ? null : seal);
+    if (seal === "/dev/zero") fs.symlinkSync("/dev/zero", path.join(g, "seal"));
     const r = f.go();
     assert.equal(r.mode, "apt", what);
     assert.equal(r.ok, true, what);
