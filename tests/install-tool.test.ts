@@ -5,12 +5,19 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { refuse, serve } from "../src/install-helper.ts";
 import { askHelper, buildInstallTool, INSTALL_TOOL } from "../src/install-tool.ts";
-import { stepInstallEnv } from "../src/runtime.ts";
+import { stepInstallEnv, systemInstallSh } from "../src/runtime.ts";
+import { spawnSync } from "node:child_process";
+
+// Folders made the way a run pod's root makes them (umask 022): a snapshot
+// is refused under a folder others can write, and a group-writable umask
+// (Debian's for a login user) would make every fixture folder one.
+process.umask(0o022);
 
 const textOf = (out: { content: { text: string }[] }) => out.content.map((c) => c.text).join("\n");
 
@@ -24,7 +31,7 @@ test("the helper takes Debian package names and nothing else", () => {
   assert.match(refuse("nope")!, /not a request/);
 });
 
-test("over the socket: apt through the start-up's own installer, then a snapshot restore", async () => {
+test("over the socket: apt through the start-up's own installer; a snapshot only a start-up sealed restores", async () => {
   // A short path: a unix socket path must fit in ~100 bytes.
   const dir = fs.realpathSync(fs.mkdtempSync(path.join("/tmp", "fi-")));
   const dpkg = path.join(dir, "dpkg");
@@ -37,20 +44,44 @@ test("over the socket: apt through the start-up's own installer, then a snapshot
     `#!/bin/sh\necho "$@" >> ${dir}/calls\ncase "$*" in *" install "*) mkdir -p ${dir}/usr && echo x > ${dir}/usr/ffmpeg && echo ${dir}/usr/ffmpeg > ${dpkg}/info/ffmpeg.list ;; esac\n`,
     { mode: 0o755 },
   );
-  const saved = { PATH: process.env.PATH, D: process.env.FOLDRUN_DPKG_DIR };
+  const keyFile = path.join(fs.realpathSync(fs.mkdtempSync(path.join("/tmp", "fk-"))), "key");
+  fs.writeFileSync(keyFile, crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
+  const names = ["PATH", "FOLDRUN_DPKG_DIR", "FOLDRUN_SYS_SCAN", "FOLDRUN_SYS_ALLOW", "FOLDRUN_SNAP_KEY_FILE"] as const;
+  const saved = names.map((n) => process.env[n]);
   process.env.PATH = `${bin}:${process.env.PATH}`;
   process.env.FOLDRUN_DPKG_DIR = dpkg;
   process.env.FOLDRUN_SYS_SCAN = dir;
+  process.env.FOLDRUN_SYS_ALLOW = dir.slice(1);
+  process.env.FOLDRUN_SNAP_KEY_FILE = keyFile;
   const sock = path.join(dir, "s");
-  const server = serve(sock, path.join(dir, "cache"));
+  const cache = path.join(dir, "cache");
+  // As root (a Debian container with an `agent` user, as on a run pod) the
+  // snippet works in the cache as the agent: hand it the cache, as the
+  // start-up's chown does.
+  const agent = process.getuid?.() === 0 ? Number(spawnSync("id", ["-u", "agent"], { encoding: "utf8" }).stdout.trim()) || null : null;
+  if (agent !== null) {
+    fs.chmodSync(dir, 0o755);
+    fs.mkdirSync(cache);
+    fs.chownSync(cache, agent, agent);
+  }
+  const server = serve(sock, cache);
+  const fresh = () => {
+    fs.rmSync(path.join(dir, "usr"), { recursive: true, force: true });
+    fs.rmSync(path.join(dpkg, "info", "ffmpeg.list"), { force: true });
+  };
   try {
     await new Promise((r) => setTimeout(r, 100));
     const first = await askHelper(sock, ["ffmpeg"]);
     assert.equal(first.ok, true, first.error);
     assert.equal(first.mode, "apt");
-    // the container is gone; a fresh one restores from the snapshot
-    fs.rmSync(path.join(dir, "usr"), { recursive: true });
-    fs.rmSync(path.join(dpkg, "info", "ffmpeg.list"));
+    assert.equal(fs.existsSync(path.join(cache, ".system-snapshots")), false, "the helper, beside the agent, seals nothing (FOL-129)");
+    // A start-up that declares the set seals one, before any agent runs.
+    fresh();
+    const r = spawnSync("sh", ["-c", systemInstallSh(cache, dir)], { env: { ...process.env, FOLDRUN_SYSTEM_PACKAGES: "ffmpeg" }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "system-install.json"), "utf8")).mode, "apt");
+    // the container is gone; a fresh one's helper restores from the snapshot
+    fresh();
     const second = await askHelper(sock, ["ffmpeg"]);
     assert.equal(second.ok, true, second.error);
     assert.equal(second.mode, "snapshot");
@@ -60,9 +91,7 @@ test("over the socket: apt through the start-up's own installer, then a snapshot
     assert.match(refused.error!, /not Debian package names/);
   } finally {
     server.close();
-    process.env.PATH = saved.PATH;
-    if (saved.D === undefined) delete process.env.FOLDRUN_DPKG_DIR;
-    else process.env.FOLDRUN_DPKG_DIR = saved.D;
+    names.forEach((n, i) => (saved[i] === undefined ? delete process.env[n] : (process.env[n] = saved[i])));
   }
 });
 

@@ -6,10 +6,13 @@
 // The agent never becomes root. It can only ask this process, over a unix
 // socket, to install Debian packages BY NAME — each name re-checked against
 // Debian's naming rule here, so nothing but a package name reaches apt, and
-// apt is driven by the same snippet the start-up uses (systemInstallSh): the
-// account's .deb cache and snapshots, so a package anyone installed before is
-// restored in about a second. Requests are served one at a time; the process
-// dies with the container.
+// apt is driven by the same snippet the start-up uses (systemInstallSh), so a
+// package set the account's steps declare in `runtime: system:` is restored
+// from its snapshot in about a second. This helper never SAVES one (FOL-129):
+// it runs while the agent's code does, and what it would seal is a disk the
+// agent has had its hands on — only a start-up, before any agent code exists
+// in the pod, seals. Requests are served one at a time; the process dies with
+// the container.
 //
 // pip and npm need no root and are installed by the tool itself, as the agent.
 
@@ -49,7 +52,9 @@ export function refuse(req: unknown): string | null {
 export function installApt(packages: string[], cacheDir: string): Promise<InstallReply> {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-install-"));
   return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", systemInstallSh(cacheDir, logDir)], {
+    // The environment the start-up gave this process (rootStartSh: the
+    // step's own reset away, the snapshot key's path in), plus the names.
+    const child = spawn("sh", ["-c", systemInstallSh(cacheDir, logDir, { save: false })], {
       env: { ...process.env, FOLDRUN_SYSTEM_PACKAGES: packages.join(" ") },
       stdio: "ignore",
     });

@@ -713,3 +713,67 @@ test("buildFailureSummary names a full Docker disk first, with apt's own E: line
   assert.ok(lines.some((l) => /returned a non-zero code: 100/.test(l)));
   assert.doesNotMatch(buildFailureSummary(log), /no engine or ERROR line/);
 });
+
+// FOL-129: the account's snapshot key reaches root's start-up in the job
+// folder, which is handed to the agent user right after. It must be gone from
+// there, and from every environment, before the drop.
+test("rootStartSh moves the snapshot key where only root reads it, keeps it out of every environment, and stops if it cannot", async () => {
+  const { rootStartSh, aptSnapshotKey } = await import("../src/run-container.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rss-")));
+  const job = path.join(dir, "job");
+  fs.mkdirSync(job);
+  fs.writeFileSync(path.join(job, "input.json"), JSON.stringify({ runtime: null }));
+  const key = crypto.randomBytes(32).toString("hex");
+  fs.writeFileSync(path.join(job, "snapshot.key"), key, { mode: 0o600 });
+  // The real start-up, with its job folder moved here and what follows it
+  // (the drop) standing in as a dump of the environment.
+  const sh = rootStartSh(path.join(dir, "cache")).replaceAll("/opt/runner/job", job) + `\nenv > ${dir}/env-after\necho "$FOLDRUN_SNAP_KEY_FILE" > ${dir}/path-after`;
+  const r = spawnSh("sh", ["-c", sh], { env: { PATH: process.env.PATH!, MY_SECRET: "s" }, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(job, "snapshot.key")), false, "gone from the job folder");
+  const after = fs.readFileSync(path.join(dir, "env-after"), "utf8");
+  assert.ok(!after.includes(key), "the key is in no environment");
+  assert.doesNotMatch(after, /FOLDRUN_SNAP_KEY_FILE/, "nor its path, after root's part");
+  assert.equal(fs.readFileSync(path.join(dir, "path-after"), "utf8").trim(), "", "nor a shell variable the drop could see");
+  assert.match(after, /^MY_SECRET=s$/m, "the step's own environment is still there for the drop");
+  assert.match(after, /^FOLDRUN_INSTALL_SOCKET=/m);
+  // Where it went: a directory only its owner can enter.
+  const kept = fs.readdirSync("/tmp").filter((d) => d.startsWith(".foldrun-key.")).map((d) => path.join("/tmp", d)).filter((d) => fs.existsSync(path.join(d, "key")) && fs.readFileSync(path.join(d, "key"), "utf8") === key);
+  assert.equal(kept.length, 1);
+  assert.equal(fs.statSync(kept[0]).mode & 0o077, 0, "0700");
+  fs.rmSync(kept[0], { recursive: true, force: true });
+
+  // A key the start-up cannot delete stops the step before the drop.
+  if (process.getuid?.() !== 0) {
+    fs.writeFileSync(path.join(job, "snapshot.key"), key, { mode: 0o600 });
+    fs.chmodSync(job, 0o555);
+    fs.rmSync(path.join(dir, "env-after"));
+    try {
+      const stuck = spawnSh("sh", ["-c", sh], { env: { PATH: process.env.PATH! }, encoding: "utf8" });
+      assert.equal(stuck.status, 1);
+      assert.match(stuck.stderr, /snapshot key could not be removed/);
+      assert.equal(fs.existsSync(path.join(dir, "env-after")), false, "the drop never ran");
+    } finally {
+      fs.chmodSync(job, 0o755);
+      for (const d of fs.readdirSync("/tmp").filter((x) => x.startsWith(".foldrun-key."))) {
+        const p = path.join("/tmp", d, "key");
+        if (fs.existsSync(p) && fs.readFileSync(p, "utf8") === key) fs.rmSync(path.join("/tmp", d), { recursive: true, force: true });
+      }
+    }
+  }
+  // Per account, and only with a tenant.
+  assert.equal(aptSnapshotKey(undefined), null);
+  const a = aptSnapshotKey("acme"), b = aptSnapshotKey("other");
+  assert.match(a!, /^[0-9a-f]{64}$/);
+  assert.notEqual(a, b);
+  assert.equal(aptSnapshotKey("acme"), a);
+});
+
+test("the docker entry reads the step env, hands the cache to the agent, runs root's start-up, then drops", async () => {
+  const { rootStartSh } = await import("../src/run-container.ts");
+  assert.match(rootStartSh(), /^FOLDRUN_INSTALL_SOCKET=\/opt\/runner\/job\/install\.sock; export FOLDRUN_INSTALL_SOCKET\n\(\nPATH=/, "the reset is the subshell's first line");
+  const s = rootStartSh();
+  const reset = s.indexOf("export -p"), key = s.indexOf("snapshot.key"), apt = s.indexOf("apt-get"), helper = s.indexOf("install-helper.js"), close = s.lastIndexOf("\n)\n");
+  assert.ok(reset > 0 && key > reset && apt > key && helper > apt && close > helper, "reset, key, apt, helper — all inside the subshell");
+  assert.match(s.slice(helper - 200, helper), /FOLDRUN_SNAP_KEY_FILE="\$FOLDRUN_SNAP_KEY_FILE" node /, "the helper gets the key's path, nothing else");
+});

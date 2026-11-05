@@ -645,6 +645,347 @@ export const SYSTEM_FROM_INPUT_SH = `FOLDRUN_SYSTEM_PACKAGES="$(node -e 'try{con
 export const SYSTEM_STATUS_FILE = "/opt/runner/job/system-install.json";
 export const SYSTEM_LOG_FILE = "/opt/runner/job/system-install.log";
 
+/** Where the worker leaves the account's snapshot key for the root start-up
+ *  (run-container.ts rootStartSh), which moves it somewhere only root can
+ *  read and deletes this copy before any agent code runs. */
+export const SNAPSHOT_KEY_FILE = "/opt/runner/job/snapshot.key";
+
+/** The paths, relative to the root, a snapshot may write under: where Debian
+ *  packages install. `var` reaches /var/run only through a link to /run, and
+ *  /var/tmp is everyone's — the verifier refuses both on what is on disk. */
+export const SNAPSHOT_ALLOWED = "etc usr var bin sbin lib lib32 lib64 libx32 opt";
+
+/** The environment variables root's start-up keeps from the step's (the
+ *  proxy apt downloads through); every other exported name is unset. */
+const ROOT_ENV_KEEP = "HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy|FOLDRUN_INSTALL_SOCKET";
+
+/**
+ * The first lines of root's start-up section (rootStartSh), run in a
+ * subshell: the step's environment is the account's — its secrets by
+ * whatever name the account chose, LD_PRELOAD and NODE_OPTIONS among the
+ * names it could choose — and none of it may steer what root runs. PATH and
+ * IFS are assigned before anything is executed, then `export -p` is read
+ * with builtins only and every exported name but the proxy's is unset. The
+ * test-only FOLDRUN_SYS_* / FOLDRUN_DPKG_DIR overrides go with the rest.
+ */
+export const ROOT_ENV_RESET_SH = String.raw`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+IFS=$(printf ' \t\nx'); IFS=${"$"}{IFS%x}
+_fx=$(export -p)
+while read -r _fl; do
+  case "$_fl" in "export "*|"declare -x "*) ;; *) continue;; esac
+  _fn=${"$"}{_fl#export }; _fn=${"$"}{_fn#declare -x }; _fn=${"$"}{_fn%%=*}
+  case "$_fn" in ${ROOT_ENV_KEEP}|PATH) ;; ""|*[!A-Za-z0-9_]*) ;; *) unset "$_fn" 2>/dev/null;; esac
+done <<FOLDRUN_ENV
+$_fx
+FOLDRUN_ENV
+unset _fx _fl _fn
+HOME=/root; export PATH HOME`;
+
+/**
+ * The snapshot verifier and sealer, a CommonJS script the snippet writes to
+ * its root-private directory and runs with node (FOL-129).
+ *
+ *   node v.cjs verify <keyfile> <key> <base> <root> <allowed> <agent uid> <out> <seal>  < tar
+ *   node v.cjs seal   <keyfile> <key> <base> <root> <allowed> <agent uid> <tar>
+ *
+ * verify reads the tar once from stdin — hashing it, copying it to <out> and
+ * reading its headers — and says `ok` only when the seal is this account's
+ * (HMAC over the key, the base, the time it was built and the tar's sha256),
+ * it was built in the last 14 days, and every member passes the audit below.
+ * seal audits a tar root has just built and prints its seal line. Exit 3 is a
+ * refusal, its reason on stdout; exit 4 is a snapshot past its 14 days.
+ *
+ * The audit is defence in depth under the seal, so that even sealed bytes can
+ * only put package files where packages go: names relative, no `..`, under
+ * an allowed root; regular files, directories, symlinks, and hard links to an
+ * earlier file of the same archive, nothing else; no setuid or setgid; nothing
+ * owned by the agent user; no name twice; nothing under one of the archive's
+ * own symlinks unless the disk already has that very link; and on disk, every
+ * existing directory a member lands under resolves inside an allowed root and
+ * is root's alone (owned by root, not group- or world-writable — a sticky
+ * root directory only above an existing entry), so no entry the agent made
+ * can sit on a member's path, now or while the extraction runs.
+ *
+ * Written for a quoted heredoc inside a JS template: no backticks, no dollar
+ * brace.
+ */
+const SNAPSHOT_JS = String.raw`"use strict";
+const fs = require("node:fs"), crypto = require("node:crypto"), path = require("node:path");
+const [mode, keyFile, KEY, BASE, root, allowArg, agentArg, a8, a9] = process.argv.slice(2);
+const MAX = 6 * 1024 * 1024 * 1024, DAY = 86400;
+const short = (n) => (String(n).length > 90 ? String(n).slice(0, 30) + "[..]" + String(n).slice(-50) : String(n));
+const say = (s) => String(s).replace(/[^A-Za-z0-9 ._:\/+=,-]/g, "?").slice(0, 240);
+const refuse = (why, code) => { process.stdout.write((code === 4 ? "expired: " : "refused: ") + say(why) + "\n"); process.exit(code || 3); };
+let key = "";
+try { key = fs.readFileSync(keyFile, "utf8").trim(); } catch (e) { key = ""; }
+if (!/^[0-9a-f]{64}$/.test(key)) refuse("no snapshot key");
+const macOf = (built, sha) => crypto.createHmac("sha256", Buffer.from(key, "hex")).update(["v5", KEY, BASE, built, sha].join("\n")).digest("hex");
+const agent = /^[0-9]+$/.test(agentArg || "") ? Number(agentArg) : -1;
+const euid = process.geteuid ? process.geteuid() : 0;
+const rootReal = fs.realpathSync(root);
+const allow = (allowArg || "").split(/\s+/).map((a) => a.replace(/^\/+|\/+$/g, "")).filter(Boolean);
+const under = (p, base) => p === base || p.startsWith(base === "/" ? "/" : base + "/");
+const allowReal = allow.map((a) => { const p = path.join(rootReal, a); try { return fs.realpathSync(p); } catch (e) { return p; } });
+const allowedName = (n) => allow.some((a) => n === a || n.startsWith(a + "/"));
+
+function norm(n, what) {
+  if (n.indexOf("\0") >= 0) return { bad: what + " has a NUL in its name" };
+  if (n.startsWith("/")) return { bad: what + " " + short(n) + " is an absolute path" };
+  const parts = n.split("/").filter((p) => p !== "" && p !== ".");
+  if (!parts.length) return { bad: what + " has an empty name" };
+  if (parts.indexOf("..") >= 0) return { bad: what + " " + short(n) + " climbs out with .." };
+  return { name: parts.join("/") };
+}
+
+// A tar read as a stream: ustar (its prefix only under the POSIX magic), GNU
+// long names and links (L, K), pax per-file headers (x). A problem stops the
+// reading but not the hashing: the seal is judged first, then the members.
+const members = [];
+let problem = null, ended = false, pend = Buffer.alloc(0), skip = 0, ext = null, longName = null, longLink = null, pax = null;
+function num(h, a, b) {
+  if (h[a] & 0x80) { if (h[a] & 0x40) return NaN; let v = h[a] & 0x3f; for (let i = a + 1; i < b; i++) v = v * 256 + h[i]; return v; }
+  const s = str(h, a, b).trim();
+  return /^[0-7]*$/.test(s) ? (s ? parseInt(s, 8) : 0) : NaN;
+}
+function str(h, a, b) { const s = h.subarray(a, b); const z = s.indexOf(0); return (z < 0 ? s : s.subarray(0, z)).toString("utf8"); }
+function header(h) {
+  if (h.every((b) => b === 0)) { ended = true; return; }
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : h[i];
+  if (num(h, 148, 156) !== sum) { problem = "a header checksum is wrong"; return; }
+  const magic = h.subarray(257, 263).toString("latin1");
+  let name = str(h, 0, 100);
+  if (magic === "ustar\0" && str(h, 345, 500)) name = str(h, 345, 500) + "/" + name;
+  const type = h[156] === 0 ? "0" : String.fromCharCode(h[156]);
+  let size = num(h, 124, 136), uid = num(h, 108, 116), link = str(h, 157, 257), uname = str(h, 265, 297);
+  const m = num(h, 100, 108);
+  if ([size, uid, m].some((v) => !Number.isFinite(v))) { problem = "a header holds a number tar cannot read"; return; }
+  if (type === "L" || type === "K" || type === "x") {
+    if (size > 1048576) { problem = "an extended header is too large"; return; }
+    ext = { type, size, parts: [] }; skip = Math.ceil(size / 512) * 512;
+    if (!skip) finishExt();
+    return;
+  }
+  if (pax) { if (pax.path !== undefined) name = pax.path; if (pax.linkpath !== undefined) link = pax.linkpath; if (pax.size !== undefined) size = pax.size; if (pax.uid !== undefined) uid = pax.uid; if (pax.uname !== undefined) uname = pax.uname; }
+  if (longName !== null) name = longName;
+  if (longLink !== null) link = longLink;
+  longName = longLink = pax = null;
+  if (!"0125".includes(type)) { problem = "member " + short(name) + " is of a kind a snapshot never holds (type " + type + ")"; return; }
+  const n = norm(name, "member");
+  if (n.bad) { problem = n.bad; return; }
+  members.push({ name: n.name, type, mode: m, uid, uname, link });
+  skip = Math.ceil(size / 512) * 512;
+}
+function finishExt() {
+  const data = Buffer.concat(ext.parts).subarray(0, ext.size);
+  const t = ext.type; ext = null;
+  if (t === "L") longName = str(data, 0, data.length);
+  else if (t === "K") longLink = str(data, 0, data.length);
+  else {
+    pax = {};
+    let i = 0;
+    while (i < data.length) {
+      const sp = data.indexOf(32, i);
+      const len = sp < 0 ? NaN : parseInt(data.subarray(i, sp).toString("latin1"), 10);
+      if (!(len > 0) || i + len > data.length) { problem = "a pax header cannot be read"; return; }
+      const rec = data.subarray(sp + 1, i + len - 1).toString("utf8");
+      const eq = rec.indexOf("=");
+      const k = rec.slice(0, eq), v = rec.slice(eq + 1);
+      if (k.startsWith("GNU.sparse")) { problem = "a sparse member"; return; }
+      if (k === "path") pax.path = v;
+      else if (k === "linkpath") pax.linkpath = v;
+      else if (k === "uname") pax.uname = v;
+      else if (k === "size" || k === "uid") { if (!/^[0-9]+$/.test(v)) { problem = "a pax " + k + " is not a number"; return; } pax[k] = Number(v); }
+      i += len;
+    }
+  }
+}
+function feed(chunk) {
+  let off = 0;
+  while (off < chunk.length && !ended && !problem) {
+    if (skip > 0) {
+      const n = Math.min(skip, chunk.length - off);
+      if (ext) ext.parts.push(chunk.subarray(off, off + n));
+      skip -= n; off += n;
+      if (!skip && ext) finishExt();
+      continue;
+    }
+    const take = chunk.subarray(off, off + 512 - pend.length);
+    pend = pend.length ? Buffer.concat([pend, take]) : take;
+    off += take.length;
+    if (pend.length === 512) { const h = Buffer.from(pend); pend = Buffer.alloc(0); header(h); }
+  }
+}
+
+// The disk a member lands on, walked one component at a time from / the way
+// the kernel will walk it when tar writes: every directory passed through,
+// and every link followed (from the directory that holds it), must be root's
+// alone, so nothing on the way can be swapped after this check, even while
+// the agent runs (the install helper restores beside it). A directory anyone
+// may write is passed only when it is root's and sticky and the entry taken
+// from it is root's; nothing is created in one. The directory the member
+// lands in must be under the root and under an allowed path.
+const walked = new Map();
+function onDisk(name) {
+  const parent = path.posix.dirname(name);
+  if (walked.has(parent)) { const w = walked.get(parent); return w && w.replace("@", short(name)); }
+  const why = walk(parent === "." ? [] : parent.split("/"));
+  walked.set(parent, why);
+  return why && why.replace("@", short(name));
+}
+function walk(parts) {
+  const okDir = (st) => (st.uid === 0 || st.uid === euid) && ((st.mode & 0o022) === 0 || ((st.mode & 0o1000) !== 0 && st.uid === 0));
+  const open = (st) => (st.mode & 0o022) !== 0;
+  let cur = "/", st;
+  try { st = fs.lstatSync("/"); } catch (e) { return "member @ has no / to land on"; }
+  if (!okDir(st)) return "member @ lies under /, which others can write";
+  let queue = (rootReal === "/" ? [] : rootReal.slice(1).split("/")).concat(parts);
+  for (let hops = 0; queue.length; ) {
+    const c = queue.shift();
+    if (c === "" || c === ".") continue;
+    if (c === "..") {
+      cur = path.dirname(cur);
+      try { st = fs.lstatSync(cur); } catch (e) { return "member @ lies under " + short(cur) + ", which cannot be read"; }
+      continue;
+    }
+    const next = cur === "/" ? "/" + c : cur + "/" + c;
+    let lst;
+    try { lst = fs.lstatSync(next); } catch (e) {
+      // Missing from here down: tar makes it, inside cur.
+      if (open(st)) return "member @ would be made in " + short(cur) + ", which others can write";
+      queue = [];
+      break;
+    }
+    if (open(st) && !(lst.uid === 0 || lst.uid === euid)) return "member @ lies under " + short(next) + ", which others could replace";
+    if (lst.isSymbolicLink()) {
+      if (++hops > 40) return "member @ lies under too many links";
+      try { fs.statSync(next); } catch (e) { return "member @ lies under the broken link " + short(next); }
+      const t = fs.readlinkSync(next);
+      if (t.startsWith("/")) { cur = "/"; st = fs.lstatSync("/"); }
+      queue = t.split("/").concat(queue);
+      continue;
+    }
+    if (!lst.isDirectory()) return "member @ lies under " + short(next) + ", which is not a directory";
+    if (!okDir(lst)) return "member @ lies under " + short(next) + ", which others can write";
+    cur = next; st = lst;
+  }
+  if (!queue.length && open(st)) return "member @ would be made in " + short(cur) + ", which others can write";
+  if (!under(cur, rootReal)) return "member @ leads out of the root, to " + short(cur);
+  if (parts.length && !allowReal.some((a) => under(cur, a))) return "member @ leads through a link to " + short(cur) + ", where packages do not install";
+  return null;
+}
+
+function audit() {
+  const seen = new Map(), links = new Map();
+  for (const m of members) {
+    if (seen.has(m.name)) return "member " + short(m.name) + " appears twice";
+    if (!allowedName(m.name)) return "member " + short(m.name) + " is outside the paths packages install to";
+    if (allow.indexOf(m.name) >= 0 && m.type !== "5") {
+      let same = false;
+      try { same = m.type === "2" && fs.readlinkSync(path.join(rootReal, m.name)) === m.link; } catch (e) { same = false; }
+      if (!same) return "member " + short(m.name) + " would replace a top-level system directory";
+    }
+    if (m.mode & 0o6000) return "member " + short(m.name) + " is setuid or setgid";
+    if ((agent >= 0 && m.uid === agent) || m.uname === "agent") return "member " + short(m.name) + " belongs to the agent user";
+    if (m.type === "1") {
+      const t = norm(m.link, "hard link " + m.name);
+      if (t.bad) return t.bad;
+      const target = seen.get(t.name);
+      if (!target || target.type !== "0") return "hard link " + short(m.name) + " points at " + short(t.name) + ", not at a file earlier in the snapshot";
+    }
+    if (m.type === "2") links.set(m.name, m.link);
+    seen.set(m.name, m);
+  }
+  for (const m of members) {
+    const parts = m.name.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const p = parts.slice(0, i).join("/");
+      const up = seen.get(p);
+      if (!up) continue;
+      if (up.type === "2") {
+        let same = false;
+        try { same = fs.readlinkSync(path.join(rootReal, p)) === up.link; } catch (e) { same = false; }
+        if (!same) return "member " + short(m.name) + " lies under a link in the snapshot itself, " + short(p);
+      } else if (up.type !== "5") return "member " + short(m.name) + " lies under the file " + short(p);
+    }
+    const why = onDisk(m.name);
+    if (why) return why;
+  }
+  return null;
+}
+function finish(sha) {
+  if (!problem && !ended) problem = "the archive ends before its end marker";
+  return problem || audit();
+}
+
+if (mode === "verify") {
+  const seal = /^v5 ([0-9]{1,12}) ([0-9a-f]{64}) ([0-9a-f]{64})$/.exec((a9 || "").trim());
+  if (!seal) refuse("it carries no seal");
+  const built = Number(seal[1]), now = Math.floor(Date.now() / 1000);
+  if (built > now + 300) refuse("its seal is dated in the future");
+  if (now - built > 14 * DAY) refuse("built " + Math.floor((now - built) / DAY) + " days ago", 4);
+  const out = fs.openSync(a8, "wx", 0o600);
+  const hash = crypto.createHash("sha256");
+  let total = 0;
+  process.stdin.on("data", (chunk) => {
+    total += chunk.length;
+    if (total > MAX) refuse("it is larger than 6 GiB");
+    hash.update(chunk); fs.writeSync(out, chunk); feed(chunk);
+  });
+  process.stdin.on("end", () => {
+    fs.closeSync(out);
+    const sha = hash.digest("hex");
+    if (sha !== seal[2]) refuse("its contents do not match its seal");
+    const want = Buffer.from(macOf(seal[1], sha), "hex"), got = Buffer.from(seal[3], "hex");
+    if (!crypto.timingSafeEqual(want, got)) refuse("its seal was not made with the account key");
+    const why = finish(sha);
+    if (why) refuse(why);
+    process.stdout.write("ok\n");
+  });
+} else if (mode === "seal") {
+  const fd = fs.openSync(a8, "r");
+  const hash = crypto.createHash("sha256");
+  const buf = Buffer.alloc(1 << 20);
+  for (let n; (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0; ) { const c = buf.subarray(0, n); hash.update(c); feed(c); }
+  fs.closeSync(fd);
+  const sha = hash.digest("hex");
+  const why = finish(sha);
+  if (why) refuse(why);
+  const built = String(Math.floor(Date.now() / 1000));
+  process.stdout.write("v5 " + built + " " + sha + " " + macOf(built, sha) + "\n");
+} else refuse("unknown mode");
+`;
+
+/** What the agent user runs to publish a snapshot root built and sealed:
+ *  sh -c PUBLISH sh <key dir> <generation> <seal> <base>, the tar on stdin.
+ *  As the agent, so a link it planted in the cache leads only where it could
+ *  write itself (FOL-129); the -L checks are for the same-user tests. */
+const PUBLISH_SH = String.raw`cd / || exit 0; K=$1; G=$K/$2
+[ -L "$(dirname "$K")" ] && exit 0
+mkdir -p "$K" 2>/dev/null || exit 0
+[ -L "$K" ] && exit 0
+T=$(mktemp -d "$K/.stage.XXXXXX" 2>/dev/null) || exit 0
+if cat > "$T/snap.tar" && printf "%s\n" "$3" > "$T/seal" && printf "%s\n" "$4" > "$T/base"; then
+  [ -e "$G" ] && mv "$G" "$K/.gone.$(basename "$T")" 2>/dev/null
+  [ -e "$G" ] || mv "$T" "$G" 2>/dev/null
+fi
+rm -rf "$T" "$K/.gone.$(basename "$T")" 2>/dev/null
+ls -t "$K" 2>/dev/null | tail -n +5 | while read -r o; do rm -rf "$K/$o"; done`;
+
+/** What the agent user runs to keep the snapshot folder tidy:
+ *  sh -c PRUNE sh <snapshots> <cache>. Generations past their 14 days,
+ *  stages a killed pod left, keys left empty, and the v3/v4 layout under
+ *  `.apt` (its .deb cache too), which nothing reads any more. Where `.apt`
+ *  was made by root (a docker volume) the agent cannot remove it and it
+ *  stays; root does not delete in the agent's folder. */
+const PRUNE_SH = String.raw`cd / || exit 0; S=$1
+rm -rf "$2/.apt" 2>/dev/null
+[ -d "$S" ] && [ ! -L "$S" ] || exit 0
+find "$S" -mindepth 2 -maxdepth 2 -type d ! -name ".*" -mtime +14 -exec rm -rf {} + 2>/dev/null
+find "$S" -mindepth 2 -maxdepth 2 -type d -name ".*" -mmin +120 -exec rm -rf {} + 2>/dev/null
+find "$S" -mindepth 1 -maxdepth 1 -type d -empty -mmin +120 -delete 2>/dev/null
+exit 0`;
+
 /**
  * The root start-up's half of `runtime: system:` — one shell snippet, used by
  * the k8s run pod, the docker entry, the deploy-time warm pod and the install
@@ -653,47 +994,69 @@ export const SYSTEM_LOG_FILE = "/opt/runner/job/system-install.log";
  * nothing else can ride in), installs them with apt as root BEFORE the drop to
  * the agent user, and writes SYSTEM_STATUS_FILE for prepareRuntime to read.
  *
- * The first step to need a package set installs it with apt (the .debs kept
- * in `<cache>/.apt/archives`) and then saves the files those packages added,
- * with their dpkg records, as a snapshot. Every later step restores the
- * snapshot instead — measured 11 Oct 2026 in a gVisor run pod on the NFS
- * cache: build-essential, pkg-config, python3-dev, libcairo2-dev and
- * libpango1.0-dev (154 packages, 432 MB) took 23-30 s through apt and 0.76 s
- * from the snapshot, gcc and pkg-config working after. Package lists stay per
- * pod: two pods updating one lists directory on a shared volume would
- * corrupt it.
+ * The first step to need a package set installs it with apt and then saves
+ * the files those packages added, with their dpkg records, as a snapshot.
+ * Every later step restores the snapshot instead — measured 11 Oct 2026 in a
+ * gVisor run pod on the NFS cache: build-essential, pkg-config, python3-dev,
+ * libcairo2-dev and libpango1.0-dev (154 packages, 432 MB) took 23-30 s
+ * through apt and 0.76 s from the snapshot, gcc and pkg-config working after.
+ * Package lists stay per pod: two pods updating one lists directory on a
+ * shared volume would corrupt it.
  *
- * Layout, format v4 (FOL-50, 5 Nov 2026):
+ * Who can write the snapshots (FOL-129, 5 Nov 2026). They live in the
+ * account's runtime cache, which the agent user owns and writes — and on EFS
+ * the access point makes every write uid 501 whoever asks, so no ownership
+ * can keep the agent out. Root extracts a snapshot onto `/`. Until v5 that
+ * meant an agent that rewrote snap.tar had its own files written as root
+ * anywhere at the next step's start (an /etc/ld.so.preload, say), in any
+ * later step of the account; and root's mkdir, mv and rm -rf in the agent's
+ * folder followed whatever links the agent left there. Now:
  *
- *   <cache>/.apt/snapshots/v4-<key>/<base>/snap.tar, base
+ *  - a snapshot is restored only under a SEAL: an HMAC, with a key the
+ *    worker derives per account from the install key and hands to root in a
+ *    file the agent never sees (SNAPSHOT_KEY_FILE), over the package set,
+ *    the base, the time it was built and the tar's sha256. The tar is copied
+ *    into a directory only root can read while it is hashed, and extracted
+ *    from that copy, so a step running beside this one cannot swap it after
+ *    the check. No key (a warm pod, an embedder): no snapshots, apt only;
+ *  - under the seal, the verifier (SNAPSHOT_JS) audits every member, and
+ *    extraction is --numeric-owner --no-overwrite-dir;
+ *  - root reads, writes and deletes in the cache only as the agent user
+ *    (runuser), so a link the agent planted there leads only where the agent
+ *    could write itself;
+ *  - only the start-up saves, before any agent code exists in the pod; the
+ *    install helper (`save: false`), which runs beside the agent, restores
+ *    but never seals what it found on disk;
+ *  - the shared .deb cache is gone: apt downloads into the pod's own
+ *    /var/cache/apt, so no root download is written through the agent's
+ *    folder. Only a snapshot miss pays the download.
+ *
+ * Layout, format v5:
+ *
+ *   <cache>/.system-snapshots/v5-<key>/<base>/snap.tar, seal, base
  *
  * The KEY is what the snapshot is of: the package set, the Debian release
  * (os-release ID and VERSION_ID) and the machine (uname -m). Under it, one
  * GENERATION per base, named by and holding the sha256 of the dpkg status
  * file it was built on, and restored only onto a base whose status is
- * byte-identical — the guarantee v3 had (its key held a CRC of the same
- * file), because the tar carries that status whole and files built against
- * those exact packages. Only an identical package set makes replaying them
- * safe: a maintainer script reads the base as well as writing to it, and a
- * changed base can need different results (two rounds of review, 5 Nov). So
- * what keeps a snapshot valid across releases is the image keeping its OS
- * layers (run-container.ts, FOLDRUN_OS_REFRESH); this layout makes the
- * misses visible and bounded:
+ * byte-identical (FOL-50): the tar carries that status whole and files built
+ * against those exact packages, and a maintainer script reads the base as
+ * well as writing to it. What keeps a snapshot valid across releases is the
+ * image keeping its OS layers (run-container.ts, FOLDRUN_OS_REFRESH):
  *
  *  - a base change is a new generation beside the old ones, counted in the
  *    status file as `stale` (the run log says "N snapshots did not fit this
- *    image"), and the four newest generations per key are kept, so the slim
- *    and the full image keep theirs; v3 kept every image's tar for 30 days;
- *  - a generation is restored for 14 days from when it was built, then
- *    rebuilt — so the packages it added pick up Debian's fixes (v3 kept one
- *    for as long as it was used) — and removed;
+ *    image"), and the four newest generations per key are kept;
+ *  - a generation is restored for 14 days from the time sealed into it, then
+ *    rebuilt — so the packages it added pick up Debian's fixes — and removed;
  *  - it is built in a staging directory and published with one rename, so
- *    a reader never sees half of one, and v3's flat tars are deleted.
+ *    a reader never sees half of one.
  *
- * A restore that fails falls back to apt, and prepareRuntime verifies the
- * result either way.
+ * A restore that is refused or fails falls back to apt, the status file says
+ * why (`refused`), and prepareRuntime verifies the result either way.
  */
-export function systemInstallSh(cacheDir: string, logDir = "/opt/runner/job"): string {
+export function systemInstallSh(cacheDir: string, logDir = "/opt/runner/job", opts: { save?: boolean } = {}): string {
+  const save = opts.save !== false;
   // String.raw so the shell's backslashes are its own. No shell `${…}` may
   // appear below (it would be a JS interpolation): defaults are spelled out.
   return String.raw`if [ -n "$FOLDRUN_SYSTEM_PACKAGES" ]; then
@@ -702,32 +1065,51 @@ export function systemInstallSh(cacheDir: string, logDir = "/opt/runner/job"): s
   R=$FOLDRUN_SYS_ROOT; [ -n "$R" ] || R=/
   SCAN=$FOLDRUN_SYS_SCAN; [ -n "$SCAN" ] || SCAN="/etc /usr /var/lib"
   OSR=$FOLDRUN_OS_RELEASE; [ -n "$OSR" ] || OSR=/etc/os-release
-  C=${cacheDir}/.apt; A=$C/archives; S=$C/snapshots
-  mkdir -p "$A/partial" "$S" 2>/dev/null || { A=/var/cache/apt/archives; S=""; }
-  W=$(mktemp -d /tmp/.foldrun-sys.XXXXXX 2>/dev/null) || { W=/tmp/.foldrun-sys.$$; mkdir -p "$W"; }
+  ALLOW=$FOLDRUN_SYS_ALLOW; [ -n "$ALLOW" ] || ALLOW="${SNAPSHOT_ALLOWED}"
+  KF=$FOLDRUN_SNAP_KEY_FILE; S=${cacheDir}/.system-snapshots
+  # The cache is the agent's: as root, touch it only as the agent user.
+  AS=""; AU=""
+  if [ "$(id -u)" = 0 ]; then AU=$(id -u agent 2>/dev/null) && AS="runuser -u agent --" || S=""; fi
+  # Bounded: a FIFO or an endless file in place of a snapshot must not hold
+  # every later start-up of the account.
+  command -v timeout > /dev/null 2>&1 && AS="timeout 300 $AS"
+  W=$(mktemp -d /tmp/.foldrun-sys.XXXXXX 2>/dev/null) || { W=""; S=""; }
+  { [ -n "$KF" ] && [ -f "$KF" ] && command -v node > /dev/null 2>&1; } || S=""
   _fh() { if command -v sha256sum > /dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
-  KEY=v4-$( { printf '%s\n' $SYS | LC_ALL=C sort -u; grep -E '^(ID|VERSION_ID)=' "$OSR" 2>/dev/null; uname -m; } | _fh | cut -c1-16)
-  BASE=$(_fh < "$D/status"); K=$S/$KEY; G=$K/$(echo "$BASE" | cut -c1-16)
-  [ -n "$BASE" ] && [ "$KEY" != v4- ] || S=""
-  T0=$(date +%s); MODE=apt; RC=1; STALE=0
-  if [ -n "$S" ] && [ -d "$K" ]; then
-    if [ -f "$G/snap.tar" ] && [ "$(cat "$G/base" 2>/dev/null)" = "$BASE" ] && [ -z "$(find "$G" -maxdepth 0 -mtime +14 2>/dev/null)" ] \
-      && tar -xf "$G/snap.tar" -C "$R" > ${logDir}/system-install.log 2>&1; then
-      MODE=snapshot; RC=0; touch "$G/snap.tar" 2>/dev/null
-      # apt runs ldconfig through dpkg's trigger; a restore must too, or a
-      # library the snapshot brought is missing from /etc/ld.so.cache.
-      [ "$R" = / ] && ldconfig 2>/dev/null
-    else
-      # Generations of this package set built on other bases: why apt runs.
-      STALE=$(ls "$K" 2>/dev/null | grep -cvx "$(basename "$G")")
+  KEY=v5-$( { printf '%s\n' $SYS | LC_ALL=C sort -u; grep -E '^(ID|VERSION_ID)=' "$OSR" 2>/dev/null; uname -m; } | _fh | cut -c1-16)
+  BASE=$(_fh < "$D/status"); GN=$(echo "$BASE" | cut -c1-16); K=$S/$KEY; G=$K/$GN
+  [ -n "$BASE" ] && [ "$KEY" != v5- ] || S=""
+  XF="--numeric-owner"; tar --version 2>/dev/null | grep -q GNU && XF="--numeric-owner --no-overwrite-dir --keep-directory-symlink"
+  T0=$(date +%s); MODE=apt; RC=1; STALE=0; WHY=""; UNSAVED=""
+  if [ -n "$S" ]; then
+    cat > "$W/v.cjs" <<'FOLDRUN_SNAPSHOT_JS'
+${SNAPSHOT_JS}
+FOLDRUN_SNAPSHOT_JS
+  fi
+  if [ -n "$S" ] && $AS test -f "$G/snap.tar" 2>/dev/null; then
+    if [ "$($AS cat "$G/base" 2>/dev/null)" = "$BASE" ]; then
+      SEAL=$($AS cat "$G/seal" 2>/dev/null)
+      V=$($AS cat "$G/snap.tar" 2>/dev/null | node "$W/v.cjs" verify "$KF" "$KEY" "$BASE" "$R" "$ALLOW" "$AU" "$W/snap.tar" "$SEAL" 2>/dev/null); VR=$?
+      if [ $VR -eq 0 ] && [ "$V" = ok ] && tar -xf "$W/snap.tar" -C "$R" $XF > ${logDir}/system-install.log 2>&1; then
+        MODE=snapshot; RC=0
+        # apt runs ldconfig through dpkg's trigger; a restore must too, or a
+        # library the snapshot brought is missing from /etc/ld.so.cache.
+        [ "$R" = / ] && ldconfig 2>/dev/null
+      elif [ $VR -eq 3 ]; then WHY=$(printf '%s' "$V" | sed 's/^refused: //')
+      fi
+      rm -f "$W/snap.tar"
     fi
   fi
+  if [ -n "$S" ] && [ "$MODE" != snapshot ]; then
+    # Generations of this package set built on other bases: why apt runs.
+    STALE=$($AS ls "$K" 2>/dev/null | grep -cvx "$GN")
+  fi
   if [ "$MODE" != snapshot ]; then
-    ls "$D"/info/*.list 2>/dev/null | sort > "$W/before"
-    touch "$W/mark"; sleep 1
-    { apt-get -o Acquire::Retries=3 -qq update && DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Cache::Archives="$A" -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y -qq --no-install-recommends $SYS; } > ${logDir}/system-install.log 2>&1
+    [ -n "$S" ] && [ ${save ? "1" : "0"} = 1 ] && { ls "$D"/info/*.list 2>/dev/null | sort > "$W/before"; touch "$W/mark"; sleep 1; }
+    { apt-get -o Acquire::Retries=3 -qq update && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 install -y -qq --no-install-recommends $SYS; } > ${logDir}/system-install.log 2>&1
     RC=$?
-    if [ $RC -eq 0 ] && [ -n "$S" ]; then
+    apt-get -qq clean > /dev/null 2>&1
+    if [ $RC -eq 0 ] && [ -n "$S" ] && [ ${save ? "1" : "0"} = 1 ]; then
       ls "$D"/info/*.list 2>/dev/null | sort > "$W/after"
       comm -13 "$W/before" "$W/after" > "$W/new"
       if [ -s "$W/new" ]; then
@@ -738,29 +1120,23 @@ export function systemInstallSh(cacheDir: string, logDir = "/opt/runner/job"): s
           # name: update-alternatives links (libblas.so.3 → /etc/alternatives),
           # generated caches and configs. By ctime, not mtime: those links carry
           # the package's own (2025) mtime, and only ctime cannot be backdated.
-          find $SCAN -xdev \( -path /var/lib/apt -o -path "$D/info" \) -prune -o \( -type f -o -type l \) -cnewer "$W/mark" -print 2>/dev/null
-        } | sort -u > "$W/files"
-        if mkdir -p "$K" 2>/dev/null && T=$(mktemp -d "$K/.stage.XXXXXX" 2>/dev/null); then
-          if tar -cf "$T/snap.tar" -T "$W/files" 2>/dev/null && echo "$BASE" > "$T/base"; then
-            # One rename publishes it; one this replaces (expired, or a
-            # restore of it failed) is moved aside first and removed.
-            [ -e "$G" ] && mv "$G" "$K/.gone.$(basename "$T")" 2>/dev/null
-            [ -e "$G" ] || mv "$T" "$G" 2>/dev/null
-          fi
-          rm -rf "$T" "$K/.gone.$(basename "$T")" "$G"/.stage.* 2>/dev/null
+          find $SCAN -xdev \( -path /var/lib/apt -o -path "$D/info" -o -path "${cacheDir}" \) -prune -o \( -type f -o -type l \) -cnewer "$W/mark" -print 2>/dev/null
+        } | grep '^/' | sort -u > "$W/files"
+        # Built where only root can read, audited and sealed, then handed to
+        # the agent user to publish.
+        if tar -cf "$W/snap.tar" --numeric-owner -T "$W/files" 2>/dev/null && SEAL=$(node "$W/v.cjs" seal "$KF" "$KEY" "$BASE" "$R" "$ALLOW" "$AU" "$W/snap.tar" 2>/dev/null); then
+          $AS sh -c '${PUBLISH_SH}' sh "$K" "$GN" "$SEAL" "$BASE" < "$W/snap.tar" 2>/dev/null
+        else
+          UNSAVED=$(printf '%s' "$SEAL" | sed 's/^refused: //')
         fi
-        ls -t "$K" 2>/dev/null | tail -n +5 | while read -r o; do rm -rf "$K/$o"; done
+        rm -f "$W/snap.tar"
       fi
-      # Generations past their 14 days; stages a killed pod left; v3's flat
-      # tars, which no v4 key reads; keys left empty.
-      find "$S" -mindepth 2 -maxdepth 2 -type d ! -name '.*' -mtime +14 -exec rm -rf {} + 2>/dev/null
-      find "$S" -mindepth 2 -maxdepth 2 -type d -name '.*' -mmin +120 -exec rm -rf {} + 2>/dev/null
-      find "$S" -maxdepth 1 -type f -name '*.tar' -delete 2>/dev/null
-      find "$S" -mindepth 1 -maxdepth 1 -type d -empty -mmin +120 -delete 2>/dev/null
+      $AS sh -c '${PRUNE_SH}' sh "$S" "${cacheDir}" 2>/dev/null
     fi
   fi
-  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "stale": %s, "packages": "%s"}\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$STALE" "$SYS" > ${logDir}/system-install.json
-  rm -rf "$W" /var/lib/apt/lists/* 2>/dev/null || true
+  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "stale": %s, "packages": "%s", "refused": "%s", "unsaved": "%s"}\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$STALE" "$SYS" "$WHY" "$UNSAVED" > ${logDir}/system-install.json
+  [ -n "$W" ] && rm -rf "$W"
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 fi`;
 }
 
@@ -774,7 +1150,7 @@ export function checkSystemPackages(pkgs: string[]): { log: string[]; error: str
   if (!pkgs.length) return { log: [], error: null };
   const statusFile = process.env.FOLDRUN_SYSTEM_STATUS ?? SYSTEM_STATUS_FILE;
   const logFile = process.env.FOLDRUN_SYSTEM_LOG ?? SYSTEM_LOG_FILE;
-  let status: { ok?: boolean; seconds?: number; mode?: string; stale?: number } | null = null;
+  let status: { ok?: boolean; seconds?: number; mode?: string; stale?: number; refused?: string; unsaved?: string } | null = null;
   try {
     status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
   } catch {
@@ -796,7 +1172,19 @@ export function checkSystemPackages(pkgs: string[]): { log: string[]; error: str
     // `stale`: snapshots of this package set that were there but did not fit
     // this image (systemInstallSh) — what says why a step paid apt again.
     const stale = status?.mode !== "snapshot" && status?.stale ? `, ${status.stale} snapshot${status.stale === 1 ? "" : "s"} did not fit this image` : "";
-    return { log: [`system packages ready: ${pkgs.join(", ")}${status?.seconds !== undefined ? ` (${status.mode === "snapshot" ? "snapshot" : "apt"}, ${status.seconds}s${stale})` : ""}`], error: null };
+    // FOL-129: a snapshot whose seal or contents did not pass, and one the
+    // start-up would not seal — said, so a step that paid apt says why.
+    const notes = [
+      ...(status?.mode !== "snapshot" && status?.refused ? [`snapshot refused: ${status.refused}`] : []),
+      ...(status?.unsaved ? [`no snapshot kept: ${status.unsaved}`] : []),
+    ];
+    return {
+      log: [
+        `system packages ready: ${pkgs.join(", ")}${status?.seconds !== undefined ? ` (${status.mode === "snapshot" ? "snapshot" : "apt"}, ${status.seconds}s${stale})` : ""}`,
+        ...notes,
+      ],
+      error: null,
+    };
   }
   let aptOut = "";
   try {

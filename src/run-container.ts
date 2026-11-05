@@ -33,8 +33,8 @@ import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.
 import { refusedBack, refusedLine, keptLine, type RefusedPath } from "./copy-back.ts";
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
-import { isFileValue, fileContent } from "./secrets.ts";
-import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, type RuntimeSpec } from "./runtime.ts";
+import { isFileValue, fileContent, installKeyMaterial } from "./secrets.ts";
+import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKET, ROOT_ENV_RESET_SH, SNAPSHOT_KEY_FILE, type RuntimeSpec } from "./runtime.ts";
 import { egressCaSh, type NetworkLevel } from "./network.ts";
 import { anyMemoryMi, quantityMi, type ResourceOverride } from "./resources.ts";
 import type { ScriptSpec } from "./script-tools.ts";
@@ -609,9 +609,53 @@ export const RUNTIME_CACHE = "/home/agent/.foldrun/runner/.runtimes";
 /** Starts the install helper as root, in the background, before the drop to
  *  the agent user: the root half of the `install` tool (install-helper.ts).
  *  The agent reaches it only through the socket; it installs only validated
- *  Debian package names, and dies with the container. */
+ *  Debian package names, and dies with the container.
+ *  @deprecated the start-ups use rootStartSh, which starts the helper in a
+ *  clean environment with the snapshot key's path (FOL-129). */
 export const INSTALL_HELPER_SH = `FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET}; export FOLDRUN_INSTALL_SOCKET
 node /opt/runner/node_modules/@foldrun/core/dist/src/install-helper.js "$FOLDRUN_INSTALL_SOCKET" ${RUNTIME_CACHE} >/dev/null 2>&1 &`;
+
+/**
+ * The account's key for sealing its `runtime: system:` snapshots (FOL-129):
+ * derived from the install key, so it needs no store and no rotation of its
+ * own, and per account, so one account's key seals nothing for another. The
+ * worker stages it as the step's SNAPSHOT_KEY_FILE; null (no tenant, or a
+ * process without the install key) means the step gets no snapshots.
+ */
+export function aptSnapshotKey(tenant: string | undefined | null): string | null {
+  if (!tenant) return null;
+  try {
+    return crypto.createHmac("sha256", installKeyMaterial()).update(`foldrun apt snapshot v1\0${tenant}`).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Root's part of a run container's start-up, after the step's env is read
+ * and before the chown and the drop to the agent user (k8s SHIM, docker
+ * ENTRY): the snapshot key moved where only root can read it, then — in a
+ * subshell whose environment is reset to the proxy's variables alone
+ * (ROOT_ENV_RESET_SH) — the declared system packages and the install helper.
+ * The key never enters an environment: root's commands and the helper get
+ * only its path, and the copy in the job folder (which is chowned to the
+ * agent next) is gone before the subshell ends, or the start-up stops.
+ */
+export function rootStartSh(cacheDir: string = RUNTIME_CACHE): string {
+  return `FOLDRUN_INSTALL_SOCKET=${INSTALL_SOCKET}; export FOLDRUN_INSTALL_SOCKET
+(
+${ROOT_ENV_RESET_SH}
+unset FOLDRUN_SNAP_KEY_FILE; FOLDRUN_SNAP_KEY_FILE=""
+if [ -e ${SNAPSHOT_KEY_FILE} ] || [ -L ${SNAPSHOT_KEY_FILE} ]; then
+  _fk=$(mktemp -d /tmp/.foldrun-key.XXXXXX 2>/dev/null) && [ ! -L ${SNAPSHOT_KEY_FILE} ] && cat ${SNAPSHOT_KEY_FILE} > "$_fk/key" 2>/dev/null && FOLDRUN_SNAP_KEY_FILE=$_fk/key
+  rm -f ${SNAPSHOT_KEY_FILE}
+fi
+${SYSTEM_FROM_INPUT_SH}
+${systemInstallSh(cacheDir)}
+FOLDRUN_SNAP_KEY_FILE="$FOLDRUN_SNAP_KEY_FILE" node /opt/runner/node_modules/@foldrun/core/dist/src/install-helper.js "$FOLDRUN_INSTALL_SOCKET" ${cacheDir} >/dev/null 2>&1 &
+)
+if [ -e ${SNAPSHOT_KEY_FILE} ] || [ -L ${SNAPSHOT_KEY_FILE} ]; then echo "the snapshot key could not be removed from the job folder — not starting the step" >&2; exit 1; fi`;
+}
 
 /**
  * Where the platform's shared runtime layer is mounted, read-only, in a run
@@ -1222,15 +1266,14 @@ ${CORE_INSTALL}`;
 const ENTRY = `#!/bin/sh
 set +e
 ${egressCaSh("/opt/runner/job")}
-${SYSTEM_FROM_INPUT_SH}
-${systemInstallSh(RUNTIME_CACHE)}
-${INSTALL_HELPER_SH}
-set -e
-chown -R agent:agent /workspace /library /opt/runner/job
 # The runtime cache, when one is mounted. NOT recursive: a warm cache is tens
 # of thousands of files and its contents are already agent-owned from the step
-# that built them — only the mount point itself arrives owned by root.
+# that built them — only the mount point itself arrives owned by root. Before
+# the system install: root works in the cache as the agent user (FOL-129).
 chown agent:agent ${RUNTIME_CACHE} 2>/dev/null || true
+${rootStartSh(RUNTIME_CACHE)}
+set -e
+chown -R agent:agent /workspace /library /opt/runner/job
 exec runuser -u agent -- node /opt/runner/driver.mjs
 `;
 
@@ -1868,6 +1911,10 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     const jobIn = path.join(staging, "job");
     fs.mkdirSync(jobIn);
     fs.writeFileSync(path.join(jobIn, "input.json"), JSON.stringify(args.input, null, 2));
+    // The account's snapshot key, for root's start-up alone (rootStartSh
+    // moves it out of the agent's reach before the drop) — FOL-129.
+    const snapKey = aptSnapshotKey(args.tenant);
+    if (snapKey) fs.writeFileSync(path.join(jobIn, "snapshot.key"), snapKey, { mode: 0o600 });
 
     const containerEnv = stageContainerEnv(args.env, wsIn, args.input.agentRel, args.emit);
 
@@ -1947,6 +1994,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     cp(`${wsIn}/.`, `${containerId}:/workspace`);
     cp(`${libIn}/.`, `${containerId}:/library`);
     cp(`${jobIn}/input.json`, `${containerId}:/opt/runner/job/input.json`);
+    if (snapKey) cp(`${jobIn}/snapshot.key`, `${containerId}:${SNAPSHOT_KEY_FILE}`);
     phases.files = Date.now() - t0;
 
     // Start attached and read the driver's JSONL. The step timeout gets a
