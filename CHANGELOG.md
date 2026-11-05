@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [15.1.0] — 2026-11-05
+
+- fix(ops-log): the guard sees a call with comments between its tokens; frames from the published package count (FOL-121) ([503e9d0](https://github.com/foldrun-io/foldrun-core/commit/503e9d0))
+- feat(ops-log): no account content in a platform log line, by construction (FOL-121) ([0f461da](https://github.com/foldrun-io/foldrun-core/commit/0f461da))
+
 ## [15.0.0] — 2026-11-05
 
 ### Breaking changes
