@@ -95,7 +95,10 @@ test("error.type on every failed span, a class from the words; nothing on a span
   assert.equal(at(m!, "error.type"), undefined);
   assert.match(st!.status.message ?? "", /^timed out after 900s/);
   const stopped = spansOf({ ...run, stopRequested: true } as RunRecord);
-  assert.deepEqual(at(stopped[0]!, "error.type"), { stringValue: "cancelled" });
+  assert.deepEqual(at(stopped[0]!, "error.type"), { stringValue: "cancelled" }, "the run: stopped");
+  assert.deepEqual(at(stopped[1]!, "error.type"), { stringValue: "timeout" }, "a step that failed on its own keeps its own class");
+  assert.equal(spanErrorType("stopped by a person — sandbox destroyed"), "cancelled");
+  assert.equal(spanErrorType("cancelled by A2A caller lead-bot — sandbox destroyed"), "cancelled");
   assert.equal(spanErrorType("the 7-day window is 100% used"), "model_error");
   assert.equal(spanErrorType("pod never became ready"), "platform_error");
   assert.equal(spanErrorType("Error: OOMKilled"), "oom");
@@ -116,4 +119,12 @@ test("a direct agent run is not a workflow; foldrun's models name their provider
   const keys = new Set(spansOf(run).flatMap((s) => s.attributes.map((a) => a.key)));
   for (const k of ["gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.system_instructions", "gen_ai.tool.call.arguments", "gen_ai.tool.call.result"]) assert.ok(!keys.has(k), `${k} is opt-in content`);
   for (const s of spansOf(adhoc)) assert.equal(s.status.code, 0);
+});
+
+test("the run's error.type is the step that failed it: an optional step's failure first does not", () => {
+  const optional = { ...run.steps[0]!, agent: "scout", optional: true, events: [{ t: T(2), type: "error", text: "Error: OOMKilled" }] } as unknown as StepRecord;
+  const twoFailures = { ...run, steps: [optional, run.steps[0]!] } as RunRecord;
+  const [root] = spansOf(twoFailures);
+  assert.deepEqual(at(root!, "error.type"), { stringValue: "timeout" }, "the required step's, not the optional scout's oom");
+  assert.match(root!.status.message ?? "", /^timed out/);
 });

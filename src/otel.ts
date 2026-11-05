@@ -37,7 +37,7 @@
 // own error line as the status message, capped.
 
 import crypto from "node:crypto";
-import type { RunRecord, StepRecord } from "./store.ts";
+import { isSplicedRecord, type RunRecord, type StepRecord } from "./store.ts";
 import { buildTraceTree, type TraceSpan } from "./trace-tree.ts";
 import { errorClass, type ErrorClass } from "./ops-log.ts";
 import { platformCause } from "./issues.ts";
@@ -74,6 +74,8 @@ export type SpanErrorType = (typeof SPAN_ERROR_TYPES)[number];
 export function spanErrorType(text: string | null | undefined, stopped = false): SpanErrorType {
   if (stopped) return "cancelled";
   if (!text) return "_OTHER";
+  // What stopRun writes on the step it interrupted, and on the run.
+  if (/\b(stopped by a person|cancelled by .+) — sandbox destroyed|^run (stopped|cancelled)\b/.test(text)) return "cancelled";
   const cause = platformCause(text)?.key;
   if (cause === "model-auth" || cause === "model-cap" || cause === "model-busy") return "model_error";
   if (cause === "sandbox" || cause === "worker") return "platform_error";
@@ -81,6 +83,12 @@ export function spanErrorType(text: string | null | undefined, stopped = false):
   const cls: ErrorClass = errorClass({ message: text });
   return cls !== "platform_error" && (SPAN_ERROR_TYPES as readonly string[]).includes(cls) ? (cls as SpanErrorType) : "_OTHER";
 }
+
+/** The step that failed the run, by the runner's own rule (runner.ts: a
+ *  failed step that is not optional, carried from an earlier run or a
+ *  spliced record); else any failed one. */
+const failingStep = (run: RunRecord) =>
+  run.steps.find((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s)) ?? run.steps.find((s) => s.status === "failed");
 
 const lastError = (s: StepRecord | undefined) => {
   const errors = (s?.events ?? []).filter((e) => e.type === "error");
@@ -132,9 +140,12 @@ export function runToOtlp(run: RunRecord, ctx: TraceContext, now = Date.now()) {
     // last error line, an error leaf by its own words. A failed tool call's
     // record holds no words, only that it erred.
     const failed = s.status === "error";
-    const stopped = run.stopRequested === true && (s.kind === "run" || s.kind === "step");
+    // A person (or a caller) stopping the run is why the run failed; a step
+    // that failed before the stop failed for its own reason — the step the
+    // stop interrupted is marked skipped, and its error line says cancelled.
+    const stopped = run.stopRequested === true && s.kind === "run";
     const errorText = !failed ? null
-      : s.kind === "run" ? lastError(run.steps.find((x) => x.status === "failed"))
+      : s.kind === "run" ? lastError(failingStep(run))
       : s.kind === "step" ? lastError(step)
       : s.text ?? null;
     spans.push({
