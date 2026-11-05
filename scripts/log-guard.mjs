@@ -38,9 +38,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CONSOLE_METHODS = "log|error|warn|info|debug|trace|dir|table|assert|count|group|groupCollapsed|time|timeEnd|timeLog|dirxml";
-const CONSOLE = new RegExp(`console\\s*\\.\\s*(${CONSOLE_METHODS})\\b\\s*(\\()?`, "y");
-const STREAM = /process\s*\.\s*(stdout|stderr)\s*\.\s*write\b/y;
-const OPS = /(opsLog|opsError)\s*\(/y;
+// Between tokens: whitespace or comments (`opsLog /* why */ (…)` is a call).
+const GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
+const CONSOLE = new RegExp(`console${GAP}\\.${GAP}(${CONSOLE_METHODS})\\b${GAP}(\\()?`, "y");
+const STREAM = new RegExp(`process${GAP}\\.${GAP}(stdout|stderr)${GAP}\\.${GAP}write\\b`, "y");
+const OPS = new RegExp(`(opsLog|opsError)${GAP}\\(`, "y");
 
 /**
  * Every place in the source the guard has an opinion on, with the text of

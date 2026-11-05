@@ -43,6 +43,10 @@ test("opsLog and opsError need a literal event", () => {
   assert.equal(scan("opsLog(\"info\", `x.${kind}`, {});").length, 1);
   assert.equal(scan(`opsError(name, err);`).length, 1);
   assert.equal(scan(`opsLog("info", "Not An Event");`).length, 1);
+  // A comment between the name and its call is still the call (Codex review).
+  assert.equal(scan(`opsLog /* why */ ("info", userInput);`).length, 1);
+  assert.equal(scan(`console /* x */ . error // y\n (err);`).length, 1);
+  assert.equal(scan(`process./* x */stderr.write(out);`).length, 1);
 });
 
 test("comments, strings, regexes and generated scripts are not code; a template's ${} is", () => {

@@ -228,7 +228,9 @@ export function errorClass(err: unknown): ErrorClass {
 const seenPaths = new Map<string, boolean>();
 function ourPath(p: string): boolean {
   if (/^node:[a-z_/]+$/.test(p)) return true;
-  if (!/\/foldrun-(core|platform|web)\/(src|server|app|lib|\.next|node_modules|tests|scripts|instrumentation)/.test(p)) return false;
+  // A checkout (the image runs core and platform from source), the web's
+  // build, or the published package (`node_modules/@foldrun/core/dist`).
+  if (!/\/foldrun-(core|platform|web)\/(src|server|app|lib|dist|\.next|node_modules|tests|scripts|instrumentation)|\/node_modules\/@foldrun\//.test(p)) return false;
   let known = seenPaths.get(p);
   if (known === undefined) {
     try {
