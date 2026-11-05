@@ -13,6 +13,23 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.0.0] — 2026-11-05
+
+### Breaking changes
+
+- `AgentInfo` from `@foldrun/core` — network changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `PlatformHooks` from `@foldrun/core`
+
+- docs(starter): a held step searches through the search door; name search at none (FOL-128) ([712b22b](https://github.com/foldrun-io/foldrun-core/commit/712b22b))
+- refactor(search): drop an unused env-based helper that misread a model provider's search (FOL-128, Codex review) ([3a4714c](https://github.com/foldrun-io/foldrun-core/commit/3a4714c))
+- feat(search): a step walled to its network: list searches through the proxy's search door (FOL-128) ([f16c077](https://github.com/foldrun-io/foldrun-core/commit/f16c077))
+- feat(run-container): the runner's OS part is its own Dockerfile, buildable as a base image (FOL-50) ([6765025](https://github.com/foldrun-io/foldrun-core/commit/6765025))
+
 ## [16.0.0] — 2026-11-05
 
 ### Breaking changes
