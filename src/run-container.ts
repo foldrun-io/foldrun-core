@@ -38,6 +38,7 @@ import { safeTenantSegment, systemInstallSh, SYSTEM_FROM_INPUT_SH, INSTALL_SOCKE
 import { egressCaSh, type NetworkLevel } from "./network.ts";
 import { anyMemoryMi, quantityMi, type ResourceOverride } from "./resources.ts";
 import type { ScriptSpec } from "./script-tools.ts";
+import { STARTUP_PHASES, type StartupPhase, type StartupPhases } from "./startup.ts";
 import type { ConsultSpec } from "./agent-tools.ts";
 import type { DelegateSpec, SubagentSpec } from "./subagents.ts";
 import { isOperatorEvent, type OperatorEvent } from "./operator.ts";
@@ -153,28 +154,9 @@ export interface StepTiming {
   phases?: StartupPhases;
 }
 
-/**
- * The start-up of one step, in the order it happens. Each is the moment the
- * phase ENDED, in ms since the executor began the step, so the gap between
- * two neighbours is what the later one cost (FOL-29: "pod ready" was the
- * only number, and the six seconds after it had no names).
- *
- * The executor marks its own: `services` (the account's search/browser pods
- * up), `room` (room on the cluster to start — platform pod-room.ts),
- * `applied` (pod created), `ready`, `files` (the workspace copied in),
- * `go` (the step released). The sandbox marks the rest as `{"e":"mark"}`
- * lines: `shim` (the shim saw go), `system` (system packages restored),
- * `driver` (node up), `imports` (core loaded), `tools` (runtime and tools
- * built, the SDK about to start) and `model` (the model's first text or tool
- * call). A worker that predates a mark ignores the line — parseDriverLine
- * answers null for an `e` it does not know.
- */
-export const STARTUP_PHASES = [
-  "services", "room", "applied", "ready", "files", "go",
-  "shim", "system", "driver", "imports", "tools", "model",
-] as const;
-export type StartupPhase = (typeof STARTUP_PHASES)[number];
-export type StartupPhases = Partial<Record<StartupPhase, number>>;
+/** The start-up phases and what each marks — startup.ts, where every
+ *  surface that shows them reads them from (FOL-74). */
+export { STARTUP_PHASES, type StartupPhase, type StartupPhases };
 
 /** A sandbox-side mark: which phase ended, and when (epoch ms, the
  *  sandbox's clock — the same machine's as the worker's on one node). */
