@@ -8,6 +8,7 @@
 //     examples: ["Leads for dentists in Perth"]
 //     public_card: false              # true: the card is readable without a key
 //     input: { type: object, required: [city], properties: { city: { type: string } } }
+//     accept_risk: [researcher]       # agents an admin accepted holding a secret while running code
 //
 // Publishing is the owner's decision, so it is written in the flow and nowhere
 // else, and changing it needs workspace:manage (foldrun-web
@@ -31,6 +32,11 @@ export interface A2aPublication {
   publicCard: boolean;
   /** A JSON Schema the request's data part must satisfy; null = any (or none). */
   input: Record<string, unknown> | boolean | null;
+  /** The agents of this flow an admin accepted holding a secret while they
+   *  can run code (FOL-112): their answer goes back to the caller, so the
+   *  platform refuses to publish such a flow unless each is named here.
+   *  Absent when the block does not say `accept_risk:`. */
+  acceptRisk?: string[];
 }
 
 /** The bounds on what is published, and on what a caller may send. */
@@ -48,9 +54,14 @@ export const A2A_LIMITS = {
   /** What a task's answer carries back. */
   resultChars: 64_000,
   resultDataBytes: 256_000,
+  /** Agents named under accept_risk. */
+  acceptRisk: 50,
 } as const;
 
-const KEYS = ["publish", "name", "description", "examples", "public_card", "input"] as const;
+/** One agent name: one path segment, as an agent's folder is. */
+const ONE_NAME = /^[^/\\\0\s]+$/;
+
+const KEYS = ["publish", "name", "description", "examples", "public_card", "input", "accept_risk"] as const;
 
 /** What is wrong with an `a2a:` value, each as a sentence. Empty: fine (or absent). */
 export function a2aPublishProblems(v: unknown): string[] {
@@ -88,6 +99,11 @@ export function a2aPublishProblems(v: unknown): string[] {
       if (size > A2A_LIMITS.inputSchemaBytes) out.push(`\`input\` is larger than ${A2A_LIMITS.inputSchemaBytes} bytes as JSON`);
     }
   }
+  if (o.accept_risk !== undefined && o.accept_risk !== null) {
+    const v = o.accept_risk;
+    if (!Array.isArray(v) || v.some((e) => typeof e !== "string" || !ONE_NAME.test(e.trim()))) out.push("`accept_risk` should be a list of agent names — the agents an admin accepted holding a secret while they can run code");
+    else if (v.length > A2A_LIMITS.acceptRisk) out.push(`\`accept_risk\` names more than ${A2A_LIMITS.acceptRisk} agents`);
+  }
   return out;
 }
 
@@ -111,6 +127,8 @@ export function parseA2aPublish(v: unknown): A2aPublication | null {
     examples: Array.isArray(o.examples) ? (o.examples as string[]).map((e) => e.trim()) : [],
     publicCard: o.public_card === true,
     input: o.input === undefined || o.input === null ? null : (o.input as Record<string, unknown> | boolean),
+    // Only when written: a block without it reads as it did before 5 Nov 2026.
+    ...(Array.isArray(o.accept_risk) ? { acceptRisk: [...new Set((o.accept_risk as string[]).map((e) => e.trim()))] } : {}),
   };
 }
 

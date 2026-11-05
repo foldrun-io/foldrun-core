@@ -439,7 +439,7 @@ effort: low
 overlap: skip            # skip | queue — what a second run does while one is live
 priority: normal         # high | normal | low — where its runs stand in the queue
 compute: { vcpu: 4, memory: 8Gi, disk: 40Gi }  # optional: what one run may hold at once
-a2a: { publish: false }  # true: outside agents may call it over A2A (admin only; callers need an A2A key)
+a2a: { publish: false }  # true: outside agents may call it over A2A (admin only; callers need an A2A key; an agent with a secret and Bash needs accept_risk: [agent])
 ---
 
 1. [[researcher]] — Find three sources on {{topic}}.
