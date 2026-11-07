@@ -119,6 +119,9 @@ export interface PublishInput {
   bytesOf: (sha: string) => Promise<Uint8Array>;
   /** Replay attempts before giving up under sustained contention. Default 8. */
   maxReplays?: number;
+  /** This publish carries a restore: the revision whose content the changes
+   *  bring back (the workspace head only; the history shows the link). */
+  restoredFrom?: string;
 }
 
 export interface Conflict {
@@ -390,6 +393,7 @@ async function publishScope(deps: Deps, input: PublishInput, scope: Scope, chang
       by: input.by,
       message: input.message,
       conflicts: next.conflicts.map((c) => c.path),
+      ...(input.restoredFrom && side === "authored" ? { restoredFrom: input.restoredFrom } : {}),
     });
     if (res.status === "committed") return { status: "committed", revision: res.revision, conflicts: next.conflicts };
     if (res.status === "duplicate") return { status: "duplicate", revision: res.revision, conflicts: [] };
