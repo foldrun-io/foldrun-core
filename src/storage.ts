@@ -551,21 +551,42 @@ function presign(
   return `${origin}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
 }
 
+/** A body that is not held in memory: read as it is sent. `length` and
+ *  `sha256` (hex of the whole body) are needed up front: S3 wants a
+ *  Content-Length (it refuses chunked uploads) and the hash is signed. */
+export interface S3StreamBody {
+  stream: AsyncIterable<Uint8Array>;
+  length: number;
+  sha256: string;
+}
+
+export interface S3RequestOptions {
+  /** Sub-resource and list parameters (`uploads`, `uploadId`, `partNumber`,
+   *  `prefix`...). Signed in canonical order. An empty value is `name=`. */
+  query?: Record<string, string>;
+}
+
 /** The header-signed form, for the calls the platform itself makes. */
 export async function s3Request(
   cfg: S3Config,
-  method: "GET" | "PUT" | "DELETE" | "HEAD",
+  method: "GET" | "PUT" | "POST" | "DELETE" | "HEAD",
   key: string,
-  body?: Buffer,
+  body?: Buffer | S3StreamBody,
   mime?: string,
   extra: Record<string, string> = {},
   signal?: AbortSignal,
+  opts: S3RequestOptions = {},
 ): Promise<Response> {
   const creds = await credentials(cfg);
   const { host, origin, canonicalUri } = target(cfg, key);
   const { amzDate, dateStamp } = stamps(new Date());
   const scope = `${dateStamp}/${cfg.region}/s3/aws4_request`;
-  const payloadHash = sha256(body ?? Buffer.alloc(0));
+  const streamed = body && !Buffer.isBuffer(body) ? (body as S3StreamBody) : null;
+  const payloadHash = streamed ? streamed.sha256 : sha256((body as Buffer | undefined) ?? Buffer.alloc(0));
+  const canonicalQuery = Object.keys(opts.query ?? {})
+    .sort()
+    .map((k) => `${uriEncode(k)}=${uriEncode(opts.query![k])}`)
+    .join("&");
 
   const headers: Record<string, string> = {
     host,
@@ -584,7 +605,7 @@ export async function s3Request(
   const canonicalRequest = [
     method,
     canonicalUri,
-    "",
+    canonicalQuery,
     canonicalHeaders,
     signedHeaders,
     payloadHash,
@@ -593,17 +614,21 @@ export async function s3Request(
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256(canonicalRequest)].join("\n");
   const signature = hmac(signingKey(cfg, creds, dateStamp), stringToSign).toString("hex");
 
-  const res = await fetch(`${origin}${canonicalUri}`, {
+  const res = await fetch(`${origin}${canonicalUri}${canonicalQuery ? `?${canonicalQuery}` : ""}`, {
     method,
-    body: body as BodyInit | undefined,
+    body: streamed
+      ? (Readable.toWeb(Readable.from(streamed.stream, { objectMode: false })) as unknown as BodyInit)
+      : ((body as Buffer | undefined) as BodyInit | undefined),
+    ...(streamed ? { duplex: "half" } : {}),
     signal,
     headers: {
       ...headers,
+      ...(streamed ? { "content-length": String(streamed.length) } : {}),
       Authorization:
         `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${scope}, ` +
         `SignedHeaders=${signedHeaders}, Signature=${signature}`,
     },
-  });
+  } as RequestInit);
   return res;
 }
 
