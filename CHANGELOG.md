@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.1.0] — 2026-11-07
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `ScanRule` from `@foldrun/core/scan`
+
+- fix(check): check's own rules link to their section on the checks page ([9e3401c](https://github.com/foldrun-io/foldrun-core/commit/9e3401c))
+
 ## [17.0.1] — 2026-11-05
 
 - fix(run-container): pack a script-free copy of the installed core ([3a46532](https://github.com/foldrun-io/foldrun-core/commit/3a46532))
