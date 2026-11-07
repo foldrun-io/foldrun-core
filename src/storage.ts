@@ -325,7 +325,7 @@ function fsDriver(tenant: string, workspace: string): Driver {
 
 // ---------- s3 driver ----------
 
-interface S3Config {
+export interface S3Config {
   endpoint: string;
   bucket: string;
   region: string;
@@ -531,13 +531,14 @@ function presign(
 }
 
 /** The header-signed form, for the calls the platform itself makes. */
-async function s3Request(
+export async function s3Request(
   cfg: S3Config,
   method: "GET" | "PUT" | "DELETE" | "HEAD",
   key: string,
   body?: Buffer,
   mime?: string,
   extra: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<Response> {
   const creds = await credentials(cfg);
   const { host, origin, canonicalUri } = target(cfg, key);
@@ -574,6 +575,7 @@ async function s3Request(
   const res = await fetch(`${origin}${canonicalUri}`, {
     method,
     body: body as BodyInit | undefined,
+    signal,
     headers: {
       ...headers,
       Authorization:
@@ -670,6 +672,152 @@ export function driverFor(tenant: string, workspace: string): Driver {
   return fsDriver(tenant, workspace);
 }
 
+// ---------- the per-workspace lock ----------
+//
+// The index is read, changed and written back by writers in DIFFERENT pods:
+// the web pod (uploads, registerUpload, deleteFile) and the worker (a run's
+// harvest) share the data volume. So an in-process mutex is not enough; the
+// lock has to hold across processes. It is `lockFileExclusive`'s mechanism
+// (`<file>.lock` opened O_EXCL — NFS 4.1 and EFS honour it) with three
+// differences this module needs:
+//
+//   async     it waits with a timer, so a busy lock never blocks the event loop
+//             (the sync one parks the thread with Atomics.wait);
+//   fenced    the lock file holds a token and release only removes its own, so
+//             a holder whose lock was taken over as stale cannot delete the new
+//             holder's lock;
+//   renewed   the holder touches the lock while it works, so the stale limit
+//             only ever means "the holder died", not "the holder is slow".
+//
+// Core has no database, so a Postgres advisory lock is not available here;
+// phase 2 replaces this index (and so this lock) with rows.
+//
+// The lock lives BESIDE the store directory, not in it, so a workspace delete
+// or rename (which removes or moves that directory) cannot pull it out from
+// under its own holder.
+
+const LOCK_STALE_MS = 30_000;
+const LOCK_RENEW_MS = 5_000;
+const LOCK_WAIT_MS = 30_000;
+const lockQueues = new Map<string, Promise<unknown>>();
+const nap = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function lockFile(tenant: string, workspace: string) {
+  assertSafeName(tenant, "tenant");
+  assertSafeName(workspace, "workspace");
+  return path.join(dataRoot(), tenant, STORAGE_DIR, `.${workspace}.lock`);
+}
+
+/**
+ * Take over a lock whose holder died, without ever deleting a live one.
+ *
+ * Two processes can both see the same stale file. If each simply removed it,
+ * the slower one would remove the FRESH lock the faster one had just created,
+ * and both would run. So the file is moved aside with rename(2) — atomic, one
+ * caller wins, the others get ENOENT — and what was moved is read back: if it
+ * is not stale after all (we raced a new holder), it is put back with link(2),
+ * which cannot overwrite a lock someone else took in between.
+ */
+async function clearStale(file: string): Promise<void> {
+  const aside = `${file}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    fs.renameSync(file, aside);
+  } catch {
+    return; // another process got there first, or it was released
+  }
+  try {
+    if (Date.now() - fs.statSync(aside).mtimeMs <= LOCK_STALE_MS) {
+      try {
+        fs.linkSync(aside, file); // not stale: we moved a live lock; restore it
+      } catch {
+        // someone already took the free name; the live holder lost its file and
+        // will find out at release (token check). Rare, and not made worse.
+      }
+    }
+  } catch {
+    // vanished: nothing to restore
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+}
+
+async function takeFileLock(file: string): Promise<() => void> {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const token = `${process.pid}.${crypto.randomBytes(8).toString("hex")}`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const fd = fs.openSync(file, "wx", 0o600);
+      fs.writeSync(fd, token);
+      fs.closeSync(fd);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(file).mtimeMs > LOCK_STALE_MS) {
+          await clearStale(file);
+          continue;
+        }
+      } catch {
+        continue; // released between the open and the stat
+      }
+      if (Date.now() > deadline) throw new Error("the file store is busy — another change is being saved; try again");
+      await nap(15 + Math.floor(Math.random() * 20));
+    }
+  }
+  const renew = setInterval(() => {
+    try {
+      const now = new Date();
+      fs.utimesSync(file, now, now);
+    } catch {
+      // gone: release() notices
+    }
+  }, LOCK_RENEW_MS);
+  renew.unref();
+  return () => {
+    clearInterval(renew);
+    try {
+      if (fs.readFileSync(file, "utf8") === token) fs.rmSync(file, { force: true });
+    } catch {
+      // already gone
+    }
+  };
+}
+
+/**
+ * Run `fn` as the only writer of this workspace's file index, in this process
+ * and every other one on the volume. Callers of the same workspace in this
+ * process queue on a promise chain first, so they do not poll the file against
+ * each other. Keep `fn` to index work and blob bookkeeping; bytes a caller
+ * already holds are uploaded BEFORE taking the lock (a blob is immutable and
+ * named by its hash, so that is safe) and then confirmed present inside it.
+ */
+export async function withFileStoreLock<T>(tenant: string, workspace: string, fn: () => Promise<T>): Promise<T> {
+  if (!fileStoreEnabled()) return fn();
+  return withFileLock(lockFile(tenant, workspace), fn);
+}
+
+/** The same lock for any path: `file` is the lock file itself (its directory
+ *  is created). Used by the local RevisionStore, which keeps its own state
+ *  beside the data it guards. */
+export async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = lockQueues.get(file) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(async () => {
+    const release = await takeFileLock(file);
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  });
+  lockQueues.set(file, run);
+  try {
+    return await run;
+  } finally {
+    if (lockQueues.get(file) === run) lockQueues.delete(file);
+  }
+}
+
 // ---------- the store ----------
 
 /**
@@ -719,32 +867,55 @@ async function putFileQuietly(
     throw new Error(`${norm} is ${Math.round(body.length / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
   }
   const sha = sha256(body);
-  const index = readIndex(tenant, workspace);
-  const previous = index.files.find((f) => f.path === norm);
-  if (previous?.sha === sha) return previous; // same bytes, same name: nothing happened
-
-  const projected = usedBytes(tenant, workspace) - (previous?.size ?? 0) + body.length;
-  if (projected > quotaBytes()) {
-    throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
-  }
-
   const driver = driverFor(tenant, workspace);
-  await driver.put(blobKey(tenant, workspace, sha), body, mimeFor(norm));
+  const key = blobKey(tenant, workspace, sha);
+  // A cheap look before the bytes move; the check inside the lock is the one
+  // that counts, this one only saves uploading what will be refused.
+  {
+    const seen = readIndex(tenant, workspace);
+    const before = seen.files.find((f) => f.path === norm);
+    if (before?.sha !== sha && usedBytes(tenant, workspace) - (before?.size ?? 0) + body.length > quotaBytes()) {
+      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+    }
+  }
+  // The upload happens outside the lock: it can be long, and a blob is
+  // immutable and named by its hash, so two writers uploading the same one are
+  // harmless. What the lock guards is the index, and the blob's presence while
+  // the index names it (see the confirm below).
+  await driver.put(key, body, mimeFor(norm));
 
-  const record: FileRecord = {
-    path: norm,
-    sha,
-    size: body.length,
-    mime: mimeFor(norm),
-    updatedAt: new Date().toISOString(),
-    by,
-  };
-  writeIndex(tenant, workspace, {
-    version: 1,
-    files: [...index.files.filter((f) => f.path !== norm), record],
+  return withFileStoreLock(tenant, workspace, async () => {
+    const index = readIndex(tenant, workspace);
+    const previous = index.files.find((f) => f.path === norm);
+    if (previous?.sha === sha) return previous; // same bytes, same name: nothing happened
+
+    const projected = usedBytes(tenant, workspace) - (previous?.size ?? 0) + body.length;
+    if (projected > quotaBytes()) {
+      // Nothing names the blob we just put unless another record already does.
+      if (!index.files.some((f) => f.sha === sha)) await driver.remove(key).catch(() => {});
+      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+    }
+    // A delete or replace that ran between our upload and now may have
+    // collected this very blob (it was unreferenced then). We hold the bytes,
+    // so put them back before the index points at them. put is a no-op when
+    // the object is there.
+    if (!(await driver.has(key))) await driver.put(key, body, mimeFor(norm));
+
+    const record: FileRecord = {
+      path: norm,
+      sha,
+      size: body.length,
+      mime: mimeFor(norm),
+      updatedAt: new Date().toISOString(),
+      by,
+    };
+    writeIndex(tenant, workspace, {
+      version: 1,
+      files: [...index.files.filter((f) => f.path !== norm), record],
+    });
+    if (previous) await collectLocked(tenant, workspace, previous.sha);
+    return record;
   });
-  if (previous) await collect(tenant, workspace, previous.sha);
-  return record;
 }
 
 /** Register bytes a browser PUT straight to the bucket. Same bookkeeping as
@@ -768,39 +939,45 @@ export async function registerUpload(
   requireWorkspace(tenant, workspace);
   const driver = driverFor(tenant, workspace);
   const key = blobKey(tenant, workspace, sha);
-  // Trust nothing the browser said: not that the PUT landed, not its size.
-  const size = await driver.size(key);
-  if (size === null) {
-    throw new Error("no object at that key — the upload did not complete");
-  }
-  const index = readIndex(tenant, workspace);
-  const previous = index.files.find((f) => f.path === norm);
-  const record: FileRecord = {
-    path: norm,
-    sha,
-    size,
-    mime: mimeFor(norm),
-    updatedAt: new Date().toISOString(),
-    by,
-  };
-  const files = [...index.files.filter((f) => f.path !== norm), record];
-  // putFile's two limits, on the real length. A refused object is removed:
-  // nothing names it, so it would sit in the bucket unreachable and billed —
-  // unless a record already names these bytes, which are then not ours to drop.
-  const refuse = async (message: string): Promise<never> => {
-    if (!index.files.some((f) => f.sha === sha)) await driver.remove(key).catch(() => {});
-    throw new Error(message);
-  };
-  if (size > maxBytes()) {
-    await refuse(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
-  }
-  if (bytesOf(files) > quotaBytes() && bytesOf(files) > bytesOf(index.files)) {
-    await refuse(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
-  }
-  writeIndex(tenant, workspace, { version: 1, files });
-  if (previous && previous.sha !== sha) await collect(tenant, workspace, previous.sha);
-  await announceFiles(tenant, workspace, [record.path], by);
-  return record;
+  return withFileStoreLock(tenant, workspace, async () => {
+    // Inside the lock, so a collect cannot remove the object between the
+    // check that it is there and the index naming it.
+    // Trust nothing the browser said: not that the PUT landed, not its size.
+    const size = await driver.size(key);
+    if (size === null) {
+      throw new Error("no object at that key — the upload did not complete");
+    }
+    const index = readIndex(tenant, workspace);
+    const previous = index.files.find((f) => f.path === norm);
+    const record: FileRecord = {
+      path: norm,
+      sha,
+      size,
+      mime: mimeFor(norm),
+      updatedAt: new Date().toISOString(),
+      by,
+    };
+    const files = [...index.files.filter((f) => f.path !== norm), record];
+    // putFile's two limits, on the real length. A refused object is removed:
+    // nothing names it, so it would sit in the bucket unreachable and billed —
+    // unless a record already names these bytes, which are then not ours to drop.
+    const refuse = async (message: string): Promise<never> => {
+      if (!index.files.some((f) => f.sha === sha)) await driver.remove(key).catch(() => {});
+      throw new Error(message);
+    };
+    if (size > maxBytes()) {
+      await refuse(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
+    }
+    if (bytesOf(files) > quotaBytes() && bytesOf(files) > bytesOf(index.files)) {
+      await refuse(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+    }
+    writeIndex(tenant, workspace, { version: 1, files });
+    if (previous && previous.sha !== sha) await collectLocked(tenant, workspace, previous.sha);
+    return record;
+  }).then(async (record) => {
+    await announceFiles(tenant, workspace, [record.path], by);
+    return record;
+  });
 }
 
 export async function readFileBytes(
@@ -845,18 +1022,24 @@ export async function openFile(
 
 export async function deleteFile(tenant: string, workspace: string, rel: string): Promise<boolean> {
   const norm = assertFilePath(rel);
-  const index = readIndex(tenant, workspace);
-  const record = index.files.find((f) => f.path === norm);
-  if (!record) return false;
-  writeIndex(tenant, workspace, { version: 1, files: index.files.filter((f) => f.path !== norm) });
-  await collect(tenant, workspace, record.sha);
-  // The run mirror is a cache of the index, so it follows the index.
-  fs.rmSync(path.join(workspaceDir(tenant, workspace), STORAGE_DIR, norm), { force: true });
-  return true;
+  return withFileStoreLock(tenant, workspace, async () => {
+    const index = readIndex(tenant, workspace);
+    const record = index.files.find((f) => f.path === norm);
+    if (!record) return false;
+    writeIndex(tenant, workspace, { version: 1, files: index.files.filter((f) => f.path !== norm) });
+    await collectLocked(tenant, workspace, record.sha);
+    // The run mirror is a cache of the index, so it follows the index.
+    fs.rmSync(path.join(workspaceDir(tenant, workspace), STORAGE_DIR, norm), { force: true });
+    return true;
+  });
 }
 
-/** Drop a blob once the last record naming it is gone. */
-async function collect(tenant: string, workspace: string, sha: string) {
+/** Drop a blob once the last record naming it is gone. The caller holds the
+ *  workspace lock: the reference check and the delete are one step, and a put
+ *  that is about to name this blob waits for the lock and then confirms the
+ *  blob is present before it does (putFileQuietly), so neither can strand the
+ *  other. */
+async function collectLocked(tenant: string, workspace: string, sha: string) {
   if (readIndex(tenant, workspace).files.some((f) => f.sha === sha)) return;
   try {
     await driverFor(tenant, workspace).remove(blobKey(tenant, workspace, sha));
@@ -951,6 +1134,11 @@ function storeDirOf(tenant: string, workspace: string): string | null {
  * unreachable), and a no-op when there is no store.
  */
 export async function purgeWorkspaceStorage(tenant: string, workspace: string): Promise<void> {
+  if (!fileStoreEnabled()) return;
+  return withFileStoreLock(tenant, workspace, () => purgeUnlocked(tenant, workspace));
+}
+
+async function purgeUnlocked(tenant: string, workspace: string): Promise<void> {
   const dir = storeDirOf(tenant, workspace);
   if (!dir || !fs.existsSync(dir)) return;
   const driver = driverFor(tenant, workspace);
@@ -976,10 +1164,19 @@ export async function purgeWorkspaceStorage(tenant: string, workspace: string): 
  * workspace of that name that no longer exists, never to this one.
  */
 export async function moveWorkspaceStorage(tenant: string, from: string, to: string): Promise<void> {
+  if (!fileStoreEnabled() || from === to) return;
+  // Both names, in a fixed order: an upload to the NEW name must not land in a
+  // store this call is about to replace, and two crossing renames must not
+  // each hold one lock and wait for the other.
+  const [first, second] = [from, to].sort();
+  return withFileStoreLock(tenant, first, () => withFileStoreLock(tenant, second, () => moveUnlocked(tenant, from, to)));
+}
+
+async function moveUnlocked(tenant: string, from: string, to: string): Promise<void> {
   const src = storeDirOf(tenant, from);
   const dest = storeDirOf(tenant, to);
   if (!src || !dest || src === dest) return;
-  if (fs.existsSync(dest)) await purgeWorkspaceStorage(tenant, to);
+  if (fs.existsSync(dest)) await purgeUnlocked(tenant, to);
   if (!fs.existsSync(src)) return;
   const driver = driverFor(tenant, from);
   const shas = driver.kind === "fs" ? [] : [...new Set(readIndex(tenant, from).files.map((f) => f.sha))];
