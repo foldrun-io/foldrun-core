@@ -4135,6 +4135,14 @@ export function readRun(tenant: string, workspace: string, runId: string): RunRe
   }
 }
 
+/** readRun without holding the event loop: asked of the database directly
+ *  where the port has async reads, otherwise the synchronous read. */
+export async function readRunAsync(tenant: string, workspace: string, runId: string): Promise<RunRecord | null> {
+  runFilePath(tenant, workspace, runId); // the same name checks as readRun
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runGet(tenant, workspace, runId) : readRun(tenant, workspace, runId);
+}
+
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   const p = runFilePath(tenant, workspace, run.id);
   const port = records(tenant, workspace);
@@ -4227,6 +4235,12 @@ export function runsStartedSince(tenant: string, workspace: string, sinceMs: num
  * periodic sweeps want (reconcile, the watchdog), and on a box that keeps
  * ninety days of runs that is a handful of files instead of thousands.
  */
+/** liveRuns without holding the event loop (see readRunAsync). */
+export async function liveRunsAsync(tenant: string, workspace: string): Promise<RunRecord[]> {
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runLive(tenant, workspace) : liveRuns(tenant, workspace);
+}
+
 export function liveRuns(tenant: string, workspace: string): RunRecord[] {
   const port = records(tenant, workspace);
   if (port) return port.runLive(tenant, workspace);
@@ -4524,6 +4538,12 @@ function noteRunDeleted(dir: string, runId: string) {
  * are re-read, and the index is rewritten if anything changed. A missing
  * or unreadable index is a full scan that leaves one behind.
  */
+/** listRunSummaries without holding the event loop (see readRunAsync). */
+export async function listRunSummariesAsync(tenant: string, workspace: string): Promise<RunSummary[]> {
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runSummaries(tenant, workspace) : listRunSummaries(tenant, workspace);
+}
+
 export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
   const port = records(tenant, workspace);
   if (port) return port.runSummaries(tenant, workspace);

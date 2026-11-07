@@ -13,7 +13,7 @@ import path from "node:path";
 import { registerPlatform, resetPlatform } from "../src/platform.ts";
 import type { RecordsPort } from "../src/records.ts";
 import {
-  writeRun, readRun, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
+  writeRun, readRun, readRunAsync, listRunSummariesAsync, liveRunsAsync, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
   runStamp, runUpdatedMs, readRunText, runsStartedSince, renameWorkspace, deleteWorkspace, workspaceDir,
   type RunRecord,
 } from "../src/store.ts";
@@ -89,6 +89,21 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.equal(runStamp(T, W, "run-none"), null);
     assert.equal(JSON.parse(readRunText(T, W, "run-a")!).status, "completed");
     assert.equal(readRunText(T, W, "run-none"), null);
+  });
+
+  test(t("the async reads answer what the synchronous ones do, and fall back to them without an async port"), async () => {
+    writeRun(T, W, run("run-a", "2026-11-01T10:00:00.000Z"));
+    writeRun(T, W, run("run-b", "2026-11-01T11:00:00.000Z", { status: "running", finishedAt: undefined }));
+    assert.deepEqual(await readRunAsync(T, W, "run-a"), readRun(T, W, "run-a"));
+    assert.equal(await readRunAsync(T, W, "run-none"), null);
+    assert.deepEqual(await listRunSummariesAsync(T, W), listRunSummaries(T, W));
+    assert.deepEqual((await liveRunsAsync(T, W)).map((r) => r.id), liveRuns(T, W).map((r) => r.id));
+    await assert.rejects(readRunAsync(T, W, "../x"), "the same name checks as the synchronous read");
+    // a port with no async reads is read through its synchronous twin
+    const plain = { ...subject.port, async: undefined } as RecordsPort;
+    registerPlatform({ records: plain });
+    assert.equal((await readRunAsync(T, W, "run-a"))?.id, "run-a");
+    assert.deepEqual((await listRunSummariesAsync(T, W)).map((r) => r.id), ["run-b", "run-a"]);
   });
 
   test(t("summaries come back newest first, without replies; live runs are whole"), () => {

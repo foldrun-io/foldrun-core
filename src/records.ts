@@ -19,7 +19,21 @@ import type { RunRecord, RunSummary } from "./store.ts";
 import type { TriggerEvent } from "./trigger-log.ts";
 import type { FileRecord } from "./storage.ts";
 
+/** The read half of the port without blocking the event loop (FOL-126 phase
+ *  3b): the hot reads — one run, a workspace's run list, its live runs — asked
+ *  of the database directly. Optional: a port without it is read through its
+ *  synchronous twin, so a caller can always ask the async form. The rest of
+ *  the port (writes, the trigger log, the storage index, counts, moves) is
+ *  still synchronous: see the phase 3b report for the list. */
+export interface RecordsPortAsync {
+  runGet(tenant: string, workspace: string, id: string): Promise<RunRecord | null>;
+  runSummaries(tenant: string, workspace: string): Promise<RunSummary[]>;
+  runLive(tenant: string, workspace: string): Promise<RunRecord[]>;
+}
+
 export interface RecordsPort {
+  /** Async reads (see RecordsPortAsync). */
+  async?: RecordsPortAsync;
   // ---- runs: the whole record, and the row a list reads
   /** Insert or replace one run. `live`: queued, running or parked at a gate. Last write wins. */
   runPut(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): void;
