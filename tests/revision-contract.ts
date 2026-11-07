@@ -95,8 +95,9 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
 
   t("blob: a conditional put writes once; the second says it was already there", async ({ blobs }) => {
     const key = blobObjectKey("default", sha("hello"));
-    assert.deepEqual(await blobs.putIfAbsent(key, Buffer.from("hello")), { created: true });
-    assert.deepEqual(await blobs.putIfAbsent(key, Buffer.from("hello")), { created: false });
+    // `created` is the contract; a real store adds the object's ETag.
+    assert.equal((await blobs.putIfAbsent(key, Buffer.from("hello"))).created, true);
+    assert.equal((await blobs.putIfAbsent(key, Buffer.from("hello"))).created, false);
     assert.equal((await readAll(blobs, key)).toString(), "hello");
     assert.equal((await blobs.head(key))?.size, 5);
   });

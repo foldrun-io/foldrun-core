@@ -16,6 +16,7 @@ import { s3Config } from "../src/storage.ts";
 import { blobObjectKey, sha256Hex } from "../src/manifest.ts";
 import { revisionContract } from "./revision-contract.ts";
 import { fakeS3 } from "./fake-s3.ts";
+import { realS3 } from "./s3-test-server.ts";
 
 const dirs: string[] = [];
 const tmp = () => {
@@ -60,6 +61,23 @@ async function s3Harness() {
 }
 
 revisionContract("s3(fake) + local", s3Harness);
+
+// The same cases against a REAL S3-compatible server (MinIO on loopback), when
+// the environment offers one. Without FOLDRUN_TEST_S3_URL this registers
+// nothing, so CI without MinIO passes untouched. Each case gets a bucket of its
+// own and the harness deletes it.
+const realServer = realS3();
+if (realServer) {
+  revisionContract("s3(minio) + local", async () => {
+    const b = await realServer.newBucket();
+    const root = tmp();
+    return {
+      blobs: bounded(s3BlobStore(b.cfg), { backoffMs: 5 }),
+      revisions: localRevisionStore(path.join(root, "revisions")),
+      cleanup: () => b.drop(),
+    };
+  });
+}
 
 // ---------- what only the bounded wrapper and the s3 driver can show ----------
 
