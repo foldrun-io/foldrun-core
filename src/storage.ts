@@ -55,6 +55,7 @@ import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { dataRoot, singleWorkspace } from "./paths.ts";
 import { assertSafeName, workspaceDir, STORAGE_DIR, adoptLegacyFilesDir } from "./store.ts";
+import { records } from "./records.ts";
 
 /** The directory a run sees, and the one this module mirrors into it.
  *  Declared in store.ts, where saveWorkspace also needs it; re-exported so
@@ -207,6 +208,8 @@ export function mimeFor(rel: string): string {
 
 export function readIndex(tenant: string, workspace: string): Index {
   if (!fileStoreEnabled()) return { version: 1, files: [] };
+  const port = records();
+  if (port) return { version: 1, files: port.fileList(tenant, workspace) };
   try {
     const raw = JSON.parse(fs.readFileSync(indexPath(tenant, workspace), "utf8")) as Index;
     if (!Array.isArray(raw?.files)) return { version: 1, files: [] };
@@ -224,6 +227,24 @@ function writeIndex(tenant: string, workspace: string, index: Index) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(index, null, 2));
   fs.renameSync(tmp, file);
+}
+
+/** Save one record, where `index` is the index it was read from (the file
+ *  store rewrites the whole file; the database upserts one row, which is why
+ *  two writers of different paths never touch each other). */
+function indexPut(tenant: string, workspace: string, index: Index, record: FileRecord) {
+  const port = records();
+  if (port) return port.filePut(tenant, workspace, record);
+  writeIndex(tenant, workspace, { version: 1, files: [...index.files.filter((f) => f.path !== record.path), record] });
+}
+
+function indexRemove(tenant: string, workspace: string, index: Index, rel: string) {
+  const port = records();
+  if (port) {
+    port.fileDelete(tenant, workspace, rel);
+    return;
+  }
+  writeIndex(tenant, workspace, { version: 1, files: index.files.filter((f) => f.path !== rel) });
 }
 
 export function listStorage(tenant: string, workspace: string): FileRecord[] {
@@ -794,6 +815,8 @@ async function takeFileLock(file: string): Promise<() => void> {
  */
 export async function withFileStoreLock<T>(tenant: string, workspace: string, fn: () => Promise<T>): Promise<T> {
   if (!fileStoreEnabled()) return fn();
+  const port = records();
+  if (port) return port.lock(`storage:${tenant}/${workspace}`, fn);
   return withFileLock(lockFile(tenant, workspace), fn);
 }
 
@@ -909,10 +932,7 @@ async function putFileQuietly(
       updatedAt: new Date().toISOString(),
       by,
     };
-    writeIndex(tenant, workspace, {
-      version: 1,
-      files: [...index.files.filter((f) => f.path !== norm), record],
-    });
+    indexPut(tenant, workspace, index, record);
     if (previous) await collectLocked(tenant, workspace, previous.sha);
     return record;
   });
@@ -971,7 +991,7 @@ export async function registerUpload(
     if (bytesOf(files) > quotaBytes() && bytesOf(files) > bytesOf(index.files)) {
       await refuse(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
     }
-    writeIndex(tenant, workspace, { version: 1, files });
+    indexPut(tenant, workspace, index, record);
     if (previous && previous.sha !== sha) await collectLocked(tenant, workspace, previous.sha);
     return record;
   }).then(async (record) => {
@@ -1026,7 +1046,7 @@ export async function deleteFile(tenant: string, workspace: string, rel: string)
     const index = readIndex(tenant, workspace);
     const record = index.files.find((f) => f.path === norm);
     if (!record) return false;
-    writeIndex(tenant, workspace, { version: 1, files: index.files.filter((f) => f.path !== norm) });
+    indexRemove(tenant, workspace, index, norm);
     await collectLocked(tenant, workspace, record.sha);
     // The run mirror is a cache of the index, so it follows the index.
     fs.rmSync(path.join(workspaceDir(tenant, workspace), STORAGE_DIR, norm), { force: true });
@@ -1140,12 +1160,16 @@ export async function purgeWorkspaceStorage(tenant: string, workspace: string): 
 
 async function purgeUnlocked(tenant: string, workspace: string): Promise<void> {
   const dir = storeDirOf(tenant, workspace);
-  if (!dir || !fs.existsSync(dir)) return;
+  const port = records();
+  // With the index in the database the folder need not exist (a bucket holds
+  // the objects), so the rows decide whether there is anything to purge.
+  if (!dir || (!fs.existsSync(dir) && !(port && port.fileList(tenant, workspace).length))) return;
   const driver = driverFor(tenant, workspace);
   if (driver.kind !== "fs") {
     const shas = new Set(readIndex(tenant, workspace).files.map((f) => f.sha));
     for (const sha of shas) await driver.remove(blobKey(tenant, workspace, sha)).catch(() => {});
   }
+  if (port) for (const f of port.fileList(tenant, workspace)) port.fileDelete(tenant, workspace, f.path);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
@@ -1176,14 +1200,22 @@ async function moveUnlocked(tenant: string, from: string, to: string): Promise<v
   const src = storeDirOf(tenant, from);
   const dest = storeDirOf(tenant, to);
   if (!src || !dest || src === dest) return;
-  if (fs.existsSync(dest)) await purgeUnlocked(tenant, to);
-  if (!fs.existsSync(src)) return;
+  const port = records();
+  // Whatever a store under the new name held belonged to a workspace of that
+  // name that no longer exists. (The file index has not moved yet: it moves
+  // below, after the bytes, so rows under `to` are that stale store's.)
+  if (fs.existsSync(dest) || (port && port.fileList(tenant, to).length)) await purgeUnlocked(tenant, to);
+  if (!fs.existsSync(src) && !(port && port.fileList(tenant, from).length)) return;
   const driver = driverFor(tenant, from);
   const shas = driver.kind === "fs" ? [] : [...new Set(readIndex(tenant, from).files.map((f) => f.sha))];
   if (shas.length && !driver.copy) throw new Error(`the ${driver.kind} store cannot move files to a new workspace name`);
   for (const sha of shas) await driver.copy!(blobKey(tenant, from, sha), blobKey(tenant, to, sha));
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.renameSync(src, dest);
+  if (fs.existsSync(src)) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(src, dest);
+  }
+  // The index follows the bytes, once they are all across.
+  port?.fileMove(tenant, from, to);
   for (const sha of shas) await driver.remove(blobKey(tenant, from, sha)).catch(() => {});
 }
 
