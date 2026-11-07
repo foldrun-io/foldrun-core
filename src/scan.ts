@@ -50,6 +50,9 @@ export interface ScanRule {
   help: string;
   /** OWASP Top 10 for Agentic Applications (2026) ids it guards against. */
   owasp?: string[];
+  /** Its anchor on docs.foldrun.io/checks, when it is not the id with "/"
+   *  read as "-" — a rule documented as a row of a table, not a section. */
+  anchor?: string;
 }
 
 export interface ScanFile {
@@ -400,18 +403,21 @@ export const SCAN_RULES: readonly ScanRule[] = [
  * per kind of file; the message says exactly what is wrong. Their level is
  * each problem's own, so it is not fixed here.
  */
+/** The checks page lists check's own rules in one table, under this heading. */
+const OWN_RULES = "checks-own-rules";
+
 export const CHECK_RULES: readonly (Omit<ScanRule, "level"> & { level?: ScanLevel })[] = [
-  { id: "agent/config", category: "config", title: "An agent's frontmatter or references are wrong", help: "A field foldrun cannot read, or a tool, skill, colleague or hook it names that does not exist. The message says which and what to write." },
-  { id: "flow/config", category: "config", title: "A flow's steps or options are wrong", help: "A step naming no agent, an option value the parser cannot read, a verify: written as prose, or an arrangement that cannot have what its instruction asks for." },
+  { id: "agent/config", anchor: OWN_RULES, category: "config", title: "An agent's frontmatter or references are wrong", help: "A field foldrun cannot read, or a tool, skill, colleague or hook it names that does not exist. The message says which and what to write." },
+  { id: "flow/config", anchor: OWN_RULES, category: "config", title: "A flow's steps or options are wrong", help: "A step naming no agent, an option value the parser cannot read, a verify: written as prose, or an arrangement that cannot have what its instruction asks for." },
   { id: "flow/outward-ungated", category: "security", title: "A step that acts outside the workspace with no check and no approval", help: "Give the step a verify: that reads what it did, or an approval (`!`), so a wrong post or send is caught before it repeats.", owasp: ["ASI02", "ASI09"] },
-  { id: "tool/config", category: "config", title: "A tool's definition or program is wrong", help: "A run: program that does not exist, a package it imports that nothing declares, or a leftover type: field." },
-  { id: "skill/config", category: "config", title: "A skill does not follow the skill format", help: "SKILL.md needs a name and a description the model can choose it by." },
-  { id: "eval/config", category: "config", title: "An eval names nothing, or has no cases", help: "An eval names one agent or flow that exists and holds at least one case." },
-  { id: "hook/config", category: "config", title: "A hook is not a valid hook, or a hooks: name resolves to nothing", help: "hooks/<name>/hook.md with on:, and run.mjs beside it; a run refuses a step whose hook is missing rather than run it unguarded." },
-  { id: "knowledge/okf", category: "config", title: "A knowledge or memory document is not a conformant OKF bundle entry", help: "Each document needs a type:; dates are YYYY-MM-DD; stale documents are flagged so an agent does not treat them as current." },
-  { id: "workspace/config", category: "config", title: "A workspace or account setting cannot be read", help: "AGENTS.md defaults — limits:, network:, foldrun_version: — that would leave every agent on the level above, and paths a deploy refuses." },
-  { id: "library/config", category: "config", title: "A library entry is wrong", help: "The same rules as in a workspace, for the account's shared library." },
-  { id: "paths/workspace-spelling", category: "config", title: "An older spelling of a workspace path", help: "`../../storage/x` still works; `workspace/storage/x` reads the same in every tool, script and check." },
+  { id: "tool/config", anchor: OWN_RULES, category: "config", title: "A tool's definition or program is wrong", help: "A run: program that does not exist, a package it imports that nothing declares, or a leftover type: field." },
+  { id: "skill/config", anchor: OWN_RULES, category: "config", title: "A skill does not follow the skill format", help: "SKILL.md needs a name and a description the model can choose it by." },
+  { id: "eval/config", anchor: OWN_RULES, category: "config", title: "An eval names nothing, or has no cases", help: "An eval names one agent or flow that exists and holds at least one case." },
+  { id: "hook/config", anchor: OWN_RULES, category: "config", title: "A hook is not a valid hook, or a hooks: name resolves to nothing", help: "hooks/<name>/hook.md with on:, and run.mjs beside it; a run refuses a step whose hook is missing rather than run it unguarded." },
+  { id: "knowledge/okf", anchor: OWN_RULES, category: "config", title: "A knowledge or memory document is not a conformant OKF bundle entry", help: "Each document needs a type:; dates are YYYY-MM-DD; stale documents are flagged so an agent does not treat them as current." },
+  { id: "workspace/config", anchor: OWN_RULES, category: "config", title: "A workspace or account setting cannot be read", help: "AGENTS.md defaults — limits:, network:, foldrun_version: — that would leave every agent on the level above, and paths a deploy refuses." },
+  { id: "library/config", anchor: OWN_RULES, category: "config", title: "A library entry is wrong", help: "The same rules as in a workspace, for the account's shared library." },
+  { id: "paths/workspace-spelling", anchor: OWN_RULES, category: "config", title: "An older spelling of a workspace path", help: "`../../storage/x` still works; `workspace/storage/x` reads the same in every tool, script and check." },
 ];
 
 /** The rule id of a check or deploy problem, from where it was found and
@@ -439,7 +445,7 @@ export function scanRule(id: string): (Omit<ScanRule, "level"> & { level?: ScanL
 
 /** Where a rule's docs live — one page, an anchor per rule. */
 export function ruleDocsUrl(id: string): string {
-  return `https://docs.foldrun.io/checks#${id.replace(/\//g, "-")}`;
+  return `https://docs.foldrun.io/checks#${RULE_BY_ID.get(id)?.anchor ?? id.replace(/\//g, "-")}`;
 }
 
 // ── fingerprints ───────────────────────────────────────────────────────────
