@@ -4818,7 +4818,7 @@ function driveRunInner(
       // as it starts — a deploy's revision is its commit, and an edit through
       // /source makes one too. A re-run comes through here as well.
       run.drivenAt ??= new Date().toISOString();
-      if (run.revision === undefined) run.revision = latestRevisionId(tenant, workspace);
+      if (run.revision === undefined) run.revision = await latestRevisionId(tenant, workspace);
       if (run.status !== "running") {
         run.status = "running";
         run.parkedAt = null;

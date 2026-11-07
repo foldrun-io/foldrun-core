@@ -230,13 +230,13 @@ function snapshot(tenant: string, scope: string, id: string): boolean {
 }
 
 /** Whether a revision can be restored to: it has a snapshot. */
-export function hasSnapshot(tenant: string, scope: string, id: string): boolean {
+export function hasSnapshotLocal(tenant: string, scope: string, id: string): boolean {
   assertSafeName(id, "revision id");
   return fs.existsSync(treePath(tenant, scope, id));
 }
 
 /** The whole tree at revision `id`, or null when it has no snapshot. */
-export function snapshotAt(tenant: string, scope: string, id: string): { path: string; content: string }[] | null {
+export function snapshotAtLocal(tenant: string, scope: string, id: string): { path: string; content: string }[] | null {
   assertSafeName(id, "revision id");
   let manifest: { v: number; files: Record<string, string> };
   try {
@@ -260,7 +260,7 @@ function snapshotIds(tenant: string, scope: string): Set<string> {
 }
 
 /** The newest revision that can be restored to — what "now" is in history. */
-export function headRevision(tenant: string, scope: string): RevisionSummary | null {
+export function headRevisionLocal(tenant: string, scope: string): RevisionSummary | null {
   const have = snapshotIds(tenant, scope);
   return journalRevisions(tenant, scope, { limit: Infinity }).find((r) => have.has(r.id)) ?? null;
 }
@@ -272,8 +272,8 @@ export function headRevision(tenant: string, scope: string): RevisionSummary | n
  * by a path that never recorded a change. Returns the head's id, or null
  * when there is nothing to snapshot.
  */
-export function ensureBaseline(tenant: string, scope: string, by = "foldrun"): string | null {
-  const head = headRevision(tenant, scope);
+export function ensureBaselineLocal(tenant: string, scope: string, by = "foldrun"): string | null {
+  const head = headRevisionLocal(tenant, scope);
   if (head) return head.id;
   const tree = readTree(tenant, scope);
   if (!tree || tree.length === 0) return null;
@@ -286,7 +286,7 @@ export function ensureBaseline(tenant: string, scope: string, by = "foldrun"): s
   try {
     fs.writeFileSync(marker, id, { flag: "wx" });
   } catch {
-    const held = headRevision(tenant, scope)?.id ?? null;
+    const held = headRevisionLocal(tenant, scope)?.id ?? null;
     // A marker with no baseline behind it, minutes old, is a process that
     // died writing one: clear it, and the next call writes the baseline.
     try {
@@ -318,16 +318,20 @@ export function ensureBaseline(tenant: string, scope: string, by = "foldrun"): s
  * moment. Null when history holds nothing that old. Throws (status 400) on
  * something that is none of those.
  */
-export function resolveRevision(
+export function resolveRevisionLocal(
   tenant: string,
   scope: string,
   to: string,
   now = Date.now(),
 ): { id: string; at: string; by: string; message: string } | null {
+  const have = snapshotIds(tenant, scope);
+  return resolveIn(journalRevisions(tenant, scope, { limit: Infinity }).filter((r) => have.has(r.id)), to, now);
+}
+
+/** The pick of resolveRevision over a newest-first list of restorable revisions. */
+function resolveIn(all: RevisionSummary[], to: string, now: number): { id: string; at: string; by: string; message: string } | null {
   const t = to.trim();
   if (!t || t.startsWith("-")) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
-  const have = snapshotIds(tenant, scope);
-  const all = journalRevisions(tenant, scope, { limit: Infinity }).filter((r) => have.has(r.id));
   const rel = /^(\d+)\s*(m|h|d|w)$/.exec(t);
   const moment = rel
     ? now - Number(rel[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[rel[2] as "m" | "h" | "d" | "w"]
@@ -368,7 +372,7 @@ function describe(files: RevisionFile[]): string {
 }
 
 /** Newest first. `forPath` narrows to revisions that touched one file. */
-export function listRevisions(
+export function listRevisionsLocal(
   tenant: string,
   scope: string,
   opts: { forPath?: string; limit?: number } = {},
@@ -437,7 +441,7 @@ function rebuildIndex(dir: string): RevisionSummary[] {
   return rows.map(({ written: _w, ...r }) => r).reverse();
 }
 
-export function readRevision(tenant: string, scope: string, id: string, forPath?: string): Revision | null {
+export function readRevisionLocal(tenant: string, scope: string, id: string, forPath?: string): Revision | null {
   assertSafeName(id, "revision id");
   const file = path.join(historyDir(tenant, scope), `${id}.json`);
   if (!fs.existsSync(file)) return null;
@@ -448,11 +452,14 @@ export function readRevision(tenant: string, scope: string, id: string, forPath?
 /** The files changed after revision `from` up to and including `to`, in a
  *  scope — what differs between the versions two runs ran (FOL-72). Null
  *  when either is unknown or `to` is not after `from`. */
-export function changedPathsBetween(tenant: string, scope: string, from: string | null, to: string | null): string[] | null {
+export function changedPathsBetweenLocal(tenant: string, scope: string, from: string | null, to: string | null): string[] | null {
   if (!from || !to) return null;
   if (from === to) return [];
-  const revs = listRevisions(tenant, scope, { limit: 500 }); // newest first
-  // An exact id before a commit, as resolveRevision.
+  return changedIn(listRevisionsLocal(tenant, scope, { limit: 500 }), from, to);
+}
+
+function changedIn(revs: RevisionSummary[], from: string, to: string): string[] | null {
+  // newest first. An exact id before a commit, as resolveRevision.
   const at = (x: string) => {
     const byId = revs.findIndex((r) => r.id === x);
     return byId >= 0 ? byId : revs.findIndex((r) => r.commit === x);
@@ -465,8 +472,104 @@ export function changedPathsBetween(tenant: string, scope: string, from: string 
 
 /** The most recent revision id for a scope — what a change is attributed
  *  to when nothing more specific (a deployed commit) is on record. */
-export function latestRevisionId(tenant: string, scope: string): string | null {
-  return listRevisions(tenant, scope, { limit: 1 })[0]?.id ?? null;
+export function latestRevisionIdLocal(tenant: string, scope: string): string | null {
+  return listRevisionsLocal(tenant, scope, { limit: 1 })[0]?.id ?? null;
+}
+
+
+// ------------------------------------------------- history from revisions
+//
+// FOL-126 phase 3: where the install keeps revisions (workspace-revisions.ts
+// registers a view), the history page, a revision's diff, the restore points
+// and run-to-run compare are answered from them — the same shapes this file
+// has always returned. Everything is async because a revision lives in a
+// store, not on this disk. Where nothing is registered (a laptop, the CLI, an
+// install with the journal off) or a workspace has no revisions yet, the
+// local `.history/` answers, exactly as before; where both exist the list is
+// the revisions followed by the older local entries, so turning revisions on
+// loses no history. The account shelf ("@library") is never in revisions.
+
+export interface RevisionView {
+  /** Newest first, or null when revisions do not serve this scope. */
+  list(tenant: string, scope: string, opts: { forPath?: string; limit?: number }): Promise<RevisionSummary[] | null>;
+  read(tenant: string, scope: string, id: string, forPath?: string): Promise<Revision | null>;
+  snapshot(tenant: string, scope: string, id: string): Promise<{ path: string; content: string }[] | null>;
+}
+let view: RevisionView | null = null;
+export function registerRevisionView(v: RevisionView | null) {
+  view = v;
+}
+
+/** Revisions first, then the local entries older than the oldest of them. */
+async function combined(tenant: string, scope: string, opts: { forPath?: string; limit?: number }, restorableOnly = false): Promise<RevisionSummary[]> {
+  const limit = opts.limit ?? 200;
+  const mine = view && scope !== "@library" ? await view.list(tenant, scope, { ...opts, limit: Number.isFinite(limit) ? limit : 500 }) : null;
+  let local = listRevisionsLocal(tenant, scope, { forPath: opts.forPath, limit: Infinity });
+  if (restorableOnly) {
+    const have = snapshotIds(tenant, scope);
+    local = local.filter((r) => have.has(r.id));
+  }
+  if (!mine || !mine.length) return local.slice(0, limit);
+  const oldest = mine[mine.length - 1].at;
+  const seen = new Set(mine.map((r) => r.id));
+  return [...mine, ...local.filter((r) => !seen.has(r.id) && r.at < oldest)].slice(0, limit);
+}
+
+export async function listRevisions(tenant: string, scope: string, opts: { forPath?: string; limit?: number } = {}): Promise<RevisionSummary[]> {
+  return combined(tenant, scope, opts);
+}
+
+/** The list the history page shows: each row with whether it can be restored
+ *  to. One listing answers both — every revision in the store is restorable;
+ *  a local entry is when it has a snapshot — where asking per row would list
+ *  the store once per row. */
+export async function listRevisionsRestorable(tenant: string, scope: string, opts: { forPath?: string; limit?: number } = {}): Promise<(RevisionSummary & { restorable: boolean })[]> {
+  const rows = await combined(tenant, scope, opts);
+  const have = snapshotIds(tenant, scope);
+  const stored = view && scope !== "@library" ? new Set(((await view.list(tenant, scope, { limit: 500 })) ?? []).map((r) => r.id)) : new Set<string>();
+  return rows.map((r) => ({ ...r, restorable: have.has(r.id) || stored.has(r.id) }));
+}
+
+export async function readRevision(tenant: string, scope: string, id: string, forPath?: string): Promise<Revision | null> {
+  assertSafeName(id, "revision id");
+  const fromStore = view && scope !== "@library" ? await view.read(tenant, scope, id, forPath) : null;
+  return fromStore ?? readRevisionLocal(tenant, scope, id, forPath);
+}
+
+export async function snapshotAt(tenant: string, scope: string, id: string): Promise<{ path: string; content: string }[] | null> {
+  assertSafeName(id, "revision id");
+  const fromStore = view && scope !== "@library" ? await view.snapshot(tenant, scope, id) : null;
+  return fromStore ?? snapshotAtLocal(tenant, scope, id);
+}
+
+export async function hasSnapshot(tenant: string, scope: string, id: string): Promise<boolean> {
+  assertSafeName(id, "revision id");
+  if (hasSnapshotLocal(tenant, scope, id)) return true;
+  return Boolean(view && scope !== "@library" && (await view.list(tenant, scope, { limit: 500 }))?.some((r) => r.id === id));
+}
+
+export async function headRevision(tenant: string, scope: string): Promise<RevisionSummary | null> {
+  return (await combined(tenant, scope, { limit: 1 }, true))[0] ?? null;
+}
+
+export async function resolveRevision(tenant: string, scope: string, to: string, now = Date.now()): Promise<{ id: string; at: string; by: string; message: string } | null> {
+  return resolveIn(await combined(tenant, scope, { limit: Infinity }, true), to, now);
+}
+
+export async function changedPathsBetween(tenant: string, scope: string, from: string | null, to: string | null): Promise<string[] | null> {
+  if (!from || !to) return null;
+  if (from === to) return [];
+  return changedIn(await combined(tenant, scope, { limit: 500 }), from, to);
+}
+
+export async function latestRevisionId(tenant: string, scope: string): Promise<string | null> {
+  return (await combined(tenant, scope, { limit: 1 }))[0]?.id ?? null;
+}
+
+/** A scope with no revision at all gets a local baseline, as before. */
+export async function ensureBaseline(tenant: string, scope: string, by = "foldrun"): Promise<string | null> {
+  const head = await headRevision(tenant, scope);
+  return head ? head.id : ensureBaselineLocal(tenant, scope, by);
 }
 
 // ------------------------------------------------------------------- diff
