@@ -55,6 +55,22 @@ export function registerTreeReader(fn: TreeReader) {
   readTree = (tenant, scope) => fn(tenant, scope) ?? prev(tenant, scope);
 }
 
+/** The scope's tree as the registered readers see it (text files only), or null. */
+export function currentTree(tenant: string, scope: string): RevisionFile[] | null {
+  return readTree(tenant, scope);
+}
+
+/**
+ * Where a committed change set is also handed (workspace-revisions.ts registers
+ * here: this module cannot import it, it imports the store which imports this).
+ * Called after the legacy record is written; never throws into the writer.
+ */
+type Journal = (tenant: string, scope: string, files: RevisionFile[], meta: { by: string; message: string; at: string }) => void;
+let journal: Journal | null = null;
+export function registerJournal(fn: Journal | null) {
+  journal = fn;
+}
+
 function assertSafeName(v: string, what: string) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,120}$/.test(v)) throw new Error(`illegal ${what}: ${v}`);
 }
@@ -166,6 +182,11 @@ export function recordRevision(
   // outside this call, such as a bundle's generated index.
   snapshot(tenant, scope, rev.id);
   fs.appendFileSync(path.join(dir, "index.jsonl"), `${JSON.stringify(line)}\n`);
+  try {
+    journal?.(tenant, scope, changed, { by: rev.by, message: rev.message, at: rev.at });
+  } catch {
+    // the revision store is not allowed to break a save; workspace-revisions logs and retries
+  }
   return rev;
 }
 
