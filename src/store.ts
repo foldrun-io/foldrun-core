@@ -29,6 +29,7 @@ import path from "node:path";
 import { recordRevision, registerTreeReader, assertCommitId, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
+import { records } from "./records.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
@@ -2670,6 +2671,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
   assertSafeName(tenant, "tenant");
   const dir = workspacesRoot(tenant);
   if (!fs.existsSync(dir)) return [];
+  const recordCounts = records()?.runCounts(tenant) ?? null;
   return fs
     .readdirSync(dir)
     .filter((n) => fs.statSync(path.join(dir, n)).isDirectory())
@@ -2698,7 +2700,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         agents: listAgents(tenant, name).length,
         flows: listFlows(tenant, name).length,
         deployedAt: fs.statSync(pDir).mtime.toISOString(),
-        runCount: fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0,
+        runCount: recordCounts ? (recordCounts[name] ?? 0) : (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0),
       };
     })
     .sort((a, b) => b.deployedAt.localeCompare(a.deployedAt));
@@ -3191,6 +3193,10 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
 export function deleteWorkspace(tenant: string, workspace: string) {
   const dir = workspaceDir(tenant, workspace);
   if (!fs.existsSync(dir)) throw new Error(`workspace ${workspace} not found`);
+  // Its records in the database (runs, trigger log, file index) go BEFORE the
+  // folder: if that throws, nothing was removed and the delete can be retried;
+  // after the folder is gone a retry would answer "not found" with rows left.
+  records()?.workspaceDrop(tenant, workspace);
   fs.rmSync(dir, { recursive: true, force: true });
   // Its file store too, kept by name beside the folder (storage.ts). Until
   // 30 Oct 2026 the store outlived the delete: its files stayed downloadable
@@ -3244,6 +3250,14 @@ export function renameWorkspace(tenant: string, from: string, to: string) {
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.renameSync(src, dest);
+  // Its runs and trigger log in the database follow the name; if they cannot,
+  // the folder goes back, so the two never disagree about where the workspace is.
+  try {
+    records()?.workspaceMove(tenant, from, to);
+  } catch (err) {
+    fs.renameSync(dest, src);
+    throw err;
+  }
 
   const agentsMd = path.join(dest, "AGENTS.md");
   if (fs.existsSync(agentsMd)) {
@@ -4020,15 +4034,19 @@ export function runFilePath(tenant: string, workspace: string, runId: string) {
 export function deleteRun(tenant: string, workspace: string, runId: string, opts: { pruned?: boolean } = {}): boolean {
   const file = runFilePath(tenant, workspace, runId);
   const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
-  const had = fs.existsSync(file);
+  const port = records();
+  const had = port ? port.runGet(tenant, workspace, runId) !== null : fs.existsSync(file);
   if (!had && !fs.existsSync(dir)) return false;
   // The folder first (archived outputs, captured calls), the record last:
   // a delete that fails halfway leaves the record, so a retry finds the run
   // and finishes — the other order left the content with nothing pointing
   // at it (Codex review, FOL-124).
   fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(file, { force: true });
-  noteRunDeleted(path.dirname(file), runId);
+  if (port) port.runDelete(tenant, workspace, runId);
+  else {
+    fs.rmSync(file, { force: true });
+    noteRunDeleted(path.dirname(file), runId);
+  }
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
@@ -4096,6 +4114,8 @@ export function runOutputPath(
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
   const p = runFilePath(tenant, workspace, runId);
+  const port = records();
+  if (port) return port.runGet(tenant, workspace, runId);
   // EFS/NFS: writeRun() replaces this file by rename, so an open()+read()
   // here can land on the just-unlinked inode and come back ESTALE (errno
   // -116, surfaced by Node as "Unknown system error -116", syscall read).
@@ -4117,6 +4137,11 @@ export function readRun(tenant: string, workspace: string, runId: string): RunRe
 
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   const p = runFilePath(tenant, workspace, run.id);
+  const port = records();
+  if (port) {
+    port.runPut(tenant, workspace, run, summarizeRun(run), LIVE_STATUSES.has(run.status));
+    return;
+  }
   fs.mkdirSync(path.dirname(p), { recursive: true });
   // Atomic write — runs are re-read while running (dashboard polls, CLI
   // tails), and a plain writeFileSync can be caught half-written.
@@ -4124,6 +4149,75 @@ export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   fs.writeFileSync(tmp, JSON.stringify(run, null, 2));
   fs.renameSync(tmp, p);
   noteRunWritten(path.dirname(p), run, p);
+}
+
+/** When a run's record last changed, as a string that differs whenever it
+ *  does — what a poller compares instead of a file's stat. Null: no such run
+ *  (or, for a file, gone for a moment — read to find out). */
+export function runStamp(tenant: string, workspace: string, runId: string): string | null {
+  const port = records();
+  if (port) {
+    const at = port.runStamp(tenant, workspace, runId);
+    return at === null ? null : String(at);
+  }
+  try {
+    return fileStamp(fs.statSync(runFilePath(tenant, workspace, runId)));
+  } catch {
+    return null;
+  }
+}
+
+/** When a run's record was last written (epoch ms), or null when there is none. */
+export function runUpdatedMs(tenant: string, workspace: string, runId: string): number | null {
+  const port = records();
+  if (port) {
+    const us = port.runStamp(tenant, workspace, runId);
+    return us === null ? null : us / 1000;
+  }
+  try {
+    return fs.statSync(runFilePath(tenant, workspace, runId)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** A run's record as the JSON text a stream sends, or null when there is none. */
+export function readRunText(tenant: string, workspace: string, runId: string): string | null {
+  if (records()) {
+    const run = readRun(tenant, workspace, runId);
+    return run ? JSON.stringify(run, null, 2) : null;
+  }
+  try {
+    return fs.readFileSync(runFilePath(tenant, workspace, runId), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Runs of one workspace that started at or after `sinceMs`, whole, newest
+ *  first. Off the records where there are any; the files otherwise read only
+ *  the names that say when they began. */
+export function runsStartedSince(tenant: string, workspace: string, sinceMs: number): RunRecord[] {
+  const port = records();
+  if (port) return port.runsSince(tenant, workspace, sinceMs);
+  const dir = path.join(workspaceDir(tenant, workspace), "runs");
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: RunRecord[] = [];
+  for (const f of names) {
+    if (!f.endsWith(".json") || f.startsWith(".")) continue;
+    try {
+      const run = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as RunRecord;
+      if (Date.parse(run.startedAt) >= sinceMs) out.push(run);
+    } catch {
+      // mid-write or foreign: not a run
+    }
+  }
+  return out.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 }
 
 /**
@@ -4134,6 +4228,8 @@ export function writeRun(tenant: string, workspace: string, run: RunRecord) {
  * ninety days of runs that is a handful of files instead of thousands.
  */
 export function liveRuns(tenant: string, workspace: string): RunRecord[] {
+  const port = records();
+  if (port) return port.runLive(tenant, workspace);
   const out: RunRecord[] = [];
   for (const s of listRunSummaries(tenant, workspace)) {
     if (!LIVE_STATUSES.has(s.status)) continue;
@@ -4429,6 +4525,8 @@ function noteRunDeleted(dir: string, runId: string) {
  * or unreadable index is a full scan that leaves one behind.
  */
 export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
+  const port = records();
+  if (port) return port.runSummaries(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];
   const index: RunIndex = readRunIndex(dir) ?? { v: 1, runs: {} };
@@ -4799,6 +4897,8 @@ export function listAgentSteps(tenant: string, workspace: string, agent: string)
 /** Every run of the workspace, whole, newest first. Parses every record;
  *  a list that needs only what a list needs reads listRunSummaries. */
 export function listRuns(tenant: string, workspace: string): RunRecord[] {
+  const port = records();
+  if (port) return port.runAll(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];
   return fs
