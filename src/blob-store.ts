@@ -19,110 +19,89 @@
 // driver should each reinvent: a deadline on every call, a retry budget for
 // failures worth retrying, and a cap on calls in flight.
 //
-// What s3 still needs before a caller depends on it (phase 2+): a streaming
-// put (the body is a Buffer today; objects are capped at FOLDRUN_STORAGE_MAX_MB
-// = 512 by the existing store, so this holds, but a file→S3 stream with
-// UNSIGNED-PAYLOAD or aws-chunked signing avoids the copy), multipart upload
-// for anything past ~5 GB, and a run against a real bucket — the tests here
-// use an in-process fake that models the status codes, not S3's consistency.
+// Large objects: `putSourceIfAbsent` streams from a re-readable source (a file
+// on disk) and, on s3 past a threshold, uploads in resumable parts. The s3
+// driver lives in s3-blob-store.ts; the shared types and errors in
+// blob-types.ts; both are re-exported here so callers import one module.
+// tests/s3-blob-store.test.ts runs the s3 driver against a real MinIO
+// (FOLDRUN_TEST_S3_URL), the contract suite runs it against the fake.
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { dataRoot } from "./paths.ts";
-import { s3Config, s3Request, type S3Config } from "./storage.ts";
+import { s3Config } from "./storage.ts";
+import { s3BlobStore } from "./s3-blob-store.ts";
+import {
+  BlobNotFound,
+  BlobSourceError,
+  BlobTransientError,
+  assertKey,
+  hashRange,
+  type BlobStore,
+  type BlobSweeper,
+  type BlobSource,
+  type PutSourceOptions,
+} from "./blob-types.ts";
 
-export class BlobNotFound extends Error {
-  readonly key: string;
-  constructor(key: string) {
-    super(`no object at ${key}`);
-    this.name = "BlobNotFound";
-    this.key = key;
-  }
-}
-
-/** A failure the caller may retry: the network, a timeout, a 5xx, a 429, a
- *  conditional-write conflict. Everything else (403, 400, 404) is final. */
-export class BlobTransientError extends Error {
-  readonly status?: number;
-  constructor(message: string, status?: number) {
-    super(message);
-    this.name = "BlobTransientError";
-    this.status = status;
-  }
-}
-
-export interface PutOptions {
-  contentType?: string;
-  signal?: AbortSignal;
-}
-
-export interface HeadResult {
-  size: number;
-  /** When the object was last written, when the store says. The garbage
-   *  collector's grace period is measured from here. NOTE: a conditional put
-   *  that finds the object already there does NOT refresh it, so an old blob
-   *  that a new publish reuses looks old to a sweeper — the grace period alone
-   *  does not protect it (see publish.ts, "the GC window"). */
-  modifiedAt?: Date;
-}
-
-/**
- * What every caller gets: create-only, read, ask. There is deliberately no
- * overwrite and no delete here — an object is named by its content, so the only
- * write that makes sense is "put it if it is not there", and removing one is
- * the garbage collector's job alone (BlobSweeper, below). A missed option
- * cannot corrupt a shared object because the option does not exist.
- */
-export interface BlobStore {
-  readonly kind: "fs" | "s3";
-  /** Write only if nothing is at the key. `created: false` means it was
-   *  already there; for a content-addressed key that is success. The existing
-   *  object is NOT verified against `body` — callers that need that (the
-   *  garbage collector's repair path) read it back. */
-  putIfAbsent(key: string, body: Uint8Array, opts?: PutOptions): Promise<{ created: boolean }>;
-  /** The object as a stream, optionally one inclusive byte range. Throws BlobNotFound. */
-  get(key: string, opts?: { range?: { start: number; end: number }; signal?: AbortSignal }): Promise<ReadableStream<Uint8Array>>;
-  head(key: string, opts?: { signal?: AbortSignal }): Promise<HeadResult | null>;
-}
-
-/** Removal. Held by the garbage collector and by tests; not passed to publish. */
-export interface BlobSweeper {
-  /** Idempotent: a missing key is the end state asked for. */
-  delete(key: string, opts?: { signal?: AbortSignal }): Promise<void>;
-}
-
-/** Read a whole object. For manifests and small blobs; a large file is
- *  streamed with `get`. */
-export async function readAll(store: BlobStore, key: string): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  const reader = (await store.get(key)).getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(Buffer.from(value));
-  }
-  return Buffer.concat(chunks);
-}
-
-// ---------- keys ----------
-
-/** A key is slash-separated safe segments. Checked in every driver, because a
- *  key reaches the fs driver as a path. */
-export function assertKey(key: string): string {
-  if (!key || key.length > 600 || key.startsWith("/") || key.split("/").some((s) => !/^[A-Za-z0-9._=-]{1,200}$/.test(s) || s === "." || s === "..")) {
-    throw new Error(`illegal object key: ${key.slice(0, 80)}`);
-  }
-  return key;
-}
+export * from "./blob-types.ts";
+export { s3BlobStore };
 
 // ---------- fs driver ----------
 
 export function fsBlobStore(root: string = path.join(dataRoot(), ".objects")): BlobStore & BlobSweeper {
   const at = (key: string) => path.join(root, ...assertKey(key).split("/"));
+  const tmpName = (target: string) => `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   return {
     kind: "fs",
+    async putSourceIfAbsent(key, source, opts: PutSourceOptions = {}) {
+      const target = at(key);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      if (fs.existsSync(target)) return { created: false };
+      const tmp = tmpName(target);
+      try {
+        const sha = crypto.createHash("sha256");
+        const out = fs.createWriteStream(tmp);
+        await pipeline(
+          Readable.from(source.read(0, source.size, opts.signal), { objectMode: false }),
+          async function* (chunks: AsyncIterable<Uint8Array>) {
+            for await (const c of chunks) {
+              sha.update(c);
+              yield c;
+            }
+          },
+          out,
+        );
+        if (opts.sha256 && sha.digest("hex") !== opts.sha256) throw new BlobSourceError(`the bytes for ${key} do not hash to ${opts.sha256}`);
+        try {
+          fs.linkSync(tmp, target);
+          return { created: true };
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") return { created: false };
+          throw err;
+        }
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    },
+    async abortStaleUploads({ olderThanMs, prefix = "" }) {
+      // The fs driver's "incomplete uploads" are temp files a dead writer left.
+      let n = 0;
+      const walk = (dir: string) => {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const f = path.join(dir, e.name);
+          if (e.isDirectory()) walk(f);
+          else if (e.name.endsWith(".tmp") && path.relative(root, f).startsWith(prefix) && Date.now() - fs.statSync(f).mtimeMs >= olderThanMs) {
+            fs.rmSync(f, { force: true });
+            n++;
+          }
+        }
+      };
+      if (fs.existsSync(root)) walk(root);
+      return n;
+    },
     async putIfAbsent(key, body) {
       const target = at(key);
       fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -161,67 +140,65 @@ export function fsBlobStore(root: string = path.join(dataRoot(), ".objects")): B
   };
 }
 
-// ---------- s3 driver ----------
+// ---------- download to a file ----------
 
-export function s3BlobStore(cfg: S3Config | null = s3Config()): BlobStore & BlobSweeper {
-  if (!cfg) throw new Error("the s3 blob store needs FOLDRUN_S3_ENDPOINT, FOLDRUN_S3_BUCKET and credentials");
-  const transient = (status: number) => status >= 500 || status === 429 || status === 408 || status === 409;
-  const wrap = async (what: string, fn: () => Promise<Response>): Promise<Response> => {
-    try {
-      return await fn();
-    } catch (err) {
-      if ((err as Error)?.name === "AbortError" || (err as Error)?.name === "TimeoutError") throw new BlobTransientError(`s3 ${what}: timed out`);
-      throw new BlobTransientError(`s3 ${what}: ${(err as Error)?.message ?? err}`);
+/**
+ * Fetch an object into a file, resuming. The bytes land in `<dest>.part`;
+ * a connection cut mid-body (a transient error) is picked up again with a
+ * Range from where the file ends, and so is a `.part` a dead process left.
+ * The whole file is hashed against `sha256` (when given) before it is renamed
+ * into place; a mismatch discards it and throws BlobSourceError.
+ */
+export async function downloadToFile(
+  store: BlobStore,
+  key: string,
+  dest: string,
+  opts: { sha256?: string; signal?: AbortSignal; attempts?: number } = {},
+): Promise<{ size: number }> {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const part = `${dest}.part`;
+  const size = (await store.head(key, { signal: opts.signal }))?.size;
+  if (size === undefined) throw new BlobNotFound(key);
+  const max = opts.attempts ?? 5;
+  for (let attempt = 0; ; attempt++) {
+    let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
+    if (have > size) {
+      fs.rmSync(part, { force: true });
+      have = 0;
     }
-  };
-  const fail = async (res: Response, what: string): Promise<never> => {
-    const text = (await res.text().catch(() => "")).slice(0, 200);
-    const msg = `s3 ${what} failed: ${res.status} ${text}`;
-    if (transient(res.status)) throw new BlobTransientError(msg, res.status);
-    throw Object.assign(new Error(msg), { status: res.status });
-  };
-  return {
-    kind: "s3",
-    async putIfAbsent(key, body, opts = {}) {
-      assertKey(key);
-      const res = await wrap("put", () => s3Request(cfg, "PUT", key, Buffer.from(body), opts.contentType, { "if-none-match": "*" }, opts.signal));
-      if (res.status === 412) {
-        await res.arrayBuffer().catch(() => {});
-        return { created: false };
+    if (have < size) {
+      try {
+        const body = await store.get(key, { signal: opts.signal, ...(have > 0 ? { range: { start: have, end: size - 1 } } : {}) });
+        await pipeline(Readable.fromWeb(body as never), fs.createWriteStream(part, { flags: have > 0 ? "a" : "w" }));
+      } catch (err) {
+        const transient = err instanceof BlobTransientError || (err as { cause?: unknown })?.cause instanceof BlobTransientError;
+        if (!transient || attempt + 1 >= max || opts.signal?.aborted) throw err;
+        continue;
       }
-      if (!res.ok) await fail(res, "put");
-      await res.arrayBuffer().catch(() => {});
-      return { created: true };
-    },
-    async get(key, opts = {}) {
-      assertKey(key);
-      const res = await wrap("get", () =>
-        s3Request(cfg, "GET", key, undefined, undefined, opts.range ? { range: `bytes=${opts.range.start}-${opts.range.end}` } : {}, opts.signal),
-      );
-      if (res.status === 404) {
-        await res.arrayBuffer().catch(() => {});
-        throw new BlobNotFound(key);
-      }
-      if (!res.ok || !res.body) await fail(res, "get");
-      return res.body as ReadableStream<Uint8Array>;
-    },
-    async head(key, opts = {}) {
-      assertKey(key);
-      const res = await wrap("head", () => s3Request(cfg, "HEAD", key, undefined, undefined, {}, opts.signal));
-      if (res.status === 404) return null;
-      if (!res.ok) await fail(res, "head");
-      const size = Number(res.headers.get("content-length"));
-      const lm = res.headers.get("last-modified");
-      return { size: Number.isSafeInteger(size) && size >= 0 ? size : 0, ...(lm ? { modifiedAt: new Date(lm) } : {}) };
-    },
-    async delete(key, opts = {}) {
-      assertKey(key);
-      const res = await wrap("delete", () => s3Request(cfg, "DELETE", key, undefined, undefined, {}, opts.signal));
-      if (!res.ok && res.status !== 404) await fail(res, "delete");
-      await res.arrayBuffer().catch(() => {});
-    },
-  };
+    }
+    if (fs.statSync(part).size !== size) {
+      if (attempt + 1 >= max) throw new BlobTransientError(`download of ${key} stopped short`);
+      continue;
+    }
+    break;
+  }
+  if (opts.sha256) {
+    const h = await hashRange(fileRange(part), 0, size, opts.signal);
+    if (h.sha256 !== opts.sha256) {
+      fs.rmSync(part, { force: true });
+      throw new BlobSourceError(`${key} does not hash to ${opts.sha256}`);
+    }
+  }
+  fs.renameSync(part, dest);
+  return { size };
 }
+
+const fileRange = (file: string): BlobSource => ({
+  size: fs.statSync(file).size,
+  async *read(start, end) {
+    if (end > start) yield* fs.createReadStream(file, { start, end: end - 1 });
+  },
+});
 
 // ---------- the store in force ----------
 
@@ -246,9 +223,13 @@ export interface Limits {
   concurrency: number;
   /** First backoff; doubles each retry, with jitter. */
   backoffMs: number;
+  /** The slowest link a transfer is expected to survive. A put's deadline is
+   *  `deadlineMs` plus its size over this, so a 400 MB blob is not cut off at
+   *  the 30 s a head gets. */
+  minBytesPerSec: number;
 }
 
-export const DEFAULT_LIMITS: Limits = { deadlineMs: 30_000, retries: 3, concurrency: 8, backoffMs: 200 };
+export const DEFAULT_LIMITS: Limits = { deadlineMs: 30_000, retries: 3, concurrency: 8, backoffMs: 200, minBytesPerSec: 1024 * 1024 };
 
 export function limitsFromEnv(env: NodeJS.ProcessEnv = process.env): Limits {
   const n = (v: string | undefined, d: number) => (v !== undefined && /^\d+$/.test(v) ? Number(v) : d);
@@ -257,6 +238,7 @@ export function limitsFromEnv(env: NodeJS.ProcessEnv = process.env): Limits {
     retries: n(env.FOLDRUN_BLOB_RETRIES, DEFAULT_LIMITS.retries),
     concurrency: Math.max(1, n(env.FOLDRUN_BLOB_CONCURRENCY, DEFAULT_LIMITS.concurrency)),
     backoffMs: DEFAULT_LIMITS.backoffMs,
+    minBytesPerSec: Math.max(1, n(env.FOLDRUN_BLOB_MIN_BYTES_PER_SEC, DEFAULT_LIMITS.minBytesPerSec)),
   };
 }
 
@@ -294,23 +276,24 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
   const L = { ...limitsFromEnv(), ...limits };
   const gate = new Semaphore(L.concurrency);
   /** The caller's signal and this attempt's deadline, either of which ends it. */
-  const both = (caller?: AbortSignal) => {
-    const deadline = AbortSignal.timeout(L.deadlineMs);
+  const both = (caller: AbortSignal | undefined, ms: number) => {
+    const deadline = AbortSignal.timeout(ms);
     return caller ? AbortSignal.any([caller, deadline]) : deadline;
   };
-  async function call<T>(what: string, caller: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async function call<T>(what: string, caller: AbortSignal | undefined, fn: (signal: AbortSignal) => Promise<T>, bytes = 0): Promise<T> {
+    const ms = L.deadlineMs + Math.ceil((bytes / L.minBytesPerSec) * 1000);
     return gate.run(async () => {
       let attempt = 0;
       for (;;) {
         if (caller?.aborted) throw caller.reason ?? new Error(`${what}: cancelled`);
-        const signal = both(caller);
+        const signal = both(caller, ms);
         try {
           return await Promise.race([
             fn(signal),
             new Promise<never>((_, reject) =>
               signal.addEventListener(
                 "abort",
-                () => reject(caller?.aborted ? (caller.reason ?? new Error(`${what}: cancelled`)) : new BlobTransientError(`${what}: no answer within ${L.deadlineMs}ms`)),
+                () => reject(caller?.aborted ? (caller.reason ?? new Error(`${what}: cancelled`)) : new BlobTransientError(`${what}: no answer within ${ms}ms`)),
                 { once: true },
               ),
             ),
@@ -326,7 +309,7 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
   return {
     ...inner,
     kind: inner.kind,
-    putIfAbsent: (key, body, opts) => call("put", opts?.signal, (signal) => inner.putIfAbsent(key, body, { ...opts, signal })),
+    putIfAbsent: (key, body, opts) => call("put", opts?.signal, (signal) => inner.putIfAbsent(key, body, { ...opts, signal }), body.byteLength),
     // The deadline covers getting the stream going, not draining it: the
     // timer is cleared once the object starts to arrive. The caller's signal
     // stays attached to the stream, so cancelling still stops the download.
@@ -342,6 +325,22 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
           clearTimeout(timer);
         }
       }),
+    // A streamed put has no fixed deadline (its length decides), so it gets the
+    // retry budget and the concurrency cap, and the s3 driver's own per-request
+    // deadlines. Cancelling is the caller's signal.
+    putSourceIfAbsent: (key, source, opts) =>
+      gate.run(async () => {
+        for (let attempt = 0; ; attempt++) {
+          if (opts?.signal?.aborted) throw opts.signal.reason ?? new Error("put: cancelled");
+          try {
+            return await inner.putSourceIfAbsent(key, source, opts);
+          } catch (err) {
+            if (opts?.signal?.aborted || !isTransient(err) || attempt >= L.retries) throw err;
+            await new Promise((r) => setTimeout(r, L.backoffMs * 2 ** attempt * (0.5 + Math.random())));
+          }
+        }
+      }),
+    abortStaleUploads: (o) => (inner.abortStaleUploads ? inner.abortStaleUploads(o) : Promise.resolve(0)),
     head: (key, opts) => call("head", opts?.signal, (signal) => inner.head(key, { signal })),
     delete: (key, opts) => call("delete", opts?.signal, (signal) => (inner.delete ? inner.delete(key, { signal }) : Promise.reject(new Error("this store cannot delete")))),
   } as S & BlobSweeper;
