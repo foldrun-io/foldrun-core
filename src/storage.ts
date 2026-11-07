@@ -208,7 +208,7 @@ export function mimeFor(rel: string): string {
 
 export function readIndex(tenant: string, workspace: string): Index {
   if (!fileStoreEnabled()) return { version: 1, files: [] };
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return { version: 1, files: port.fileList(tenant, workspace) };
   try {
     const raw = JSON.parse(fs.readFileSync(indexPath(tenant, workspace), "utf8")) as Index;
@@ -233,13 +233,13 @@ function writeIndex(tenant: string, workspace: string, index: Index) {
  *  store rewrites the whole file; the database upserts one row, which is why
  *  two writers of different paths never touch each other). */
 function indexPut(tenant: string, workspace: string, index: Index, record: FileRecord) {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.filePut(tenant, workspace, record);
   writeIndex(tenant, workspace, { version: 1, files: [...index.files.filter((f) => f.path !== record.path), record] });
 }
 
 function indexRemove(tenant: string, workspace: string, index: Index, rel: string) {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     port.fileDelete(tenant, workspace, rel);
     return;
@@ -815,7 +815,7 @@ async function takeFileLock(file: string): Promise<() => void> {
  */
 export async function withFileStoreLock<T>(tenant: string, workspace: string, fn: () => Promise<T>): Promise<T> {
   if (!fileStoreEnabled()) return fn();
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.lock(`storage:${tenant}/${workspace}`, fn);
   return withFileLock(lockFile(tenant, workspace), fn);
 }
@@ -1160,7 +1160,7 @@ export async function purgeWorkspaceStorage(tenant: string, workspace: string): 
 
 async function purgeUnlocked(tenant: string, workspace: string): Promise<void> {
   const dir = storeDirOf(tenant, workspace);
-  const port = records();
+  const port = records(tenant, workspace);
   // With the index in the database the folder need not exist (a bucket holds
   // the objects), so the rows decide whether there is anything to purge.
   if (!dir || (!fs.existsSync(dir) && !(port && port.fileList(tenant, workspace).length))) return;
@@ -1200,7 +1200,7 @@ async function moveUnlocked(tenant: string, from: string, to: string): Promise<v
   const src = storeDirOf(tenant, from);
   const dest = storeDirOf(tenant, to);
   if (!src || !dest || src === dest) return;
-  const port = records();
+  const port = records(tenant, from);
   // Whatever a store under the new name held belonged to a workspace of that
   // name that no longer exists. (The file index has not moved yet: it moves
   // below, after the bytes, so rows under `to` are that stale store's.)

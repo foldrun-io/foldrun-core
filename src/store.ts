@@ -2700,7 +2700,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         agents: listAgents(tenant, name).length,
         flows: listFlows(tenant, name).length,
         deployedAt: fs.statSync(pDir).mtime.toISOString(),
-        runCount: recordCounts ? (recordCounts[name] ?? 0) : (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0),
+        runCount: recordCounts && records(tenant, name) ? (recordCounts[name] ?? 0) : (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0),
       };
     })
     .sort((a, b) => b.deployedAt.localeCompare(a.deployedAt));
@@ -4034,7 +4034,7 @@ export function runFilePath(tenant: string, workspace: string, runId: string) {
 export function deleteRun(tenant: string, workspace: string, runId: string, opts: { pruned?: boolean } = {}): boolean {
   const file = runFilePath(tenant, workspace, runId);
   const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
-  const port = records();
+  const port = records(tenant, workspace);
   const had = port ? port.runGet(tenant, workspace, runId) !== null : fs.existsSync(file);
   if (!had && !fs.existsSync(dir)) return false;
   // The folder first (archived outputs, captured calls), the record last:
@@ -4114,7 +4114,7 @@ export function runOutputPath(
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
   const p = runFilePath(tenant, workspace, runId);
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runGet(tenant, workspace, runId);
   // EFS/NFS: writeRun() replaces this file by rename, so an open()+read()
   // here can land on the just-unlinked inode and come back ESTALE (errno
@@ -4137,7 +4137,7 @@ export function readRun(tenant: string, workspace: string, runId: string): RunRe
 
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   const p = runFilePath(tenant, workspace, run.id);
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     port.runPut(tenant, workspace, run, summarizeRun(run), LIVE_STATUSES.has(run.status));
     return;
@@ -4155,7 +4155,7 @@ export function writeRun(tenant: string, workspace: string, run: RunRecord) {
  *  does — what a poller compares instead of a file's stat. Null: no such run
  *  (or, for a file, gone for a moment — read to find out). */
 export function runStamp(tenant: string, workspace: string, runId: string): string | null {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     const at = port.runStamp(tenant, workspace, runId);
     return at === null ? null : String(at);
@@ -4169,7 +4169,7 @@ export function runStamp(tenant: string, workspace: string, runId: string): stri
 
 /** When a run's record was last written (epoch ms), or null when there is none. */
 export function runUpdatedMs(tenant: string, workspace: string, runId: string): number | null {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     const us = port.runStamp(tenant, workspace, runId);
     return us === null ? null : us / 1000;
@@ -4183,7 +4183,7 @@ export function runUpdatedMs(tenant: string, workspace: string, runId: string): 
 
 /** A run's record as the JSON text a stream sends, or null when there is none. */
 export function readRunText(tenant: string, workspace: string, runId: string): string | null {
-  if (records()) {
+  if (records(tenant, workspace)) {
     const run = readRun(tenant, workspace, runId);
     return run ? JSON.stringify(run, null, 2) : null;
   }
@@ -4198,7 +4198,7 @@ export function readRunText(tenant: string, workspace: string, runId: string): s
  *  first. Off the records where there are any; the files otherwise read only
  *  the names that say when they began. */
 export function runsStartedSince(tenant: string, workspace: string, sinceMs: number): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runsSince(tenant, workspace, sinceMs);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   let names: string[];
@@ -4228,7 +4228,7 @@ export function runsStartedSince(tenant: string, workspace: string, sinceMs: num
  * ninety days of runs that is a handful of files instead of thousands.
  */
 export function liveRuns(tenant: string, workspace: string): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runLive(tenant, workspace);
   const out: RunRecord[] = [];
   for (const s of listRunSummaries(tenant, workspace)) {
@@ -4525,7 +4525,7 @@ function noteRunDeleted(dir: string, runId: string) {
  * or unreadable index is a full scan that leaves one behind.
  */
 export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runSummaries(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];
@@ -4897,7 +4897,7 @@ export function listAgentSteps(tenant: string, workspace: string, agent: string)
 /** Every run of the workspace, whole, newest first. Parses every record;
  *  a list that needs only what a list needs reads listRunSummaries. */
 export function listRuns(tenant: string, workspace: string): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runAll(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];

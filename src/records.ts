@@ -65,13 +65,22 @@ export interface RecordsPort {
   /** The storage file index follows the workspace's new name. */
   fileMove(tenant: string, from: string, to: string): void;
 
+  /** True while this workspace's records are still FILES on this process: its
+   *  boot import could not move them (records-import.ts), so every function
+   *  answers from the files for it, and the next boot tries again. Optional:
+   *  a port without it has no such workspaces. */
+  onFiles?(tenant: string, workspace: string): boolean;
+
   /** A short named lock across processes, with stale-holder fencing: while
    *  `fn` runs, every write of this port made in its async context is refused
    *  if a newer holder took the lock over. */
   lock<T>(name: string, fn: () => Promise<T>): Promise<T>;
 }
 
-/** The registered port, or null: files, as before. */
-export function records(): RecordsPort | null {
-  return platform.records ?? null;
+/** The registered port, or null: files, as before. With a workspace, null also
+ *  when that workspace is still on files (its import is pending). */
+export function records(tenant?: string, workspace?: string): RecordsPort | null {
+  const port = platform.records ?? null;
+  if (port && tenant !== undefined && workspace !== undefined && port.onFiles?.(tenant, workspace)) return null;
+  return port;
 }

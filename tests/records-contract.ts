@@ -157,6 +157,22 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.equal(listStorage(T, "moved").length, 0);
   });
 
+  test(t("a workspace the port says is on files is read and written as files; the others use the port"), () => {
+    mkWs("other");
+    registerPlatform({ records: { ...subject.port, onFiles: (_t: string, w: string) => w === "desk" } });
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    writeRun(T, "other", run("r2", "2026-11-01T02:00:00.000Z"));
+    assert.ok(fs.existsSync(path.join(workspaceDir(T, W), "runs", "r1.json")), "desk wrote a file");
+    assert.equal(fs.existsSync(path.join(workspaceDir(T, "other"), "runs", "r2.json")), false, "other wrote to the port");
+    assert.equal(readRun(T, W, "r1")!.id, "r1");
+    assert.deepEqual(listRunSummaries(T, W).map((x) => x.id), ["r1"]);
+    assert.deepEqual(listRunSummaries(T, "other").map((x) => x.id), ["r2"]);
+    assert.equal(Object.fromEntries(listWorkspaces(T).map((w) => [w.name, w.runCount])).desk, 1);
+    recordTriggerEvent(T, W, { t: "2026-11-01T01:00:00.000Z", flow: "f", trigger: "webhook", outcome: "started" });
+    assert.ok(fs.existsSync(path.join(workspaceDir(T, W), "trigger-log.jsonl")));
+    assert.equal(readTriggerEvents(T, W).length, 1);
+  });
+
   test(t("a rename whose records cannot move puts the folder back (Codex review)"), () => {
     writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
     registerPlatform({ records: { ...subject.port, workspaceMove() { throw new Error("database down"); } } });
