@@ -25,6 +25,7 @@ const W = "desk";
 let root: string;
 let deps: Deps;
 
+const ON = { journal: () => true, read: () => true };
 const AGENT = (name: string) => `---\nname: ${name}\n---\n${name} body\n`;
 const text = async (rel: string) => (await readAtHead(T, W, rel))?.toString("utf8") ?? null;
 
@@ -53,7 +54,7 @@ test("with no backend nothing is journalled: a laptop and the CLI are untouched"
 });
 
 test("the first write commits the whole tree as the baseline; later writes are one revision each, and reads resolve head → manifest → blob", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "agents/writer/AGENTS.md", AGENT("writer2"), { by: "user:a", message: "rename" });
   assert.equal((await flushRevisions({ tenant: T, workspace: W })).pending, 0);
   const first = await listRevisionSummaries(T, W);
@@ -73,7 +74,7 @@ test("the first write commits the whole tree as the baseline; later writes are o
 });
 
 test("every writer is journalled: save, delete and rename, in order", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
   writeWorkspaceFile(T, W, "memory/notes.md", "two\n", { by: "assistant" });
   renameWorkspaceFile(T, W, "memory/notes.md", "memory/old.md", { by: "user:a" });
@@ -87,7 +88,7 @@ test("every writer is journalled: save, delete and rename, in order", async () =
 });
 
 test("a revision's detail and snapshot come back in history.ts's shapes", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a", message: "first" });
   await flushRevisions();
   writeWorkspaceFile(T, W, "memory/notes.md", "two\n", { by: "user:a", message: "second" });
@@ -106,7 +107,7 @@ test("a revision's detail and snapshot come back in history.ts's shapes", async 
 });
 
 test("restore is a NEW revision pointing at old blobs; history is kept; the folder write that follows is a no-op", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
   await flushRevisions();
   const [first] = await listRevisionSummaries(T, W);
@@ -126,7 +127,7 @@ test("restore is a NEW revision pointing at old blobs; history is kept; the fold
 });
 
 test("state/ moves on its own head: a state write never makes a source revision", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
   await flushRevisions();
   fs.mkdirSync(path.join(workspaceDir(T, W), "state"), { recursive: true });
@@ -142,7 +143,7 @@ test("state/ moves on its own head: a state write never makes a source revision"
 });
 
 test("an executable script keeps its mode", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   fs.mkdirSync(path.join(workspaceDir(T, W), "scripts"), { recursive: true });
   fs.writeFileSync(path.join(workspaceDir(T, W), "scripts", "run.sh"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
   const { recordRevision } = await import("../src/history.ts");
@@ -164,7 +165,7 @@ test("a revision store that is down loses nothing: changes stay queued in order 
       return typeof v === "function" ? v.bind(target) : v;
     },
   });
-  setRevisionBackend({ ...deps, revisions: flaky });
+  setRevisionBackend({ ...deps, revisions: flaky }, ON);
   writeWorkspaceFile(T, W, "memory/a.md", "a\n", { by: "user:a", message: "a" });
   writeWorkspaceFile(T, W, "memory/b.md", "b\n", { by: "user:a", message: "b" });
   const r = await flushRevisions({ tenant: T, workspace: W });
@@ -179,7 +180,7 @@ test("a revision store that is down loses nothing: changes stay queued in order 
 });
 
 test("a change the manifest refuses is dropped and named, not retried for ever: later changes still commit", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   fs.mkdirSync(path.join(workspaceDir(T, W), "memory"), { recursive: true });
   fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "Notes.md"), "upper\n");
   fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "notes.md"), "lower\n"); // on a case-sensitive disk
@@ -196,14 +197,14 @@ test("a change the manifest refuses is dropped and named, not retried for ever: 
 });
 
 test("a retried flush never publishes twice", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/a.md", "a\n", { by: "user:a", message: "a" });
   await Promise.all([flushRevisions(), flushRevisions(), flushRevisions()]);
   assert.equal((await listRevisionSummaries(T, W)).length, 1);
 });
 
 test("reconcile brings the heads to the folder's content in one revision, and is a no-op when they agree", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   assert.equal(needsReconcile(T, W), false);
   const r1 = (await reconcileWorkspace(T, W, "importer"))!;
   assert.equal(r1.status, "committed");
@@ -218,7 +219,7 @@ test("reconcile brings the heads to the folder's content in one revision, and is
 });
 
 test("the cache seam: a read asks the cache first, fills it on a miss, and a hit never touches the store", async () => {
-  setRevisionBackend(deps);
+  setRevisionBackend(deps, ON);
   writeWorkspaceFile(T, W, "memory/a.md", "a\n", { by: "user:a" });
   await flushRevisions();
   const seen: string[] = [];
@@ -233,7 +234,7 @@ test("the cache seam: a read asks the cache first, fills it on a miss, and a hit
   assert.ok(seen.some((s) => s.startsWith("put")), "filled on a miss");
   // Break the store: a hit must be served from the cache alone.
   let blobReads = 0;
-  setRevisionBackend({ ...deps, blobs: new Proxy(deps.blobs, { get: (t, p, r) => (p === "get" ? (...a: unknown[]) => { blobReads++; return (t.get as Function)(...a); } : Reflect.get(t, p, r)) }) });
+  setRevisionBackend({ ...deps, blobs: new Proxy(deps.blobs, { get: (t, p, r) => (p === "get" ? (...a: unknown[]) => { blobReads++; return (t.get as Function)(...a); } : Reflect.get(t, p, r)) }) }, ON);
   assert.equal(await text("memory/a.md"), "a\n");
   assert.ok(blobReads <= 1, `only the manifest was read from the store, not the file (${blobReads})`);
 });

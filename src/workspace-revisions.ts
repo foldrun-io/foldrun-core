@@ -35,8 +35,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { currentTree, registerJournal, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
-import { workspaceDir } from "./store.ts";
+import { currentTree, registerJournal, registerRevisionView, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
+import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath } from "./store.ts";
+import { dataRoot } from "./paths.ts";
 import { opsError, opsLog } from "./ops-log.ts";
 import { readAll, BlobNotFound } from "./blob-store.ts";
 import {
@@ -52,18 +53,41 @@ import {
   type Manifest,
 } from "./manifest.ts";
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, PublishError, type Deps, type PublishResult } from "./publish.ts";
-import type { Revision, WorkspaceRef } from "./revision-store.ts";
+import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 
 // ------------------------------------------------------------- the backend
 
 let backend: Deps | null = null;
 
+/** Two switches the host decides on every call (the settings registry's
+ *  `revisions.journal` and `revisions.read`): the journal and history from
+ *  revisions; reads of file content from heads. Both default to off in a host
+ *  that gives no answer, so registering a backend alone changes nothing. */
+export interface BackendOptions {
+  journal?: () => boolean;
+  read?: () => boolean;
+}
+let gate: Required<BackendOptions> = { journal: () => false, read: () => false };
+
 /** Where revisions live, or null (no journal, nothing changes). */
-export function setRevisionBackend(deps: Deps | null): void {
+export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {}): void {
   backend = deps;
+  gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
   registerJournal(deps ? journalChange : null);
+  registerRevisionView(deps ? view : null);
 }
 export const revisionBackend = (): Deps | null => backend;
+const journalOn = (): boolean => !!backend && safe(gate.journal);
+/** Reads of content from heads (and run stage-in): its own switch, and only
+ *  where the journal runs too (a head that is not kept current is not a source). */
+export const revisionReadsOn = (): boolean => journalOn() && safe(gate.read);
+function safe(fn: () => boolean): boolean {
+  try {
+    return fn();
+  } catch {
+    return false;
+  }
+}
 
 /** The bounded node-local cache of blobs, keyed by sha (built elsewhere). A
  *  miss falls through to the BlobStore and fills the cache. */
@@ -77,6 +101,20 @@ export function setBlobCache(c: BlobCache | null): void {
 }
 
 // ------------------------------------------------------------- the journal
+//
+// Durable: every change set is written to a file BEFORE it is queued, and the
+// file is removed when the change is committed. A process that dies with
+// changes queued leaves the files; recoverJournal (boot) replays them and
+// reconcileAll repairs whatever still disagrees with the folder.
+//
+// Why files and not a table: an entry carries the bytes of every changed file
+// (the head cannot be rebuilt from paths alone), a table would copy them into
+// rows a second time, a write-ahead FILE on the volume the folder is on shares
+// that volume's fate (if the volume is gone there is nothing to replay
+// against), it needs no migration, and any pod can replay it — the commit is
+// idempotent per entry id, so two pods replaying one file commit it once.
+// Cost: while the volume is the working copy it is also where the journal is;
+// when the volume is retired (phase 8) the journal moves to a table.
 
 interface Entry {
   id: string;
@@ -84,29 +122,90 @@ interface Entry {
   by: string;
   message: string;
   at: string;
+  /** The revision this change brings back (a restore), when it is one. */
+  restoredFrom?: string;
+  /** Its file in the journal directory, when it was written. */
+  file?: string;
 }
 const MAX_QUEUED = 2000;
+/** A journal file this old, that no queue of this process holds, was left by a
+ *  process that died (a live one commits within seconds or keeps retrying). */
+const ORPHAN_MS = 120_000;
 const queues = new Map<string, Entry[]>();
 const chains = new Map<string, Promise<unknown>>();
-const marked = new Set<string>(); // overflowed: needs reconcileWorkspace
+const marked = new Set<string>(); // overflowed or dropped: needs reconcileWorkspace
+const verified = new Set<string>(); // reconciled once in this process
 const retryAt = new Map<string, number>();
+const restoring = new Map<string, string>();
 const key = (tenant: string, workspace: string) => `${tenant}\0${workspace}`;
 const split = (k: string): [string, string] => k.split("\0") as [string, string];
+
+const journalRoot = () => path.join(dataRoot(), ".revision-journal");
+const journalDir = (tenant: string, workspace: string) => path.join(journalRoot(), tenant, workspace);
+let fileSeq = 0;
+
+/** Write the entry down, atomically. A volume that refuses leaves the entry
+ *  in memory only (said once per failure), as the journal always was. */
+function persist(tenant: string, workspace: string, e: Entry): void {
+  try {
+    const dir = journalDir(tenant, workspace);
+    fs.mkdirSync(dir, { recursive: true });
+    const name = `${Date.now().toString().padStart(14, "0")}-${String(fileSeq++ % 1_000_000).padStart(6, "0")}-${e.id}.json`;
+    const file = path.join(dir, name);
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, tenant, workspace, id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom }));
+    fs.renameSync(`${file}.tmp`, file);
+    e.file = file;
+  } catch (err) {
+    opsError("revisions.journal_not_persisted", err, { tenant, workspace }, "warn");
+  }
+}
+
+function forget(tenant: string, workspace: string, e: Entry): void {
+  if (!e.file) return;
+  try {
+    fs.rmSync(e.file, { force: true });
+    fs.rmdirSync(journalDir(tenant, workspace)); // only when empty
+  } catch {
+    // not empty, or already gone
+  }
+}
 
 /** Called by history.recordRevision for every change set. Synchronous and
  *  cheap; the commit happens in the background (flushRevisions waits for it). */
 function journalChange(tenant: string, scope: string, files: RevisionFile[], meta: { by: string; message: string; at: string }): void {
   if (!backend || scope === "@library") return; // the account shelf is not a workspace
   const k = key(tenant, scope);
+  if (!safe(gate.journal)) {
+    verified.delete(k); // a change the head will not see: reconcile before trusting it again
+    return;
+  }
   const q = queues.get(k) ?? [];
-  q.push({ id: crypto.randomBytes(12).toString("hex"), files, by: meta.by, message: meta.message, at: meta.at });
+  // Only what the head needs: the new content. The old text is the writer's
+  // history record, not the journal's (it can be a quarter megabyte a file).
+  const slim = files.map((f) => ({ path: f.path, before: null, after: f.after }));
+  const entry: Entry = { id: crypto.randomBytes(12).toString("hex"), files: slim, by: meta.by, message: meta.message, at: meta.at, restoredFrom: restoring.get(k) };
+  persist(tenant, scope, entry);
+  q.push(entry);
   if (q.length > MAX_QUEUED) {
-    q.splice(0, q.length - MAX_QUEUED);
+    for (const old of q.splice(0, q.length - MAX_QUEUED)) forget(tenant, scope, old);
     marked.add(k);
     opsLog("error", "revisions.journal_overflow", { tenant, workspace: scope, count: MAX_QUEUED });
   }
   queues.set(k, q);
   setImmediate(() => void drain(k));
+}
+
+/** Run `fn` (a synchronous writer) so that the change it records is committed
+ *  as a restore of `revisionId` — the history then says "restored from". */
+export function asRestoreOf<T>(tenant: string, workspace: string, revisionId: string | null | undefined, fn: () => T): T {
+  const k = key(tenant, workspace);
+  if (!revisionId || !journalOn()) return fn();
+  restoring.set(k, revisionId);
+  try {
+    return fn();
+  } finally {
+    restoring.delete(k);
+  }
 }
 
 export function pendingRevisions(): number {
@@ -129,6 +228,7 @@ async function drainOne(k: string): Promise<void> {
     try {
       await commitEntry(backend, tenant, workspace, entry);
       q.shift();
+      forget(tenant, workspace, entry);
       retryAt.delete(k);
     } catch (err) {
       if (permanent(err)) {
@@ -138,6 +238,7 @@ async function drainOne(k: string): Promise<void> {
         // for a reconcile once the cause is fixed.
         opsError("revisions.entry_dropped", err, { tenant, workspace });
         q.shift();
+        forget(tenant, workspace, entry);
         marked.add(k);
         continue;
       }
@@ -151,6 +252,20 @@ async function drainOne(k: string): Promise<void> {
     }
   }
   if (q && !q.length) queues.delete(k);
+  // Once per process per workspace, with nothing queued: the folder is the
+  // truth, so a head that disagrees with it (a crash lost an entry, the
+  // journal was off for a while, a run wrote the folder directly) is brought
+  // to it. After the entries, never before: replaying an older change over a
+  // reconciled head would write it backwards.
+  if (backend && (!q || !q.length) && (!verified.has(k) || marked.has(k))) {
+    verified.add(k);
+    try {
+      await reconcileWorkspace(tenant, workspace, "reconcile");
+    } catch (err) {
+      verified.delete(k);
+      opsError("revisions.reconcile_failed", err, { tenant, workspace }, "warn");
+    }
+  }
 }
 
 /** An error that retrying will not cure: the manifest refused the content. */
@@ -169,16 +284,138 @@ export async function flushRevisions(only?: { tenant: string; workspace: string 
   return { pending: only ? (queues.get(key(only.tenant, only.workspace))?.length ?? 0) : pendingRevisions() };
 }
 
-/** Tests: forget every queued change and pending retry. */
+/** Tests: forget every queued change and pending retry (journal FILES stay:
+ *  that is what a crash leaves). */
 export function resetJournalForTests(): void {
   queues.clear();
   chains.clear();
   marked.clear();
+  verified.clear();
   retryAt.clear();
+  restoring.clear();
+}
+
+/** An account is gone (or one workspace is): forget its queued changes and
+ *  remove its journal files, so nothing of it is replayed or committed later
+ *  and no workspace text outlives it outside the folder. Safe to repeat. */
+export function dropJournal(tenant: string, workspace?: string): void {
+  for (const k of [...queues.keys()]) {
+    const [t, w] = split(k);
+    if (t === tenant && (workspace === undefined || w === workspace)) {
+      queues.delete(k);
+      marked.delete(k);
+      verified.delete(k);
+      retryAt.delete(k);
+    }
+  }
+  fs.rmSync(workspace === undefined ? path.join(journalRoot(), tenant) : journalDir(tenant, workspace), { recursive: true, force: true });
 }
 
 /** Does this workspace need a reconcile (its journal overflowed)? */
 export const needsReconcile = (tenant: string, workspace: string) => marked.has(key(tenant, workspace));
+
+/** Boot: replay what a dead process left in the journal directory, oldest
+ *  first, then wait for it to commit. Entries of a workspace that no longer
+ *  exists are discarded. `minAgeMs` keeps clear of a live process's files. */
+export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<{ entries: number; workspaces: number }> {
+  if (!journalOn()) return { entries: 0, workspaces: 0 };
+  const minAge = opts.minAgeMs ?? ORPHAN_MS;
+  let entries = 0;
+  const touched: string[] = [];
+  const root = journalRoot();
+  let tenants: string[] = [];
+  try {
+    tenants = fs.readdirSync(root);
+  } catch {
+    return { entries: 0, workspaces: 0 };
+  }
+  for (const tenant of tenants) {
+    let workspaces: string[] = [];
+    try {
+      workspaces = fs.readdirSync(path.join(root, tenant));
+    } catch {
+      continue;
+    }
+    for (const workspace of workspaces) {
+      const dir = path.join(root, tenant, workspace);
+      let names: string[] = [];
+      try {
+        const all = fs.readdirSync(dir);
+        // a write that died before its rename leaves a .tmp: nothing to replay
+        for (const n of all) if (n.endsWith(".json.tmp") && minAge > 0 && Date.now() - fs.statSync(path.join(dir, n)).mtimeMs > minAge) fs.rmSync(path.join(dir, n), { force: true });
+        names = all.filter((n) => n.endsWith(".json")).sort();
+      } catch {
+        continue;
+      }
+      const k = key(tenant, workspace);
+      const q = queues.get(k) ?? [];
+      const held = new Set(q.map((e) => e.file));
+      const gone = !fs.existsSync(workspaceDir(tenant, workspace));
+      const found: Entry[] = [];
+      for (const name of names) {
+        const file = path.join(dir, name);
+        if (held.has(file)) continue;
+        try {
+          if (gone) {
+            fs.rmSync(file, { force: true });
+            continue;
+          }
+          if (minAge > 0 && Date.now() - fs.statSync(file).mtimeMs < minAge) continue;
+          const e = JSON.parse(fs.readFileSync(file, "utf8")) as Entry & { v: number };
+          if (e.v !== 1 || !Array.isArray(e.files)) throw new Error("not a journal entry");
+          found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, file });
+        } catch (err) {
+          // a torn or foreign file: set it aside, never replay it
+          opsError("revisions.journal_file_unreadable", err, { tenant, workspace }, "warn");
+          try {
+            fs.renameSync(file, `${file}.unreadable`);
+          } catch {
+            // leave it
+          }
+        }
+      }
+      if (!found.length) continue;
+      queues.set(k, [...found, ...q]);
+      entries += found.length;
+      touched.push(k);
+    }
+  }
+  await Promise.all(touched.map((k) => drain(k)));
+  return { entries, workspaces: touched.length };
+}
+
+/** Boot: bring every workspace's heads to its folder (reconcile each, one at
+ *  a time, yielding between). A workspace with changes still queued is left
+ *  to its queue. Returns how many were checked and how many needed repair. */
+export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {}): Promise<{ checked: number; repaired: number; failed: number }> {
+  const out = { checked: 0, repaired: 0, failed: 0 };
+  if (!journalOn()) return out;
+  for (const tenant of opts.tenants ?? listTenants()) {
+    for (const w of listWorkspaces(tenant)) {
+      const k = key(tenant, w.name);
+      try {
+        verified.add(k); // reconciled explicitly below, and counted
+        await drain(k);
+        if (queues.get(k)?.length) {
+          verified.delete(k);
+          continue; // the store is not taking writes: leave it
+        }
+        const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => reconcileWorkspace(tenant, w.name, opts.by ?? "reconcile"));
+        chains.set(k, next);
+        const res = await next;
+        verified.add(k);
+        out.checked++;
+        if (res && res.status === "committed") out.repaired++;
+      } catch (err) {
+        out.failed++;
+        opsError("revisions.reconcile_failed", err, { tenant, workspace: w.name }, "warn");
+      }
+      await new Promise<void>((r) => setImmediate(r));
+    }
+  }
+  opsLog("info", "revisions.reconciled", out);
+  return out;
+}
 
 // ------------------------------------------------------------- committing
 
@@ -207,7 +444,9 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     const sha = sha256Hex(buf);
     bytes.set(sha, buf);
     const was = head[side].files[rel];
-    changes[rel] = { op: "put", base: was ? entryId(was) : null, sha, size: buf.length, mode: modeOf(tenant, workspace, rel) };
+    const mode = modeOf(tenant, workspace, rel);
+    if (was && was.sha === sha && was.mode === mode) return; // the head already holds it
+    changes[rel] = { op: "put", base: was ? entryId(was) : null, sha, size: buf.length, mode };
   };
 
   if (baseline.authored || baseline.state) {
@@ -233,18 +472,29 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     }
   }
   if (!Object.keys(changes).length) return null;
-  return publish(deps, {
+  // A restore tag only counts when that revision is in the store.
+  const restoredFrom = entry.restoredFrom && (await deps.revisions.revision(ws, entry.restoredFrom)) ? entry.restoredFrom : undefined;
+  try {
+    return await publish(deps, {
     ws,
     opId: opIdOf(baseline.authored || baseline.state ? "jb" : "jr", entry.id),
     by: entry.by,
     message: entry.message,
     changes,
+    restoredFrom,
     bytesOf: async (sha) => {
       const b = bytes.get(sha);
       if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
       return b;
     },
-  });
+    });
+  } catch (err) {
+    // This entry's id was used before for a different set of changes: an
+    // earlier attempt committed it (its answer was lost) and the head has
+    // moved on, so the changes computed now differ. It is done.
+    if (err instanceof OpIdReused) return null;
+    throw err;
+  }
 }
 
 /** Bring the heads to the folder's content in one revision: the way in for a
@@ -334,12 +584,20 @@ export async function listRevisionSummaries(tenant: string, workspace: string, o
   if (!deps) return [];
   const revs = await deps.revisions.revisions({ tenant, workspace }, { limit: opts.forPath ? 500 : (opts.limit ?? 200) });
   const out: RevisionSummary[] = [];
-  for (const r of revs) {
-    const [mine, before] = await Promise.all([loadManifest(deps, tenant, r.authored), parentManifest(deps, tenant, workspace, r)]);
-    const paths = Object.keys(diffManifests(before, mine)).sort();
-    if (opts.forPath && !paths.includes(opts.forPath)) continue;
-    out.push({ id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths });
-    if (out.length >= (opts.limit ?? 200)) break;
+  const want = opts.limit ?? 200;
+  // Eight at a time: each revision is two manifest reads, and a history page
+  // asks for hundreds.
+  for (let i = 0; i < revs.length && out.length < want; i += 8) {
+    const rows = await Promise.all(
+      revs.slice(i, i + 8).map(async (r) => {
+        const [mine, before] = await Promise.all([loadManifest(deps, tenant, r.authored), parentManifest(deps, tenant, workspace, r)]);
+        return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: Object.keys(diffManifests(before, mine)).sort() } as RevisionSummary;
+      }),
+    );
+    for (const row of rows) {
+      if (opts.forPath && !row.paths.includes(opts.forPath)) continue;
+      if (out.length < want) out.push(row);
+    }
   }
   return out;
 }
@@ -388,4 +646,75 @@ export async function restoreRevision(tenant: string, workspace: string, to: str
   const deps = backend;
   if (!deps) return null;
   return restore(deps, { ws: { tenant, workspace }, to, opId: opts.opId, by: opts.by, message: opts.message, stateTo: opts.stateTo });
+}
+
+// ------------------------------------------------------------- history view
+
+/** What history.ts asks for, answered from revisions where the journal runs.
+ *  A store that errors answers null (the local history is used) and says so. */
+async function guarded<T>(what: string, tenant: string, workspace: string, fn: () => Promise<T>): Promise<T | null> {
+  if (!journalOn()) return null;
+  try {
+    return await fn();
+  } catch (err) {
+    opsError("revisions.history_unavailable", err, { tenant, workspace, what }, "warn");
+    return null;
+  }
+}
+const view: RevisionView = {
+  list: (t, w, o) => guarded("list", t, w, () => listRevisionSummaries(t, w, o)),
+  read: (t, w, id, p) => guarded("read", t, w, () => readRevisionDetail(t, w, id, p)),
+  snapshot: (t, w, id) => guarded("snapshot", t, w, () => snapshotFiles(t, w, id)),
+};
+
+// ------------------------------------------------------------- reads through heads
+
+/** One workspace file, from its head when reads through revisions are on and
+ *  the head has it; null otherwise, and the caller reads the folder (the
+ *  fallback is the point: a head behind the folder, a missing blob, a store
+ *  that is down, a binary file the tree reader never recorded). */
+export async function readHeadText(tenant: string, workspace: string, rel: string): Promise<string | null> {
+  if (!revisionReadsOn()) return null;
+  try {
+    const b = await readAtHead(tenant, workspace, rel);
+    return b ? b.toString("utf8") : null;
+  } catch (err) {
+    opsError("revisions.read_failed", err, { tenant, workspace }, "warn");
+    return null;
+  }
+}
+
+/** Every file of the workspace head with its bytes and mode (both heads), for
+ *  a stage-in; null when reads through revisions are off, there is no head,
+ *  or any blob could not be had (the caller then stages from the folder). */
+export async function readHeadTree(tenant: string, workspace: string): Promise<{ path: string; bytes: Buffer; mode: number }[] | null> {
+  const deps = backend;
+  if (!deps || !revisionReadsOn()) return null;
+  try {
+    const heads = await headsOf(deps, { tenant, workspace });
+    if (!heads.workspace) return null;
+    const m = await manifestsAt(deps, tenant, heads);
+    const out: { path: string; bytes: Buffer; mode: number }[] = [];
+    for (const side of ["authored", "state"] as const) {
+      for (const [p, e] of Object.entries(m[side].files)) {
+        const b = await blobBytes(deps, tenant, e.sha);
+        if (!b) return null;
+        out.push({ path: p, bytes: b, mode: e.mode });
+      }
+    }
+    return out;
+  } catch (err) {
+    opsError("revisions.read_failed", err, { tenant, workspace }, "warn");
+    return null;
+  }
+}
+
+/** The dashboard's and the API's read of one editable file: the head's bytes
+ *  when reads through revisions are on and the head has the file, otherwise
+ *  the folder exactly as readWorkspaceFile answers (same path rules, same
+ *  "file not found"). */
+export async function readWorkspaceFileVia(tenant: string, workspace: string, rel: string): Promise<string> {
+  const p = assertEditablePath(rel);
+  const head = await readHeadText(tenant, workspace, p);
+  return head !== null ? head : readWorkspaceFile(tenant, workspace, rel);
 }
