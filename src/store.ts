@@ -26,7 +26,7 @@ import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { recordRevision, registerTreeReader, assertCommitId, type RevisionFile } from "./history.ts";
+import { recordRevision, registerTreeReader, assertCommitId, workspaceGone, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
@@ -3198,6 +3198,9 @@ export function deleteWorkspace(tenant: string, workspace: string) {
   // after the folder is gone a retry would answer "not found" with rows left.
   records()?.workspaceDrop(tenant, workspace);
   fs.rmSync(dir, { recursive: true, force: true });
+  // Its revision journal: queued changes must not commit (or replay at the
+  // next boot) for a workspace that is gone (FOL-126 phase 4).
+  workspaceGone(tenant, workspace);
   // Its file store too, kept by name beside the folder (storage.ts). Until
   // 30 Oct 2026 the store outlived the delete: its files stayed downloadable
   // and shared, and the next workspace given this name inherited them. The
@@ -4141,6 +4144,21 @@ export async function readRunAsync(tenant: string, workspace: string, runId: str
   runFilePath(tenant, workspace, runId); // the same name checks as readRun
   const port = records(tenant, workspace);
   return port?.async ? port.async.runGet(tenant, workspace, runId) : readRun(tenant, workspace, runId);
+}
+
+/** writeRun without holding the event loop (FOL-126 phase 4): for the callers
+ *  that are async anyway. Where the port writes asynchronously the record is
+ *  written when this resolves; everywhere else (files, a port without the
+ *  async write) it IS writeRun. The sync callers (the runner's save) are
+ *  untouched. */
+export async function writeRunAsync(tenant: string, workspace: string, run: RunRecord): Promise<void> {
+  const port = records(tenant, workspace);
+  if (port?.async?.runPut) {
+    runFilePath(tenant, workspace, run.id); // the same name checks as writeRun
+    await port.async.runPut(tenant, workspace, run, summarizeRun(run), LIVE_STATUSES.has(run.status));
+    return;
+  }
+  writeRun(tenant, workspace, run);
 }
 
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {

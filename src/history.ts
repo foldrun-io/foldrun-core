@@ -71,6 +71,20 @@ export function registerJournal(fn: Journal | null) {
   journal = fn;
 }
 
+/** A workspace was deleted: whatever a registered journal still holds for it
+ *  (queued changes, their files) goes too (FOL-126 phase 4). */
+let onGone: ((tenant: string, workspace: string) => void) | null = null;
+export function registerWorkspaceGone(fn: ((tenant: string, workspace: string) => void) | null) {
+  onGone = fn;
+}
+export function workspaceGone(tenant: string, workspace: string): void {
+  try {
+    onGone?.(tenant, workspace);
+  } catch {
+    // a journal that cannot be cleared now is cleared at the next boot (the replay discards a missing workspace)
+  }
+}
+
 function assertSafeName(v: string, what: string) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,120}$/.test(v)) throw new Error(`illegal ${what}: ${v}`);
 }
