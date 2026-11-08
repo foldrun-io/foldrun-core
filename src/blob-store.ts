@@ -91,6 +91,10 @@ export interface BlobStore {
 export interface BlobSweeper {
   /** Idempotent: a missing key is the end state asked for. */
   delete(key: string, opts?: { signal?: AbortSignal }): Promise<void>;
+  /** An account is gone: remove everything under its prefix. Only a store that
+   *  can enumerate has it (the folder one); a bucket's objects are the
+   *  sweeper's once the account's pins are released. */
+  purgeTenant?(tenant: string): Promise<void>;
 }
 
 /** Read a whole object. For manifests and small blobs; a large file is
@@ -157,6 +161,9 @@ export function fsBlobStore(root: string = path.join(dataRoot(), ".objects")): B
     },
     async delete(key) {
       fs.rmSync(at(key), { force: true });
+    },
+    async purgeTenant(tenant) {
+      fs.rmSync(path.dirname(at(`t/${tenant}/x`)), { recursive: true, force: true });
     },
   };
 }
@@ -344,5 +351,6 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
       }),
     head: (key, opts) => call("head", opts?.signal, (signal) => inner.head(key, { signal })),
     delete: (key, opts) => call("delete", opts?.signal, (signal) => (inner.delete ? inner.delete(key, { signal }) : Promise.reject(new Error("this store cannot delete")))),
+    ...(inner.purgeTenant ? { purgeTenant: (tenant: string) => inner.purgeTenant!(tenant) } : {}),
   } as S & BlobSweeper;
 }
