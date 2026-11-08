@@ -85,6 +85,34 @@ export function workspaceGone(tenant: string, workspace: string): void {
   }
 }
 
+/**
+ * What follows a workspace through a delete or a rename (workspace-revisions.ts
+ * registers it): its journal and its history in the revision store. The async
+ * forms run the folder's own change INSIDE them (`remove`, `rename`), so that
+ * a store which cannot be reached stops the change before anything is removed
+ * or moved, and a writer racing the change is held off until it is done. The
+ * sync forms are for a caller that cannot wait: they do what can be done now
+ * and finish in the background.
+ */
+export interface WorkspaceLifecycle {
+  drop(tenant: string, workspace: string, remove: () => void): Promise<void>;
+  move(tenant: string, from: string, to: string, rename: () => void): Promise<void>;
+  moved(tenant: string, from: string, to: string): void;
+}
+let lifecycleHooks: WorkspaceLifecycle | null = null;
+export function registerWorkspaceLifecycle(l: WorkspaceLifecycle | null) {
+  lifecycleHooks = l;
+}
+export const workspaceLifecycle = (): WorkspaceLifecycle | null => lifecycleHooks;
+/** A workspace's folder was renamed (sync path): see WorkspaceLifecycle.moved. */
+export function workspaceMoved(tenant: string, from: string, to: string): void {
+  try {
+    lifecycleHooks?.moved(tenant, from, to);
+  } catch {
+    // finished by the next reconcile
+  }
+}
+
 function assertSafeName(v: string, what: string) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]{0,120}$/.test(v)) throw new Error(`illegal ${what}: ${v}`);
 }

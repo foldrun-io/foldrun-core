@@ -26,7 +26,7 @@ import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { recordRevision, registerTreeReader, assertCommitId, workspaceGone, type RevisionFile } from "./history.ts";
+import { recordRevision, registerTreeReader, assertCommitId, workspaceGone, workspaceMoved, workspaceLifecycle, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
@@ -3214,6 +3214,20 @@ export function deleteWorkspace(tenant: string, workspace: string) {
 }
 
 /**
+ * deleteWorkspace, with the workspace's revisions: its history is dropped
+ * BEFORE the folder goes (a store that cannot be reached refuses the delete
+ * while it can still be retried) and once more after, for whatever a racing
+ * write made in between. A new workspace of the same name starts empty.
+ * Where nothing records revisions this is deleteWorkspace.
+ */
+export async function deleteWorkspaceAsync(tenant: string, workspace: string): Promise<void> {
+  const lc = workspaceLifecycle();
+  if (!lc) return deleteWorkspace(tenant, workspace);
+  if (!fs.existsSync(workspaceDir(tenant, workspace))) throw new Error(`workspace ${workspace} not found`);
+  await lc.drop(tenant, workspace, () => deleteWorkspace(tenant, workspace));
+}
+
+/**
  * What a rename would break, so the caller can say so before doing it.
  *
  * The workspace name is not just a directory: it is in every webhook URL *and*
@@ -3261,12 +3275,33 @@ export function renameWorkspace(tenant: string, from: string, to: string) {
     fs.renameSync(dest, src);
     throw err;
   }
+  // Its queued revisions and its history follow the name (workspace-revisions.ts).
+  workspaceMoved(tenant, from, to);
 
   const agentsMd = path.join(dest, "AGENTS.md");
   if (fs.existsSync(agentsMd)) {
     const raw = fs.readFileSync(agentsMd, "utf8");
     fs.writeFileSync(agentsMd, raw.replace(/^name:.*$/m, `name: ${to}`));
   }
+}
+
+/**
+ * renameWorkspace, with the workspace's revisions: queued changes are held
+ * while its history is re-keyed to the new name, then the folder moves; if the
+ * folder cannot move the history goes back. A store that cannot be reached
+ * refuses the rename before anything moved. Where nothing records revisions
+ * this is renameWorkspace.
+ */
+export async function renameWorkspaceAsync(tenant: string, from: string, to: string): Promise<void> {
+  const lc = workspaceLifecycle();
+  if (!lc || from === to) return renameWorkspace(tenant, from, to);
+  assertSafeName(to, "workspace");
+  if (!fs.existsSync(workspaceDir(tenant, from))) throw new Error(`workspace ${from} not found`);
+  // The checks renameWorkspace makes, BEFORE the history moves: a name that is
+  // taken must never have its history replaced by this one's.
+  if (singleWorkspace()) return renameWorkspace(tenant, from, to); // throws
+  if (fs.existsSync(workspaceDir(tenant, to)) || fs.existsSync(path.join(dataRoot(), tenant, WORKSPACES, to))) throw new Error(`workspace ${to} already exists`);
+  await lc.move(tenant, from, to, () => renameWorkspace(tenant, from, to));
 }
 
 /** Set a workspace's description, in AGENTS.md, without touching anything else.
