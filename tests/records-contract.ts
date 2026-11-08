@@ -13,7 +13,7 @@ import path from "node:path";
 import { registerPlatform, resetPlatform } from "../src/platform.ts";
 import type { RecordsPort } from "../src/records.ts";
 import {
-  writeRun, readRun, readRunAsync, listRunSummariesAsync, liveRunsAsync, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
+  writeRun, writeRunAsync, readRun, readRunAsync, listRunSummariesAsync, liveRunsAsync, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
   runStamp, runUpdatedMs, readRunText, runsStartedSince, renameWorkspace, deleteWorkspace, workspaceDir,
   type RunRecord,
 } from "../src/store.ts";
@@ -104,6 +104,21 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     registerPlatform({ records: plain });
     assert.equal((await readRunAsync(T, W, "run-a"))?.id, "run-a");
     assert.deepEqual((await listRunSummariesAsync(T, W)).map((r) => r.id), ["run-b", "run-a"]);
+  });
+
+  test(t("an async run write lands like the synchronous one, replaces by id, and falls back to it without an async port"), async () => {
+    await writeRunAsync(T, W, run("run-a", "2026-11-01T10:00:00.000Z", { status: "running", finishedAt: undefined }));
+    assert.equal(readRun(T, W, "run-a")?.status, "running");
+    assert.deepEqual(liveRuns(T, W).map((r) => r.id), ["run-a"]);
+    await writeRunAsync(T, W, run("run-a", "2026-11-01T10:00:00.000Z"));
+    assert.equal(readRun(T, W, "run-a")?.status, "completed");
+    assert.deepEqual(liveRuns(T, W), [], "it ended, so it stopped being live");
+    assert.equal(listRunSummaries(T, W).length, 1, "one row per run");
+    await assert.rejects(writeRunAsync(T, W, run("../x", "2026-11-01T10:00:00.000Z")), "the same name checks as writeRun");
+    const plain = { ...subject.port, async: undefined } as RecordsPort;
+    registerPlatform({ records: plain });
+    await writeRunAsync(T, W, run("run-b", "2026-11-01T11:00:00.000Z"));
+    assert.equal(readRun(T, W, "run-b")?.id, "run-b");
   });
 
   test(t("summaries come back newest first, without replies; live runs are whole"), () => {

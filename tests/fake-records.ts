@@ -41,6 +41,7 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
       runGet: async (t, w, id) => syncPort.runGet(t, w, id),
       runSummaries: async (t, w) => syncPort.runSummaries(t, w),
       runLive: async (t, w) => syncPort.runLive(t, w),
+      runPut: async (t, w, run, summary, live) => void runs.set(k(t, w, run.id), { run: structuredClone(run), summary: structuredClone(summary), live, stamp: Date.now() * 1000 + tick++ }),
     },
     runPut: (t, w, run, summary, live) => void runs.set(k(t, w, run.id), { run: structuredClone(run), summary: structuredClone(summary), live, stamp: Date.now() * 1000 + tick++ }),
     runGet: (t, w, id) => (runs.has(k(t, w, id)) ? structuredClone(runs.get(k(t, w, id))!.run) : null),
