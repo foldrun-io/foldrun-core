@@ -24,11 +24,14 @@ export interface JournalRecord {
   tenant: string;
   workspace: string;
   id: string;
-  files: { path: string; before: null; after: string | null; base?: string | null }[];
+  files: { path: string; before: null; after: string | null; base?: string | null; handed?: string | null }[];
   by: string;
   message: string;
   at: string;
   restoredFrom?: string;
+  /** A run's copy-back: the revisions (workspace head, state head) its stage-in
+   *  started from. Each file's base is read from these, not from the folder. */
+  baseRev?: { workspace: string | null; state: string | null };
 }
 
 export interface JournalStore {
@@ -51,6 +54,11 @@ export interface JournalStore {
   sweep(tenant: string, workspace: string, olderThanMs: number): void;
   /** Remove everything of one workspace, or of the whole account. Safe to repeat. */
   drop(tenant: string, workspace?: string): void;
+  /** A workspace was renamed: its entries not held by a live queue (a dead
+   *  process's) now belong to the new name. Handles of entries that were
+   *  moved are NOT promised to stay valid: a caller holding some forgets them
+   *  first and puts them again under the new name. */
+  move(tenant: string, from: string, to: string): void;
 }
 
 /** The files: <root>/<tenant>/<workspace>/<time>-<seq>-<id>.json, tmp + rename. */
@@ -131,6 +139,14 @@ export function fsJournalStore(root: () => string): JournalStore {
     },
     drop(tenant, workspace) {
       fs.rmSync(workspace === undefined ? path.join(root(), tenant) : dirOf(tenant, workspace), { recursive: true, force: true });
+    },
+    move(tenant, from, to) {
+      const src = dirOf(tenant, from);
+      if (!fs.existsSync(src)) return;
+      const dest = dirOf(tenant, to);
+      fs.mkdirSync(dest, { recursive: true });
+      for (const n of fs.readdirSync(src)) fs.renameSync(path.join(src, n), path.join(dest, n));
+      fs.rmSync(src, { recursive: true, force: true });
     },
   };
 }
