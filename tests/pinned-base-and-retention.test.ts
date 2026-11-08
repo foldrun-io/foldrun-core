@@ -60,6 +60,9 @@ function fakePins() {
     async isPinnedBeyondRevisions(_t, kind, ref) {
       return all().some((x) => x.kind === kind && x.ref === ref && x.holder.kind !== "revision");
     },
+    async live() {
+      return { manifests: all().filter((x) => x.kind === "manifest").map((x) => x.ref), blobs: all().filter((x) => x.kind === "blob").map((x) => x.ref) };
+    },
     async guardDelete(_t, _k, _r, del) {
       await del();
       return true;
