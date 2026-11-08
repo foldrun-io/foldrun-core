@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.2.0] — 2026-11-08
+
+- feat(runner): certutil in the full image — a held Firefox trusts the egress CA (FOL-144) ([898c0dc](https://github.com/foldrun-io/foldrun-core/commit/898c0dc))
+
 ## [17.1.1] — 2026-11-08
 
 - fix(docs): every Settings → … names a tab or section that exists ([bae2351](https://github.com/foldrun-io/foldrun-core/commit/bae2351))
