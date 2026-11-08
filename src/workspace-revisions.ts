@@ -35,17 +35,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { currentTree, registerJournal, registerRevisionView, registerWorkspaceGone, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
+import { currentTree, registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
 import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath } from "./store.ts";
 import { dataRoot } from "./paths.ts";
 import { opsError, opsLog } from "./ops-log.ts";
-import { readAll, BlobNotFound } from "./blob-store.ts";
+import { readAll, BlobNotFound, type BlobSweeper } from "./blob-store.ts";
 import { fsJournalStore, type JournalStore, type JournalRecord } from "./journal-store.ts";
 import {
   blobObjectKey,
   diffManifests,
   emptyManifest,
   entryId,
+  EMPTY_MANIFEST_ID,
   MODE_EXEC,
   MODE_FILE,
   sha256Hex,
@@ -53,8 +54,9 @@ import {
   type Changes,
   type Manifest,
 } from "./manifest.ts";
-import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, PublishError, type Deps, type PublishResult } from "./publish.ts";
+import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
+import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 
 // ------------------------------------------------------------- the backend
 
@@ -71,8 +73,15 @@ export interface BackendOptions {
    *  files under <data>/.revision-journal (a laptop, Compose). A hosted install
    *  gives the database, so the journal does not depend on the shared volume. */
   journalStore?: JournalStore;
+  /** How many `state/` checkpoints to keep, and for how long (state-retention.ts).
+   *  Unset: none is ever pruned. */
+  stateRetention?: () => StateRetention;
+  /** How often a workspace's checkpoints are looked at after a commit (ms). */
+  retentionEveryMs?: number;
 }
 let gate: { journal: () => boolean; read: () => boolean } = { journal: () => false, read: () => false };
+let retention: (() => StateRetention) | null = null;
+let retentionEvery = 10 * 60_000;
 /** The legacy place: files on the volume. Always replayed at boot (and then
  *  empty), whatever new entries are written to. */
 const legacyFiles = fsJournalStore(() => journalRoot());
@@ -85,8 +94,11 @@ export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {})
   backend = deps;
   gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
   primary = opts.journalStore ?? null;
+  retention = opts.stateRetention ?? null;
+  retentionEvery = opts.retentionEveryMs ?? 10 * 60_000;
   registerJournal(deps ? journalChange : null);
-  registerWorkspaceGone(deps ? (t, w) => dropJournal(t, w) : null);
+  registerWorkspaceGone(deps ? (t, w) => goneNow(t, w) : null);
+  registerWorkspaceLifecycle(deps ? { drop: dropWorkspaceRevisions, move: moveWorkspaceRevisions, moved: movedNow } : null);
   registerRevisionView(deps ? view : null);
 }
 export const revisionBackend = (): Deps | null => backend;
@@ -133,7 +145,7 @@ export function setBlobCache(c: BlobCache | null): void {
  *  writer STARTED from (null: the path did not exist), so the commit can tell
  *  a concurrent writer apart (same path = conflict, disjoint paths replay). A
  *  dashboard save has none: its base is whatever the head holds. */
-type EntryFile = RevisionFile & { base?: string | null };
+type EntryFile = RevisionFile & { base?: string | null; handed?: string | null };
 interface Entry {
   id: string;
   files: EntryFile[];
@@ -142,6 +154,8 @@ interface Entry {
   at: string;
   /** The revision this change brings back (a restore), when it is one. */
   restoredFrom?: string;
+  /** A run's copy-back: the revisions its stage-in started from (pinRunBase). */
+  baseRev?: RunBase;
   /** Where it was written down, and its handle there (when it was). */
   store?: JournalStore;
   handle?: string;
@@ -155,6 +169,10 @@ const chains = new Map<string, Promise<unknown>>();
 const marked = new Set<string>(); // overflowed or dropped: needs reconcileWorkspace
 const verified = new Set<string>(); // reconciled once in this process
 const retryAt = new Map<string, number>();
+const wantPrune = new Set<string>(); // a state checkpoint was committed since the last look
+const prunedAt = new Map<string, number>();
+/** Workspaces whose commits are held while a delete or rename runs. */
+const frozen = new Map<string, Promise<void>>();
 const restoring = new Map<string, string>();
 const key = (tenant: string, workspace: string) => `${tenant}\0${workspace}`;
 const split = (k: string): [string, string] => k.split("\0") as [string, string];
@@ -166,7 +184,7 @@ const journalRoot = () => path.join(dataRoot(), ".revision-journal");
 function persist(tenant: string, workspace: string, e: Entry): void {
   const store = entryStore();
   try {
-    e.handle = store.put({ v: 1, tenant, workspace, id: e.id, files: e.files as JournalRecord["files"], by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom });
+    e.handle = store.put({ v: 1, tenant, workspace, id: e.id, files: e.files as JournalRecord["files"], by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev });
     e.store = store;
   } catch (err) {
     opsError("revisions.journal_not_persisted", err, { tenant, workspace, store: store.kind }, "warn");
@@ -218,6 +236,10 @@ export interface StepWrite {
   path: string;
   base: string | null;
   after: Buffer;
+  /** The sha of what the step was HANDED (null: no such file; undefined: not
+   *  known, or the folder was merged with another writer's change). The head is
+   *  held to the pinned revision's copy of the path only where the two agree. */
+  handed?: string | null;
 }
 
 /** A step's file in the journal is held to this size; a bigger one is left to
@@ -256,7 +278,7 @@ export function recordStepOutputs(
   tenant: string,
   workspace: string,
   writes: StepWrite[],
-  meta: { runId?: string; step?: string | number; by?: string },
+  meta: { runId?: string; step?: string | number; by?: string; base?: RunBase | null },
 ): number {
   if (!backend || workspace === "@library") return 0;
   const k = key(tenant, workspace);
@@ -279,7 +301,7 @@ export function recordStepOutputs(
       continue;
     }
     total += w.after.length;
-    files.push({ path: w.path, before: null, after: text, base: w.base });
+    files.push({ path: w.path, before: null, after: text, base: w.base, ...(w.handed !== undefined ? { handed: w.handed } : {}) });
   }
   if (!files.length) return 0;
   const idSource = meta.runId ? `${meta.runId}\0${meta.step ?? ""}` : crypto.randomBytes(12).toString("hex");
@@ -289,6 +311,7 @@ export function recordStepOutputs(
     by: meta.by ?? (meta.runId ? `run:${meta.runId}` : "run"),
     message: meta.runId ? `run ${meta.runId}${meta.step !== undefined ? ` step ${meta.step}` : ""}` : "run output",
     at: new Date().toISOString(),
+    baseRev: meta.base ?? undefined,
   });
   return files.length;
 }
@@ -313,7 +336,14 @@ export function pendingRevisions(): number {
 }
 
 function drain(k: string): Promise<void> {
-  const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => drainOne(k));
+  // A delete or a rename of this workspace is in progress: nothing commits
+  // until it is done (the gate is read now, so a drain started BEFORE it is
+  // never behind it — that is what lets the lifecycle wait for those).
+  const gate = frozen.get(k);
+  const next = (chains.get(k) ?? Promise.resolve())
+    .catch(() => {})
+    .then(() => gate)
+    .then(() => drainOne(k));
   chains.set(k, next);
   return next;
 }
@@ -331,7 +361,8 @@ async function drainOne(k: string): Promise<void> {
       continue;
     }
     try {
-      await commitEntry(backend, tenant, workspace, entry);
+      const res = await commitEntry(backend, tenant, workspace, entry);
+      if (res?.status === "committed" && res.stateRevision) wantPrune.add(k);
       q.shift();
       forget(tenant, workspace, entry);
       retryAt.delete(k);
@@ -357,6 +388,7 @@ async function drainOne(k: string): Promise<void> {
     }
   }
   if (q && !q.length) queues.delete(k);
+  if (wantPrune.delete(k)) await pruneIfDue(tenant, workspace);
   // Once per process per workspace, with nothing queued: the folder is the
   // truth, so a head that disagrees with it (a crash lost an entry, the
   // journal was off for a while, a run wrote the folder directly) is brought
@@ -398,6 +430,9 @@ export function resetJournalForTests(): void {
   verified.clear();
   retryAt.clear();
   restoring.clear();
+  wantPrune.clear();
+  prunedAt.clear();
+  frozen.clear();
 }
 
 /** An account is gone (or one workspace is): forget its queued changes and
@@ -422,6 +457,304 @@ export function dropJournal(tenant: string, workspace?: string): void {
       opsError("revisions.journal_not_dropped", err, { tenant, workspace, store: st.kind }, "warn");
     }
   }
+}
+
+// ------------------------------------------------------------- delete and rename
+//
+// A workspace is named by its folder, and the history is kept under that name.
+// Until 8 Nov 2026 a delete left the heads and revisions where they were and a
+// rename left them under the old name: a NEW workspace given either name then
+// started on the old one's head — its history, and through a restore or a
+// read from the head, its files. Now both follow the folder.
+
+/** Hold the commits of these workspaces until the returned function is called.
+ *  Waits for an earlier hold on the same workspace first. */
+async function freeze(keys: string[]): Promise<() => void> {
+  for (const k of keys) while (frozen.has(k)) await frozen.get(k)!.catch(() => {});
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  for (const k of keys) frozen.set(k, gate);
+  return () => {
+    for (const k of keys) if (frozen.get(k) === gate) frozen.delete(k);
+    release();
+    for (const k of keys) if (queues.get(k)?.length) void drain(k);
+  };
+}
+
+const lifecycleBusy = new Set<string>(); // keys a lifecycle call is handling (the sync hooks stay out of its way)
+
+/** What the sync hooks started and has not finished (tests, and a process that is ending). */
+const background = new Set<Promise<unknown>>();
+export async function settleLifecycle(): Promise<void> {
+  while (background.size) await Promise.allSettled([...background]);
+}
+function inBackground(p: Promise<unknown>): void {
+  const q = p.finally(() => background.delete(q));
+  background.add(q);
+}
+/** Try again a few times, then say so: the folder is gone and cannot be asked. */
+async function persistently(fn: () => Promise<void>, giveUp: (err: unknown) => void): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= 4) return giveUp(err);
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+    }
+  }
+}
+
+/** The sync hook: a folder was removed by a caller that did not wait for us. */
+function goneNow(tenant: string, workspace: string): void {
+  dropJournal(tenant, workspace);
+  if (lifecycleBusy.has(key(tenant, workspace))) return;
+  inBackground(
+    persistently(
+      () => dropWorkspaceRevisions(tenant, workspace, () => {}),
+      (err) => opsError("revisions.drop_failed", err, { tenant, workspace }),
+    ),
+  );
+}
+
+/**
+ * A workspace is being deleted: its queued changes, its journal entries and
+ * its history (both heads, every revision, the operations, the pins on their
+ * manifests) go, so that nothing of it can be seen by, or committed under, the
+ * next workspace of that name. `remove` is the folder's own removal. Order:
+ * hold the commits; drop; remove the folder; drop again for whatever slipped
+ * in between. A store that cannot be reached throws BEFORE `remove` runs.
+ */
+export async function dropWorkspaceRevisions(tenant: string, workspace: string, remove?: () => void): Promise<void> {
+  const deps = backend;
+  if (!deps || workspace === "@library") {
+    remove?.();
+    return;
+  }
+  const k = key(tenant, workspace);
+  lifecycleBusy.add(k);
+  const before = chains.get(k);
+  const release = await freeze([k]);
+  try {
+    dropJournal(tenant, workspace);
+    await before?.catch(() => {});
+    try {
+      await deps.revisions.drop({ tenant, workspace });
+    } catch (err) {
+      // Nothing was removed and the workspace stays: whatever was queued is lost to the queue, so it is reconciled from the folder.
+      marked.add(k);
+      verified.delete(k);
+      throw err;
+    }
+    remove?.();
+    dropJournal(tenant, workspace);
+    await deps.revisions.drop({ tenant, workspace });
+    marked.delete(k);
+    verified.delete(k);
+  } finally {
+    lifecycleBusy.delete(k);
+    release();
+  }
+}
+
+/** An account is gone: its journal, its history and the blobs under its name.
+ *  Throws when the store cannot be reached (the caller says so; nothing of the
+ *  rest depends on it). */
+export async function dropTenantRevisions(tenant: string): Promise<void> {
+  dropJournal(tenant);
+  const deps = backend;
+  if (!deps) return;
+  const mine = [...chains.keys()].filter((k) => split(k)[0] === tenant);
+  await Promise.all(mine.map((k) => chains.get(k)!.catch(() => {})));
+  for (const k of mine) {
+    chains.delete(k);
+    marked.delete(k);
+    verified.delete(k);
+  }
+  await deps.revisions.drop({ tenant });
+  await (deps.blobs as Partial<BlobSweeper>).purgeTenant?.(tenant);
+}
+
+/** The sync hook: a folder was renamed by a caller that did not wait for us. */
+function movedNow(tenant: string, from: string, to: string): void {
+  if (lifecycleBusy.has(key(tenant, from)) || lifecycleBusy.has(key(tenant, to))) return;
+  inBackground(moveWorkspaceRevisions(tenant, from, to).catch((err) => opsError("revisions.move_failed", err, { tenant, workspace: from, to })));
+}
+
+/**
+ * A workspace is being renamed: its queued changes wait, its history is
+ * re-keyed to the new name (whatever the new name held belonged to a workspace
+ * that no longer exists), `rename` moves the folder, and the queue and the
+ * journal entries follow. If the folder cannot move, the history goes back. A
+ * store that cannot be reached throws BEFORE `rename` runs.
+ */
+export async function moveWorkspaceRevisions(tenant: string, from: string, to: string, rename?: () => void): Promise<void> {
+  const deps = backend;
+  if (!deps || from === "@library" || to === "@library") {
+    rename?.();
+    return;
+  }
+  const ka = key(tenant, from);
+  const kb = key(tenant, to);
+  lifecycleBusy.add(ka);
+  lifecycleBusy.add(kb);
+  const befores = [chains.get(ka), chains.get(kb)];
+  const release = await freeze([ka, kb].sort());
+  try {
+    await Promise.all(befores.map((b) => b?.catch(() => {})));
+    // Nothing is queued for the new name (no folder has it); what a dead
+    // process left for it is stale.
+    dropJournal(tenant, to);
+    await deps.revisions.move(tenant, from, to);
+    if (rename) {
+      try {
+        rename();
+      } catch (err) {
+        await deps.revisions.move(tenant, to, from).catch((e) => opsError("revisions.move_back_failed", e, { tenant, workspace: from, to }));
+        throw err;
+      }
+    }
+    rekeyQueue(tenant, from, to);
+  } finally {
+    lifecycleBusy.delete(ka);
+    lifecycleBusy.delete(kb);
+    release();
+  }
+}
+
+/** Queued changes and journal entries of `from` become `to`'s. */
+function rekeyQueue(tenant: string, from: string, to: string): void {
+  const ka = key(tenant, from);
+  const kb = key(tenant, to);
+  const q = queues.get(ka) ?? [];
+  for (const e of q) forget(tenant, from, e); // the old handles
+  for (const st of journalStores()) {
+    try {
+      st.move(tenant, from, to); // entries no live queue holds (a dead process's)
+    } catch (err) {
+      opsError("revisions.journal_not_moved", err, { tenant, workspace: from, to, store: st.kind }, "warn");
+    }
+  }
+  const moved = q.map((e) => ({ ...e, store: undefined, handle: undefined }));
+  for (const e of moved) persist(tenant, to, e);
+  q.length = 0; // a drain that holds the old array has nothing left
+  queues.delete(ka);
+  if (moved.length) queues.set(kb, moved);
+  if (marked.delete(ka)) marked.add(kb);
+  verified.delete(ka);
+  verified.delete(kb);
+  retryAt.delete(ka);
+  retryAt.delete(kb);
+}
+
+// ------------------------------------------------------------- a run's pinned base
+
+/** The revisions a run's stage-in started from, one per head (null: that head
+ *  had no revision yet). */
+export interface RunBase {
+  workspace: string | null;
+  state: string | null;
+}
+/** A run's pin on the manifests of its base lasts this long without a renewal. */
+const RUN_PIN_TTL_MS = 2 * 60 * 60_000;
+
+/**
+ * FOL-126 fixes (8 Nov). At stage-in: record which revisions the run starts
+ * from and pin their manifests (holder kind `run`, a lease renewed while the
+ * step lives), so retention and the sweeper leave them alone. The copy-back is
+ * then published against THIS base: a path the head changed since is a
+ * conflict, not an overwrite, whatever the folder holds by then.
+ *
+ * The queue is flushed first, so the head is not behind a save made a moment
+ * ago (a head behind the folder would make every such path look conflicting).
+ * Null — and the caller carries on as before, with the folder as the base —
+ * when revisions are off, there is no head yet (the baseline will hold the
+ * whole tree), changes are still queued (the store is down), or the pin cannot
+ * be taken.
+ */
+export async function pinRunBase(tenant: string, workspace: string, holder: string): Promise<{ base: RunBase; release(): Promise<void> } | null> {
+  const deps = backend;
+  if (!deps || !journalOn() || workspace === "@library") return null;
+  try {
+    const { pending } = await flushRevisions({ tenant, workspace });
+    if (pending) return null;
+    const heads = await headsOf(deps, { tenant, workspace });
+    if (!heads.workspace && !heads.state) return null;
+    return await holdRunBase(deps, tenant, { workspace: heads.workspace?.id ?? null, state: heads.state?.id ?? null }, heads, holder);
+  } catch (err) {
+    opsError("revisions.run_base_failed", err, { tenant, workspace }, "warn");
+    return null;
+  }
+}
+
+/** The same pin for a base that was recorded earlier (a driver that took over a
+ *  step): null when either revision is gone. */
+export async function repinRunBase(tenant: string, workspace: string, base: RunBase, holder: string): Promise<{ base: RunBase; release(): Promise<void> } | null> {
+  const deps = backend;
+  if (!deps || !journalOn()) return null;
+  try {
+    const w = base.workspace ? await deps.revisions.revision({ tenant, workspace, scope: "workspace" }, base.workspace) : null;
+    const s = base.state ? await deps.revisions.revision({ tenant, workspace, scope: "state" }, base.state) : null;
+    if ((base.workspace && !w) || (base.state && !s)) return null;
+    return await holdRunBase(deps, tenant, base, { workspace: w, state: s }, holder);
+  } catch (err) {
+    opsError("revisions.run_base_failed", err, { tenant, workspace }, "warn");
+    return null;
+  }
+}
+
+async function holdRunBase(deps: Deps, tenant: string, base: RunBase, revs: Heads, holder: string): Promise<{ base: RunBase; release(): Promise<void> } | null> {
+  const pins = deps.pins;
+  const pinHolder = { kind: "run" as const, id: holder.slice(0, 200) };
+  let timer: ReturnType<typeof setInterval> | null = null;
+  if (pins) {
+    const ids = [revs.workspace?.authored, revs.state?.state].filter((m): m is string => !!m && m !== EMPTY_MANIFEST_ID);
+    await pins.pinManifests(tenant, ids, pinHolder, { ttlMs: RUN_PIN_TTL_MS });
+    timer = setInterval(() => void pins.renew(tenant, pinHolder, RUN_PIN_TTL_MS).catch(() => {}), RUN_PIN_TTL_MS / 4);
+    timer.unref?.();
+  }
+  let released = false;
+  return {
+    base,
+    async release() {
+      if (released) return;
+      released = true;
+      if (timer) clearInterval(timer);
+      await pins?.release(tenant, pinHolder).catch((err) => opsError("revisions.run_pin_not_released", err, { tenant }, "warn"));
+    },
+  };
+}
+
+// ------------------------------------------------------------- state retention
+
+/** Look at one workspace's `state/` checkpoints now (the host's window). */
+export async function pruneStateNow(tenant: string, workspace: string): Promise<{ pruned: number; kept: number; held: number } | null> {
+  const deps = backend;
+  if (!deps || !retention || !journalOn()) return null;
+  const policy = safe2(retention);
+  if (!policy) return null;
+  try {
+    const res = await pruneStateRevisions(deps, { tenant, workspace }, policy);
+    prunedAt.set(key(tenant, workspace), Date.now());
+    if (res.pruned) opsLog("info", "revisions.state_pruned", { tenant, workspace, pruned: res.pruned, kept: res.kept, held: res.held });
+    return res;
+  } catch (err) {
+    opsError("revisions.state_prune_failed", err, { tenant, workspace }, "warn");
+    return null;
+  }
+}
+const safe2 = (fn: () => StateRetention): StateRetention | null => {
+  try {
+    return fn();
+  } catch {
+    return null;
+  }
+};
+
+/** After a state commit: look, but not on every one (a checkpoint per step). */
+async function pruneIfDue(tenant: string, workspace: string): Promise<void> {
+  const last = prunedAt.get(key(tenant, workspace)) ?? 0;
+  if (Date.now() - last < retentionEvery) return;
+  await pruneStateNow(tenant, workspace);
 }
 
 /** Does this workspace need a reconcile (its journal overflowed)? */
@@ -467,7 +800,7 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
           if (minAge > 0 && ageMs < minAge) continue;
           const e = store.read(tenant, workspace, handle);
           if (e.v !== 1 || !Array.isArray(e.files)) throw new Error("not a journal entry");
-          found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, store, handle });
+          found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev, store, handle });
         } catch (err) {
           // a torn or foreign entry: set it aside, never replay it
           opsError("revisions.journal_file_unreadable", err, { tenant, workspace }, "warn");
@@ -510,6 +843,7 @@ export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {
         verified.add(k);
         out.checked++;
         if (res && res.status === "committed") out.repaired++;
+        await pruneStateNow(tenant, w.name);
       } catch (err) {
         out.failed++;
         opsError("revisions.reconcile_failed", err, { tenant, workspace: w.name }, "warn");
@@ -542,6 +876,27 @@ function pinnedBase(sha: string | null, was: { sha: string; mode: number } | und
   return entryId({ sha, mode: MODE_FILE });
 }
 
+/** The manifests a run's stage-in started from, per side; a side whose revision
+ *  is gone (or that had no head) is absent and the caller falls back. */
+async function baseManifests(deps: Deps, tenant: string, workspace: string, base?: RunBase): Promise<{ authored?: Manifest; state?: Manifest }> {
+  const out: { authored?: Manifest; state?: Manifest } = {};
+  if (!base) return out;
+  try {
+    if (base.workspace) {
+      const r = await deps.revisions.revision({ tenant, workspace, scope: "workspace" }, base.workspace);
+      if (r) out.authored = await loadManifest(deps, tenant, r.authored);
+    }
+    if (base.state) {
+      const r = await deps.revisions.revision({ tenant, workspace, scope: "state" }, base.state);
+      if (r) out.state = await loadManifest(deps, tenant, r.state);
+    }
+  } catch (err) {
+    opsError("revisions.base_unreadable", err, { tenant, workspace }, "warn");
+    return {};
+  }
+  return out;
+}
+
 /** One journal entry → one publish. The first commit of a workspace is its
  *  whole tree. */
 async function commitEntry(deps: Deps, tenant: string, workspace: string, entry: Entry): Promise<PublishResult | null> {
@@ -552,14 +907,26 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   const changes: Changes = {};
   const baseline: { authored: boolean; state: boolean } = { authored: !heads.workspace, state: !heads.state };
 
-  const put = (rel: string, text: string, side: "authored" | "state", pinned?: string | null) => {
+  // A run's copy-back is pinned to the revisions its stage-in started from: a
+  // path's base is what THAT revision held, so a head that moved since (another
+  // run, a person) is a conflict on the path, and disjoint paths replay. Where
+  // the revision cannot be read any more, the folder's sha stands in.
+  const fromRev = await baseManifests(deps, tenant, workspace, entry.baseRev);
+
+  const put = (rel: string, text: string, side: "authored" | "state", pinned?: string | null, handed?: string | null) => {
     const buf = Buffer.from(text, "utf8");
     const sha = sha256Hex(buf);
     bytes.set(sha, buf);
     const was = head[side].files[rel];
     const mode = modeOf(tenant, workspace, rel);
     if (was && was.sha === sha && was.mode === mode) return; // the head already holds it
-    changes[rel] = { op: "put", base: pinned === undefined ? (was ? entryId(was) : null) : pinnedBase(pinned, was), sha, size: buf.length, mode };
+    // The pinned revision's copy of the path is the base only if it is what the
+    // step was handed; otherwise (handed from the folder, which was ahead of or
+    // different from the head) the folder's sha is the honest base.
+    const atRev = fromRev[side]?.files[rel];
+    const usable = fromRev[side] !== undefined && handed !== undefined && handed === (atRev ? atRev.sha : null);
+    const pinnedTo = pinned === undefined ? undefined : usable ? (atRev ? entryId(atRev) : null) : pinnedBase(pinned, was);
+    changes[rel] = { op: "put", base: pinned === undefined ? (was ? entryId(was) : null) : pinnedTo!, sha, size: buf.length, mode };
   };
 
   if (baseline.authored || baseline.state) {
@@ -581,7 +948,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     if (f.after === null) {
       if (was) changes[f.path] = { op: "delete", base: entryId(was) };
     } else {
-      put(f.path, f.after, side, f.base);
+      put(f.path, f.after, side, f.base, f.handed);
     }
   }
   if (!Object.keys(changes).length) return null;
