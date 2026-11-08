@@ -15,7 +15,7 @@ import path from "node:path";
 import { workspaceDir } from "../src/store.ts";
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRevisionStore } from "../src/revision-store.ts";
-import { setRevisionBackend, resetJournalForTests, flushRevisions, readAtHead, recordStepOutputs, pendingRevisions, needsReconcile } from "../src/workspace-revisions.ts";
+import { setRevisionBackend, resetJournalForTests, flushRevisions, readAtHead, recordStepOutputs, pendingRevisions, needsReconcile, settleLifecycle } from "../src/workspace-revisions.ts";
 import { applyContainerChanges } from "../src/run-container.ts";
 import { headsOf, manifestsAt, type Deps } from "../src/publish.ts";
 
@@ -195,7 +195,10 @@ test("deleting a workspace removes its queued changes and journal files, and not
   const { recoverJournal } = await import("../src/workspace-revisions.ts");
   assert.deepEqual(await recoverJournal({ minAgeMs: 0 }), { entries: 0, workspaces: 0 });
   await flushRevisions();
-  assert.equal((await headsOf(deps, { tenant: T, workspace: W })).workspace?.id, headBefore, "no revision was made for the deleted workspace");
+  await settleLifecycle();
+  // The delete also took the history (8 Nov): no head at all, and in particular no new revision.
+  assert.equal((await headsOf(deps, { tenant: T, workspace: W })).workspace, null, "no revision was made for the deleted workspace, and its history is gone");
+  assert.ok(headBefore);
 });
 
 test("a commit already waiting when the workspace is deleted does not publish the rest of the queue", async () => {
@@ -210,7 +213,9 @@ test("a commit already waiting when the workspace is deleted does not publish th
   state.down = false; // back up: the retry timer and a later drain find nothing
   await flushRevisions();
   await new Promise((r) => setTimeout(r, 1200)); // past the first retry delay
-  assert.equal((await headsOf(deps, { tenant: T, workspace: W })).workspace?.id, headBefore);
+  await settleLifecycle();
+  assert.equal((await headsOf(deps, { tenant: T, workspace: W })).workspace, null, "nothing was published after the delete, and the history went with it");
+  assert.ok(headBefore);
   assert.equal(pendingRevisions(), 0);
 });
 
