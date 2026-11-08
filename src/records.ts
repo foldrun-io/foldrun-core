@@ -29,6 +29,11 @@ export interface RecordsPortAsync {
   runGet(tenant: string, workspace: string, id: string): Promise<RunRecord | null>;
   runSummaries(tenant: string, workspace: string): Promise<RunSummary[]>;
   runLive(tenant: string, workspace: string): Promise<RunRecord[]>;
+  /** The write half, for a caller that is async anyway (FOL-126 phase 4):
+   *  the same upsert as the synchronous runPut, honouring the fence of the
+   *  lock its async context holds, with the event loop free while it waits.
+   *  Optional like the reads: a port without it is written through runPut. */
+  runPut?(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): Promise<void>;
 }
 
 export interface RecordsPort {
