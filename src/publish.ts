@@ -81,6 +81,9 @@ export interface Deps {
   revisions: RevisionStore;
   /** Durable pins for GC. Unset = none (an install with no database has no sweeper). */
   pins?: BlobPins;
+  /** Does this workspace exist right now? Handed to every commit as its guard
+   *  (revision-store.ts CommitInput.guard). Unset: commits are not guarded. */
+  workspaceExists?: (ws: WorkspaceRef) => boolean | Promise<boolean>;
 }
 
 /** A revision (or a publish) names a blob the store does not have. Explicit,
@@ -98,8 +101,8 @@ export class BlobMissing extends Error {
 }
 
 export class PublishError extends Error {
-  readonly code: "too_many_replays" | "bad_change";
-  constructor(message: string, code: "too_many_replays" | "bad_change") {
+  readonly code: "too_many_replays" | "bad_change" | "gone";
+  constructor(message: string, code: "too_many_replays" | "bad_change" | "gone") {
     super(message);
     this.name = "PublishError";
     this.code = code;
@@ -352,6 +355,8 @@ export function stateOpId(opId: string): string {
 
 const RANK = { committed: 2, duplicate: 1, unchanged: 0 } as const;
 
+const guardOf = (deps: Deps, ws: WorkspaceRef) => (deps.workspaceExists ? { guard: () => deps.workspaceExists!({ tenant: ws.tenant, workspace: ws.workspace }) } : {});
+
 /** One head's half of a publish. */
 async function publishScope(deps: Deps, input: PublishInput, scope: Scope, changes: Changes, opId: string): Promise<PublishResult> {
   const ws: WorkspaceRef = { ...input.ws, scope };
@@ -394,7 +399,9 @@ async function publishScope(deps: Deps, input: PublishInput, scope: Scope, chang
       message: input.message,
       conflicts: next.conflicts.map((c) => c.path),
       ...(input.restoredFrom && side === "authored" ? { restoredFrom: input.restoredFrom } : {}),
+      ...guardOf(deps, input.ws),
     });
+    if (res.status === "gone") throw new PublishError(`${input.ws.workspace} does not exist (any more)`, "gone");
     if (res.status === "committed") return { status: "committed", revision: res.revision, conflicts: next.conflicts };
     if (res.status === "duplicate") return { status: "duplicate", revision: res.revision, conflicts: [] };
     // stale: the head moved. Fold again onto it.
@@ -486,7 +493,9 @@ async function restoreScope(deps: Deps, input: RestoreInput, scope: Scope, toId:
       by: input.by,
       message: input.message ?? `restore ${target.id}`,
       restoredFrom: target.id,
+      ...guardOf(deps, input.ws),
     });
+    if (res.status === "gone") throw new PublishError(`${input.ws.workspace} does not exist (any more)`, "gone");
     if (res.status === "committed") return { status: "committed", revision: res.revision, conflicts: [] };
     if (res.status === "duplicate") return { status: "duplicate", revision: res.revision, conflicts: [] };
   }
