@@ -102,7 +102,7 @@ import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
 import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
-import { BROWSER_CONFINED_ENV, browseNetworkLine, browseVerdict } from "./browse-egress.ts";
+import { BROWSER_CONFINED_ENV, VENDOR_DOOR_ENV, VENDOR_DOOR_HOSTS, browseNetworkLine, browseVerdict, vendorDoorFor } from "./browse-egress.ts";
 import { SEARCH_DOOR_ENV, searchDoorWanted, searchProvided } from "./search-egress.ts";
 import { materializeFileSecrets, cleanupFileSecrets } from "./secret-files.ts";
 import { buildApiTools, secretsUsedByApi } from "./api-tools.ts";
@@ -2977,6 +2977,19 @@ async function runStep(
       // Secrets bound to sites in the vault: filled by the proxy for those
       // sites alone, never put in the sandbox (egress.ts).
       const boundSites = secretSites(tenant, Object.keys(liveSecrets), workspaceName);
+      // FOL-145: a vendor browser the install holds through its vendor door —
+      // the vendor's key bound to the vendor's hosts (so it is a name in the
+      // sandbox and the proxy fills it, under the vendor's session rules),
+      // and the door on the grant. Only where the install lists the vendor.
+      // Only for a step that may browse: a step whose web block only fetches
+      // or searches keeps its vendor calls as they were (Codex review).
+      const mayBrowse = scriptSpecs.some((sc) => sc.name === "web") && (!web.actions || web.actions.includes("browse"));
+      const vendorDoor = mayBrowse ? vendorDoorFor(clockEnv.FOLDRUN_BROWSER_VENDOR) : null;
+      if (vendorDoor) {
+        const key = clockEnv.FOLDRUN_BROWSER_SECRET;
+        if (key && key in liveSecrets) boundSites[key] = [...new Set([...(boundSites[key] ?? []), ...VENDOR_DOOR_HOSTS[vendorDoor.vendor]!])];
+        grant.vendorDoor = vendorDoor;
+      }
       const network = resolveNetwork({
         account: readAgentsMd(accountDir(tenant))?.data?.network,
         workspace: readAgentsMd(workspaceRootOf(agentDir))?.data?.network,
@@ -3048,6 +3061,7 @@ async function runStep(
             enforce: lease.enforce === true,
             vendor: clockEnv.FOLDRUN_BROWSER_VENDOR,
             confines: !!isolation && platform.confinesBrowsing?.(isolation) === true,
+            door: !!grant.vendorDoor,
           })
         : null;
       if (lease && browse?.kind === "refuse") {
@@ -3091,10 +3105,10 @@ async function runStep(
       // credential as launch options instead (FOLDRUN_BROWSER_CONFINED).
       // Every other browsing step is open by default, and its bound secrets
       // materialise as they did before the door.
-      const forward = lease?.proxy && (!browses || browse?.kind === "hosted") ? lease : null;
+      const forward = lease?.proxy && (!browses || browse?.kind === "hosted" || browse?.kind === "vendor") ? lease : null;
       // A browsing step on an install with the door says whether it is held
       // to its list, and which tier its browser falls in (browse-egress.ts).
-      push("info", browse ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR, { hosted: browse.kind === "hosted" }) : networkLine(network, forward ? forward.enforce === true : null));
+      push("info", browse ? browseNetworkLine(network, clockEnv.FOLDRUN_BROWSER_VENDOR, { hosted: browse.kind === "hosted", vendorDoor: browse.kind === "vendor" }) : networkLine(network, forward ? forward.enforce === true : null));
       // Web search under a held list (FOL-128, search-egress.ts): the
       // account's engine through the proxy's search door, for the actions
       // our engine answers — decided here, from this step's own config and
@@ -3347,6 +3361,9 @@ async function runStep(
             // cannot go through it, and the platform starts no account
             // browser pod for it (browse-egress.ts, FOL-110 phase 3).
             ...(browse?.kind === "hosted" ? { [BROWSER_CONFINED_ENV]: "1" } : {}),
+            // FOL-145: its vendor's calls and remote-control socket go through
+            // the egress proxy's /e/ door, under the vendor's session rules.
+            ...(browse?.kind === "vendor" ? { [VENDOR_DOOR_ENV]: "1" } : {}),
             // The search door's address, for the driver: a step it walls
             // searches there, with the tool told it is held (search-egress.ts).
             ...(grant.search && lease?.search ? { [SEARCH_DOOR_ENV]: lease.search } : {}),
