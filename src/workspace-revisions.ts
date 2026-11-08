@@ -35,11 +35,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { currentTree, registerJournal, registerRevisionView, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
+import { currentTree, registerJournal, registerRevisionView, registerWorkspaceGone, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
 import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath } from "./store.ts";
 import { dataRoot } from "./paths.ts";
 import { opsError, opsLog } from "./ops-log.ts";
 import { readAll, BlobNotFound } from "./blob-store.ts";
+import { fsJournalStore, type JournalStore, type JournalRecord } from "./journal-store.ts";
 import {
   blobObjectKey,
   diffManifests,
@@ -66,14 +67,26 @@ let backend: Deps | null = null;
 export interface BackendOptions {
   journal?: () => boolean;
   read?: () => boolean;
+  /** Where the journal's entries are written down (journal-store.ts). Unset:
+   *  files under <data>/.revision-journal (a laptop, Compose). A hosted install
+   *  gives the database, so the journal does not depend on the shared volume. */
+  journalStore?: JournalStore;
 }
-let gate: Required<BackendOptions> = { journal: () => false, read: () => false };
+let gate: { journal: () => boolean; read: () => boolean } = { journal: () => false, read: () => false };
+/** The legacy place: files on the volume. Always replayed at boot (and then
+ *  empty), whatever new entries are written to. */
+const legacyFiles = fsJournalStore(() => journalRoot());
+let primary: JournalStore | null = null;
+const journalStores = (): JournalStore[] => (primary && primary !== legacyFiles ? [primary, legacyFiles] : [legacyFiles]);
+const entryStore = (): JournalStore => primary ?? legacyFiles;
 
 /** Where revisions live, or null (no journal, nothing changes). */
 export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {}): void {
   backend = deps;
   gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
+  primary = opts.journalStore ?? null;
   registerJournal(deps ? journalChange : null);
+  registerWorkspaceGone(deps ? (t, w) => dropJournal(t, w) : null);
   registerRevisionView(deps ? view : null);
 }
 export const revisionBackend = (): Deps | null => backend;
@@ -116,16 +129,22 @@ export function setBlobCache(c: BlobCache | null): void {
 // Cost: while the volume is the working copy it is also where the journal is;
 // when the volume is retired (phase 8) the journal moves to a table.
 
+/** A journal file. `base` is set by a run's copy-back: the sha of what the
+ *  writer STARTED from (null: the path did not exist), so the commit can tell
+ *  a concurrent writer apart (same path = conflict, disjoint paths replay). A
+ *  dashboard save has none: its base is whatever the head holds. */
+type EntryFile = RevisionFile & { base?: string | null };
 interface Entry {
   id: string;
-  files: RevisionFile[];
+  files: EntryFile[];
   by: string;
   message: string;
   at: string;
   /** The revision this change brings back (a restore), when it is one. */
   restoredFrom?: string;
-  /** Its file in the journal directory, when it was written. */
-  file?: string;
+  /** Where it was written down, and its handle there (when it was). */
+  store?: JournalStore;
+  handle?: string;
 }
 const MAX_QUEUED = 2000;
 /** A journal file this old, that no queue of this process holds, was left by a
@@ -141,32 +160,25 @@ const key = (tenant: string, workspace: string) => `${tenant}\0${workspace}`;
 const split = (k: string): [string, string] => k.split("\0") as [string, string];
 
 const journalRoot = () => path.join(dataRoot(), ".revision-journal");
-const journalDir = (tenant: string, workspace: string) => path.join(journalRoot(), tenant, workspace);
-let fileSeq = 0;
 
-/** Write the entry down, atomically. A volume that refuses leaves the entry
- *  in memory only (said once per failure), as the journal always was. */
+/** Write the entry down, atomically. A store that refuses leaves the entry in
+ *  memory only (said once per failure), as the journal always was. */
 function persist(tenant: string, workspace: string, e: Entry): void {
+  const store = entryStore();
   try {
-    const dir = journalDir(tenant, workspace);
-    fs.mkdirSync(dir, { recursive: true });
-    const name = `${Date.now().toString().padStart(14, "0")}-${String(fileSeq++ % 1_000_000).padStart(6, "0")}-${e.id}.json`;
-    const file = path.join(dir, name);
-    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, tenant, workspace, id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom }));
-    fs.renameSync(`${file}.tmp`, file);
-    e.file = file;
+    e.handle = store.put({ v: 1, tenant, workspace, id: e.id, files: e.files as JournalRecord["files"], by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom });
+    e.store = store;
   } catch (err) {
-    opsError("revisions.journal_not_persisted", err, { tenant, workspace }, "warn");
+    opsError("revisions.journal_not_persisted", err, { tenant, workspace, store: store.kind }, "warn");
   }
 }
 
 function forget(tenant: string, workspace: string, e: Entry): void {
-  if (!e.file) return;
+  if (!e.store || e.handle === undefined) return;
   try {
-    fs.rmSync(e.file, { force: true });
-    fs.rmdirSync(journalDir(tenant, workspace)); // only when empty
-  } catch {
-    // not empty, or already gone
+    e.store.remove(tenant, workspace, e.handle);
+  } catch (err) {
+    opsError("revisions.journal_not_removed", err, { tenant, workspace }, "warn");
   }
 }
 
@@ -179,11 +191,15 @@ function journalChange(tenant: string, scope: string, files: RevisionFile[], met
     verified.delete(k); // a change the head will not see: reconcile before trusting it again
     return;
   }
-  const q = queues.get(k) ?? [];
   // Only what the head needs: the new content. The old text is the writer's
   // history record, not the journal's (it can be a quarter megabyte a file).
   const slim = files.map((f) => ({ path: f.path, before: null, after: f.after }));
-  const entry: Entry = { id: crypto.randomBytes(12).toString("hex"), files: slim, by: meta.by, message: meta.message, at: meta.at, restoredFrom: restoring.get(k) };
+  enqueue(tenant, scope, { id: crypto.randomBytes(12).toString("hex"), files: slim, by: meta.by, message: meta.message, at: meta.at, restoredFrom: restoring.get(k) });
+}
+
+function enqueue(tenant: string, scope: string, entry: Entry): void {
+  const k = key(tenant, scope);
+  const q = queues.get(k) ?? [];
   persist(tenant, scope, entry);
   q.push(entry);
   if (q.length > MAX_QUEUED) {
@@ -193,6 +209,88 @@ function journalChange(tenant: string, scope: string, files: RevisionFile[], met
   }
   queues.set(k, q);
   setImmediate(() => void drain(k));
+}
+
+/** One file a step wrote back to the workspace (run-container.ts
+ *  applyContainerChanges): `base` is the sha of the folder's copy before the
+ *  write (null: new file), `after` the bytes now on the folder. */
+export interface StepWrite {
+  path: string;
+  base: string | null;
+  after: Buffer;
+}
+
+/** A step's file in the journal is held to this size; a bigger one is left to
+ *  the reconcile, which reads it from the folder (the journal file carries the
+ *  bytes, and a state index can be tens of megabytes). */
+const MAX_STEP_FILE = 1024 * 1024;
+/** And one step's entry as a whole: it is written down in one go (a file, or a
+ *  row through the synchronous bridge), so it is bounded. What does not fit is
+ *  left to the reconcile too. */
+const MAX_STEP_ENTRY = 8 * 1024 * 1024;
+
+/**
+ * FOL-126 phase 4. A step's copy-back lands as ONE revision (one journal
+ * entry, one publish): the paths it wrote on the workspace head and the ones
+ * under state/ on the state head (two commits, each idempotent, as decided on
+ * 6 Nov). Never a half-written tree: the entry is on disk before anything is
+ * queued, and a commit is all of the step's paths or none.
+ *
+ * Pinned base: each path carries the sha the folder held before the write, so
+ * a head that moved since (another run, a person) is a CONFLICT on that path —
+ * the head's version stays, the step's is kept beside it as
+ * `<stem>.conflict-<op>.<ext>` — while paths nobody else touched go through.
+ * The id is derived from the run and step, so a step whose copy-back is
+ * applied twice (a resumed driver) publishes once.
+ *
+ * The rule for a failed step, written down: applyContainerChanges runs after a
+ * failure too (a failed step's partial outputs are usually the interesting
+ * ones), so they are committed as well, as today's folder gets them. A step
+ * whose copy-out itself failed wrote nothing and commits nothing. A test run's
+ * diverted state/ and storage/ writes never reach the folder and never here.
+ *
+ * Text only: a binary file is not versioned yet (see phase 3). Returns the
+ * number of paths queued.
+ */
+export function recordStepOutputs(
+  tenant: string,
+  workspace: string,
+  writes: StepWrite[],
+  meta: { runId?: string; step?: string | number; by?: string },
+): number {
+  if (!backend || workspace === "@library") return 0;
+  const k = key(tenant, workspace);
+  if (!safe(gate.journal)) {
+    verified.delete(k); // the head will not see this: reconcile before trusting it again
+    return 0;
+  }
+  const files: EntryFile[] = [];
+  let total = 0;
+  for (const w of writes) {
+    if (!sideOf(w.path)) continue; // not workspace content (runs/, .foldrun/ …)
+    const text = w.after.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(w.after)) continue; // binary: not versioned
+    if (w.after.length > MAX_STEP_FILE) {
+      marked.add(k); // the folder has it; the reconcile records it
+      continue;
+    }
+    if (total + w.after.length > MAX_STEP_ENTRY) {
+      marked.add(k);
+      continue;
+    }
+    total += w.after.length;
+    files.push({ path: w.path, before: null, after: text, base: w.base });
+  }
+  if (!files.length) return 0;
+  const idSource = meta.runId ? `${meta.runId}\0${meta.step ?? ""}` : crypto.randomBytes(12).toString("hex");
+  enqueue(tenant, workspace, {
+    id: `st${sha256Hex(Buffer.from(idSource)).slice(0, 22)}`,
+    files,
+    by: meta.by ?? (meta.runId ? `run:${meta.runId}` : "run"),
+    message: meta.runId ? `run ${meta.runId}${meta.step !== undefined ? ` step ${meta.step}` : ""}` : "run output",
+    at: new Date().toISOString(),
+  });
+  return files.length;
 }
 
 /** Run `fn` (a synchronous writer) so that the change it records is committed
@@ -225,6 +323,13 @@ async function drainOne(k: string): Promise<void> {
   const q = queues.get(k);
   while (q && q.length && backend) {
     const entry = q[0];
+    // The workspace was deleted while this waited (or retried): nothing to
+    // publish, and nothing for a later boot to replay.
+    if (!fs.existsSync(workspaceDir(tenant, workspace))) {
+      q.shift();
+      forget(tenant, workspace, entry);
+      continue;
+    }
     try {
       await commitEntry(backend, tenant, workspace, entry);
       q.shift();
@@ -257,7 +362,7 @@ async function drainOne(k: string): Promise<void> {
   // journal was off for a while, a run wrote the folder directly) is brought
   // to it. After the entries, never before: replaying an older change over a
   // reconciled head would write it backwards.
-  if (backend && (!q || !q.length) && (!verified.has(k) || marked.has(k))) {
+  if (backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(workspaceDir(tenant, workspace))) {
     verified.add(k);
     try {
       await reconcileWorkspace(tenant, workspace, "reconcile");
@@ -302,13 +407,21 @@ export function dropJournal(tenant: string, workspace?: string): void {
   for (const k of [...queues.keys()]) {
     const [t, w] = split(k);
     if (t === tenant && (workspace === undefined || w === workspace)) {
+      // A drain already running holds this array: empty it, or it commits the rest.
+      if (queues.get(k)) queues.get(k)!.length = 0;
       queues.delete(k);
       marked.delete(k);
       verified.delete(k);
       retryAt.delete(k);
     }
   }
-  fs.rmSync(workspace === undefined ? path.join(journalRoot(), tenant) : journalDir(tenant, workspace), { recursive: true, force: true });
+  for (const st of journalStores()) {
+    try {
+      st.drop(tenant, workspace);
+    } catch (err) {
+      opsError("revisions.journal_not_dropped", err, { tenant, workspace, store: st.kind }, "warn");
+    }
+  }
 }
 
 /** Does this workspace need a reconcile (its journal overflowed)? */
@@ -321,54 +434,45 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
   if (!journalOn()) return { entries: 0, workspaces: 0 };
   const minAge = opts.minAgeMs ?? ORPHAN_MS;
   let entries = 0;
-  const touched: string[] = [];
-  const root = journalRoot();
-  let tenants: string[] = [];
-  try {
-    tenants = fs.readdirSync(root);
-  } catch {
-    return { entries: 0, workspaces: 0 };
-  }
-  for (const tenant of tenants) {
-    let workspaces: string[] = [];
+  const touched = new Set<string>();
+  for (const store of journalStores()) {
+    let list: { tenant: string; workspace: string }[] = [];
     try {
-      workspaces = fs.readdirSync(path.join(root, tenant));
-    } catch {
+      list = store.workspaces();
+    } catch (err) {
+      opsError("revisions.journal_unavailable", err, { store: store.kind }, "warn");
       continue;
     }
-    for (const workspace of workspaces) {
-      const dir = path.join(root, tenant, workspace);
-      let names: string[] = [];
-      try {
-        const all = fs.readdirSync(dir);
-        // a write that died before its rename leaves a .tmp: nothing to replay
-        for (const n of all) if (n.endsWith(".json.tmp") && minAge > 0 && Date.now() - fs.statSync(path.join(dir, n)).mtimeMs > minAge) fs.rmSync(path.join(dir, n), { force: true });
-        names = all.filter((n) => n.endsWith(".json")).sort();
-      } catch {
-        continue;
-      }
+    for (const { tenant, workspace } of list) {
       const k = key(tenant, workspace);
       const q = queues.get(k) ?? [];
-      const held = new Set(q.map((e) => e.file));
+      const held = new Set(q.filter((e) => e.store === store).map((e) => e.handle));
       const gone = !fs.existsSync(workspaceDir(tenant, workspace));
       const found: Entry[] = [];
-      for (const name of names) {
-        const file = path.join(dir, name);
-        if (held.has(file)) continue;
+      let names: { handle: string; ageMs: number }[] = [];
+      try {
+        store.sweep(tenant, workspace, minAge);
+        names = store.entries(tenant, workspace);
+      } catch (err) {
+        opsError("revisions.journal_unavailable", err, { tenant, workspace, store: store.kind }, "warn");
+        continue;
+      }
+      for (const { handle, ageMs } of names) {
+        if (held.has(handle)) continue;
         try {
           if (gone) {
-            fs.rmSync(file, { force: true });
+            store.remove(tenant, workspace, handle);
             continue;
           }
-          if (minAge > 0 && Date.now() - fs.statSync(file).mtimeMs < minAge) continue;
-          const e = JSON.parse(fs.readFileSync(file, "utf8")) as Entry & { v: number };
+          if (minAge > 0 && ageMs < minAge) continue;
+          const e = store.read(tenant, workspace, handle);
           if (e.v !== 1 || !Array.isArray(e.files)) throw new Error("not a journal entry");
-          found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, file });
+          found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, store, handle });
         } catch (err) {
-          // a torn or foreign file: set it aside, never replay it
+          // a torn or foreign entry: set it aside, never replay it
           opsError("revisions.journal_file_unreadable", err, { tenant, workspace }, "warn");
           try {
-            fs.renameSync(file, `${file}.unreadable`);
+            store.setAside(tenant, workspace, handle);
           } catch {
             // leave it
           }
@@ -377,11 +481,11 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
       if (!found.length) continue;
       queues.set(k, [...found, ...q]);
       entries += found.length;
-      touched.push(k);
+      touched.add(k);
     }
   }
-  await Promise.all(touched.map((k) => drain(k)));
-  return { entries, workspaces: touched.length };
+  await Promise.all([...touched].map((k) => drain(k)));
+  return { entries, workspaces: touched.size };
 }
 
 /** Boot: bring every workspace's heads to its folder (reconcile each, one at
@@ -429,6 +533,15 @@ function modeOf(tenant: string, workspace: string, rel: string): number {
 
 const opIdOf = (prefix: string, id: string) => `${prefix}-${id}`;
 
+/** The change's base for a writer that started from `sha`: the head's own
+ *  entry when it still holds that content (so the change applies), else an id
+ *  the head cannot hold (so the path is a conflict, not an overwrite). */
+function pinnedBase(sha: string | null, was: { sha: string; mode: number } | undefined): string | null {
+  if (sha === null) return was ? entryId({ sha: "0".repeat(64), mode: MODE_FILE }) : null; // started from "no file", the head has one now (a sha nothing hashes to)
+  if (was && was.sha === sha) return entryId(was);
+  return entryId({ sha, mode: MODE_FILE });
+}
+
 /** One journal entry → one publish. The first commit of a workspace is its
  *  whole tree. */
 async function commitEntry(deps: Deps, tenant: string, workspace: string, entry: Entry): Promise<PublishResult | null> {
@@ -439,14 +552,14 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   const changes: Changes = {};
   const baseline: { authored: boolean; state: boolean } = { authored: !heads.workspace, state: !heads.state };
 
-  const put = (rel: string, text: string, side: "authored" | "state") => {
+  const put = (rel: string, text: string, side: "authored" | "state", pinned?: string | null) => {
     const buf = Buffer.from(text, "utf8");
     const sha = sha256Hex(buf);
     bytes.set(sha, buf);
     const was = head[side].files[rel];
     const mode = modeOf(tenant, workspace, rel);
     if (was && was.sha === sha && was.mode === mode) return; // the head already holds it
-    changes[rel] = { op: "put", base: was ? entryId(was) : null, sha, size: buf.length, mode };
+    changes[rel] = { op: "put", base: pinned === undefined ? (was ? entryId(was) : null) : pinnedBase(pinned, was), sha, size: buf.length, mode };
   };
 
   if (baseline.authored || baseline.state) {
@@ -468,7 +581,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     if (f.after === null) {
       if (was) changes[f.path] = { op: "delete", base: entryId(was) };
     } else {
-      put(f.path, f.after, side);
+      put(f.path, f.after, side, f.base);
     }
   }
   if (!Object.keys(changes).length) return null;
