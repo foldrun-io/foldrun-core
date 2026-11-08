@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.3.0] — 2026-11-08
+
+- feat(browse): a held vendor browser through foldrun's vendor door — admission (FOL-145) ([dd599e2](https://github.com/foldrun-io/foldrun-core/commit/dd599e2))
+- feat(egress): grant.vendorDoor — a held vendor browser's door (FOL-145) ([1a305bd](https://github.com/foldrun-io/foldrun-core/commit/1a305bd))
+
 ## [17.2.0] — 2026-11-08
 
 - feat(runner): certutil in the full image — a held Firefox trusts the egress CA (FOL-144) ([898c0dc](https://github.com/foldrun-io/foldrun-core/commit/898c0dc))
