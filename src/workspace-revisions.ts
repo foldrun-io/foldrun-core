@@ -57,6 +57,7 @@ import {
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
+import type { SweepMarks } from "./blob-sweeper.ts";
 
 // ------------------------------------------------------------- the backend
 
@@ -78,9 +79,17 @@ export interface BackendOptions {
   stateRetention?: () => StateRetention;
   /** How often a workspace's checkpoints are looked at after a commit (ms). */
   retentionEveryMs?: number;
+  /** Where "first seen" is kept: lets the boot reconcile remove the history of
+   *  workspaces whose folder is gone (cleanOrphanedHistory). Unset: it never does. */
+  sweepMarks?: SweepMarks;
+  /** How long a workspace must have been seen without its folder before its
+   *  history is removed. Default one hour. */
+  orphanGraceMs?: number;
 }
 let gate: { journal: () => boolean; read: () => boolean } = { journal: () => false, read: () => false };
 let retention: (() => StateRetention) | null = null;
+let orphanMarks: SweepMarks | null = null;
+let orphanGrace = 3_600_000;
 let retentionEvery = 10 * 60_000;
 /** The legacy place: files on the volume. Always replayed at boot (and then
  *  empty), whatever new entries are written to. */
@@ -91,11 +100,15 @@ const entryStore = (): JournalStore => primary ?? legacyFiles;
 
 /** Where revisions live, or null (no journal, nothing changes). */
 export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {}): void {
-  backend = deps;
+  // Every commit asks, inside the store's workspace lock, whether the folder is
+  // still there: a delete or rename on another pod removes it under that lock.
+  backend = deps ? { ...deps, workspaceExists: deps.workspaceExists ?? ((ws) => fs.existsSync(workspaceDir(ws.tenant, ws.workspace))) } : null;
   gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
   primary = opts.journalStore ?? null;
   retention = opts.stateRetention ?? null;
   retentionEvery = opts.retentionEveryMs ?? 10 * 60_000;
+  orphanMarks = opts.sweepMarks ?? null;
+  orphanGrace = opts.orphanGraceMs ?? 3_600_000;
   registerJournal(deps ? journalChange : null);
   registerWorkspaceGone(deps ? (t, w) => goneNow(t, w) : null);
   registerWorkspaceLifecycle(deps ? { drop: dropWorkspaceRevisions, move: moveWorkspaceRevisions, moved: movedNow } : null);
@@ -367,6 +380,13 @@ async function drainOne(k: string): Promise<void> {
       forget(tenant, workspace, entry);
       retryAt.delete(k);
     } catch (err) {
+      if (err instanceof PublishError && err.code === "gone") {
+        // The folder is gone (deleted or renamed, here or on another pod): the
+        // change has nowhere to go, and nothing should be recorded under the name.
+        q.shift();
+        forget(tenant, workspace, entry);
+        continue;
+      }
       if (permanent(err)) {
         // Retrying cannot change a verdict about the CONTENT (a path the
         // manifest refuses, two names differing by case): drop this entry so
@@ -614,11 +634,19 @@ export async function moveWorkspaceRevisions(tenant: string, from: string, to: s
       }
     }
     rekeyQueue(tenant, from, to);
+    if (rename) {
+      // A commit on another pod that passed its guard between the move and the
+      // folder rename left rows under the OLD name; its content is in the
+      // folder now, so the old name's rows go and the new name is reconciled.
+      await deps.revisions.drop({ tenant, workspace: from });
+      marked.add(kb);
+    }
   } finally {
     lifecycleBusy.delete(ka);
     lifecycleBusy.delete(kb);
     release();
   }
+  if (rename) void drain(kb); // the reconcile marked above
 }
 
 /** Queued changes and journal entries of `from` become `to`'s. */
@@ -757,6 +785,82 @@ async function pruneIfDue(tenant: string, workspace: string): Promise<void> {
   await pruneStateNow(tenant, workspace);
 }
 
+// ------------------------------------------------------------- history without a workspace
+
+/**
+ * FOL-126 fixes (8 Nov 2026), once and idempotent: before the delete took the
+ * history with it, the heads and revisions of a deleted workspace stayed, and a
+ * new workspace of that name started on them. Any workspace the store has
+ * rows for and the volume has no folder for is such a leftover.
+ *
+ * Removing history is not undone, so it is done carefully: a workspace is
+ * RECORDED the first time it is seen without a folder and removed only when it
+ * has been seen without one for `graceMs` (a volume that is briefly not
+ * mounted, or a listing that came back short, passes); an account whose
+ * folders are mostly missing is left alone and said (a partial mount looks
+ * exactly like that); nothing is done when the data root itself is empty or
+ * absent. A workspace whose folder is back is forgotten. Each removal takes the
+ * same lock as a delete (dropWorkspaceRevisions).
+ */
+export async function cleanOrphanedHistory(
+  marks: SweepMarks,
+  opts: { graceMs: number; force?: boolean; dryRun?: boolean },
+): Promise<{ checked: number; orphans: number; marked: number; dropped: number; skipped: number }> {
+  const out = { checked: 0, orphans: 0, marked: 0, dropped: 0, skipped: 0 };
+  const deps = backend;
+  if (!deps) return out;
+  const root = dataRoot();
+  let rootEntries = 0;
+  try {
+    rootEntries = fs.readdirSync(root).filter((n) => !n.startsWith(".")).length;
+  } catch {
+    // not there
+  }
+  if (!rootEntries) {
+    opsLog("warn", "revisions.orphans_skipped", { reason: "data_root_empty" });
+    return out;
+  }
+  const byTenant = new Map<string, string[]>();
+  for (const w of await deps.revisions.workspaces()) {
+    if (w.workspace === "@library") continue;
+    byTenant.set(w.tenant, [...(byTenant.get(w.tenant) ?? []), w.workspace]);
+  }
+  const exists = (t: string, w: string) => fs.existsSync(workspaceDir(t, w));
+  for (const [tenant, list] of byTenant) {
+    out.checked += list.length;
+    const missing = list.filter((w) => !exists(tenant, w));
+    const known = await marks.load(tenant, "workspace");
+    const back = [...known.keys()].filter((w) => !missing.includes(w));
+    if (back.length && !opts.dryRun) await marks.clear(tenant, "workspace", back);
+    if (!missing.length) continue;
+    out.orphans += missing.length;
+    if (!opts.force && list.length > 5 && missing.length > list.length / 2) {
+      out.skipped += missing.length;
+      opsLog("warn", "revisions.orphans_skipped", { tenant, reason: "most_folders_missing", missing: missing.length, total: list.length });
+      continue;
+    }
+    const at = await marks.now();
+    const fresh = missing.filter((w) => !known.has(w));
+    if (fresh.length && !opts.dryRun) await marks.put(tenant, "workspace", fresh.map((ref) => ({ ref, size: 0 })), at);
+    out.marked += fresh.length;
+    for (const w of missing) {
+      const m = known.get(w);
+      if (!m || at.getTime() - m.firstSeen.getTime() < opts.graceMs || opts.dryRun) continue;
+      if (exists(tenant, w)) continue; // came back while we looked
+      try {
+        await dropWorkspaceRevisions(tenant, w);
+        await marks.clear(tenant, "workspace", [w]);
+        out.dropped++;
+      } catch (err) {
+        out.skipped++;
+        opsError("revisions.orphan_not_dropped", err, { tenant, workspace: w }, "warn");
+      }
+    }
+  }
+  if (out.orphans) opsLog("info", "revisions.orphans", { ...out });
+  return out;
+}
+
 /** Does this workspace need a reconcile (its journal overflowed)? */
 export const needsReconcile = (tenant: string, workspace: string) => marked.has(key(tenant, workspace));
 
@@ -827,6 +931,10 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
 export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {}): Promise<{ checked: number; repaired: number; failed: number }> {
   const out = { checked: 0, repaired: 0, failed: 0 };
   if (!journalOn()) return out;
+  // First, the history of workspaces that were deleted before the delete took
+  // it with them (8 Nov 2026): it must not be reconciled, or found by a new
+  // workspace of the same name.
+  if (orphanMarks) await cleanOrphanedHistory(orphanMarks, { graceMs: orphanGrace }).catch((err) => opsError("revisions.orphans_failed", err, {}, "warn"));
   for (const tenant of opts.tenants ?? listTenants()) {
     for (const w of listWorkspaces(tenant)) {
       const k = key(tenant, w.name);
