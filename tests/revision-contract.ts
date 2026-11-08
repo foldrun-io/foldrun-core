@@ -593,6 +593,9 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
       async isPinned() {
         return false;
       },
+      async isPinnedBeyondRevisions() {
+        return false;
+      },
       async guardDelete(_t, _k, _r, del) {
         await del();
         return true;
@@ -620,6 +623,95 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
     log.length = 0;
     await assert.rejects(() => publish(deps, { ...bad.input, bytesOf: async () => Buffer.from("not what was promised") }), PublishError);
     assert.equal(log[log.length - 1], "release:publish");
+  });
+
+
+  // ---------- lifecycle: drop, move, prune (FOL-126 fixes, 8 Nov) ----------
+
+  t("drop: the workspace's history goes, the next one of that name starts empty, others are untouched, a repeat is safe", async (_h, deps) => {
+    const ws = fresh();
+    const other = fresh();
+    const r1 = await publish(deps, (await edit(deps, ws, null, { "memory/a.md": "1", "state/s.json": "0" }, { opId: "drop-first-op" })).input);
+    await publish(deps, (await edit(deps, other, null, { "memory/o.md": "o" })).input);
+    assert.ok(await deps.revisions.head(ws));
+    assert.ok((await deps.revisions.head({ ...ws, scope: "state" })));
+    const n = await deps.revisions.drop({ tenant: ws.tenant, workspace: ws.workspace });
+    assert.ok(n >= 2, "both heads' revisions were counted");
+    assert.equal(await deps.revisions.head(ws), null);
+    assert.equal(await deps.revisions.head({ ...ws, scope: "state" }), null);
+    assert.deepEqual(await deps.revisions.revisions(ws), []);
+    assert.equal(await deps.revisions.operation(ws, "drop-first-op"), null, "its operations went too");
+    assert.ok(await deps.revisions.head(other), "another workspace of the account is untouched");
+    // a new workspace of the same name starts from nothing: base null commits, and it sees none of the old files
+    const again = await publish(deps, (await edit(deps, ws, null, { "memory/new.md": "fresh" })).input);
+    assert.equal(again.status, "committed");
+    assert.equal(again.revision!.seq, 1);
+    assert.notEqual(again.revision!.id, r1.revision!.id);
+    const m = await manifestsAt(deps, ws.tenant, await headsOf(deps, ws));
+    assert.deepEqual(Object.keys(m.authored.files), ["memory/new.md"]);
+    assert.deepEqual(Object.keys(m.state.files), []);
+    assert.equal(await deps.revisions.drop({ tenant: ws.tenant, workspace: "never-existed" }), 0);
+  });
+
+  t("drop of an account takes every workspace of it and none of another account's", async (_h, deps) => {
+    const a = { tenant: `acct${crypto.randomBytes(3).toString("hex")}`, workspace: "one" };
+    const b = { tenant: a.tenant, workspace: "two" };
+    const c = { tenant: `acct${crypto.randomBytes(3).toString("hex")}`, workspace: "one" };
+    for (const w of [a, b, c]) await publish(deps, (await edit(deps, w, null, { "memory/x.md": w.tenant + w.workspace })).input);
+    await deps.revisions.drop({ tenant: a.tenant });
+    assert.equal(await deps.revisions.head(a), null);
+    assert.equal(await deps.revisions.head(b), null);
+    assert.ok(await deps.revisions.head(c));
+    await deps.revisions.drop({ tenant: c.tenant });
+  });
+
+  t("move: heads, history and operations follow the new name; the old name is empty; a stale new name is replaced", async (_h, deps) => {
+    const from = fresh();
+    const to = { tenant: from.tenant, workspace: `${from.workspace}-new` };
+    const r1 = await publish(deps, (await edit(deps, from, null, { "memory/a.md": "1", "state/s.json": "s" }, { opId: "move-first-op" })).input);
+    const r2 = await publish(deps, (await edit(deps, from, r1, { "memory/a.md": "2" })).input);
+    // leftovers of an earlier workspace under the target name
+    await publish(deps, (await edit(deps, to, null, { "memory/stale.md": "stale" })).input);
+    await deps.revisions.move(from.tenant, from.workspace, to.workspace);
+    assert.equal(await deps.revisions.head(from), null);
+    assert.equal(await deps.revisions.head({ ...from, scope: "state" }), null);
+    const head = await deps.revisions.head(to);
+    assert.equal(head!.id, r2.revision!.id, "same revision, new name");
+    assert.equal((await deps.revisions.revisions(to)).length, 2);
+    assert.ok(await deps.revisions.head({ ...to, scope: "state" }), "the state head came along");
+    assert.equal((await deps.revisions.operation(to, "move-first-op"))?.outcome, "committed");
+    assert.equal(await deps.revisions.operation(from, "move-first-op"), null);
+    const m = await manifestsAt(deps, to.tenant, await headsOf(deps, to));
+    assert.deepEqual(Object.keys(m.authored.files), ["memory/a.md"], "the stale workspace's file is gone");
+    // history continues on the new name
+    const r3 = await publish(deps, (await edit(deps, to, head, { "memory/b.md": "3" })).input);
+    assert.equal(r3.status, "committed");
+    assert.equal(r3.revision!.seq, 3);
+    // the old name is free again, and empty
+    const fresh1 = await publish(deps, (await edit(deps, from, null, { "memory/z.md": "z" })).input);
+    assert.equal(fresh1.revision!.seq, 1);
+    // moving a name with nothing under it is not an error
+    await deps.revisions.move(from.tenant, "nothing-here", "nowhere");
+  });
+
+  t("prune: removes the named revisions of one head, never the head, never the other head", async (_h, deps) => {
+    const ws = fresh();
+    const sws = { ...ws, scope: "state" as const };
+    let r = await publish(deps, (await edit(deps, ws, null, { "memory/a.md": "1", "state/s.json": "0" })).input);
+    for (let i = 1; i <= 4; i++) r = await publish(deps, (await edit(deps, ws, r, { "state/s.json": String(i) })).input);
+    const states = await deps.revisions.revisions(sws, { limit: 50 });
+    assert.equal(states.length, 5);
+    const head = states[0];
+    const old = states.slice(1, 4).map((x) => x.id);
+    assert.equal(await deps.revisions.prune(sws, [head.id, ...old, "rev_doesnotexist"]), 3, "the head and an unknown id are not counted");
+    const left = await deps.revisions.revisions(sws, { limit: 50 });
+    assert.deepEqual(left.map((x) => x.id), [head.id, states[4].id]);
+    assert.equal((await deps.revisions.head(sws))!.id, head.id);
+    assert.equal((await deps.revisions.revisions(ws, { limit: 50 })).length, 1, "the source head is untouched");
+    assert.equal(await deps.revisions.prune(sws, old), 0, "a repeat removes nothing");
+    // commits go on from the head
+    const next = await publish(deps, (await edit(deps, ws, r, { "state/s.json": "9" })).input);
+    assert.equal(next.status, "committed");
   });
 
 }
