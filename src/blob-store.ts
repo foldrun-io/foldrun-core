@@ -95,6 +95,17 @@ export interface BlobSweeper {
    *  can enumerate has it (the folder one); a bucket's objects are the
    *  sweeper's once the account's pins are released. */
   purgeTenant?(tenant: string): Promise<void>;
+  /** Every object under a key prefix, with its size and last-modified time —
+   *  what the sweeper walks. Only a store that can enumerate has it. */
+  list?(prefix: string, opts?: { signal?: AbortSignal }): AsyncIterable<ListedObject>;
+  /** The accounts that have objects (the first key segment under `t/`). */
+  tenants?(opts?: { signal?: AbortSignal }): Promise<string[]>;
+}
+
+export interface ListedObject {
+  key: string;
+  size: number;
+  modifiedAt: Date;
 }
 
 /** Read a whole object. For manifests and small blobs; a large file is
@@ -165,6 +176,37 @@ export function fsBlobStore(root: string = path.join(dataRoot(), ".objects")): B
     async purgeTenant(tenant) {
       fs.rmSync(path.dirname(at(`t/${tenant}/x`)), { recursive: true, force: true });
     },
+    async *list(prefix) {
+      const base = at(`${prefix.replace(/\/+$/, "")}/x`);
+      const dir = path.dirname(base);
+      const walk = function* (d: string, rel: string): Generator<ListedObject> {
+        let names: fs.Dirent[] = [];
+        try {
+          names = fs.readdirSync(d, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of names) {
+          if (e.isDirectory()) yield* walk(path.join(d, e.name), `${rel}${e.name}/`);
+          else if (e.isFile() && !e.name.endsWith(".tmp")) {
+            try {
+              const st = fs.statSync(path.join(d, e.name));
+              yield { key: `${rel}${e.name}`, size: st.size, modifiedAt: st.mtime };
+            } catch {
+              // gone meanwhile
+            }
+          }
+        }
+      };
+      yield* walk(dir, `${prefix.replace(/\/+$/, "")}/`);
+    },
+    async tenants() {
+      try {
+        return fs.readdirSync(path.join(root, "t"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch {
+        return [];
+      }
+    },
   };
 }
 
@@ -227,7 +269,42 @@ export function s3BlobStore(cfg: S3Config | null = s3Config()): BlobStore & Blob
       if (!res.ok && res.status !== 404) await fail(res, "delete");
       await res.arrayBuffer().catch(() => {});
     },
+    async *list(prefix, opts = {}) {
+      let token: string | undefined;
+      do {
+        const q: Record<string, string> = { "list-type": "2", prefix: prefix.endsWith("/") ? prefix : `${prefix}/`, ...(token ? { "continuation-token": token } : {}) };
+        const res = await wrap("list", () => s3Request(cfg, "GET", "", undefined, undefined, {}, opts.signal, q));
+        if (!res.ok) await fail(res, "list");
+        const xml = await res.text();
+        for (const c of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+          const key = xmlText(c[1], "Key");
+          const size = Number(xmlText(c[1], "Size"));
+          const lm = xmlText(c[1], "LastModified");
+          if (key) yield { key, size: Number.isFinite(size) ? size : 0, modifiedAt: lm ? new Date(lm) : new Date(0) };
+        }
+        token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? xmlText(xml, "NextContinuationToken") ?? undefined : undefined;
+      } while (token);
+    },
+    async tenants(opts = {}) {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const q: Record<string, string> = { "list-type": "2", prefix: "t/", delimiter: "/", ...(token ? { "continuation-token": token } : {}) };
+        const res = await wrap("list", () => s3Request(cfg, "GET", "", undefined, undefined, {}, opts.signal, q));
+        if (!res.ok) await fail(res, "list");
+        const xml = await res.text();
+        for (const c of xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]*)<\/Prefix>/g)) out.push(unxml(c[1]).replace(/^t\//, "").replace(/\/$/, ""));
+        token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? xmlText(xml, "NextContinuationToken") ?? undefined : undefined;
+      } while (token);
+      return out;
+    },
   };
+}
+
+const unxml = (v: string) => v.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+function xmlText(xml: string, tag: string): string | null {
+  const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(xml);
+  return m ? unxml(m[1]) : null;
 }
 
 // ---------- the store in force ----------
@@ -352,5 +429,7 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
     head: (key, opts) => call("head", opts?.signal, (signal) => inner.head(key, { signal })),
     delete: (key, opts) => call("delete", opts?.signal, (signal) => (inner.delete ? inner.delete(key, { signal }) : Promise.reject(new Error("this store cannot delete")))),
     ...(inner.purgeTenant ? { purgeTenant: (tenant: string) => inner.purgeTenant!(tenant) } : {}),
+    ...(inner.list ? { list: (prefix: string, o?: { signal?: AbortSignal }) => inner.list!(prefix, o) } : {}),
+    ...(inner.tenants ? { tenants: (o?: { signal?: AbortSignal }) => inner.tenants!(o) } : {}),
   } as S & BlobSweeper;
 }

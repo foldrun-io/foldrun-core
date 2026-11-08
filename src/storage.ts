@@ -560,9 +560,15 @@ export async function s3Request(
   mime?: string,
   extra: Record<string, string> = {},
   signal?: AbortSignal,
+  /** Query parameters (ListObjectsV2: list-type, prefix, continuation-token). */
+  query: Record<string, string> = {},
 ): Promise<Response> {
   const creds = await credentials(cfg);
   const { host, origin, canonicalUri } = target(cfg, key);
+  const canonicalQuery = Object.keys(query)
+    .sort()
+    .map((k) => `${uriEncode(k)}=${uriEncode(query[k])}`)
+    .join("&");
   const { amzDate, dateStamp } = stamps(new Date());
   const scope = `${dateStamp}/${cfg.region}/s3/aws4_request`;
   const payloadHash = sha256(body ?? Buffer.alloc(0));
@@ -584,7 +590,7 @@ export async function s3Request(
   const canonicalRequest = [
     method,
     canonicalUri,
-    "",
+    canonicalQuery,
     canonicalHeaders,
     signedHeaders,
     payloadHash,
@@ -593,7 +599,7 @@ export async function s3Request(
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256(canonicalRequest)].join("\n");
   const signature = hmac(signingKey(cfg, creds, dateStamp), stringToSign).toString("hex");
 
-  const res = await fetch(`${origin}${canonicalUri}`, {
+  const res = await fetch(`${origin}${canonicalUri}${canonicalQuery ? `?${canonicalQuery}` : ""}`, {
     method,
     body: body as BodyInit | undefined,
     signal,
