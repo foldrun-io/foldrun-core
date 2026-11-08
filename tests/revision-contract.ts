@@ -596,6 +596,9 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
       async isPinnedBeyondRevisions() {
         return false;
       },
+      async live() {
+        return { manifests: [], blobs: [] };
+      },
       async guardDelete(_t, _k, _r, del) {
         await del();
         return true;
@@ -712,6 +715,19 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
     // commits go on from the head
     const next = await publish(deps, (await edit(deps, ws, r, { "state/s.json": "9" })).input);
     assert.equal(next.status, "committed");
+  });
+
+
+  t("guard: a commit whose guard says the workspace is gone writes nothing and says so; one that says yes commits", async (_h, deps) => {
+    const ws = fresh();
+    const w = await edit(deps, ws, null, { "memory/a.md": "1" });
+    const gone = await deps.revisions.commit(ws, { base: null, authored: "a".repeat(64), state: "0".repeat(64), opId: op("gone"), digest: "d".repeat(64), by: "t", message: "m", guard: async () => false });
+    assert.deepEqual(gone, { status: "gone" });
+    assert.equal(await deps.revisions.head(ws), null);
+    const withGuard = { ...deps, workspaceExists: () => true };
+    assert.equal((await publish(withGuard, w.input)).status, "committed");
+    const w2 = await edit(deps, ws, await headsOf(deps, ws).then((h) => h.workspace), { "memory/b.md": "2" });
+    await assert.rejects(() => publish({ ...deps, workspaceExists: () => false }, w2.input), (e: Error & { code?: string }) => e instanceof PublishError && e.code === "gone");
   });
 
 }
