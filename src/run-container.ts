@@ -30,6 +30,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, isPlatformPath, type ApiSpec, type Effort, type ModelCall } from "./store.ts";
 import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
+import { recordStepOutputs, type StepWrite } from "./workspace-revisions.ts";
 import { refusedBack, refusedLine, keptLine, type RefusedPath } from "./copy-back.ts";
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
@@ -463,6 +464,11 @@ export interface ApplyOptions {
    *  changed come back, each told to onKept instead of refused. */
   allowConfig?: boolean;
   onKept?: (kept: RefusedPath) => void;
+  /** Where the writes are recorded as a revision (FOL-126 phase 4): the
+   *  account and the run/step the copy-back belongs to. The workspace is the
+   *  folder's name. Without it the folder is written and nothing is recorded
+   *  (a laptop, a scratch dir). */
+  revision?: { tenant: string; runId?: string; step?: string | number };
 }
 
 export function applyContainerChanges(
@@ -474,6 +480,7 @@ export function applyContainerChanges(
   opts: ApplyOptions = {},
 ): string[] {
   const applied: string[] = [];
+  const written: StepWrite[] = [];
   // Files a sandbox: own job's reply copied into this sandbox mid-step
   // (delegate-tools.ts copyBackFiles), path → sha256 of what was written: for
   // those, that is what the step started from. The job's change is already on
@@ -568,6 +575,7 @@ export function applyContainerChanges(
           fs.mkdirSync(path.dirname(conflictAbs), { recursive: true });
           fs.writeFileSync(conflictAbs, next);
           applied.push(conflictRel);
+          written.push({ path: conflictRel.replaceAll("\\", "/"), base: null, after: next });
           note?.(
             `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the workspace while this step ran, ` +
               `and not only by appending — kept the workspace's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
@@ -590,9 +598,21 @@ export function applyContainerChanges(
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, next);
       applied.push(rel);
+      // The pinned base is what the folder held before this write (null: a new
+      // file) — for an untouched path that is what the step was handed.
+      written.push({ path: rel.replaceAll("\\", "/"), base: hostNow ? sha(hostNow) : null, after: next });
     }
   };
   walk(containerWs);
+  // The step's outputs as one revision (all its paths, or none). Never allowed
+  // to fail the copy-back: the folder is written already.
+  if (opts.revision && written.length) {
+    try {
+      recordStepOutputs(opts.revision.tenant, path.basename(hostWs), written, { runId: opts.revision.runId, step: opts.revision.step });
+    } catch (err) {
+      note?.(`the step's files were written to the workspace but not recorded as a revision yet: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return applied;
 }
 
@@ -2244,6 +2264,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
         onRefused: (r) => refused.push(r),
         allowConfig: args.configWrites === true,
         onKept: (r) => kept.push(r),
+        revision: args.tenant ? { tenant: args.tenant, runId: args.runId, step: containerId } : undefined,
       });
       if (refused.length) args.emit("info", refusedLine(refused));
       if (kept.length) args.emit("info", keptLine(kept));
