@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.1.1] — 2026-11-08
+
+- fix(docs): every Settings → … names a tab or section that exists ([bae2351](https://github.com/foldrun-io/foldrun-core/commit/bae2351))
+
 ## [17.1.0] — 2026-11-07
 
 ### Widened in the public API
