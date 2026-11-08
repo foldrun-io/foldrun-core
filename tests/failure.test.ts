@@ -46,7 +46,7 @@ test("a step bigger than its account's or its flow's whole pool names the pool a
   assert.equal(acct.kind, "memory");
   assert.equal(acct.message, "This step alone asks for 16 GiB of memory, more than this account's 8 for all its steps together.");
   assert.equal(acct.scope, "account");
-  assert.match(acct.fix!, /Settings → Governance/);
+  assert.match(acct.fix!, /Settings → Policies → Governance/);
   assert.match(acct.fix!, /plan/);
   const flow = explainFailure("this step holds 4 vCPU, more than this run's 2 vCPU for all its steps (its flow's compute:) — ask for less");
   assert.equal(flow.kind, "cpu");

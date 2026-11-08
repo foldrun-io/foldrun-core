@@ -2761,7 +2761,7 @@ const ACCOUNT_SEALED: Record<string, string> = {
   "oauth-clients.json": "OAuth client credentials — never served to a browser.",
   "ledger.jsonl": "the billing ledger — append-only, read it through Usage and Wallet.",
   "billing.json": "the account's billing settings — read and change them in Wallet.",
-  "oauth-connections.json": "connected apps and their health — see Settings → Connections.",
+  "oauth-connections.json": "connected apps and their health — see Settings → Secrets → Connections.",
   "secret-health.json": "secret usage bookkeeping — see Settings → Secrets.",
 };
 
@@ -3616,7 +3616,7 @@ export interface StepRecord {
    *  "provider: …" — or "none set" (model-credential.ts). */
   credential?: string;
   /** Whose key paid for the step's model calls (3 Nov 2026): "own" — the
-   *  account's (a provider: block, Settings → Model), billed by its
+   *  account's (a provider: block, Settings → Models), billed by its
    *  provider; "operator" — the platform's own credential, billed from the
    *  step's tokens; "foldrun" — foldrun's models, billed per call by the
    *  model gateway, never from the step. Absent on older records. */
@@ -4502,7 +4502,7 @@ export function runCost(run: RunRecord): number {
 
 /** Whether a step's tokens are the platform's to bill: it ran on the
  *  platform's own model credential, not the account's key ("provider: …" —
- *  a provider: block, or Settings → Model), which the provider bills. The
+ *  a provider: block, or Settings → Models), which the provider bills. The
  *  meter, the Usage page and the ledger split all ask this one question, so
  *  what a page shows is what was charged. */
 export function stepBillsTokens(s: Pick<StepRecord, "credential" | "supply">): boolean {
@@ -4542,7 +4542,7 @@ export function billedTokenCost(s: { credential?: string; supply?: StepSupply; c
  *
  * Tokens count only for steps that ran on the platform's own model
  * credential. A step on the account's own key (`credential` "provider: …" —
- * a provider: block, or Settings → Model) was paid for at the provider, and
+ * a provider: block, or Settings → Models) was paid for at the provider, and
  * billing it again here charged a BYOK customer twice. And a carried step's
  * tokens were billed where it ran, like its compute.
  */

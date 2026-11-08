@@ -1352,7 +1352,7 @@ export function agentContext(
   //
   // The URL sits in git; the token is a ${SECRET} resolved server-side. An
   // agent's own block wins over the workspace's, like everything else here.
-  // Then the account's own model key (Settings → Model), when it set one:
+  // Then the account's own model key (Settings → Models), when it set one:
   // an account that brings its key need not write a block anywhere.
   const fileBlock =
     (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
@@ -2493,7 +2493,7 @@ async function runStep(
     // Chosen, but not to be had now: failed with why, before a sandbox —
     // never onto the account's stored key or the operator's.
     if (supply.kind === "refused") {
-      push("error", `foldrun's models: ${supply.reason} — or switch this account back to its own key (Settings → Model, \`foldrun account model use own\`)`);
+      push("error", `foldrun's models: ${supply.reason} — or switch this account back to its own key (Settings → Models, \`foldrun account model use own\`)`);
       step.status = "failed";
       save();
       return;
@@ -2522,7 +2522,7 @@ async function runStep(
       if (primaryOnPlatform) {
         push(
           "error",
-          `no model key: this account runs on its own API key, and none is set. Add one in Settings → Model ` +
+          `no model key: this account runs on its own API key, and none is set. Add one in Settings → Models ` +
             `(or \`foldrun account model set <provider> --key …\`), or write a provider: block in AGENTS.md`,
         );
         step.status = "failed";
@@ -2547,7 +2547,7 @@ async function runStep(
         "error",
         "no model credential: this install has none and the account has no key of its own. Set ANTHROPIC_API_KEY " +
           "(or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) in the platform's environment — for Docker Compose, " +
-          "self-hosting/.env, then `docker compose up -d` — or add the account's key in Settings → Model " +
+          "self-hosting/.env, then `docker compose up -d` — or add the account's key in Settings → Models " +
           "(`foldrun account model set <provider> --key …`)",
       );
       step.status = "failed";

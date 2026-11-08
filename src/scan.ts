@@ -340,7 +340,7 @@ export const SCAN_RULES: readonly ScanRule[] = [
     help:
       "Each model takes its own effort levels: GPT-6 and Claude take all five, Gemini stops at high, Kimi has low, high and max. " +
       "The step still runs, at the nearest level the model has, and the step's log says so. Write the level it has, or choose " +
-      "a provider whose model has the one you want (Settings → Model provider).",
+      "a provider whose model has the one you want (Settings → Models).",
   },
   {
     id: "config/output-fitted",

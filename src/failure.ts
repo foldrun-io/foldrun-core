@@ -160,7 +160,7 @@ export function failureFactsOf(step: FailedStepLike): FailureFacts | undefined {
   return Object.keys(facts).length ? facts : undefined;
 }
 
-const UPGRADE = "or a plan that allows more (Settings → Billing)";
+const UPGRADE = "or a plan that allows more (Billing)";
 
 const SCOPES: Record<string, LimitScope> = {
   "this run's": "run",
@@ -201,7 +201,7 @@ function tooBig(reason: string): FailureExplained | null {
     const fix =
       scope === "run" ? "Ask for less with size: or resources: on the agent, or raise the flow's compute:."
       : scope === "workspace" ? "Ask for less with size: or resources: on the agent, or raise the workspace's compute: (its AGENTS.md)."
-      : scope === "account" ? `Ask for less with size: or resources: on the agent, raise the account's compute: (Settings → Governance), ${UPGRADE}.`
+      : scope === "account" ? `Ask for less with size: or resources: on the agent, raise the account's compute: (Settings → Policies → Governance), ${UPGRADE}.`
       : "Ask for less with size: or resources: on the agent: no machine here can hold a step this big.";
     return {
       class: "policy_denied",
