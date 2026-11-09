@@ -29,6 +29,7 @@ import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-sc
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { SUPPLY_TITLES, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
 import type { StepSupply } from "./store.ts";
+import { archiveRunOutputs, noteRefused } from "./run-outputs.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
@@ -2378,6 +2379,16 @@ async function runStep(
     answer = answer
       .split("\n")
       .filter((line) => {
+        // `write: <path> => <text>` / `bytes: <path> => <n>`: the step leaves a
+        // file in its outputs/ (n bytes of "x"), so what archive() does with a
+        // run's outputs is testable end to end.
+        const w = /^(write|bytes): (\S+) => (.*)$/.exec(line);
+        if (w) {
+          const target = path.join(agentDir, "outputs", w[2]!);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, w[1] === "write" ? w[3]! : "x".repeat(Number(w[3])));
+          return false;
+        }
         const m = /^call: (\S+) (.*?) => (.*)$/.exec(line);
         if (!m) return true;
         const id = `toolu_stub${(step.calls?.length ?? 0) + 1}`;
@@ -4939,11 +4950,18 @@ function driveRunInner(
   };
 
   // Archive what a run produced, so history survives the next run's reset.
-  const archive = () => {
+  // Where a backend is registered and `runs.outputs_store` is on, each agent's
+  // outputs are published to the blob store (run-outputs.ts) and what could
+  // not be kept is written on the run; otherwise (a laptop, the setting off, or
+  // — TEMPORARILY, until the EFS cutover — a publish that failed) the folder is
+  // copied to the volume as before.
+  const archive = async () => {
     for (const agent of new Set(run.steps.map((s) => s.agent))) {
       const from = path.join(runRoot, "agents", agent, "outputs");
       if (!fs.existsSync(from) || fs.readdirSync(from).length === 0) continue;
-      copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
+      const done = await archiveRunOutputs(tenant, workspace, run.id, agent, from);
+      if (done.where === "store") noteRefused(run, done.refused);
+      else copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
     }
   };
 
@@ -6399,7 +6417,7 @@ function driveRunInner(
         // failure too.
         try {
           stampMemories();
-          archive();
+          await archive();
         } catch {
           // never let bookkeeping fail a run that already finished
         }
