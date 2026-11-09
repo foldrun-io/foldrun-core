@@ -3911,6 +3911,16 @@ export interface PriceSnapshot {
   values: Record<string, number>;
 }
 
+export interface RefusedOutput {
+  agent: string;
+  /** Relative to that agent's outputs/. */
+  path: string;
+  bytes: number;
+  reason: "file-cap" | "run-cap" | "name" | "count";
+  /** The cap in bytes that was exceeded (the count for "count"). */
+  limit?: number;
+}
+
 export interface RunRecord {
   id: string;
   flow: string; // flow name, or "adhoc:<agent>" for direct agent runs
@@ -3978,6 +3988,12 @@ export interface RunRecord {
    *  the agents decided was worth remembering, listed so a person can review
    *  the lesson without diffing the folder. */
   memoryWrites?: string[];
+  /** Files a run's agents left in outputs/ that were NOT kept, and why (FOL-126
+   *  phase 5): over the per-file or per-run size cap, a name the store cannot
+   *  hold, or too many files. Shown on the run page and listed by /files. At
+   *  most 100 are named; `outputsRefusedCount` is the whole number. */
+  outputsRefused?: RefusedOutput[];
+  outputsRefusedCount?: number;
   /** The workspace's deployed commit when the run was created — which
    *  version of the files it ran (FOL-54 step 4). Absent for a workspace
    *  never deployed, and before 19 Oct 2026. */
@@ -4132,11 +4148,20 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   if (prior?.inputs?.length) {
     void import("./storage.ts").then((m) => m.releaseRunInputs(tenant, workspace, runId)).catch(() => {});
   }
+  // Outputs published to the blob store (run-outputs.ts) are records and pins,
+  // not files under dir: they go in the background, retried.
+  onRunRemoved?.(tenant, workspace, runId);
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
   if (!opts.pruned) onRunDeleted?.(tenant, workspace, runId);
   return true;
+}
+
+/** run-outputs.ts registers here (it imports this module). */
+let onRunRemoved: ((tenant: string, workspace: string, runId: string) => void) | null = null;
+export function registerRunRemovedHook(fn: typeof onRunRemoved) {
+  onRunRemoved = fn;
 }
 
 /** ledger.ts registers here — store cannot import it without a cycle, and
@@ -4154,14 +4179,17 @@ export interface RunOutputFile {
 }
 
 /**
- * What a run archived: every file its agents left in outputs/, copied under
- * runs/<id>/outputs/<agent>/ when the run finished (runner.ts, archive()).
+ * What a run archived ON THE VOLUME: every file its agents left in outputs/,
+ * copied under runs/<id>/outputs/<agent>/ when the run finished (runner.ts,
+ * archive()). Where run outputs are published to the blob store (FOL-126
+ * phase 5, run-outputs.ts) this is only the fallback and the laptop's copy;
+ * callers use run-outputs.ts listRunOutputs, which asks both.
  *
  * Per agent, not per step — the archive is a copy of each agent's folder,
  * and the record cannot say which step wrote which file. An agent that
  * steps twice in one run shows the same files against both steps.
  */
-export function listRunOutputs(tenant: string, workspace: string, runId: string): RunOutputFile[] {
+export function listRunOutputsOnVolume(tenant: string, workspace: string, runId: string): RunOutputFile[] {
   const root = path.join(workspaceDir(tenant, workspace), "runs", runId, "outputs");
   if (!fs.existsSync(root)) return [];
   const out: RunOutputFile[] = [];
@@ -4181,7 +4209,7 @@ export function listRunOutputs(tenant: string, workspace: string, runId: string)
 
 /** The absolute path of one archived output, or null when the name escapes
  *  the archive or names nothing — the API serves only what this returns. */
-export function runOutputPath(
+export function runOutputPathOnVolume(
   tenant: string,
   workspace: string,
   runId: string,
