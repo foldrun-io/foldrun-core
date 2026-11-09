@@ -13,6 +13,113 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.4.0] — 2026-11-09
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `PlatformHooks` from `@foldrun/core`
+- `resolveRevision` from `@foldrun/core`
+- `listRevisions` from `@foldrun/core`
+- `resolveRevision` from `@foldrun/core/history`
+- `listRevisions` from `@foldrun/core/history`
+
+### New in the public API
+
+- `deleteWorkspaceAsync` from `@foldrun/core`
+- `renameWorkspaceAsync` from `@foldrun/core`
+- `readRunAsync` from `@foldrun/core`
+- `writeRunAsync` from `@foldrun/core`
+- `runStamp` from `@foldrun/core`
+- `runUpdatedMs` from `@foldrun/core`
+- `readRunText` from `@foldrun/core`
+- `runsStartedSince` from `@foldrun/core`
+- `liveRunsAsync` from `@foldrun/core`
+- `listRunSummariesAsync` from `@foldrun/core`
+- `currentTree` from `@foldrun/core`
+- `registerJournal` from `@foldrun/core`
+- `registerWorkspaceGone` from `@foldrun/core`
+- `workspaceGone` from `@foldrun/core`
+- `WorkspaceLifecycle` from `@foldrun/core`
+- `registerWorkspaceLifecycle` from `@foldrun/core`
+- `workspaceLifecycle` from `@foldrun/core`
+- `workspaceMoved` from `@foldrun/core`
+- `hasSnapshotLocal` from `@foldrun/core`
+- `snapshotAtLocal` from `@foldrun/core`
+- `headRevisionLocal` from `@foldrun/core`
+- `ensureBaselineLocal` from `@foldrun/core`
+- `resolveRevisionLocal` from `@foldrun/core`
+- `listRevisionsLocal` from `@foldrun/core`
+- `readRevisionLocal` from `@foldrun/core`
+- `changedPathsBetweenLocal` from `@foldrun/core`
+- `latestRevisionIdLocal` from `@foldrun/core`
+- `RevisionView` from `@foldrun/core`
+- `registerRevisionView` from `@foldrun/core`
+- `listRevisionsRestorable` from `@foldrun/core`
+- `S3Config` from `@foldrun/core`
+- `S3StreamBody` from `@foldrun/core`
+- `S3RequestOptions` from `@foldrun/core`
+- `s3Request` from `@foldrun/core`
+- `withFileStoreLock` from `@foldrun/core`
+- `withFileLock` from `@foldrun/core`
+- `currentTree` from `@foldrun/core/history`
+- `registerJournal` from `@foldrun/core/history`
+- `registerWorkspaceGone` from `@foldrun/core/history`
+- `workspaceGone` from `@foldrun/core/history`
+- …and 16 more
+
+- fix(revisions): a mark set while a repair publishes survives it (FOL-126) ([34dd1a9](https://github.com/foldrun-io/foldrun-core/commit/34dd1a9))
+- fix(revisions): reconcile reads the heads before the folder, keeps its mark until it publishes, and keys its op id on the heads (FOL-126) ([bd544bf](https://github.com/foldrun-io/foldrun-core/commit/bd544bf))
+- Test sweeper and orphans ([4b00799](https://github.com/foldrun-io/foldrun-core/commit/4b00799))
+- Test guard and store queries ([80cb84f](https://github.com/foldrun-io/foldrun-core/commit/80cb84f))
+- Guard commits, clean orphans ([982ab82](https://github.com/foldrun-io/foldrun-core/commit/982ab82))
+- Add blob sweeper ([3ae7166](https://github.com/foldrun-io/foldrun-core/commit/3ae7166))
+- List objects in stores ([e8ca067](https://github.com/foldrun-io/foldrun-core/commit/e8ca067))
+- Pins list live refs ([60455e0](https://github.com/foldrun-io/foldrun-core/commit/60455e0))
+- Commit guard and gone result ([4859d3d](https://github.com/foldrun-io/foldrun-core/commit/4859d3d))
+- Test pinned base, retention ([6e81140](https://github.com/foldrun-io/foldrun-core/commit/6e81140))
+- Pin run base at stage-in ([b5c002b](https://github.com/foldrun-io/foldrun-core/commit/b5c002b))
+- Add state retention ([15657a3](https://github.com/foldrun-io/foldrun-core/commit/15657a3))
+- Test delete and rename ([0e9df49](https://github.com/foldrun-io/foldrun-core/commit/0e9df49))
+- History follows delete and rename ([33bff57](https://github.com/foldrun-io/foldrun-core/commit/33bff57))
+- Async delete and rename ([2a4d9ce](https://github.com/foldrun-io/foldrun-core/commit/2a4d9ce))
+- Journal store move ([1a8a86f](https://github.com/foldrun-io/foldrun-core/commit/1a8a86f))
+- Pins beyond revisions, purge tenant ([3599ca0](https://github.com/foldrun-io/foldrun-core/commit/3599ca0))
+- Add drop move prune ([e332db0](https://github.com/foldrun-io/foldrun-core/commit/e332db0))
+- Test step outputs and journal ([4100e72](https://github.com/foldrun-io/foldrun-core/commit/4100e72))
+- Test async run write ([ab8a24e](https://github.com/foldrun-io/foldrun-core/commit/ab8a24e))
+- Add async run write ([5391934](https://github.com/foldrun-io/foldrun-core/commit/5391934))
+- Record step outputs as revision ([1b925d4](https://github.com/foldrun-io/foldrun-core/commit/1b925d4))
+- Clear journal on workspace delete ([d415c24](https://github.com/foldrun-io/foldrun-core/commit/d415c24))
+- Journal through a store ([09929cb](https://github.com/foldrun-io/foldrun-core/commit/09929cb))
+- Add journal store seam ([c0b9bc0](https://github.com/foldrun-io/foldrun-core/commit/c0b9bc0))
+- Async reads on records port ([b326b2d](https://github.com/foldrun-io/foldrun-core/commit/b326b2d))
+- History from revisions, async ([74cd983](https://github.com/foldrun-io/foldrun-core/commit/74cd983))
+- Durable revision journal and reconcile ([084d283](https://github.com/foldrun-io/foldrun-core/commit/084d283))
+- Let publish carry restoredFrom ([e764454](https://github.com/foldrun-io/foldrun-core/commit/e764454))
+- Add blob benchmark script ([41ffa5d](https://github.com/foldrun-io/foldrun-core/commit/41ffa5d))
+- Run contract suite on MinIO ([151a424](https://github.com/foldrun-io/foldrun-core/commit/151a424))
+- Add MinIO s3 driver tests ([0e8c12e](https://github.com/foldrun-io/foldrun-core/commit/0e8c12e))
+- Add node-local blob cache ([4492cc3](https://github.com/foldrun-io/foldrun-core/commit/4492cc3))
+- Wire s3 driver into blob store ([3cf6a80](https://github.com/foldrun-io/foldrun-core/commit/3cf6a80))
+- Add s3 blob store driver ([07ae959](https://github.com/foldrun-io/foldrun-core/commit/07ae959))
+- Add blob types and errors ([6447eb0](https://github.com/foldrun-io/foldrun-core/commit/6447eb0))
+- Add S3 streaming and query hooks ([de09561](https://github.com/foldrun-io/foldrun-core/commit/de09561))
+- Test workspace revisions ([56fd05e](https://github.com/foldrun-io/foldrun-core/commit/56fd05e))
+- Add revision journal and history reads ([ed73476](https://github.com/foldrun-io/foldrun-core/commit/ed73476))
+- Serve files-mode workspaces from files ([d8be17d](https://github.com/foldrun-io/foldrun-core/commit/d8be17d))
+- Add records contract tests ([1ac86d1](https://github.com/foldrun-io/foldrun-core/commit/1ac86d1))
+- Route storage index through port ([20c132c](https://github.com/foldrun-io/foldrun-core/commit/20c132c))
+- Route trigger log through port ([d9de637](https://github.com/foldrun-io/foldrun-core/commit/d9de637))
+- Route runs through records port ([25ee555](https://github.com/foldrun-io/foldrun-core/commit/25ee555))
+- Add records port seam ([5a2e9ef](https://github.com/foldrun-io/foldrun-core/commit/5a2e9ef))
+- Fix ops-log frames path check ([a5c3795](https://github.com/foldrun-io/foldrun-core/commit/a5c3795))
+- Add revision contract tests ([dc0c980](https://github.com/foldrun-io/foldrun-core/commit/dc0c980))
+- Add blob and revision stores ([40abd2d](https://github.com/foldrun-io/foldrun-core/commit/40abd2d))
+- Add manifest and publish ([ad43fb9](https://github.com/foldrun-io/foldrun-core/commit/ad43fb9))
+- Lock file index writers ([db88d2c](https://github.com/foldrun-io/foldrun-core/commit/db88d2c))
+
 ## [17.3.0] — 2026-11-08
 
 - feat(browse): a held vendor browser through foldrun's vendor door — admission (FOL-145) ([dd599e2](https://github.com/foldrun-io/foldrun-core/commit/dd599e2))
