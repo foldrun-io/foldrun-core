@@ -240,13 +240,15 @@ export function blobCache(opts: BlobCacheOptions): BlobCache {
   function startFill(k: string, tenant: string, sha: string, f: Fill): Promise<void> {
     return gate(async () => {
       inFlight++;
-      const part = path.join(tmpDir, `${tenant}-${sha}.${process.pid}.part`);
+      // downloadToFile writes `<dl>.part` and renames it to `dl` once the hash
+      // matched; `dl` is then renamed into the cache. Both names are removed
+      // below whatever happens: a fill that failed (a final error, retries
+      // spent) would otherwise leave its bytes in tmp/, outside the count
+      // that maxBytes holds, until the next start-up sweep.
+      const dl = path.join(tmpDir, `${tenant}-${sha}.${process.pid}.dl`);
       try {
         const final = fileOf(tenant, sha);
         fs.mkdirSync(path.dirname(final), { recursive: true });
-        // downloadToFile resumes a cut body with a Range and checks the hash
-        // before it renames `part` to its name; nothing is left on a mismatch.
-        const dl = `${part}.dl`;
         const { size } = await downloadToFile(store, blobObjectKey(tenant, sha), dl, { sha256: sha });
         fs.renameSync(dl, final);
         const e: Entry = { size, pins: f.waiters, tick: ++tick };
@@ -260,7 +262,8 @@ export function blobCache(opts: BlobCacheOptions): BlobCache {
         evict(); // the new entry is pinned by its waiters; others may go
       } finally {
         inFlight--;
-        fs.rmSync(part, { force: true });
+        fs.rmSync(`${dl}.part`, { force: true });
+        fs.rmSync(dl, { force: true });
       }
     });
   }
