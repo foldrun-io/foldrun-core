@@ -289,3 +289,75 @@ test("dropJournal forgets an account's queued changes and removes its files, nob
   assert.ok(fs.existsSync(path.join(root, ".revision-journal", "other", "w")));
   dropJournal(T); // repeatable
 });
+
+// ---- history past the first page of the store (FOL-152) ----
+
+test("history is not the store's first page: older revisions list, restore and resolve by id or date", async () => {
+  // A store that answers at most 3 revisions a page stands in for one with
+  // more than 500 (the real page limit), without writing 500 revisions.
+  const capped: RevisionStore = new Proxy(deps.revisions, {
+    get(target, prop, recv) {
+      const v = Reflect.get(target, prop, recv);
+      if (prop === "revisions") return (ws: Parameters<RevisionStore["revisions"]>[0], o: { limit?: number; before?: number } = {}) => target.revisions(ws, { ...o, limit: Math.min(o.limit ?? 50, 3) });
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  setRevisionBackend({ ...deps, revisions: capped }, ON);
+  for (let i = 0; i < 7; i++) {
+    writeWorkspaceFile(T, W, "memory/a.md", `v${i}\n`, { by: "user:a", message: `v${i}` });
+    await flushRevisions();
+    await new Promise((r) => setTimeout(r, 3)); // distinct times, for the date lookup
+  }
+  // Only the store answers: no local history to fall back on.
+  fs.rmSync(path.join(root, T, ".history"), { recursive: true, force: true });
+  const all = await listRevisions(T, W, { limit: 50 });
+  assert.deepEqual(all.map((r) => r.message), ["v6", "v5", "v4", "v3", "v2", "v1", "v0"], "every page");
+  const oldest = all[all.length - 1];
+  assert.equal(await hasSnapshot(T, W, oldest.id), true, "found by id, not by looking in the first page");
+  assert.equal((await resolveRevision(T, W, oldest.id))?.id, oldest.id);
+  assert.equal((await resolveRevision(T, W, all[5].at))?.id, all[5].id, "a date older than the first page");
+  const rows = await listRevisionsRestorable(T, W, { limit: 50 });
+  assert.equal(rows.length, 7);
+  assert.ok(rows.every((r) => r.restorable), `every stored revision can be restored to (${rows.filter((r) => !r.restorable).map((r) => r.message)})`);
+  assert.deepEqual((await listRevisions(T, W, { limit: 4 })).map((r) => r.message), ["v6", "v5", "v4", "v3"], "a limit is still a limit");
+});
+
+// ---- a read agrees with the write's ifMatch while a commit is pending (FOL-152) ----
+
+import { recordStepOutputs } from "../src/workspace-revisions.ts";
+
+test("the editable-file read serves the folder while the head is known to be behind it: queued, marked, or written with the journal off", async () => {
+  const state = { down: false };
+  setRevisionBackend(downStore(state), ON);
+  const folder = (rel: string) => fs.readFileSync(path.join(workspaceDir(T, W), rel), "utf8");
+  writeWorkspaceFile(T, W, "memory/b.md", "v1\n", { by: "user:a" });
+  await flushRevisions();
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "v1\n");
+
+  // A save whose commit cannot land yet: the read is what the save's ifMatch
+  // is checked against (the folder), not the older head.
+  state.down = true;
+  writeWorkspaceFile(T, W, "memory/b.md", "v2\n", { by: "user:a" });
+  assert.equal((await flushRevisions({ tenant: T, workspace: W })).pending, 1);
+  assert.equal(await text("memory/b.md"), "v1\n", "the head is behind");
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), folder("memory/b.md"), "a queued change: the folder");
+  state.down = false;
+  await flushRevisions({ tenant: T, workspace: W });
+  assert.equal(await text("memory/b.md"), "v2\n");
+  fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "b.md"), "behind, unrecorded\n");
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "v2\n", "nothing pending: the head again");
+
+  // Marked for a repair (a file too big to journal): the folder, until the reconcile.
+  recordStepOutputs(T, W, [{ path: "state/big.json", base: null, after: Buffer.alloc(1024 * 1024 + 1, 97) }], { runId: "r-big", step: "p" });
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "behind, unrecorded\n", "marked: the folder");
+  writeWorkspaceFile(T, W, "memory/c.md", "c\n", { by: "user:a" }); // a drain runs, and the reconcile with it
+  await flushRevisions({ tenant: T, workspace: W });
+  fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "b.md"), "behind again\n");
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "behind, unrecorded\n", "reconciled: the head again");
+
+  // Written while the journal was off: the head never saw it.
+  setRevisionBackend(downStore(state), { journal: () => false, read: () => false });
+  writeWorkspaceFile(T, W, "memory/b.md", "while off\n", { by: "user:a" });
+  setRevisionBackend(downStore(state), ON);
+  assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "while off\n", "changed with the journal off: the folder");
+});

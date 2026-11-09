@@ -238,3 +238,29 @@ test("the cache seam: a read asks the cache first, fills it on a miss, and a hit
   assert.equal(await text("memory/a.md"), "a\n");
   assert.ok(blobReads <= 1, `only the manifest was read from the store, not the file (${blobReads})`);
 });
+
+// ---- a snapshot is all of a revision or nothing (FOL-152) ----
+
+import crypto from "node:crypto";
+import { snapshotAt, hasSnapshot, resolveRevision, listRevisions, listRevisionsRestorable } from "../src/history.ts";
+
+/** Remove one file's blob from the object store, as a sweep or a lost object would. */
+function loseBlob(content: string): void {
+  const sha = crypto.createHash("sha256").update(content).digest("hex");
+  const hit = (fs.readdirSync(path.join(root, ".objects"), { recursive: true }) as string[]).find((f) => f.endsWith(sha));
+  assert.ok(hit, "the blob was stored");
+  fs.rmSync(path.join(root, ".objects", hit!));
+}
+
+test("a revision one of whose blobs is missing has no snapshot: never a tree that silently lacks the file", async () => {
+  setRevisionBackend(deps, ON);
+  writeWorkspaceFile(T, W, "memory/notes.md", "kept only here\n", { by: "user:a", message: "first" });
+  await flushRevisions();
+  const [rev] = await listRevisionSummaries(T, W);
+  assert.ok((await snapshotFiles(T, W, rev.id))!.some((f) => f.path === "memory/notes.md"));
+  loseBlob("kept only here\n");
+  await assert.rejects(snapshotFiles(T, W, rev.id), /memory\/notes\.md: its content .* is missing/);
+  // Through history (what the restore route asks): no snapshot, so the restore
+  // refuses, rather than a tree that would delete memory/notes.md.
+  assert.equal(await snapshotAt(T, W, rev.id), null);
+});

@@ -226,3 +226,47 @@ test("a step with more output than one entry may carry journals what fits and le
   assert.ok(n > 0 && n < 12, `some, not all (${n})`);
   assert.equal(needsReconcile(T, W), true);
 });
+
+// ---- a retry of a partly committed entry still commits what is missing (FOL-152) ----
+
+test("an entry whose authored half committed and whose state half failed commits the state half on retry", async () => {
+  // A state head exists, so the entry is not a baseline on either side.
+  fs.mkdirSync(path.join(ws, "state"), { recursive: true });
+  fs.writeFileSync(path.join(ws, "state", "seed.json"), "{}");
+  recordStepOutputs(T, W, [{ path: "state/seed.json", base: null, after: Buffer.from("{}") }], { runId: "seed-state", step: 0 });
+  // A person changed b on the head after the run below started from b0.
+  fs.writeFileSync(path.join(ws, "memory", "b.md"), "b person\n");
+  recordStepOutputs(T, W, [{ path: "memory/b.md", base: sha("b0\n"), after: Buffer.from("b person\n") }], { runId: "person", step: 0 });
+  await flushRevisions({ tenant: T, workspace: W });
+  assert.equal(await text("memory/b.md"), "b person\n");
+
+  // The state commit fails once; the authored one goes through.
+  let failState = true;
+  const inner = deps.revisions;
+  const flaky: RevisionStore = new Proxy(inner, {
+    get(target, prop, recv) {
+      const v = Reflect.get(target, prop, recv);
+      if (prop === "commit" && typeof v === "function") {
+        return (ws: { scope?: string }, ...rest: unknown[]) =>
+          failState && ws.scope === "state" ? Promise.reject(new Error("database down")) : (v as Function).call(target, ws, ...rest);
+      }
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  setRevisionBackend({ ...deps, revisions: flaky }, ON);
+  recordStepOutputs(T, W, [
+    { path: "memory/a.md", base: sha("a0\n"), after: Buffer.from("a run\n") }, // applies
+    { path: "memory/b.md", base: sha("b0\n"), after: Buffer.from("b run\n") }, // conflicts
+    { path: "state/x.json", base: null, after: Buffer.from('{"x":1}') },
+  ], { runId: "run-partial", step: "p" });
+  assert.equal((await flushRevisions({ tenant: T, workspace: W })).pending, 1, "the state half failed: still queued");
+  assert.equal(await text("memory/a.md"), "a run\n", "the authored half committed");
+  assert.equal(await text("state/x.json"), null);
+
+  failState = false;
+  assert.equal((await flushRevisions({ tenant: T, workspace: W })).pending, 0);
+  assert.equal(await text("state/x.json"), '{"x":1}', "the retry committed the state half");
+  const conflictCopies = Object.keys((await heads()).authored.files).filter((f) => /^memory\/b\.conflict-/.test(f));
+  assert.equal(conflictCopies.length, 1, `one conflict copy of b, not one per attempt (${conflictCopies.join(", ")})`);
+  assert.equal(await text("memory/b.md"), "b person\n", "the head keeps the person's b");
+});
