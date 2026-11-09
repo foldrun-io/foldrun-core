@@ -13,6 +13,18 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.0.0] — 2026-11-09
+
+### Breaking changes
+
+- `RevisionView` from `@foldrun/core` — list changed
+- `RevisionView` from `@foldrun/core/history` — list changed
+
+- fix(blobs): multipart checks the whole object's sha256; every s3 request has a deadline (FOL-152) ([7e937cc](https://github.com/foldrun-io/foldrun-core/commit/7e937cc))
+- fix(blobs): an empty object downloads; a failed cache fill leaves no temp file (FOL-152) ([30560b2](https://github.com/foldrun-io/foldrun-core/commit/30560b2))
+- fix(sweeper): stop on an unreadable new manifest, charge the shared budget from the report (FOL-152) ([5011f1e](https://github.com/foldrun-io/foldrun-core/commit/5011f1e))
+- fix(revisions): partial retries, whole snapshots, all of history, reads that match ifMatch (FOL-152) ([3d5df5d](https://github.com/foldrun-io/foldrun-core/commit/3d5df5d))
+
 ## [17.4.0] — 2026-11-09
 
 ### Widened in the public API
