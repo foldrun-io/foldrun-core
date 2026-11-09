@@ -68,6 +68,10 @@ export function browseTier(vendor: string | null | undefined): { tier: BrowseTie
 export type BrowseVerdict =
   | { kind: "legacy" }
   | { kind: "hosted" }
+  /** FOL-145: a vendor's browser held to the list through foldrun's vendor
+   *  door — the vendor's key bound to its API, the proxy's session rules on
+   *  every call, the door its only proxy. */
+  | { kind: "vendor"; vendor: string }
   | { kind: "refuse"; message: string };
 
 export function browseVerdict(o: {
@@ -79,10 +83,13 @@ export function browseVerdict(o: {
   vendor: string | null | undefined;
   /** Can this executor wall the step's network (Platform.confinesBrowsing)? */
   confines: boolean;
+  /** The step's grant carries a vendor door for this vendor (vendorDoorFor). */
+  door?: boolean;
 }): BrowseVerdict {
   if (o.level === "open" || !o.enforce || !o.confines) return { kind: "legacy" };
   const { tier, title } = browseTier(o.vendor);
   if (tier === "hosted") return { kind: "hosted" };
+  if (tier === "vendor" && o.door) return { kind: "vendor", vendor: (o.vendor ?? "").trim().toLowerCase() };
   const why =
     tier === "vendor"
       ? `${title} browses from its own network, and foldrun cannot hold it to network: until that vendor is qualified (FOL-110 phase 4)`
@@ -100,8 +107,12 @@ export function browseVerdict(o: {
  *  an egress proxy: the step's list, and whether it holds — `hosted` when
  *  browseVerdict put the step under the wall, else the plain fact that it
  *  does not hold yet, for the browser or anything else in the step. */
-export function browseNetworkLine(policy: NetworkPolicy, vendor: string | null | undefined, opts: { hosted?: boolean } = {}): string {
+export function browseNetworkLine(policy: NetworkPolicy, vendor: string | null | undefined, opts: { hosted?: boolean; vendorDoor?: boolean } = {}): string {
   const what = networkLine(policy, true);
+  if (opts.vendorDoor) {
+    const { title } = browseTier(vendor);
+    return `${what} — enforced — through foldrun's vendor door: ${title}'s browser runs on the vendor's machines, and the session it starts has foldrun's door as its only proxy, so its pages are held to this list (no site a secret is bound to: a vendor's browser cannot trust foldrun's certificate, FOL-145).`;
+  }
   if (opts.hosted) {
     return `${what} — enforced — hosted: the browser runs inside this step's sandbox, whose network reaches only the egress proxy (which holds the list), so a page, a script or a changed proxy setting reaches no site off the list.`;
   }
@@ -116,4 +127,41 @@ export function browseNetworkLine(policy: NetworkPolicy, vendor: string | null |
         ? `. Its browser (${title}) browses from the vendor's network: it comes under network: through the egress proxy once that vendor is qualified (FOL-110)`
         : `. Its browser (${title}) always browses through its own network and cannot be held to network: — a restricted, enforced network: will refuse it (FOL-110)`;
   return `${what}${now}${later}.`;
+}
+
+// ------------------------------------------------ FOL-145: the vendor door
+
+/** Set to "1" for a step whose vendor browser is held through the door:
+ *  the web tool sends the vendor's API calls and its remote-control
+ *  WebSocket through the egress proxy's /e/ door (Playwright's
+ *  connectOverCDP ignores HTTPS_PROXY, so a walled sandbox has no other way). */
+export const VENDOR_DOOR_ENV = "FOLDRUN_VENDOR_DOOR";
+
+/** The hosts a vendor's key is bound to in door mode: its API, and the
+ *  remote-control hosts known so far. Browserbase's and Hyperbrowser's
+ *  remote-control hosts come back in their session answers and are added as
+ *  FOL-151 qualifies them; until then those vendors fail closed there. */
+export const VENDOR_DOOR_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  browserbase: ["api.browserbase.com"],
+  steel: ["api.steel.dev", "connect.steel.dev"],
+  hyperbrowser: ["api.hyperbrowser.ai"],
+  browserless: ["production-sfo.browserless.io", "production-lon.browserless.io", "production-ams.browserless.io"],
+};
+
+/**
+ * The vendor door for a step's vendor, or null. On only when the install
+ * says so — FOLDRUN_VENDOR_EGRESS=1, FOLDRUN_VENDOR_EGRESS_URL (the door's
+ * public address) — and the vendor is in FOLDRUN_VENDOR_EGRESS_VENDORS (the
+ * vendors qualified, or on trial while FOL-151 qualifies them; empty by
+ * default, so nothing changes until a vendor is listed).
+ */
+export function vendorDoorFor(vendor: string | null | undefined, env: Record<string, string | undefined> = process.env): { vendor: string; server: string } | null {
+  const name = (vendor ?? "").trim().toLowerCase();
+  if (!name || env.FOLDRUN_VENDOR_EGRESS !== "1") return null;
+  const server = (env.FOLDRUN_VENDOR_EGRESS_URL ?? "").trim();
+  if (!/^https?:\/\/[^/\s]+$/.test(server.replace(/\/$/, ""))) return null;
+  const listed = (env.FOLDRUN_VENDOR_EGRESS_VENDORS ?? "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
+  if (!listed.includes(name) || !VENDOR_DOOR_HOSTS[name]) return null;
+  if (browseTier(name).tier !== "vendor") return null;
+  return { vendor: name, server: server.replace(/\/$/, "") };
 }

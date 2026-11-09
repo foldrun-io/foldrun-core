@@ -1279,8 +1279,13 @@ FROM base AS browsers
 # --with-deps packages, so a Playwright bump that dropped it would have
 # broken every windowed browser without a word. No xauth: nothing here runs
 # xvfb-run, and Xvfb started without -auth takes the local client as it is.
+# libnss3-tools for certutil: Firefox trusts a CA only from its own
+# profile's NSS database (not the system store, SSL_CERT_FILE, enterprise
+# roots or a distribution policy — each tried in this image, 8 Nov 2026), so
+# web browse puts the egress CA there for a step held to its network: list
+# (FOL-128). ~1 MB.
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends xvfb \\
+ && apt-get install -y --no-install-recommends xvfb libnss3-tools \\
  && rm -rf /var/lib/apt/lists/*
 # Google Chrome and Chrome beta come from Google's apt repository, which
 # Playwright adds; each is tried ENGINE_DOWNLOAD_ATTEMPTS times. Only on

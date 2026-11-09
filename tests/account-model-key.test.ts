@@ -1,6 +1,6 @@
 // Multi-tenant model keys: a hosted platform runs only its operator's
 // accounts on its own model credential, and every other account brings its
-// own API key — set once in the account vault (Settings → Model), no
+// own API key — set once in the account vault (Settings → Models), no
 // provider: block needed. Exercised through a fake executor, which sees the
 // args a cluster would.
 //
@@ -60,7 +60,7 @@ test("a customer account with no key of its own is refused before a sandbox, and
     const done = await run();
     assert.equal(done.status, "failed");
     assert.equal(calls.length, 0, "no sandbox rented, and the operator's key never used");
-    assert.ok(done.steps[0].events.some((e) => /no model key: .*Settings → Model/.test(e.text)), done.steps[0].events.map((e) => e.text).join("\n"));
+    assert.ok(done.steps[0].events.some((e) => /no model key: .*Settings → Models/.test(e.text)), done.steps[0].events.map((e) => e.text).join("\n"));
     // The command it names is the CLI's real one, and the record never says
     // the step ran on the operator's login (FOL-14, 18 Oct 2026).
     assert.ok(done.steps[0].events.some((e) => /`foldrun account model set <provider> --key …`/.test(e.text)));
@@ -259,7 +259,7 @@ test("a container step with no model credential anywhere is refused before a san
       assert.equal(done.status, "failed");
       assert.equal(calls.length, 0, "no sandbox rented for a step that could only fail at the model");
       const texts = done.steps[0].events.map((e) => e.text).join("\n");
-      assert.match(texts, /no model credential: .*ANTHROPIC_API_KEY.*self-hosting\/\.env.*Settings → Model/, texts);
+      assert.match(texts, /no model credential: .*ANTHROPIC_API_KEY.*self-hosting\/\.env.*Settings → Models/, texts);
       assert.equal(done.steps[0].credential, "none set");
       assert.doesNotMatch(texts, /fall back to whatever login/, "no machine login to fall back to in a container");
     } finally {

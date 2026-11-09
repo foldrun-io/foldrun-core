@@ -44,7 +44,7 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   // ------------------------------------------------------------ client
   {
     id: "client.authorization-code-pkce", role: "client", title: "Authorization code with PKCE (S256)", spec: "RFC 6749 §4.1, RFC 7636",
-    status: "supported", note: "Settings → Connections or `foldrun connect`. PKCE is on for every connection.",
+    status: "supported", note: "Settings → Secrets → Connections or `foldrun connect`. PKCE is on for every connection.",
     proof: [platform("tests/oauth-connect.test.ts", "PKCE: on by default"), platform(KC, "authorization code + PKCE S256 + PAR"), cli("tests/cli-connect.test.ts", "connect: PKCE by default")],
   },
   {

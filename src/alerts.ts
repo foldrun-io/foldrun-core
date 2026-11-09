@@ -167,7 +167,7 @@ export function evaluateAlerts(cfg: AlertConfig, facts: AlertFacts, workspace: s
         key: `runs_per_hour/${flow}`,
         flow,
         headline: `${workspace}: ${flow} started ${n} times in an hour`,
-        detail: `Past the ${cfg.runsPerHour} in alerts: runs_per_hour — a loop, a webhook sender retrying, or a schedule written wrong. Its Triggers page shows what started each; throttle: or debounce: caps it, and Settings → Pause stops it now.`,
+        detail: `Past the ${cfg.runsPerHour} in alerts: runs_per_hour — a loop, a webhook sender retrying, or a schedule written wrong. Its Triggers page shows what started each; throttle: or debounce: caps it, and Settings → Policies → Pause runs stops it now.`,
       });
     }
   }

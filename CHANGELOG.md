@@ -13,6 +13,29 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [17.3.0] — 2026-11-08
+
+- feat(browse): a held vendor browser through foldrun's vendor door — admission (FOL-145) ([dd599e2](https://github.com/foldrun-io/foldrun-core/commit/dd599e2))
+- feat(egress): grant.vendorDoor — a held vendor browser's door (FOL-145) ([1a305bd](https://github.com/foldrun-io/foldrun-core/commit/1a305bd))
+
+## [17.2.0] — 2026-11-08
+
+- feat(runner): certutil in the full image — a held Firefox trusts the egress CA (FOL-144) ([898c0dc](https://github.com/foldrun-io/foldrun-core/commit/898c0dc))
+
+## [17.1.1] — 2026-11-08
+
+- fix(docs): every Settings → … names a tab or section that exists ([bae2351](https://github.com/foldrun-io/foldrun-core/commit/bae2351))
+
+## [17.1.0] — 2026-11-07
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `ScanRule` from `@foldrun/core/scan`
+
+- fix(check): check's own rules link to their section on the checks page ([9e3401c](https://github.com/foldrun-io/foldrun-core/commit/9e3401c))
+
 ## [17.0.1] — 2026-11-05
 
 - fix(run-container): pack a script-free copy of the installed core ([3a46532](https://github.com/foldrun-io/foldrun-core/commit/3a46532))

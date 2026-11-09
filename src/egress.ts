@@ -132,6 +132,12 @@ export interface EgressGrant {
    *  searchDoorWanted): a held step's way to the account's search engine.
    *  `max` caps how many searches go through it. Absent: the door refuses. */
   search?: { max?: number };
+  /** FOL-145: a step whose vendor browser is held to its list. The proxy
+   *  applies the vendor's session rules (foldrun-platform
+   *  vendor-session-policy.ts) to that vendor's API calls on the /e/ door —
+   *  the call that starts a browser gets `server`, foldrun's vendor egress
+   *  door, as its only proxy. Absent: nothing changes. */
+  vendorDoor?: { vendor: string; server: string };
 }
 
 export interface EgressLease {

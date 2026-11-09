@@ -47,7 +47,7 @@ foldrun_version: "0.1"
 # that declares the same key replaces it *whole* — base_url and token never
 # merge across scopes, so a provider block belongs entirely at one level.
 #
-# Your own model key needs no block: Settings → Model provider, or
+# Your own model key needs no block: Settings → Models, or
 # \`foldrun account model set anthropic --key …\` (an API key, not a login).
 # On foldrun's own platform you can run on foldrun's models instead, billed
 # in credits: \`foldrun account model use foldrun --provider anthropic\`.
@@ -409,7 +409,7 @@ and \`/api/metrics\` (Prometheus). Outside \`/api\`: \`/a2a/<account>/<ws>/flows
 (a published flow's agent card and A2A 1.0 JSON-RPC endpoint — an A2A key only, \`foldrun docs a2a\`).
 
 Every call answers — and the CLI sends — \`Foldrun-Version: YYYY-MM-DD\` (dated API
-versions; an account pin in Settings → API), \`X-RateLimit-*\` headers (a \`429\`
+versions; an account pin in Settings → API keys → API), \`X-RateLimit-*\` headers (a \`429\`
 carries \`Retry-After\`), and writes that start work take an \`Idempotency-Key\`
 (a retry with the same key replays the first answer). The whole surface as
 OpenAPI 3.1: \`/api/openapi.json\` (open), or \`foldrun api spec --out openapi.json\`.

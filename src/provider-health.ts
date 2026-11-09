@@ -237,8 +237,8 @@ export function providersInUse(tenant: string): ProviderInUse[] {
   };
 
   add(frontmatterOf(path.join(accountDir(tenant), "AGENTS.md")).provider, null, "account");
-  // The account's own key from Settings → Model, which needs no block.
-  add(accountModelBlock((name) => getSecret(tenant, name)?.value ?? null), null, "account (Settings → Model)");
+  // The account's own key from Settings → Models, which needs no block.
+  add(accountModelBlock((name) => getSecret(tenant, name)?.value ?? null), null, "account (Settings → Models)");
   for (const ws of safeList(() => listWorkspaces(tenant))) {
     const dir = workspaceDir(tenant, ws.name);
     add(frontmatterOf(path.join(dir, "AGENTS.md")).provider, ws.name, ws.name);
