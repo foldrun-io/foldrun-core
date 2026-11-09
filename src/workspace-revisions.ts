@@ -54,7 +54,7 @@ import {
   type Changes,
   type Manifest,
 } from "./manifest.ts";
-import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
+import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, stateOpId, BlobMissing, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 import type { SweepMarks } from "./blob-sweeper.ts";
@@ -181,6 +181,8 @@ const queues = new Map<string, Entry[]>();
 const chains = new Map<string, Promise<unknown>>();
 const marked = new Set<string>(); // overflowed or dropped: needs reconcileWorkspace
 const verified = new Set<string>(); // reconciled once in this process
+const unjournalled = new Set<string>(); // changed here while the journal was off: the head has not seen it
+const repairing = new Set<string>(); // a reconcile is publishing: the head is about to change
 const retryAt = new Map<string, number>();
 const wantPrune = new Set<string>(); // a state checkpoint was committed since the last look
 const prunedAt = new Map<string, number>();
@@ -220,6 +222,7 @@ function journalChange(tenant: string, scope: string, files: RevisionFile[], met
   const k = key(tenant, scope);
   if (!safe(gate.journal)) {
     verified.delete(k); // a change the head will not see: reconcile before trusting it again
+    unjournalled.add(k);
     return;
   }
   // Only what the head needs: the new content. The old text is the writer's
@@ -297,6 +300,7 @@ export function recordStepOutputs(
   const k = key(tenant, workspace);
   if (!safe(gate.journal)) {
     verified.delete(k); // the head will not see this: reconcile before trusting it again
+    unjournalled.add(k);
     return 0;
   }
   const files: EntryFile[] = [];
@@ -428,6 +432,7 @@ async function drainOne(k: string): Promise<void> {
 /** An error that retrying will not cure: the manifest refused the content. */
 function permanent(err: unknown): boolean {
   if (err instanceof PublishError) return err.code === "bad_change";
+  if (err instanceof OpIdReused) return true; // commitEntry asked again and it still is: see there
   const m = err instanceof Error ? err.message : "";
   return /^illegal manifest path|differ only by case|a manifest holds at most|is not workspace content/.test(m);
 }
@@ -448,6 +453,8 @@ export function resetJournalForTests(): void {
   chains.clear();
   marked.clear();
   verified.clear();
+  unjournalled.clear();
+  repairing.clear();
   retryAt.clear();
   restoring.clear();
   wantPrune.clear();
@@ -467,6 +474,7 @@ export function dropJournal(tenant: string, workspace?: string): void {
       queues.delete(k);
       marked.delete(k);
       verified.delete(k);
+      unjournalled.delete(k);
       retryAt.delete(k);
     }
   }
@@ -1062,27 +1070,61 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   if (!Object.keys(changes).length) return null;
   // A restore tag only counts when that revision is in the store.
   const restoredFrom = entry.restoredFrom && (await deps.revisions.revision(ws, entry.restoredFrom)) ? entry.restoredFrom : undefined;
-  try {
-    return await publish(deps, {
-    ws,
-    opId: opIdOf(baseline.authored || baseline.state ? "jb" : "jr", entry.id),
-    by: entry.by,
-    message: entry.message,
-    changes,
-    restoredFrom,
-    bytesOf: async (sha) => {
-      const b = bytes.get(sha);
-      if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
-      return b;
-    },
-    });
-  } catch (err) {
-    // This entry's id was used before for a different set of changes: an
-    // earlier attempt committed it (its answer was lost) and the head has
-    // moved on, so the changes computed now differ. It is done.
-    if (err instanceof OpIdReused) return null;
-    throw err;
+  const prefix = baseline.authored || baseline.state ? "jb" : "jr";
+  // An entry is two commits (workspace head, then state head), each with its
+  // own op id. A retry after only the first landed must still make the second:
+  // so a side whose op id has finished is left out, rather than recomputed —
+  // recomputed, its changes differ (what landed now matches the head and drops
+  // out, a conflict does not), the op id would be "reused", and until 9 Nov
+  // 2026 that was taken as the whole entry being done and the state half was
+  // never committed (FOL-152). Asked again after an OpIdReused: another pod
+  // replaying the same entry may finish a side between the look and the publish.
+  for (let attempt = 0; ; attempt++) {
+    const done = await sidesDone(deps, ws, entry.id);
+    const todo: Changes = {};
+    for (const [p, c] of Object.entries(changes)) if (!done[sideOf(p)!]) todo[p] = c;
+    if (!Object.keys(todo).length) return null;
+    try {
+      return await publish(deps, {
+        ws,
+        // The op id of a side that finished, when one did, so the other side's
+        // conflict copies are named the way the first attempt would have.
+        opId: done.opId ?? opIdOf(prefix, entry.id),
+        by: entry.by,
+        message: entry.message,
+        changes: todo,
+        restoredFrom: done.authored ? undefined : restoredFrom,
+        bytesOf: async (sha) => {
+          const b = bytes.get(sha);
+          if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
+          return b;
+        },
+      });
+    } catch (err) {
+      // Never "done" by itself: a side that finished is found by sidesDone on
+      // the next look. One that keeps answering OpIdReused without having
+      // finished is a bug, and permanent(): the entry is dropped and the
+      // workspace reconciled from the folder, so nothing is lost silently.
+      if (!(err instanceof OpIdReused) || attempt >= 2) throw err;
+    }
   }
+}
+
+/** Which halves of a journal entry finished in an earlier attempt (an
+ *  operation is recorded for each, committed or unchanged). Both prefixes are
+ *  asked: an entry that was a baseline when it first ran is not one on retry. */
+async function sidesDone(deps: Deps, ws: WorkspaceRef, id: string): Promise<{ authored: boolean; state: boolean; opId?: string }> {
+  const out: { authored: boolean; state: boolean; opId?: string } = { authored: false, state: false };
+  const ids = ["jb", "jr"].map((prefix) => opIdOf(prefix, id));
+  const found = await Promise.all(
+    ids.map((opId) => Promise.all([deps.revisions.operation({ ...ws, scope: "workspace" }, opId), deps.revisions.operation({ ...ws, scope: "state" }, stateOpId(opId))])),
+  );
+  found.forEach(([a, s], i) => {
+    if (a) out.authored = true;
+    if (s) out.state = true;
+    if ((a || s) && !out.opId) out.opId = ids[i];
+  });
+  return out;
 }
 
 /** Bring the heads to the folder's content in one revision: the way in for a
@@ -1097,6 +1139,8 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
   // writing a file too big to journal while this publishes) asks for another
   // repair; a repair that fails puts it back for the next one.
   const wasMarked = marked.delete(k);
+  const wasUnjournalled = unjournalled.delete(k);
+  repairing.add(k);
   try {
     // The heads first, then the folder: a folder read older than the heads
     // would diff a stale copy against a newer head, and with that head as each
@@ -1138,7 +1182,10 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
     });
   } catch (err) {
     if (wasMarked) marked.add(k);
+    if (wasUnjournalled) unjournalled.add(k);
     throw err;
+  } finally {
+    repairing.delete(k);
   }
 }
 
@@ -1183,27 +1230,57 @@ async function parentManifest(deps: Deps, tenant: string, workspace: string, rev
 /** The history page's rows, newest first: the workspace head's revisions in
  *  history.ts's summary shape. `commit` is null (a deploy's commit id rides in
  *  the message); the id is the revision's. */
-export async function listRevisionSummaries(tenant: string, workspace: string, opts: { limit?: number; forPath?: string } = {}): Promise<RevisionSummary[]> {
+export async function listRevisionSummaries(tenant: string, workspace: string, opts: { limit?: number; forPath?: string; paths?: boolean } = {}): Promise<RevisionSummary[]> {
   const deps = backend;
   if (!deps) return [];
-  const revs = await deps.revisions.revisions({ tenant, workspace }, { limit: opts.forPath ? 500 : (opts.limit ?? 200) });
-  const out: RevisionSummary[] = [];
   const want = opts.limit ?? 200;
-  // Eight at a time: each revision is two manifest reads, and a history page
-  // asks for hundreds.
-  for (let i = 0; i < revs.length && out.length < want; i += 8) {
-    const rows = await Promise.all(
-      revs.slice(i, i + 8).map(async (r) => {
-        const [mine, before] = await Promise.all([loadManifest(deps, tenant, r.authored), parentManifest(deps, tenant, workspace, r)]);
-        return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: Object.keys(diffManifests(before, mine)).sort() } as RevisionSummary;
-      }),
-    );
-    for (const row of rows) {
-      if (opts.forPath && !row.paths.includes(opts.forPath)) continue;
-      if (out.length < want) out.push(row);
+  // `paths: false` (resolving a restore point) needs only who, when and why:
+  // no manifest is read, and every row says paths [].
+  const withPaths = opts.paths !== false || !!opts.forPath;
+  // Page by page: the store answers at most PAGE revisions a call, and until
+  // 9 Nov 2026 that first page was taken as the whole history, so a revision
+  // older than the 500th could not be listed or resolved (FOL-152). A search
+  // for one path still looks at no more than FOR_PATH_SCAN of them: each is two
+  // manifest reads.
+  const scanUpTo = opts.forPath ? FOR_PATH_SCAN : Infinity;
+  const out: RevisionSummary[] = [];
+  let before: number | undefined;
+  for (let scanned = 0; out.length < want && scanned < scanUpTo; ) {
+    const ask = opts.forPath ? Math.min(PAGE, scanUpTo - scanned) : Math.min(PAGE, want - out.length);
+    const revs = await deps.revisions.revisions({ tenant, workspace }, { limit: ask, ...(before !== undefined ? { before } : {}) });
+    if (!revs.length) break;
+    scanned += revs.length;
+    // Eight at a time: each revision is two manifest reads, and a history page
+    // asks for hundreds.
+    for (let i = 0; i < revs.length && out.length < want; i += 8) {
+      const rows = await Promise.all(
+        revs.slice(i, i + 8).map(async (r) => {
+          if (!withPaths) return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: [] } as RevisionSummary;
+          const [mine, parent] = await Promise.all([loadManifest(deps, tenant, r.authored), parentManifest(deps, tenant, workspace, r)]);
+          return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: Object.keys(diffManifests(parent, mine)).sort() } as RevisionSummary;
+        }),
+      );
+      for (const row of rows) {
+        if (opts.forPath && !row.paths.includes(opts.forPath)) continue;
+        if (out.length < want) out.push(row);
+      }
     }
+    before = revs[revs.length - 1].seq;
+    if (before <= 1) break; // that was the first revision: nothing older to ask for
   }
   return out;
+}
+/** The most revisions the store answers in one call (revision-store.ts). */
+const PAGE = 500;
+const FOR_PATH_SCAN = 500;
+
+/** One revision of the workspace head, by id, without listing: the history's
+ *  "is this a restore point" and "which revision is that id". */
+export async function revisionSummary(tenant: string, workspace: string, id: string): Promise<RevisionSummary | null> {
+  const deps = backend;
+  if (!deps) return null;
+  const r = await deps.revisions.revision({ tenant, workspace }, id);
+  return r ? { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: [] } : null;
 }
 
 /** One revision with what changed, in history.ts's Revision shape (text
@@ -1226,7 +1303,12 @@ export async function readRevisionDetail(tenant: string, workspace: string, id: 
   return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, files };
 }
 
-/** The whole tree at a revision (the files a restore would bring back), text. */
+/** The whole tree at a revision (the files a restore would bring back), text.
+ *  All of it or an error: a file whose blob cannot be had throws BlobMissing.
+ *  Until 9 Nov 2026 such a file was left out, and a tree that lacks a file is
+ *  indistinguishable from one where it was deleted — a restore from it would
+ *  have removed the file from the folder (FOL-152). Through history.ts the
+ *  error answers "no snapshot", and the restore refuses. */
 export async function snapshotFiles(tenant: string, workspace: string, id: string): Promise<{ path: string; content: string }[] | null> {
   const deps = backend;
   if (!deps) return null;
@@ -1236,7 +1318,8 @@ export async function snapshotFiles(tenant: string, workspace: string, id: strin
   const out: { path: string; content: string }[] = [];
   for (const [p, e] of Object.entries(m.files).sort(([a], [b]) => a.localeCompare(b))) {
     const b = await blobBytes(deps, tenant, e.sha);
-    if (b) out.push({ path: p, content: b.toString("utf8") });
+    if (!b) throw new BlobMissing(p, e.sha);
+    out.push({ path: p, content: b.toString("utf8") });
   }
   return out;
 }
@@ -1269,6 +1352,7 @@ const view: RevisionView = {
   list: (t, w, o) => guarded("list", t, w, () => listRevisionSummaries(t, w, o)),
   read: (t, w, id, p) => guarded("read", t, w, () => readRevisionDetail(t, w, id, p)),
   snapshot: (t, w, id) => guarded("snapshot", t, w, () => snapshotFiles(t, w, id)),
+  get: (t, w, id) => guarded("get", t, w, () => revisionSummary(t, w, id)),
 };
 
 // ------------------------------------------------------------- reads through heads
@@ -1278,7 +1362,7 @@ const view: RevisionView = {
  *  fallback is the point: a head behind the folder, a missing blob, a store
  *  that is down, a binary file the tree reader never recorded). */
 export async function readHeadText(tenant: string, workspace: string, rel: string): Promise<string | null> {
-  if (!revisionReadsOn()) return null;
+  if (!revisionReadsOn() || headBehind(tenant, workspace, rel)) return null;
   try {
     const b = await readAtHead(tenant, workspace, rel);
     return b ? b.toString("utf8") : null;
@@ -1286,6 +1370,20 @@ export async function readHeadText(tenant: string, workspace: string, rel: strin
     opsError("revisions.read_failed", err, { tenant, workspace }, "warn");
     return null;
   }
+}
+
+/** Is the head known, in this process, not to hold the folder's copy of `rel`?
+ *  A change to it is queued (its commit failed or has not run yet), the
+ *  workspace is marked for a repair or being repaired, or it was written while
+ *  the journal was off. The folder is the working copy and what a save's
+ *  `ifMatch` is checked against, so a read that answered the older head there
+ *  would tell the client a hash its next save can never match (FOL-152).
+ *  In-memory only, so it costs nothing per read; a change another process
+ *  has queued is not seen here. */
+function headBehind(tenant: string, workspace: string, rel: string): boolean {
+  const k = key(tenant, workspace);
+  if (marked.has(k) || unjournalled.has(k) || repairing.has(k)) return true;
+  return !!queues.get(k)?.some((e) => e.files.some((f) => f.path === rel));
 }
 
 /** Every file of the workspace head with its bytes and mode (both heads), for
@@ -1314,7 +1412,8 @@ export async function readHeadTree(tenant: string, workspace: string): Promise<{
 }
 
 /** The dashboard's and the API's read of one editable file: the head's bytes
- *  when reads through revisions are on and the head has the file, otherwise
+ *  when reads through revisions are on, the head has the file and nothing in
+ *  this process says the head is behind the folder for it (headBehind), otherwise
  *  the folder exactly as readWorkspaceFile answers (same path rules, same
  *  "file not found"). */
 export async function readWorkspaceFileVia(tenant: string, workspace: string, rel: string): Promise<string> {

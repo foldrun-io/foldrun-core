@@ -372,6 +372,12 @@ export function resolveRevisionLocal(
 
 /** The pick of resolveRevision over a newest-first list of restorable revisions. */
 function resolveIn(all: RevisionSummary[], to: string, now: number): { id: string; at: string; by: string; message: string } | null {
+  return pick(all, target(to, now));
+}
+
+/** What a restore's `to` names: a moment, or an id (or a commit). Throws 400
+ *  on something that is neither. */
+function target(to: string, now: number): { moment: number } | { id: string } {
   const t = to.trim();
   if (!t || t.startsWith("-")) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
   const rel = /^(\d+)\s*(m|h|d|w)$/.exec(t);
@@ -380,12 +386,20 @@ function resolveIn(all: RevisionSummary[], to: string, now: number): { id: strin
     : /^\d{4}-\d{2}-\d{2}/.test(t)
       ? Date.parse(t)
       : null;
-  let hit: RevisionSummary | undefined;
   if (moment !== null) {
     if (Number.isNaN(moment)) throw Object.assign(new Error(`not a date: ${to}`), { status: 400 });
-    hit = all.find((r) => Date.parse(r.at) <= moment);
+    return { moment };
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(t)) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
+  return { id: t };
+}
+
+function pick(all: RevisionSummary[], want: { moment: number } | { id: string }): { id: string; at: string; by: string; message: string } | null {
+  let hit: RevisionSummary | undefined;
+  if ("moment" in want) {
+    hit = all.find((r) => Date.parse(r.at) <= want.moment);
   } else {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(t)) throw Object.assign(new Error(`not a revision or a time: ${to}`), { status: 400 });
+    const t = want.id;
     // An exact id first, then a commit: a commit deployed twice is recorded
     // once under its own id and again under a fresh one naming it (30 Oct
     // 2026, recordRevision), and newest-first with one predicate answered
@@ -532,29 +546,45 @@ export function latestRevisionIdLocal(tenant: string, scope: string): string | n
 // loses no history. The account shelf ("@library") is never in revisions.
 
 export interface RevisionView {
-  /** Newest first, or null when revisions do not serve this scope. */
-  list(tenant: string, scope: string, opts: { forPath?: string; limit?: number }): Promise<RevisionSummary[] | null>;
+  /** Newest first, or null when revisions do not serve this scope. Every page
+   *  of the store up to `limit` (Infinity: all of it); `paths: false` leaves
+   *  the changed paths out (rows say []), which is what makes "all" cheap. */
+  list(tenant: string, scope: string, opts: { forPath?: string; limit?: number; paths?: boolean }): Promise<RevisionSummary[] | null>;
   read(tenant: string, scope: string, id: string, forPath?: string): Promise<Revision | null>;
   snapshot(tenant: string, scope: string, id: string): Promise<{ path: string; content: string }[] | null>;
+  /** One revision by id, looked up rather than listed (paths []); null when
+   *  the store has none. Optional: a view without it is asked through `list`. */
+  get?(tenant: string, scope: string, id: string): Promise<RevisionSummary | null>;
 }
 let view: RevisionView | null = null;
 export function registerRevisionView(v: RevisionView | null) {
   view = v;
 }
 
-/** Revisions first, then the local entries older than the oldest of them. */
-async function combined(tenant: string, scope: string, opts: { forPath?: string; limit?: number }, restorableOnly = false): Promise<RevisionSummary[]> {
+/** Revisions first, then the local entries older than the oldest of them.
+ *  `stored` is which rows came from the store (every one a restore point). */
+async function combinedRows(
+  tenant: string,
+  scope: string,
+  opts: { forPath?: string; limit?: number; paths?: boolean },
+  restorableOnly = false,
+): Promise<{ rows: RevisionSummary[]; stored: Set<string> }> {
   const limit = opts.limit ?? 200;
-  const mine = view && scope !== "@library" ? await view.list(tenant, scope, { ...opts, limit: Number.isFinite(limit) ? limit : 500 }) : null;
+  // The whole of `limit`, every page of it: the store's first page is not all
+  // of history (FOL-152).
+  const mine = view && scope !== "@library" ? await view.list(tenant, scope, { ...opts, limit }) : null;
   let local = listRevisionsLocal(tenant, scope, { forPath: opts.forPath, limit: Infinity });
   if (restorableOnly) {
     const have = snapshotIds(tenant, scope);
     local = local.filter((r) => have.has(r.id));
   }
-  if (!mine || !mine.length) return local.slice(0, limit);
+  if (!mine || !mine.length) return { rows: local.slice(0, limit), stored: new Set() };
   const oldest = mine[mine.length - 1].at;
   const seen = new Set(mine.map((r) => r.id));
-  return [...mine, ...local.filter((r) => !seen.has(r.id) && r.at < oldest)].slice(0, limit);
+  return { rows: [...mine, ...local.filter((r) => !seen.has(r.id) && r.at < oldest)].slice(0, limit), stored: seen };
+}
+async function combined(tenant: string, scope: string, opts: { forPath?: string; limit?: number; paths?: boolean }, restorableOnly = false): Promise<RevisionSummary[]> {
+  return (await combinedRows(tenant, scope, opts, restorableOnly)).rows;
 }
 
 export async function listRevisions(tenant: string, scope: string, opts: { forPath?: string; limit?: number } = {}): Promise<RevisionSummary[]> {
@@ -566,9 +596,8 @@ export async function listRevisions(tenant: string, scope: string, opts: { forPa
  *  a local entry is when it has a snapshot — where asking per row would list
  *  the store once per row. */
 export async function listRevisionsRestorable(tenant: string, scope: string, opts: { forPath?: string; limit?: number } = {}): Promise<(RevisionSummary & { restorable: boolean })[]> {
-  const rows = await combined(tenant, scope, opts);
+  const { rows, stored } = await combinedRows(tenant, scope, opts);
   const have = snapshotIds(tenant, scope);
-  const stored = view && scope !== "@library" ? new Set(((await view.list(tenant, scope, { limit: 500 })) ?? []).map((r) => r.id)) : new Set<string>();
   return rows.map((r) => ({ ...r, restorable: have.has(r.id) || stored.has(r.id) }));
 }
 
@@ -587,7 +616,11 @@ export async function snapshotAt(tenant: string, scope: string, id: string): Pro
 export async function hasSnapshot(tenant: string, scope: string, id: string): Promise<boolean> {
   assertSafeName(id, "revision id");
   if (hasSnapshotLocal(tenant, scope, id)) return true;
-  return Boolean(view && scope !== "@library" && (await view.list(tenant, scope, { limit: 500 }))?.some((r) => r.id === id));
+  if (!view || scope === "@library") return false;
+  // Looked up by id: a listing stops at a page, and a revision older than it
+  // was "not restorable" until 9 Nov 2026 (FOL-152).
+  if (view.get) return (await view.get(tenant, scope, id)) !== null;
+  return Boolean((await view.list(tenant, scope, { limit: Infinity, paths: false }))?.some((r) => r.id === id));
 }
 
 export async function headRevision(tenant: string, scope: string): Promise<RevisionSummary | null> {
@@ -595,7 +628,15 @@ export async function headRevision(tenant: string, scope: string): Promise<Revis
 }
 
 export async function resolveRevision(tenant: string, scope: string, to: string, now = Date.now()): Promise<{ id: string; at: string; by: string; message: string } | null> {
-  return resolveIn(await combined(tenant, scope, { limit: Infinity }, true), to, now);
+  const want = target(to, now);
+  // An id in the store is one lookup; anything else (a date, a local id, a
+  // commit) is answered from ALL of history — every page of the store, without
+  // the changed paths, then the local entries.
+  if ("id" in want && view?.get && scope !== "@library") {
+    const hit = await view.get(tenant, scope, want.id);
+    if (hit) return { id: hit.id, at: hit.at, by: hit.by, message: hit.message };
+  }
+  return pick(await combined(tenant, scope, { limit: Infinity, paths: false }, true), want);
 }
 
 export async function changedPathsBetween(tenant: string, scope: string, from: string | null, to: string | null): Promise<string[] | null> {
