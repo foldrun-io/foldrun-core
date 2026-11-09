@@ -1092,9 +1092,13 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
   const deps = backend;
   if (!deps) return null;
   const ws: WorkspaceRef = { tenant, workspace };
+  // The heads first, then the folder: a folder read older than the heads
+  // would diff a stale copy against a newer head, and with that head as each
+  // path's base the publish would undo the newer write without a conflict.
+  const heads = await headsOf(deps, ws);
   const tree = currentTree(tenant, workspace);
   if (!tree) return null;
-  const head = await manifestsAt(deps, tenant, await headsOf(deps, ws));
+  const head = await manifestsAt(deps, tenant, heads);
   const bytes = new Map<string, Buffer>();
   const want: Manifest = emptyManifest();
   const have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
@@ -1114,16 +1118,24 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
     if (!(p in want.files) && fs.existsSync(path.join(dir, p))) want.files[p] = have.files[p];
   }
   const changes = diffManifests(have, want);
-  marked.delete(key(tenant, workspace));
-  if (!Object.keys(changes).length) return null;
-  return publish(deps, {
+  if (!Object.keys(changes).length) {
+    marked.delete(key(tenant, workspace));
+    return null;
+  }
+  const result = await publish(deps, {
     ws,
-    opId: opIdOf("jx", requestDigest("reconcile", changes).slice(0, 40)),
+    // The heads it was diffed against are part of the id: the same changes
+    // over a different head (the head was restored since) are a new repair,
+    // not a retry of the earlier one.
+    opId: opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40)),
     by,
     message: "workspace content recorded",
     changes,
     bytesOf: async (sha) => bytes.get(sha)!,
   });
+  // Only now: a reconcile that failed leaves the workspace marked for the next one.
+  marked.delete(key(tenant, workspace));
+  return result;
 }
 
 // ------------------------------------------------------------- reading
