@@ -44,6 +44,11 @@ export interface ManifestEntry {
 
 export interface Manifest {
   v: 1;
+  /** Absent: a workspace manifest (paths under the authored/state roots).
+   *  "run-output": what one agent of one run left in outputs/ (FOL-126 phase 5):
+   *  any legal relative path, never a head, never restored. Part of the
+   *  canonical form, so the two kinds can never share an id. */
+  kind?: "run-output";
   /** Forward-slashed paths, relative to the workspace root. */
   files: Record<string, ManifestEntry>;
 }
@@ -115,7 +120,7 @@ export const MAX_PATH_BYTES = 400;
  *  are sharded. 50k files is ~5 MB of canonical JSON. */
 export const MAX_MANIFEST_FILES = 50_000;
 
-export function assertManifestPath(rel: string): string {
+export function assertManifestPath(rel: string, kind?: Manifest["kind"]): string {
   if (typeof rel !== "string" || !rel || Buffer.byteLength(rel) > MAX_PATH_BYTES) throw new Error(`illegal manifest path: ${String(rel).slice(0, 80)}`);
   if (rel.includes("\\") || rel.startsWith("/") || /^[a-zA-Z]:/.test(rel)) throw new Error(`illegal manifest path: ${rel}`);
   if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) throw new Error(`illegal manifest path: ${rel}`);
@@ -124,7 +129,7 @@ export function assertManifestPath(rel: string): string {
   // name on a Mac and two on Linux. A manifest holds the composed form, so it
   // extracts the same everywhere. (Case is handled per manifest, below.)
   if (rel !== rel.normalize("NFC")) throw new Error(`illegal manifest path (not NFC-normalised): ${rel}`);
-  if (sideOf(rel) === null) throw new Error(`${rel} is not workspace content (authored: ${[...AUTHORED_DIRS, ...AUTHORED_ROOT_FILES].join(", ")}; state: state/)`);
+  if (kind !== "run-output" && sideOf(rel) === null) throw new Error(`${rel} is not workspace content (authored: ${[...AUTHORED_DIRS, ...AUTHORED_ROOT_FILES].join(", ")}; state: state/)`);
   return rel;
 }
 
@@ -158,7 +163,7 @@ export function assertEntry(p: string, e: ManifestEntry): void {
  *  to WRITE — a revision must never point at a manifest it cannot read back. */
 export function assertManifest(m: Manifest): void {
   for (const [p, e] of Object.entries(m.files)) {
-    assertManifestPath(p);
+    assertManifestPath(p, m.kind);
     assertEntry(p, e);
   }
   assertNoCaseCollisions(m);
@@ -181,7 +186,7 @@ export function canonicalManifest(m: Manifest): string {
     const e = m.files[p];
     files[p] = { sha: e.sha, size: e.size, mode: e.mode };
   }
-  return JSON.stringify({ v: 1, files });
+  return JSON.stringify(m.kind ? { v: 1, kind: m.kind, files } : { v: 1, files });
 }
 
 export function manifestId(m: Manifest): ManifestId {
@@ -201,6 +206,7 @@ export function parseManifest(text: string): Manifest {
   if (raw?.v !== 1 || typeof raw.files !== "object" || raw.files === null || Array.isArray(raw.files)) {
     throw new Error("not a manifest (v1)");
   }
+  if (raw.kind !== undefined && raw.kind !== "run-output") throw new Error("not a manifest (unknown kind)");
   assertManifest(raw);
   return raw;
 }
