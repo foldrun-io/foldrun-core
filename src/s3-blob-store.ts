@@ -24,6 +24,7 @@
 //    resumed (and swept by abortStaleUploads / a bucket lifecycle rule if no
 //    one comes back).
 
+import crypto from "node:crypto";
 import { s3Request, forgetS3Credentials, type S3Config, type S3StreamBody } from "./storage.ts";
 import {
   BlobNotFound,
@@ -47,6 +48,7 @@ const MiB = 1024 * 1024;
 export const MIN_PART_BYTES = 5 * MiB;
 /** S3's ceiling on the number of parts. */
 export const MAX_PARTS = 10_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export interface S3BlobOptions {
   /** Objects at or above this many bytes go up as multipart. */
@@ -123,10 +125,22 @@ const isTimeout = (signal?: AbortSignal) => signal?.aborted === true && (signal.
 export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): BlobStore & BlobSweeper & { checkBucket(signal?: AbortSignal): Promise<void> } {
   if (!cfg) throw new Error("the s3 blob store needs FOLDRUN_S3_ENDPOINT, FOLDRUN_S3_BUCKET and credentials");
   const o: S3BlobOptions = { ...s3OptionsFromEnv(), ...given };
-  const requestDeadline = (bytes: number) => o.requestDeadlineMs + Math.ceil((bytes / o.minBytesPerSec) * 1000);
+  // Clamped to the longest timer Node keeps: past 2^31-1 ms it fires after
+  // 1 ms instead, which would cut off the complete of a multi-TiB object.
+  const requestDeadline = (bytes: number) => Math.min(MAX_TIMER_MS, o.requestDeadlineMs + Math.ceil((bytes / o.minBytesPerSec) * 1000));
 
   /** One signed request with the failures of the network turned into
-   *  BlobTransientError, so the retry wrapper above knows what to retry. */
+   *  BlobTransientError, so the retry wrapper above knows what to retry.
+   *
+   *  Every request carries this driver's own deadline (its floor plus its body
+   *  at minBytesPerSec) on top of the caller's signal. bounded() leaves a
+   *  streamed put to the driver, so without it a server that accepts the
+   *  connection and never answers would hold the single PUT, or a multipart
+   *  HEAD, list, create or complete, for as long as the caller's signal lets
+   *  it — forever when there is none. `sizedBy` overrides the bytes the
+   *  deadline is sized by (a complete, whose small body stands for a whole
+   *  object the store has to assemble). A GET passes `false`: its signal also
+   *  bounds reading the body, which is the caller's to bound. */
   const send = async (
     what: string,
     method: Parameters<typeof s3Request>[1],
@@ -136,15 +150,19 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
     signal?: AbortSignal,
     query?: Record<string, string>,
     mime?: string,
+    sizedBy?: number | false,
   ): Promise<Response> => {
+    const ms = requestDeadline(sizedBy === undefined || sizedBy === false ? (body?.length ?? 0) : sizedBy);
+    const bound = sizedBy === false ? signal : signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
     try {
-      return await s3Request(cfg, method, key, body, mime, extra, signal, query ? { query } : {});
+      return await s3Request(cfg, method, key, body, mime, extra, bound, query ? { query } : {});
     } catch (err) {
       // A source that fails while it is being sent surfaces from fetch as
       // "fetch failed" with the real error as its cause. It is not the
       // network's fault and a retry would read the same bytes.
       for (let e: unknown = err, i = 0; e && i < 4; e = (e as Error).cause, i++) if (e instanceof BlobSourceError) throw e;
       if (signal?.aborted && !isTimeout(signal)) throw err; // the caller cancelled
+      if (bound?.aborted && isTimeout(bound)) throw new BlobTransientError(`s3 ${what}: no answer within ${ms}ms`);
       const name = (err as Error)?.name;
       if (name === "AbortError" || name === "TimeoutError") throw new BlobTransientError(`s3 ${what}: timed out`);
       const cause = (err as { cause?: { code?: string; message?: string } }).cause;
@@ -162,6 +180,18 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
     return new BlobStoreError(msg, res.status, code);
   };
   const drain = (res: Response) => res.arrayBuffer().catch(() => {});
+  /** A reply's body. The request's deadline still runs while it is read, and
+   *  a deadline or a dropped connection here is as transient as one before
+   *  the headers came. */
+  const textOf = async (res: Response, what: string): Promise<string> => {
+    try {
+      return await res.text();
+    } catch (err) {
+      if ((err as Error)?.name === "TimeoutError") throw new BlobTransientError(`s3 ${what}: timed out reading the reply`);
+      if (err instanceof TypeError) throw new BlobTransientError(`s3 ${what}: the reply was cut off (${(err as { cause?: { code?: string } }).cause?.code ?? err.message})`);
+      throw err;
+    }
+  };
 
   const headObject = async (key: string, signal?: AbortSignal): Promise<HeadResult | null> => {
     const res = await send("head", "HEAD", key, undefined, {}, signal);
@@ -207,7 +237,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
       if (uploadMarker) q["upload-id-marker"] = uploadMarker;
       const res = await send("list uploads", "GET", "", undefined, {}, signal, q);
       if (!res.ok) throw await failure(res, "list uploads");
-      const xml = await res.text();
+      const xml = await textOf(res, "list uploads");
       // The oldest open upload for the key: the one most likely to have parts.
       const mine = [...xml.matchAll(/<Upload>([\s\S]*?)<\/Upload>/g)]
         .map((m) => ({ key: unxml(/<Key>([^<]*)<\/Key>/.exec(m[1])?.[1] ?? ""), id: unxml(/<UploadId>([^<]*)<\/UploadId>/.exec(m[1])?.[1] ?? ""), at: Date.parse(/<Initiated>([^<]*)<\/Initiated>/.exec(m[1])?.[1] ?? "") || 0 }))
@@ -234,7 +264,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         return null; // NoSuchUpload: it was completed or aborted under us
       }
       if (!res.ok) throw await failure(res, "list parts");
-      const xml = await res.text();
+      const xml = await textOf(res, "list parts");
       for (const m of xml.matchAll(/<Part>([\s\S]*?)<\/Part>/g)) {
         const n = Number(/<PartNumber>(\d+)<\/PartNumber>/.exec(m[1])?.[1]);
         const size = Number(/<Size>(\d+)<\/Size>/.exec(m[1])?.[1]);
@@ -268,7 +298,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
     if (!uploadId || !have) {
       const res = await send("create upload", "POST", key, undefined, {}, signal, { uploads: "" }, opts.contentType);
       if (!res.ok) throw await failure(res, "create upload");
-      uploadId = unxml(/<UploadId>([^<]*)<\/UploadId>/.exec(await res.text())?.[1] ?? "");
+      uploadId = unxml(/<UploadId>([^<]*)<\/UploadId>/.exec(await textOf(res, "create upload"))?.[1] ?? "");
       if (!uploadId) throw new BlobTransientError("s3 create upload: no upload id in the reply");
       have = new Map();
     }
@@ -281,6 +311,35 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
     // AbortError, which would hide a transient or final cause.
     let firstError: { err: unknown } | null = null;
     const both = signal ? AbortSignal.any([signal, inner.signal]) : inner.signal;
+
+    // Each part is checked against the bytes read for it (the sha256 signed
+    // into its PUT, or the md5 a part already in the store must match), but
+    // that alone says nothing about the object: a file that changed after the
+    // caller hashed it would go up whole and consistent under the OLD content
+    // address. So the same reads also feed one sha256 of the whole object,
+    // compared with opts.sha256 before the upload is completed. A sha256
+    // cannot be put together from the parts' own, so the reads have to reach
+    // it in order: each part's hash pass waits for the one before it.
+    // Workers take part numbers in order, so chaining their passes keeps it,
+    // and the uploads still overlap. A part reused from an earlier attempt is
+    // read and hashed like the others, so a resumed upload is covered too.
+    const whole = opts.sha256 ? crypto.createHash("sha256") : null;
+    let hashed: Promise<unknown> = Promise.resolve();
+    const hashPart = (start: number, end: number): Promise<{ sha256: string; md5: string }> => {
+      const pass = hashed.then(async () => {
+        const sha = crypto.createHash("sha256");
+        const md5 = crypto.createHash("md5");
+        for await (const chunk of source.read(start, end, both)) {
+          sha.update(chunk);
+          md5.update(chunk);
+          whole?.update(chunk);
+        }
+        return { sha256: sha.digest("hex"), md5: md5.digest("hex") };
+      });
+      hashed = pass; // a failed pass fails the ones after it: the upload is over anyway
+      return pass;
+    };
+
     let next = 1;
     const worker = async () => {
       while (!both.aborted) {
@@ -289,8 +348,10 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         const [start, end] = range(n);
         const len = end - start;
         // Hash first: the sha256 is signed into the request, the md5 is what a
-        // part already in the store must match to be trusted.
-        const h = await hashRange(source, start, end, both);
+        // part already in the store must match to be trusted. (No await
+        // between taking `n` and queueing its pass: that is what keeps the
+        // whole-object hash in order.)
+        const h = await hashPart(start, end);
         const prior = have!.get(n);
         if (prior && prior.size === len && unquote(prior.etag) === h.md5) {
           done.set(n, prior.etag);
@@ -302,7 +363,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
           key,
           { stream: source.read(start, end, both), length: len, sha256: h.sha256 },
           {},
-          AbortSignal.any([both, AbortSignal.timeout(requestDeadline(len))]),
+          both, // send() adds the part's deadline, sized by its length
           { partNumber: String(n), uploadId: id },
         );
         if (!res.ok) throw await failure(res, `part ${n}`);
@@ -324,6 +385,14 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
       await Promise.allSettled(pool);
       if (firstError) throw (firstError as { err: unknown }).err;
 
+      // Every part went through hashPart, in order: `whole` is the object the
+      // store would assemble. Not the bytes asked for means not this key —
+      // a final failure, so the catch below aborts the upload.
+      if (whole) {
+        const got = whole.digest("hex");
+        if (got !== opts.sha256) throw new BlobSourceError(`the bytes for ${key} do not hash to ${opts.sha256} (they hash to ${got}): the source changed after it was hashed`);
+      }
+
       const xml =
         `<CompleteMultipartUpload>` +
         [...done.entries()]
@@ -331,7 +400,9 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
           .map(([n, etag]) => `<Part><PartNumber>${n}</PartNumber><ETag>${etag.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</ETag></Part>`)
           .join("") +
         `</CompleteMultipartUpload>`;
-      const res = await send("complete upload", "POST", key, Buffer.from(xml), { "if-none-match": "*" }, signal, { uploadId: id }, "application/xml");
+      // Assembling the parts takes the store longer the bigger the object
+      // (AWS warns of minutes), so its deadline is sized by the object.
+      const res = await send("complete upload", "POST", key, Buffer.from(xml), { "if-none-match": "*" }, signal, { uploadId: id }, "application/xml", source.size);
       if (res.status === 412) {
         // Someone else's identical object won. Ours is not needed.
         await drain(res);
@@ -348,7 +419,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
       }
       if (!res.ok) throw await failure(res, "complete upload");
       // S3 can answer 200 and put the error in the body.
-      const text = await res.text();
+      const text = await textOf(res, "complete upload");
       if (/<Error>/.test(text)) {
         const code = codeOf(text);
         const msg = `s3 complete upload failed: 200 ${code ?? "error in body"}`;
@@ -382,7 +453,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
     },
     async get(key, opts = {}) {
       assertKey(key);
-      const res = await send("get", "GET", key, undefined, opts.range ? { range: `bytes=${opts.range.start}-${opts.range.end}` } : {}, opts.signal);
+      const res = await send("get", "GET", key, undefined, opts.range ? { range: `bytes=${opts.range.start}-${opts.range.end}` } : {}, opts.signal, undefined, undefined, false);
       if (res.status === 404) {
         const text = await res.text().catch(() => "");
         // A GET carries the reason a HEAD cannot: the bucket may be the thing that is missing.
@@ -425,7 +496,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         if (uploadMarker) q["upload-id-marker"] = uploadMarker;
         const res = await send("list uploads", "GET", "", undefined, {}, signal, q);
         if (!res.ok) throw await failure(res, "list uploads");
-        const xml = await res.text();
+        const xml = await textOf(res, "list uploads");
         for (const m of xml.matchAll(/<Upload>([\s\S]*?)<\/Upload>/g)) {
           const key = unxml(/<Key>([^<]*)<\/Key>/.exec(m[1])?.[1] ?? "");
           const id = unxml(/<UploadId>([^<]*)<\/UploadId>/.exec(m[1])?.[1] ?? "");
@@ -447,7 +518,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         const q: Record<string, string> = { "list-type": "2", prefix: prefix.endsWith("/") ? prefix : `${prefix}/`, ...(token ? { "continuation-token": token } : {}) };
         const res = await send("list", "GET", "", undefined, {}, opts.signal, q);
         if (!res.ok) throw await failure(res, "list");
-        const xml = await res.text();
+        const xml = await textOf(res, "list");
         for (const c of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
           const key = xmlText(c[1], "Key");
           const size = Number(xmlText(c[1], "Size"));
@@ -464,7 +535,7 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         const q: Record<string, string> = { "list-type": "2", prefix: "t/", delimiter: "/", ...(token ? { "continuation-token": token } : {}) };
         const res = await send("list", "GET", "", undefined, {}, opts.signal, q);
         if (!res.ok) throw await failure(res, "list");
-        const xml = await res.text();
+        const xml = await textOf(res, "list");
         for (const c of xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]*)<\/Prefix>/g)) out.push(unxml(c[1]).replace(/^t\//, "").replace(/\/$/, ""));
         token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? (xmlText(xml, "NextContinuationToken") ?? undefined) : undefined;
       } while (token);
