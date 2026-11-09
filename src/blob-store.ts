@@ -210,6 +210,10 @@ export async function downloadToFile(
         if (!transient || attempt + 1 >= max || opts.signal?.aborted) throw err;
         continue;
       }
+    } else if (have === 0) {
+      // An empty object: nothing to fetch, but the file must still exist to
+      // be checked and renamed into place like any other.
+      fs.writeFileSync(part, "");
     }
     if (fs.statSync(part).size !== size) {
       if (attempt + 1 >= max) throw new BlobTransientError(`download of ${key} stopped short`);

@@ -537,6 +537,122 @@ test("multipart: a source that changes between the hash and the send is caught b
   }
 });
 
+/** Flip one byte of a file in place, keeping its size: the change a size check cannot see. */
+const flipByte = (file: string, at: number) => {
+  const fd = fs.openSync(file, "r+");
+  const b = Buffer.alloc(1);
+  fs.readSync(fd, b, 0, 1, at);
+  b[0] ^= 0xff;
+  fs.writeSync(fd, b, 0, 1, at);
+  fs.closeSync(fd);
+};
+
+test("multipart: a file that changed after the caller hashed it is refused — the whole object is checked against the sha256, not just each part", { skip }, async () => {
+  const r = await rig();
+  try {
+    const f = randomFile(17 * MiB); // 4 parts
+    const key = `t/default/blobs/${f.sha256}`;
+    flipByte(f.file, 7 * MiB); // in part 2; every part is still self-consistent
+    await assert.rejects(() => r.store({}, { retries: 3 }).putSourceIfAbsent(key, fileSource(f.file), { sha256: f.sha256 }), BlobSourceError);
+    assert.equal(await r.store().head(key), null, "nothing is stored under the old content address");
+    assert.deepEqual(await openUploads(r.cfg), [], "and the upload was aborted, not left open");
+    // without a sha256 there is nothing to hold it to, and it goes up as it is
+    assert.equal((await r.store().putSourceIfAbsent(`t/default/blobs/${sha256OfFile(f.file)}`, fileSource(f.file))).created, true);
+  } finally {
+    await r.done();
+  }
+});
+
+test("resumed multipart: the whole-object check covers the parts reused from the first attempt", { skip }, async () => {
+  const r = await rig();
+  try {
+    const f = randomFile(24 * MiB + 1); // 5 parts
+    const key = `t/default/blobs/${f.sha256}`;
+    // Parts 1-3 land, part 4 fails for good: the upload stays open for a resume.
+    r.proxy.add({ when: isPart(4), fault: { status: 503 }, times: 1000 });
+    await assert.rejects(() => r.store({ partConcurrency: 1 }, { retries: 0 }).putSourceIfAbsent(key, fileSource(f.file), { sha256: f.sha256 }), BlobTransientError);
+    assert.equal((await openUploads(r.cfg)).length, 1);
+    r.proxy.clearRules();
+
+    // The file changes in part 5 (not yet sent) before the retry: parts 1-3 are
+    // reused, 4 and 5 go up as they now are, and the result is refused.
+    flipByte(f.file, 24 * MiB);
+    r.proxy.reset();
+    await assert.rejects(() => r.store({ partConcurrency: 1 }, { retries: 0 }).putSourceIfAbsent(key, fileSource(f.file), { sha256: f.sha256 }), BlobSourceError);
+    assert.deepEqual(partPuts(r.proxy).map((s) => Number(s.query.get("partNumber"))).sort(), [4, 5], "parts 1-3 were reused, not re-sent");
+    assert.equal(await r.store().head(key), null);
+    assert.deepEqual(await openUploads(r.cfg), []);
+
+    // Put back, the same resume shape completes: the reused parts' bytes are in the hash.
+    flipByte(f.file, 24 * MiB);
+    r.proxy.add({ when: isPart(4), fault: { status: 503 }, times: 1000 });
+    await assert.rejects(() => r.store({ partConcurrency: 2 }, { retries: 0 }).putSourceIfAbsent(key, fileSource(f.file), { sha256: f.sha256 }), BlobTransientError);
+    r.proxy.clearRules();
+    r.proxy.reset();
+    assert.equal((await r.store({ partConcurrency: 3 }).putSourceIfAbsent(key, fileSource(f.file), { sha256: f.sha256 })).created, true);
+    assert.ok(partPuts(r.proxy).length < 5, "it resumed rather than starting over");
+    await downloadToFile(r.store(), key, path.join(tmp(), "ok.bin"), { sha256: f.sha256 });
+  } finally {
+    await r.done();
+  }
+});
+
+test("deadlines: the driver bounds every request of a streamed put — the single PUT and the multipart HEAD, list, create and complete", { skip }, async () => {
+  const r = await rig();
+  try {
+    // bounded() gives a streamed put no deadline of its own; these are the driver's.
+    const store = () => r.store({ requestDeadlineMs: 300, minBytesPerSec: 50 * MiB }, { retries: 0 });
+    const slow = 4000;
+    const small = randomFile(64 * 1024);
+    const big = randomFile(12 * MiB);
+    const cases: [string, (s: { method: string; query: URLSearchParams }) => boolean, { file: string; sha256: string }][] = [
+      ["single PUT", (s) => s.method === "PUT", small],
+      ["HEAD", (s) => s.method === "HEAD", big],
+      ["list uploads", (s) => s.method === "GET" && s.query.has("uploads"), big],
+      ["create upload", (s) => s.method === "POST" && s.query.has("uploads"), big],
+      ["complete", (s) => s.method === "POST" && s.query.has("uploadId"), big],
+    ];
+    for (const [name, when, f] of cases) {
+      r.proxy.clearRules();
+      r.proxy.add({ when, fault: { delayMs: slow } });
+      const t0 = Date.now();
+      await assert.rejects(
+        () => store().putSourceIfAbsent(`t/default/blobs/${f.sha256}`, fileSource(f.file), { sha256: f.sha256 }),
+        (e: unknown) => e instanceof BlobTransientError && /no answer within \d+ms/.test((e as Error).message),
+        name,
+      );
+      assert.ok(Date.now() - t0 < slow - 1000, `${name}: gave up at ${Date.now() - t0}ms, before the server answered`);
+    }
+    // The caller's signal still counts beside the deadline.
+    r.proxy.clearRules();
+    r.proxy.add({ when: (s) => s.method === "PUT", fault: { delayMs: slow } });
+    const ctl = new AbortController();
+    setTimeout(() => ctl.abort(new Error("caller gave up")), 50);
+    await assert.rejects(() => r.store({ requestDeadlineMs: 10_000 }, { retries: 0 }).putSourceIfAbsent(`t/default/blobs/${small.sha256}`, fileSource(small.file), { sha256: small.sha256, signal: ctl.signal }), /caller gave up/);
+    // A healthy server is not cut off by them. (A fresh file: the proxy still
+    // forwards the delayed requests above once their delay is over.)
+    r.proxy.clearRules();
+    const fresh = randomFile(12 * MiB);
+    assert.equal((await store().putSourceIfAbsent(`t/default/blobs/${fresh.sha256}`, fileSource(fresh.file), { sha256: fresh.sha256 })).created, true);
+  } finally {
+    await r.done();
+  }
+});
+
+test("deadlines: one longer than Node's longest timer is held at that, not fired at once", { skip }, async () => {
+  const r = await rig();
+  try {
+    // At 1 byte a second a 5 MiB part earns ~5.2e9 ms and the complete of 12 MiB
+    // ~1.3e10 — past 2^31-1, where a timer fires after 1 ms (as a multi-TiB
+    // object would at the default throughput).
+    const f = randomFile(12 * MiB);
+    const res = await r.store({ minBytesPerSec: 1 }, { retries: 0 }).putSourceIfAbsent(`t/default/blobs/${f.sha256}`, fileSource(f.file), { sha256: f.sha256 });
+    assert.equal(res.created, true);
+  } finally {
+    await r.done();
+  }
+});
+
 // ---------- fs driver, same streaming surface (runs everywhere) ----------
 
 test("fs driver: streamed put, hash check, stale temp sweep", async () => {
@@ -565,4 +681,19 @@ test("fs driver: streamed put, hash check, stale temp sweep", async () => {
   const dest = path.join(tmp(), "fs.bin");
   await downloadToFile(store, key, dest, { sha256: f.sha256 });
   assert.equal(sha256OfFile(dest), f.sha256);
+});
+
+test("downloadToFile: an empty object downloads to an empty file, fresh or over a leftover .part", async () => {
+  const store = fsBlobStore(path.join(tmp(), "objs"));
+  const key = blobKey("");
+  await store.putIfAbsent(key, Buffer.alloc(0));
+  const dest = path.join(tmp(), "empty.bin");
+  assert.deepEqual(await downloadToFile(store, key, dest, { sha256: sha("") }), { size: 0 });
+  assert.equal(fs.readFileSync(dest).length, 0);
+  assert.equal(fs.existsSync(`${dest}.part`), false);
+  // a dead process's .part that is too long for the object is thrown away
+  const again = path.join(tmp(), "again.bin");
+  fs.writeFileSync(`${again}.part`, "junk");
+  assert.deepEqual(await downloadToFile(store, key, again, { sha256: sha("") }), { size: 0 });
+  assert.equal(fs.readFileSync(again).length, 0);
 });

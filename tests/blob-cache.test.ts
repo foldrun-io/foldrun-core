@@ -196,6 +196,52 @@ test("a failed fill rejects every reader that joined it, and the next try starts
   await assert.rejects(() => c.acquire("default", "f".repeat(64)), BlobNotFound);
 });
 
+test("a fill that fails part-way through the body leaves no temp file behind", async () => {
+  const r = await rig();
+  const b = blob(400_000);
+  const s = await r.put(b);
+  // Every GET sends some bytes and then the connection drops: downloadToFile
+  // resumes until its attempts are spent, leaving a partial file each time.
+  const cutting: BlobStore = {
+    ...r.inner,
+    async get(key, opts) {
+      const whole = await r.inner.get(key, opts);
+      const reader = whole.getReader();
+      let sent = 0;
+      return new ReadableStream<Uint8Array>({
+        async pull(c) {
+          const { done, value } = await reader.read();
+          if (done || sent > 0) {
+            reader.cancel().catch(() => {});
+            return c.error(new BlobTransientError("cut off"));
+          }
+          const piece = value.subarray(0, 1000);
+          sent += piece.length;
+          c.enqueue(piece);
+        },
+      });
+    },
+  };
+  const dir = tmp();
+  const c = blobCache({ dir, maxBytes: 10 * MiB, store: bounded(cutting, { retries: 0, backoffMs: 1 }) });
+  await assert.rejects(() => c.acquire("default", s), BlobTransientError);
+  assert.deepEqual(fs.readdirSync(path.join(dir, "tmp")), [], "the partial download was removed");
+  assert.equal(c.stats().entries, 0);
+});
+
+test("an empty blob is cached like any other", async () => {
+  const r = await rig();
+  const s = await r.put(Buffer.alloc(0));
+  const c = r.cache(10 * MiB);
+  const l = await c.acquire("default", s);
+  assert.equal(l.size, 0);
+  assert.equal(readFile(l.path).length, 0);
+  l.release();
+  const again = await c.acquire("default", s);
+  again.release();
+  assert.equal(c.stats().hits, 1);
+});
+
 test("a reader that gives up does not cancel the download the others wait for, and leaves no pin", async () => {
   const r = await rig();
   const b = blob(MiB);
