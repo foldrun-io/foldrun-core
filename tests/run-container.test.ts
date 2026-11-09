@@ -667,6 +667,12 @@ test("the browsers stage installs Xvfb by name — headless: false must not hang
   assert.doesNotMatch(commands, /xauth/, "nothing runs xvfb-run, so nothing needs xauth");
 });
 
+test("the browsers stage installs certutil — a held Firefox trusts the egress CA only from its profile's NSS database (FOL-128)", () => {
+  const browsers = stage(DOCKERFILE, "browsers");
+  assert.match(browsers, /apt-get install -y --no-install-recommends [^\n]*\blibnss3-tools\b/);
+  assert.doesNotMatch(stage(DOCKERFILE, "slim"), /libnss3-tools/, "slim has no Firefox, so no certutil");
+});
+
 test("the full image writes down which engines it has, and an x86_64 build missing one fails", () => {
   const browsers = stage(DOCKERFILE, "browsers");
   assert.match(browsers, /\/opt\/browser\/engines\.json/);

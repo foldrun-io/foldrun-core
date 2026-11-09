@@ -441,6 +441,35 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
         if (!keyMarker && !uploadMarker) return n;
       }
     },
+    async *list(prefix, opts = {}) {
+      let token: string | undefined;
+      do {
+        const q: Record<string, string> = { "list-type": "2", prefix: prefix.endsWith("/") ? prefix : `${prefix}/`, ...(token ? { "continuation-token": token } : {}) };
+        const res = await send("list", "GET", "", undefined, {}, opts.signal, q);
+        if (!res.ok) throw await failure(res, "list");
+        const xml = await res.text();
+        for (const c of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+          const key = xmlText(c[1], "Key");
+          const size = Number(xmlText(c[1], "Size"));
+          const lm = xmlText(c[1], "LastModified");
+          if (key) yield { key, size: Number.isFinite(size) ? size : 0, modifiedAt: lm ? new Date(lm) : new Date(0) };
+        }
+        token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? (xmlText(xml, "NextContinuationToken") ?? undefined) : undefined;
+      } while (token);
+    },
+    async tenants(opts = {}) {
+      const out: string[] = [];
+      let token: string | undefined;
+      do {
+        const q: Record<string, string> = { "list-type": "2", prefix: "t/", delimiter: "/", ...(token ? { "continuation-token": token } : {}) };
+        const res = await send("list", "GET", "", undefined, {}, opts.signal, q);
+        if (!res.ok) throw await failure(res, "list");
+        const xml = await res.text();
+        for (const c of xml.matchAll(/<CommonPrefixes>\s*<Prefix>([^<]*)<\/Prefix>/g)) out.push(unxml(c[1]).replace(/^t\//, "").replace(/\/$/, ""));
+        token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? (xmlText(xml, "NextContinuationToken") ?? undefined) : undefined;
+      } while (token);
+      return out;
+    },
     /** Is the bucket there, and may we use it? A HEAD on a key cannot say. */
     async checkBucket(signal) {
       const res = await send("head bucket", "HEAD", "", undefined, {}, signal);
@@ -450,6 +479,11 @@ export function s3BlobStore(cfg: S3Config, given: Partial<S3BlobOptions> = {}): 
       throw await failure(res, "head bucket");
     },
   };
+}
+
+function xmlText(xml: string, tag: string): string | null {
+  const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(xml);
+  return m ? unxml(m[1]) : null;
 }
 
 export { bufferSource };

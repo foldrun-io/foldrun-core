@@ -13,7 +13,7 @@ import path from "node:path";
 import { registerPlatform, resetPlatform } from "../src/platform.ts";
 import type { RecordsPort } from "../src/records.ts";
 import {
-  writeRun, readRun, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
+  writeRun, writeRunAsync, readRun, readRunAsync, listRunSummariesAsync, liveRunsAsync, deleteRun, liveRuns, listRuns, listRunSummaries, listAllRuns, listWorkspaces,
   runStamp, runUpdatedMs, readRunText, runsStartedSince, renameWorkspace, deleteWorkspace, workspaceDir,
   type RunRecord,
 } from "../src/store.ts";
@@ -91,6 +91,36 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.equal(readRunText(T, W, "run-none"), null);
   });
 
+  test(t("the async reads answer what the synchronous ones do, and fall back to them without an async port"), async () => {
+    writeRun(T, W, run("run-a", "2026-11-01T10:00:00.000Z"));
+    writeRun(T, W, run("run-b", "2026-11-01T11:00:00.000Z", { status: "running", finishedAt: undefined }));
+    assert.deepEqual(await readRunAsync(T, W, "run-a"), readRun(T, W, "run-a"));
+    assert.equal(await readRunAsync(T, W, "run-none"), null);
+    assert.deepEqual(await listRunSummariesAsync(T, W), listRunSummaries(T, W));
+    assert.deepEqual((await liveRunsAsync(T, W)).map((r) => r.id), liveRuns(T, W).map((r) => r.id));
+    await assert.rejects(readRunAsync(T, W, "../x"), "the same name checks as the synchronous read");
+    // a port with no async reads is read through its synchronous twin
+    const plain = { ...subject.port, async: undefined } as RecordsPort;
+    registerPlatform({ records: plain });
+    assert.equal((await readRunAsync(T, W, "run-a"))?.id, "run-a");
+    assert.deepEqual((await listRunSummariesAsync(T, W)).map((r) => r.id), ["run-b", "run-a"]);
+  });
+
+  test(t("an async run write lands like the synchronous one, replaces by id, and falls back to it without an async port"), async () => {
+    await writeRunAsync(T, W, run("run-a", "2026-11-01T10:00:00.000Z", { status: "running", finishedAt: undefined }));
+    assert.equal(readRun(T, W, "run-a")?.status, "running");
+    assert.deepEqual(liveRuns(T, W).map((r) => r.id), ["run-a"]);
+    await writeRunAsync(T, W, run("run-a", "2026-11-01T10:00:00.000Z"));
+    assert.equal(readRun(T, W, "run-a")?.status, "completed");
+    assert.deepEqual(liveRuns(T, W), [], "it ended, so it stopped being live");
+    assert.equal(listRunSummaries(T, W).length, 1, "one row per run");
+    await assert.rejects(writeRunAsync(T, W, run("../x", "2026-11-01T10:00:00.000Z")), "the same name checks as writeRun");
+    const plain = { ...subject.port, async: undefined } as RecordsPort;
+    registerPlatform({ records: plain });
+    await writeRunAsync(T, W, run("run-b", "2026-11-01T11:00:00.000Z"));
+    assert.equal(readRun(T, W, "run-b")?.id, "run-b");
+  });
+
   test(t("summaries come back newest first, without replies; live runs are whole"), () => {
     writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
     writeRun(T, W, run("r2", "2026-11-01T02:00:00.000Z", { status: "running", finishedAt: undefined }));
@@ -155,6 +185,22 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.equal(readRun(T, "moved", "r1"), null);
     assert.equal(readTriggerEvents(T, "moved").length, 0);
     assert.equal(listStorage(T, "moved").length, 0);
+  });
+
+  test(t("a workspace the port says is on files is read and written as files; the others use the port"), () => {
+    mkWs("other");
+    registerPlatform({ records: { ...subject.port, onFiles: (_t: string, w: string) => w === "desk" } });
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    writeRun(T, "other", run("r2", "2026-11-01T02:00:00.000Z"));
+    assert.ok(fs.existsSync(path.join(workspaceDir(T, W), "runs", "r1.json")), "desk wrote a file");
+    assert.equal(fs.existsSync(path.join(workspaceDir(T, "other"), "runs", "r2.json")), false, "other wrote to the port");
+    assert.equal(readRun(T, W, "r1")!.id, "r1");
+    assert.deepEqual(listRunSummaries(T, W).map((x) => x.id), ["r1"]);
+    assert.deepEqual(listRunSummaries(T, "other").map((x) => x.id), ["r2"]);
+    assert.equal(Object.fromEntries(listWorkspaces(T).map((w) => [w.name, w.runCount])).desk, 1);
+    recordTriggerEvent(T, W, { t: "2026-11-01T01:00:00.000Z", flow: "f", trigger: "webhook", outcome: "started" });
+    assert.ok(fs.existsSync(path.join(workspaceDir(T, W), "trigger-log.jsonl")));
+    assert.equal(readTriggerEvents(T, W).length, 1);
   });
 
   test(t("a rename whose records cannot move puts the folder back (Codex review)"), () => {

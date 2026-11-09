@@ -11,7 +11,7 @@
 // it.
 
 import crypto from "node:crypto";
-import { readRun, writeRun, readFlow, mayApprove, type FlowInfo, type RunRecord } from "./store.ts";
+import { readRun, writeRunAsync, readFlow, mayApprove, type FlowInfo, type RunRecord } from "./store.ts";
 import { platform } from "./platform.ts";
 import { approveToken, eventToken, installKey } from "./webhook.ts";
 
@@ -276,7 +276,7 @@ export async function decideApproval(
   if (d.link !== undefined) {
     run.approvalLinksUsed = [...(run.approvalLinksUsed ?? []), linkDigest(d.link)].slice(-50);
   }
-  writeRun(tenant, workspace, run);
+  await writeRunAsync(tenant, workspace, run);
 
   // A parked run has no process polling for this decision — the worker
   // that was driving it gave its slot back at the gate. Line it up again.
@@ -434,7 +434,7 @@ export async function deliverEvent(
     throw new ApprovalError(opts.step === undefined ? "this run is not waiting for an event" : `step ${opts.step} is not waiting for an event`, 409);
   }
   for (const { s } of waiting) s.eventPayload = payload.slice(0, 20_000);
-  writeRun(tenant, workspace, run);
+  await writeRunAsync(tenant, workspace, run);
   let decided: number[] = [];
   for (const { i } of waiting) {
     const out = await decideApproval(tenant, workspace, runId, { decision: "approve", step: i, by: opts.by ?? "by an external event" });

@@ -44,6 +44,7 @@ import {
   type BlobSweeper,
   type BlobSource,
   type PutSourceOptions,
+  type ListedObject,
 } from "./blob-types.ts";
 
 export * from "./blob-types.ts";
@@ -136,6 +137,40 @@ export function fsBlobStore(root: string = path.join(dataRoot(), ".objects")): B
     },
     async delete(key) {
       fs.rmSync(at(key), { force: true });
+    },
+    async purgeTenant(tenant) {
+      fs.rmSync(path.dirname(at(`t/${tenant}/x`)), { recursive: true, force: true });
+    },
+    async *list(prefix) {
+      const base = at(`${prefix.replace(/\/+$/, "")}/x`);
+      const dir = path.dirname(base);
+      const walk = function* (d: string, rel: string): Generator<ListedObject> {
+        let names: fs.Dirent[] = [];
+        try {
+          names = fs.readdirSync(d, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of names) {
+          if (e.isDirectory()) yield* walk(path.join(d, e.name), `${rel}${e.name}/`);
+          else if (e.isFile() && !e.name.endsWith(".tmp")) {
+            try {
+              const st = fs.statSync(path.join(d, e.name));
+              yield { key: `${rel}${e.name}`, size: st.size, modifiedAt: st.mtime };
+            } catch {
+              // gone meanwhile
+            }
+          }
+        }
+      };
+      yield* walk(dir, `${prefix.replace(/\/+$/, "")}/`);
+    },
+    async tenants() {
+      try {
+        return fs.readdirSync(path.join(root, "t"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch {
+        return [];
+      }
     },
   };
 }
@@ -343,5 +378,8 @@ export function bounded<S extends BlobStore & Partial<BlobSweeper>>(inner: S, li
     abortStaleUploads: (o) => (inner.abortStaleUploads ? inner.abortStaleUploads(o) : Promise.resolve(0)),
     head: (key, opts) => call("head", opts?.signal, (signal) => inner.head(key, { signal })),
     delete: (key, opts) => call("delete", opts?.signal, (signal) => (inner.delete ? inner.delete(key, { signal }) : Promise.reject(new Error("this store cannot delete")))),
+    ...(inner.purgeTenant ? { purgeTenant: (tenant: string) => inner.purgeTenant!(tenant) } : {}),
+    ...(inner.list ? { list: (prefix: string, o?: { signal?: AbortSignal }) => inner.list!(prefix, o) } : {}),
+    ...(inner.tenants ? { tenants: (o?: { signal?: AbortSignal }) => inner.tenants!(o) } : {}),
   } as S & BlobSweeper;
 }

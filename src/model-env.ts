@@ -1,7 +1,7 @@
 // The model environment for work an ACCOUNT asks for outside a step: an eval's
 // judge, the dashboard's "draft a flow with AI". Resolved the way a step
 // resolves it — the workspace's provider: block, else the account's, else the
-// account's own key from Settings → Model — and only then the platform's own
+// account's own key from Settings → Models — and only then the platform's own
 // credential, which a hosted platform keeps for its operator's accounts
 // (platform.platformKeyAllowed). Every other account brings an API key;
 // asking for the platform's here is refused, not quietly billed to it.
@@ -26,7 +26,7 @@ export class ModelKeyError extends Error {
 }
 
 export const NO_MODEL_KEY =
-  "no model key: this account runs on its own API key, and none is set — add one in Settings → Model " +
+  "no model key: this account runs on its own API key, and none is set — add one in Settings → Models " +
   "(or `foldrun account model set <provider> --key …`), or write a provider: block in AGENTS.md";
 
 /**

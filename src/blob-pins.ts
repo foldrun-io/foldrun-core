@@ -56,6 +56,13 @@ export interface BlobPins {
   renew(tenant: string, holder: PinHolder, ttlMs: number): Promise<number>;
   /** Is anything holding this object right now (a live, unexpired pin)? */
   isPinned(tenant: string, kind: PinKind, ref: string): Promise<boolean>;
+  /** Is a live pin on this object held by something OTHER than a revision (a
+   *  run reading it, a publish in flight)? Retention asks this before it lets
+   *  a revision go: the revision's own pin is the one it is about to release. */
+  isPinnedBeyondRevisions(tenant: string, kind: PinKind, ref: string): Promise<boolean>;
+  /** Everything of this account a live (unexpired) pin names, any holder: the
+   *  sweeper's roots besides the revisions. */
+  live(tenant: string): Promise<{ manifests: string[]; blobs: string[] }>;
   /** The sweeper's only way to delete: runs `del` only if no live pin names
    *  the object, with pinning of that object held off for the duration.
    *  Returns whether `del` ran. */
@@ -74,6 +81,12 @@ export const noPins: BlobPins = {
   },
   async isPinned() {
     return false;
+  },
+  async isPinnedBeyondRevisions() {
+    return false;
+  },
+  async live() {
+    return { manifests: [], blobs: [] };
   },
   async guardDelete(_t, _k, _r, del) {
     await del();

@@ -26,7 +26,7 @@ import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
 import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
-import { recordRevision, registerTreeReader, assertCommitId, type RevisionFile } from "./history.ts";
+import { recordRevision, registerTreeReader, assertCommitId, workspaceGone, workspaceMoved, workspaceLifecycle, type RevisionFile } from "./history.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
@@ -2700,7 +2700,7 @@ export function listWorkspaces(tenant: string): WorkspaceSummary[] {
         agents: listAgents(tenant, name).length,
         flows: listFlows(tenant, name).length,
         deployedAt: fs.statSync(pDir).mtime.toISOString(),
-        runCount: recordCounts ? (recordCounts[name] ?? 0) : (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0),
+        runCount: recordCounts && records(tenant, name) ? (recordCounts[name] ?? 0) : (fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith(".json") && !f.startsWith(".")).length : 0),
       };
     })
     .sort((a, b) => b.deployedAt.localeCompare(a.deployedAt));
@@ -2763,7 +2763,7 @@ const ACCOUNT_SEALED: Record<string, string> = {
   "oauth-clients.json": "OAuth client credentials — never served to a browser.",
   "ledger.jsonl": "the billing ledger — append-only, read it through Usage and Wallet.",
   "billing.json": "the account's billing settings — read and change them in Wallet.",
-  "oauth-connections.json": "connected apps and their health — see Settings → Connections.",
+  "oauth-connections.json": "connected apps and their health — see Settings → Secrets → Connections.",
   "secret-health.json": "secret usage bookkeeping — see Settings → Secrets.",
 };
 
@@ -3198,6 +3198,9 @@ export function deleteWorkspace(tenant: string, workspace: string) {
   // after the folder is gone a retry would answer "not found" with rows left.
   records()?.workspaceDrop(tenant, workspace);
   fs.rmSync(dir, { recursive: true, force: true });
+  // Its revision journal: queued changes must not commit (or replay at the
+  // next boot) for a workspace that is gone (FOL-126 phase 4).
+  workspaceGone(tenant, workspace);
   // Its file store too, kept by name beside the folder (storage.ts). Until
   // 30 Oct 2026 the store outlived the delete: its files stayed downloadable
   // and shared, and the next workspace given this name inherited them. The
@@ -3208,6 +3211,20 @@ export function deleteWorkspace(tenant: string, workspace: string) {
     fs.rmSync(path.join(dataRoot(), tenant, STORAGE_DIR, workspace), { recursive: true, force: true });
   }
   workspaceChanged(tenant, workspace, "delete");
+}
+
+/**
+ * deleteWorkspace, with the workspace's revisions: its history is dropped
+ * BEFORE the folder goes (a store that cannot be reached refuses the delete
+ * while it can still be retried) and once more after, for whatever a racing
+ * write made in between. A new workspace of the same name starts empty.
+ * Where nothing records revisions this is deleteWorkspace.
+ */
+export async function deleteWorkspaceAsync(tenant: string, workspace: string): Promise<void> {
+  const lc = workspaceLifecycle();
+  if (!lc) return deleteWorkspace(tenant, workspace);
+  if (!fs.existsSync(workspaceDir(tenant, workspace))) throw new Error(`workspace ${workspace} not found`);
+  await lc.drop(tenant, workspace, () => deleteWorkspace(tenant, workspace));
 }
 
 /**
@@ -3258,12 +3275,33 @@ export function renameWorkspace(tenant: string, from: string, to: string) {
     fs.renameSync(dest, src);
     throw err;
   }
+  // Its queued revisions and its history follow the name (workspace-revisions.ts).
+  workspaceMoved(tenant, from, to);
 
   const agentsMd = path.join(dest, "AGENTS.md");
   if (fs.existsSync(agentsMd)) {
     const raw = fs.readFileSync(agentsMd, "utf8");
     fs.writeFileSync(agentsMd, raw.replace(/^name:.*$/m, `name: ${to}`));
   }
+}
+
+/**
+ * renameWorkspace, with the workspace's revisions: queued changes are held
+ * while its history is re-keyed to the new name, then the folder moves; if the
+ * folder cannot move the history goes back. A store that cannot be reached
+ * refuses the rename before anything moved. Where nothing records revisions
+ * this is renameWorkspace.
+ */
+export async function renameWorkspaceAsync(tenant: string, from: string, to: string): Promise<void> {
+  const lc = workspaceLifecycle();
+  if (!lc || from === to) return renameWorkspace(tenant, from, to);
+  assertSafeName(to, "workspace");
+  if (!fs.existsSync(workspaceDir(tenant, from))) throw new Error(`workspace ${from} not found`);
+  // The checks renameWorkspace makes, BEFORE the history moves: a name that is
+  // taken must never have its history replaced by this one's.
+  if (singleWorkspace()) return renameWorkspace(tenant, from, to); // throws
+  if (fs.existsSync(workspaceDir(tenant, to)) || fs.existsSync(path.join(dataRoot(), tenant, WORKSPACES, to))) throw new Error(`workspace ${to} already exists`);
+  await lc.move(tenant, from, to, () => renameWorkspace(tenant, from, to));
 }
 
 /** Set a workspace's description, in AGENTS.md, without touching anything else.
@@ -3630,7 +3668,7 @@ export interface StepRecord {
    *  "provider: …" — or "none set" (model-credential.ts). */
   credential?: string;
   /** Whose key paid for the step's model calls (3 Nov 2026): "own" — the
-   *  account's (a provider: block, Settings → Model), billed by its
+   *  account's (a provider: block, Settings → Models), billed by its
    *  provider; "operator" — the platform's own credential, billed from the
    *  step's tokens; "foldrun" — foldrun's models, billed per call by the
    *  model gateway, never from the step. Absent on older records. */
@@ -4034,7 +4072,7 @@ export function runFilePath(tenant: string, workspace: string, runId: string) {
 export function deleteRun(tenant: string, workspace: string, runId: string, opts: { pruned?: boolean } = {}): boolean {
   const file = runFilePath(tenant, workspace, runId);
   const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
-  const port = records();
+  const port = records(tenant, workspace);
   const had = port ? port.runGet(tenant, workspace, runId) !== null : fs.existsSync(file);
   if (!had && !fs.existsSync(dir)) return false;
   // The folder first (archived outputs, captured calls), the record last:
@@ -4114,7 +4152,7 @@ export function runOutputPath(
 
 export function readRun(tenant: string, workspace: string, runId: string): RunRecord | null {
   const p = runFilePath(tenant, workspace, runId);
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runGet(tenant, workspace, runId);
   // EFS/NFS: writeRun() replaces this file by rename, so an open()+read()
   // here can land on the just-unlinked inode and come back ESTALE (errno
@@ -4135,9 +4173,32 @@ export function readRun(tenant: string, workspace: string, runId: string): RunRe
   }
 }
 
+/** readRun without holding the event loop: asked of the database directly
+ *  where the port has async reads, otherwise the synchronous read. */
+export async function readRunAsync(tenant: string, workspace: string, runId: string): Promise<RunRecord | null> {
+  runFilePath(tenant, workspace, runId); // the same name checks as readRun
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runGet(tenant, workspace, runId) : readRun(tenant, workspace, runId);
+}
+
+/** writeRun without holding the event loop (FOL-126 phase 4): for the callers
+ *  that are async anyway. Where the port writes asynchronously the record is
+ *  written when this resolves; everywhere else (files, a port without the
+ *  async write) it IS writeRun. The sync callers (the runner's save) are
+ *  untouched. */
+export async function writeRunAsync(tenant: string, workspace: string, run: RunRecord): Promise<void> {
+  const port = records(tenant, workspace);
+  if (port?.async?.runPut) {
+    runFilePath(tenant, workspace, run.id); // the same name checks as writeRun
+    await port.async.runPut(tenant, workspace, run, summarizeRun(run), LIVE_STATUSES.has(run.status));
+    return;
+  }
+  writeRun(tenant, workspace, run);
+}
+
 export function writeRun(tenant: string, workspace: string, run: RunRecord) {
   const p = runFilePath(tenant, workspace, run.id);
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     port.runPut(tenant, workspace, run, summarizeRun(run), LIVE_STATUSES.has(run.status));
     return;
@@ -4155,7 +4216,7 @@ export function writeRun(tenant: string, workspace: string, run: RunRecord) {
  *  does — what a poller compares instead of a file's stat. Null: no such run
  *  (or, for a file, gone for a moment — read to find out). */
 export function runStamp(tenant: string, workspace: string, runId: string): string | null {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     const at = port.runStamp(tenant, workspace, runId);
     return at === null ? null : String(at);
@@ -4169,7 +4230,7 @@ export function runStamp(tenant: string, workspace: string, runId: string): stri
 
 /** When a run's record was last written (epoch ms), or null when there is none. */
 export function runUpdatedMs(tenant: string, workspace: string, runId: string): number | null {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     const us = port.runStamp(tenant, workspace, runId);
     return us === null ? null : us / 1000;
@@ -4183,7 +4244,7 @@ export function runUpdatedMs(tenant: string, workspace: string, runId: string): 
 
 /** A run's record as the JSON text a stream sends, or null when there is none. */
 export function readRunText(tenant: string, workspace: string, runId: string): string | null {
-  if (records()) {
+  if (records(tenant, workspace)) {
     const run = readRun(tenant, workspace, runId);
     return run ? JSON.stringify(run, null, 2) : null;
   }
@@ -4198,7 +4259,7 @@ export function readRunText(tenant: string, workspace: string, runId: string): s
  *  first. Off the records where there are any; the files otherwise read only
  *  the names that say when they began. */
 export function runsStartedSince(tenant: string, workspace: string, sinceMs: number): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runsSince(tenant, workspace, sinceMs);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   let names: string[];
@@ -4227,8 +4288,14 @@ export function runsStartedSince(tenant: string, workspace: string, sinceMs: num
  * periodic sweeps want (reconcile, the watchdog), and on a box that keeps
  * ninety days of runs that is a handful of files instead of thousands.
  */
+/** liveRuns without holding the event loop (see readRunAsync). */
+export async function liveRunsAsync(tenant: string, workspace: string): Promise<RunRecord[]> {
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runLive(tenant, workspace) : liveRuns(tenant, workspace);
+}
+
 export function liveRuns(tenant: string, workspace: string): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runLive(tenant, workspace);
   const out: RunRecord[] = [];
   for (const s of listRunSummaries(tenant, workspace)) {
@@ -4524,8 +4591,14 @@ function noteRunDeleted(dir: string, runId: string) {
  * are re-read, and the index is rewritten if anything changed. A missing
  * or unreadable index is a full scan that leaves one behind.
  */
+/** listRunSummaries without holding the event loop (see readRunAsync). */
+export async function listRunSummariesAsync(tenant: string, workspace: string): Promise<RunSummary[]> {
+  const port = records(tenant, workspace);
+  return port?.async ? port.async.runSummaries(tenant, workspace) : listRunSummaries(tenant, workspace);
+}
+
 export function listRunSummaries(tenant: string, workspace: string): RunSummary[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runSummaries(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];
@@ -4600,7 +4673,7 @@ export function runCost(run: RunRecord): number {
 
 /** Whether a step's tokens are the platform's to bill: it ran on the
  *  platform's own model credential, not the account's key ("provider: …" —
- *  a provider: block, or Settings → Model), which the provider bills. The
+ *  a provider: block, or Settings → Models), which the provider bills. The
  *  meter, the Usage page and the ledger split all ask this one question, so
  *  what a page shows is what was charged. */
 export function stepBillsTokens(s: Pick<StepRecord, "credential" | "supply">): boolean {
@@ -4640,7 +4713,7 @@ export function billedTokenCost(s: { credential?: string; supply?: StepSupply; c
  *
  * Tokens count only for steps that ran on the platform's own model
  * credential. A step on the account's own key (`credential` "provider: …" —
- * a provider: block, or Settings → Model) was paid for at the provider, and
+ * a provider: block, or Settings → Models) was paid for at the provider, and
  * billing it again here charged a BYOK customer twice. And a carried step's
  * tokens were billed where it ran, like its compute.
  */
@@ -4897,7 +4970,7 @@ export function listAgentSteps(tenant: string, workspace: string, agent: string)
 /** Every run of the workspace, whole, newest first. Parses every record;
  *  a list that needs only what a list needs reads listRunSummaries. */
 export function listRuns(tenant: string, workspace: string): RunRecord[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) return port.runAll(tenant, workspace);
   const dir = path.join(workspaceDir(tenant, workspace), "runs");
   if (!fs.existsSync(dir)) return [];

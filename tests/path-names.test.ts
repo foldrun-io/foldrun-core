@@ -28,7 +28,7 @@ import {
   writeWorkspaceFile,
 } from "../src/store.ts";
 import { resolveHooks, isHookName } from "../src/hooks.ts";
-import { listRevisions, readRevision, resolveRevision, snapshotAt, changedPathsBetween } from "../src/history.ts";
+import { listRevisionsLocal as listRevisions, readRevisionLocal as readRevision, resolveRevisionLocal as resolveRevision, snapshotAtLocal as snapshotAt, changedPathsBetweenLocal as changedPathsBetween } from "../src/history.ts";
 import { configMatter } from "../src/matter.ts";
 
 function withData(run: (root: string) => Promise<void> | void) {

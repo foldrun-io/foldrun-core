@@ -52,6 +52,31 @@ export async function fakeS3(bucket = "test-bucket"): Promise<FakeS3> {
         }
         case "GET":
         case "HEAD": {
+          if (req.method === "GET" && url.searchParams.get("list-type") === "2") {
+            const prefix = url.searchParams.get("prefix") ?? "";
+            const delimiter = url.searchParams.get("delimiter");
+            const after = url.searchParams.get("continuation-token");
+            const keys = [...objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+            const prefixes = new Set<string>();
+            const direct: string[] = [];
+            for (const k of keys) {
+              const rest = k.slice(prefix.length);
+              if (delimiter && rest.includes(delimiter)) prefixes.add(prefix + rest.slice(0, rest.indexOf(delimiter) + 1));
+              else direct.push(k);
+            }
+            const PAGE = 2; // small, so a test crosses a page boundary
+            const start = after ? direct.findIndex((k) => k > after) : 0;
+            const page = start < 0 ? [] : direct.slice(start, start + PAGE);
+            const more = start >= 0 && start + PAGE < direct.length;
+            const xml =
+              `<ListBucketResult><IsTruncated>${more}</IsTruncated>` +
+              (more ? `<NextContinuationToken>${page[page.length - 1]}</NextContinuationToken>` : "") +
+              page.map((k) => `<Contents><Key>${k}</Key><Size>${objects.get(k)!.body.length}</Size><LastModified>${objects.get(k)!.modifiedAt.toISOString()}</LastModified></Contents>`).join("") +
+              [...prefixes].map((p) => `<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`).join("") +
+              `</ListBucketResult>`;
+            res.writeHead(200, { "content-type": "application/xml" }).end(xml);
+            return;
+          }
           const o = objects.get(key);
           if (!o) {
             res.writeHead(404).end(req.method === "GET" ? "<Error><Code>NoSuchKey</Code></Error>" : undefined);

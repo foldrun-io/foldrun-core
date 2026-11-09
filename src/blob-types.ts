@@ -129,6 +129,21 @@ export interface BlobSweeper {
    *  A bucket lifecycle rule (AbortIncompleteMultipartUpload) does the same on
    *  AWS and R2; this is for stores that have none, and for tests. */
   abortStaleUploads(opts: { olderThanMs: number; prefix?: string; signal?: AbortSignal }): Promise<number>;
+  /** An account is gone: remove everything under its prefix. Only a store that
+   *  can enumerate has it (the folder one); a bucket's objects are the
+   *  sweeper's once the account's pins are released. */
+  purgeTenant?(tenant: string): Promise<void>;
+  /** Every object under a key prefix, with its size and last-modified time —
+   *  what the sweeper walks. */
+  list?(prefix: string, opts?: { signal?: AbortSignal }): AsyncIterable<ListedObject>;
+  /** The accounts that have objects (the first key segment under `t/`). */
+  tenants?(opts?: { signal?: AbortSignal }): Promise<string[]>;
+}
+
+export interface ListedObject {
+  key: string;
+  size: number;
+  modifiedAt: Date;
 }
 
 /** Read a whole object. For manifests and small blobs; a large file is

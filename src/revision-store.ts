@@ -116,6 +116,13 @@ export interface CommitInput {
   message: string;
   restoredFrom?: string;
   conflicts?: string[];
+  /** Asked INSIDE the store's own exclusion (the workspace lock), right before
+   *  the head moves: does the workspace still exist? A delete or rename on
+   *  another pod holds that lock while it removes the history and the folder,
+   *  so a commit that gets the lock afterwards finds the folder gone and is
+   *  refused ("gone"), rather than recreating rows under a name that has
+   *  none. Unset: no check (the contract tests, a laptop). */
+  guard?: () => boolean | Promise<boolean>;
 }
 
 export type CommitResult =
@@ -124,7 +131,9 @@ export type CommitResult =
    *  lost). `revision` is what that attempt made. */
   | { status: "duplicate"; revision: Revision }
   /** The head is no longer `base`. `head` is what it is now. Nothing written. */
-  | { status: "stale"; head: Revision | null };
+  | { status: "stale"; head: Revision | null }
+  /** The guard said the workspace does not exist (any more). Nothing written. */
+  | { status: "gone" };
 
 /** A row of the storage/ file index. */
 export interface IndexedFile {
@@ -159,6 +168,37 @@ export interface RevisionStore {
   putFile(ws: WorkspaceRef, file: IndexedFile, expectSha?: string | null): Promise<boolean>;
   /** Delete one row; same expectation rule. Returns whether a row went. */
   deleteFile(ws: WorkspaceRef, path: string, expectSha?: string | null): Promise<boolean>;
+
+  // The lifecycle of a workspace's history (FOL-126 fixes, 8 Nov). A workspace
+  // is named by its folder, so what the store keeps under that name has to
+  // follow the folder: a delete takes it, a rename carries it.
+
+  /** Remove every head, revision and operation of one workspace (both heads),
+   *  or of the whole account when `workspace` is omitted, with the pins its
+   *  revisions held (so the objects can be collected). The next workspace of
+   *  that name starts empty. Safe to repeat; returns how many revisions went. */
+  drop(target: { tenant: string; workspace?: string }): Promise<number>;
+  /** Re-key a workspace's heads, revisions and operations (both heads) from one
+   *  name to another, in one step. Whatever the new name already holds belonged
+   *  to a workspace that no longer exists and is removed first. Revision ids
+   *  do not change. A name with nothing under it moves nothing. */
+  move(tenant: string, from: string, to: string): Promise<void>;
+  /** Remove these revisions of one head (and the pins they held on their
+   *  manifests; the objects themselves are the sweeper's). The head itself is
+   *  never removed. Returns how many went. */
+  prune(ws: WorkspaceRef, ids: readonly string[]): Promise<number>;
+
+  // What the sweeper and the orphan cleanup ask (blob-sweeper.ts).
+
+  /** Every manifest id a revision of this account names (both heads, all
+   *  workspaces), or only those of revisions made at or after `since` (the
+   *  sweeper's last look before a delete: what a publish committed meanwhile). */
+  manifestIds(tenant: string, opts?: { since?: Date }): Promise<string[]>;
+  /** Does the store hold any revision at all? A sweeper that finds none, with
+   *  objects in the bucket, suspects a wiped database and refuses. */
+  anyRevisions(): Promise<boolean>;
+  /** Every workspace that has a head or a revision, any account. */
+  workspaces(): Promise<{ tenant: string; workspace: string }[]>;
 }
 
 const OP_ID = /^[A-Za-z0-9._:@=+-]{8,200}$/;
@@ -293,6 +333,7 @@ export function localRevisionStore(root: string = path.join(dataRoot(), ".revisi
     async commit(ws, input) {
       assertOpId(input.opId);
       return locked(ws, async () => {
+        if (input.guard && !(await input.guard())) return { status: "gone" };
         const done = operationOf(ws, input.opId);
         if (done) {
           if (done.digest !== input.digest) throw new OpIdReused(input.opId);
@@ -356,5 +397,117 @@ export function localRevisionStore(root: string = path.join(dataRoot(), ".revisi
         return true;
       });
     },
+    async drop(target) {
+      assertSafeName(target.tenant, "tenant");
+      if (target.workspace === undefined) {
+        const dir = path.join(root, target.tenant);
+        const n = countRevs(dir);
+        fs.rmSync(dir, { recursive: true, force: true });
+        return n;
+      }
+      const ws = { tenant: target.tenant, workspace: target.workspace };
+      return locked(ws, () => locked({ ...ws, scope: "state" }, async () => {
+        const n = seqs(ws).length + seqs({ ...ws, scope: "state" }).length;
+        fs.rmSync(dirOf(ws), { recursive: true, force: true }); // the state head's folder is inside it
+        return n;
+      }));
+    },
+    async move(tenant, from, to) {
+      const a = { tenant, workspace: from };
+      const b = { tenant, workspace: to };
+      // Both names, in a fixed order, so two crossing renames cannot wait on each other.
+      const [first, second] = from < to ? [a, b] : [b, a];
+      return locked(first, () => locked(second, async () => {
+        const src = dirOf(a);
+        const dest = dirOf(b);
+        fs.rmSync(dest, { recursive: true, force: true }); // stale: that name has no workspace
+        if (fs.existsSync(src)) fs.renameSync(src, dest);
+      }));
+    },
+    async manifestIds(tenant, opts = {}) {
+      assertSafeName(tenant, "tenant");
+      const out = new Set<string>();
+      const since = opts.since?.getTime() ?? -Infinity;
+      eachRevision(root, tenant, (_t, _w, r) => {
+        if (Date.parse(r.at) < since) return;
+        out.add(r.authored);
+        out.add(r.state);
+      });
+      return [...out];
+    },
+    async anyRevisions() {
+      let any = false;
+      eachRevision(root, null, () => (any = true));
+      return any;
+    },
+    async workspaces() {
+      const out = new Map<string, { tenant: string; workspace: string }>();
+      eachRevision(root, null, (tenant, workspace) => out.set(`${tenant}\0${workspace}`, { tenant, workspace }));
+      return [...out.values()];
+    },
+    async prune(ws, ids) {
+      if (!ids.length) return 0;
+      return locked(ws, async () => {
+        const head = headOf(ws);
+        const want = new Set(ids);
+        let n = 0;
+        for (const seq of seqs(ws)) {
+          const r = bySeq(ws, seq);
+          if (!r || !want.has(r.id) || r.id === head?.id) continue;
+          fs.rmSync(path.join(dirOf(ws), "revs", seqName(seq)), { force: true });
+          n++;
+        }
+        return n;
+      });
+    },
   };
+}
+
+function eachRevision(root: string, tenant: string | null, fn: (tenant: string, workspace: string, rev: Revision) => void): void {
+  const tenants = tenant ? [tenant] : safeDirs(root);
+  for (const t of tenants) {
+    for (const w of safeDirs(path.join(root, t))) {
+      for (const d of [path.join(root, t, w, "revs"), path.join(root, t, w, "state-head", "revs")]) {
+        let names: string[] = [];
+        try {
+          names = fs.readdirSync(d).filter((x) => /^\d{10}\.json$/.test(x));
+        } catch {
+          continue;
+        }
+        for (const n of names) {
+          try {
+            fn(t, w, JSON.parse(fs.readFileSync(path.join(d, n), "utf8")) as Revision);
+          } catch {
+            // torn: not a revision
+          }
+        }
+      }
+    }
+  }
+}
+function safeDirs(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+function countRevs(dir: string): number {
+  let n = 0;
+  try {
+    for (const w of fs.readdirSync(dir)) {
+      if (w.startsWith(".")) continue;
+      for (const d of [path.join(dir, w, "revs"), path.join(dir, w, "state-head", "revs")]) {
+        try {
+          n += fs.readdirSync(d).filter((x) => /^\d{10}\.json$/.test(x)).length;
+        } catch {
+          // none
+        }
+      }
+    }
+  } catch {
+    // none
+  }
+  return n;
 }

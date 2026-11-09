@@ -30,6 +30,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, isPlatformPath, type ApiSpec, type Effort, type ModelCall } from "./store.ts";
 import { divertedSummary, isDivertedPath, overlayTestWrites } from "./test-mode.ts";
+import { recordStepOutputs, pinRunBase, type RunBase, type StepWrite } from "./workspace-revisions.ts";
 import { refusedBack, refusedLine, keptLine, type RefusedPath } from "./copy-back.ts";
 import type { CallIo, EventExtra, ExecUsage } from "./step-exec.ts";
 import type { TokenPrice } from "./catalog.ts";
@@ -369,6 +370,36 @@ export function readHandedIn(workspaceRoot: string, runId: string, ref: string):
 export function dropHandedIn(workspaceRoot: string, runId: string, ref: string): void {
   const file = handedInPath(workspaceRoot, runId, ref);
   if (file) fs.rmSync(file, { force: true });
+  const base = baseRevisionPath(workspaceRoot, runId, ref);
+  if (base) fs.rmSync(base, { force: true });
+}
+
+/**
+ * The revisions a step's stage-in started from (FOL-126 fixes), kept on the host
+ * beside what it was handed, for the same reason: a driver that inherits the
+ * step publishes its copy-back against the SAME base, not against whatever the
+ * heads hold by then. Platform-owned, never staged, erased with the run.
+ */
+export function baseRevisionPath(workspaceRoot: string, runId: string, ref: string): string | null {
+  const file = handedInPath(workspaceRoot, runId, ref);
+  return file ? file.replace(/\.json$/, ".base.json") : null;
+}
+export function writeBaseRevision(workspaceRoot: string, runId: string, ref: string, base: RunBase): void {
+  const file = baseRevisionPath(workspaceRoot, runId, ref);
+  if (!file) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(base));
+}
+export function readBaseRevision(workspaceRoot: string, runId: string, ref: string): RunBase | undefined {
+  const file = baseRevisionPath(workspaceRoot, runId, ref);
+  if (!file) return undefined;
+  try {
+    const m = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<RunBase>;
+    const ok = (v: unknown) => v === null || typeof v === "string";
+    return m && ok(m.workspace) && ok(m.state) ? { workspace: m.workspace ?? null, state: m.state ?? null } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -463,6 +494,11 @@ export interface ApplyOptions {
    *  changed come back, each told to onKept instead of refused. */
   allowConfig?: boolean;
   onKept?: (kept: RefusedPath) => void;
+  /** Where the writes are recorded as a revision (FOL-126 phase 4): the
+   *  account and the run/step the copy-back belongs to. The workspace is the
+   *  folder's name. Without it the folder is written and nothing is recorded
+   *  (a laptop, a scratch dir). */
+  revision?: { tenant: string; runId?: string; step?: string | number; base?: RunBase | null };
 }
 
 export function applyContainerChanges(
@@ -474,6 +510,7 @@ export function applyContainerChanges(
   opts: ApplyOptions = {},
 ): string[] {
   const applied: string[] = [];
+  const written: StepWrite[] = [];
   // Files a sandbox: own job's reply copied into this sandbox mid-step
   // (delegate-tools.ts copyBackFiles), path → sha256 of what was written: for
   // those, that is what the step started from. The job's change is already on
@@ -556,10 +593,16 @@ export function applyContainerChanges(
       // other run's ledger rows on 2026-09-14. Merge appends; keep both
       // sides of anything else.
       const hostMoved = was !== undefined && hostNow !== null && !same(hostNow);
+      // What the step was handed, as a sha (null: no such file; undefined: not
+      // known). It is the base the head is held to — unless the folder was
+      // merged, which already folded the other writer's change in.
+      const handed: string | null | undefined = was === undefined ? undefined : was === null ? null : typeof was === "string" ? was : sha(was);
+      let foldedIn = false;
       if (hostMoved) {
         const merged = mergeAppends(was ?? null, hostNow, next);
         if (merged) {
           next = merged;
+          foldedIn = true;
         } else {
           const ext = path.extname(rel);
           const stem = rel.slice(0, rel.length - ext.length);
@@ -568,6 +611,7 @@ export function applyContainerChanges(
           fs.mkdirSync(path.dirname(conflictAbs), { recursive: true });
           fs.writeFileSync(conflictAbs, next);
           applied.push(conflictRel);
+          written.push({ path: conflictRel.replaceAll("\\", "/"), base: null, after: next });
           note?.(
             `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the workspace while this step ran, ` +
               `and not only by appending — kept the workspace's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
@@ -590,9 +634,21 @@ export function applyContainerChanges(
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, next);
       applied.push(rel);
+      // The pinned base is what the folder held before this write (null: a new
+      // file) — for an untouched path that is what the step was handed.
+      written.push({ path: rel.replaceAll("\\", "/"), base: hostNow ? sha(hostNow) : null, after: next, handed: foldedIn ? undefined : handed });
     }
   };
   walk(containerWs);
+  // The step's outputs as one revision (all its paths, or none). Never allowed
+  // to fail the copy-back: the folder is written already.
+  if (opts.revision && written.length) {
+    try {
+      recordStepOutputs(opts.revision.tenant, path.basename(hostWs), written, { runId: opts.revision.runId, step: opts.revision.step, base: opts.revision.base });
+    } catch (err) {
+      note?.(`the step's files were written to the workspace but not recorded as a revision yet: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return applied;
 }
 
@@ -1223,8 +1279,13 @@ FROM base AS browsers
 # --with-deps packages, so a Playwright bump that dropped it would have
 # broken every windowed browser without a word. No xauth: nothing here runs
 # xvfb-run, and Xvfb started without -auth takes the local client as it is.
+# libnss3-tools for certutil: Firefox trusts a CA only from its own
+# profile's NSS database (not the system store, SSL_CERT_FILE, enterprise
+# roots or a distribution policy — each tried in this image, 8 Nov 2026), so
+# web browse puts the egress CA there for a step held to its network: list
+# (FOL-128). ~1 MB.
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends xvfb \\
+ && apt-get install -y --no-install-recommends xvfb libnss3-tools \\
  && rm -rf /var/lib/apt/lists/*
 # Google Chrome and Chrome beta come from Google's apt repository, which
 # Playwright adds; each is tried ENGINE_DOWNLOAD_ATTEMPTS times. Only on
@@ -2060,7 +2121,11 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-run-"));
   let containerId = "";
+  // The revisions this step starts from (FOL-126 fixes): taken before the
+  // folder is copied, held until the copy-back is done.
+  let pinned: Awaited<ReturnType<typeof pinRunBase>> = null;
   try {
+    pinned = args.tenant ? await pinRunBase(args.tenant, path.basename(args.workspaceRoot), `${args.runId ?? "step"}:${crypto.randomBytes(4).toString("hex")}`) : null;
     // Stage the workspace copy minus what the platform owns — the vault,
     // hook state, run history. The container gets the trust boundary, not
     // the bookkeeping. One definition of "platform-owned" for this filter,
@@ -2244,6 +2309,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
         onRefused: (r) => refused.push(r),
         allowConfig: args.configWrites === true,
         onKept: (r) => kept.push(r),
+        revision: args.tenant ? { tenant: args.tenant, runId: args.runId, step: containerId, base: pinned?.base ?? null } : undefined,
       });
       if (refused.length) args.emit("info", refusedLine(refused));
       if (kept.length) args.emit("info", keptLine(kept));
@@ -2265,5 +2331,6 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
   } finally {
     if (containerId) spawnSync(cli(), ["rm", "-f", containerId], { stdio: "ignore" });
     fs.rmSync(staging, { recursive: true, force: true });
+    await pinned?.release();
   }
 }

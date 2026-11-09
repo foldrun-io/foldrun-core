@@ -19,7 +19,26 @@ import type { RunRecord, RunSummary } from "./store.ts";
 import type { TriggerEvent } from "./trigger-log.ts";
 import type { FileRecord } from "./storage.ts";
 
+/** The read half of the port without blocking the event loop (FOL-126 phase
+ *  3b): the hot reads — one run, a workspace's run list, its live runs — asked
+ *  of the database directly. Optional: a port without it is read through its
+ *  synchronous twin, so a caller can always ask the async form. The rest of
+ *  the port (writes, the trigger log, the storage index, counts, moves) is
+ *  still synchronous: see the phase 3b report for the list. */
+export interface RecordsPortAsync {
+  runGet(tenant: string, workspace: string, id: string): Promise<RunRecord | null>;
+  runSummaries(tenant: string, workspace: string): Promise<RunSummary[]>;
+  runLive(tenant: string, workspace: string): Promise<RunRecord[]>;
+  /** The write half, for a caller that is async anyway (FOL-126 phase 4):
+   *  the same upsert as the synchronous runPut, honouring the fence of the
+   *  lock its async context holds, with the event loop free while it waits.
+   *  Optional like the reads: a port without it is written through runPut. */
+  runPut?(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): Promise<void>;
+}
+
 export interface RecordsPort {
+  /** Async reads (see RecordsPortAsync). */
+  async?: RecordsPortAsync;
   // ---- runs: the whole record, and the row a list reads
   /** Insert or replace one run. `live`: queued, running or parked at a gate. Last write wins. */
   runPut(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): void;
@@ -65,13 +84,22 @@ export interface RecordsPort {
   /** The storage file index follows the workspace's new name. */
   fileMove(tenant: string, from: string, to: string): void;
 
+  /** True while this workspace's records are still FILES on this process: its
+   *  boot import could not move them (records-import.ts), so every function
+   *  answers from the files for it, and the next boot tries again. Optional:
+   *  a port without it has no such workspaces. */
+  onFiles?(tenant: string, workspace: string): boolean;
+
   /** A short named lock across processes, with stale-holder fencing: while
    *  `fn` runs, every write of this port made in its async context is refused
    *  if a newer holder took the lock over. */
   lock<T>(name: string, fn: () => Promise<T>): Promise<T>;
 }
 
-/** The registered port, or null: files, as before. */
-export function records(): RecordsPort | null {
-  return platform.records ?? null;
+/** The registered port, or null: files, as before. With a workspace, null also
+ *  when that workspace is still on files (its import is pending). */
+export function records(tenant?: string, workspace?: string): RecordsPort | null {
+  const port = platform.records ?? null;
+  if (port && tenant !== undefined && workspace !== undefined && port.onFiles?.(tenant, workspace)) return null;
+  return port;
 }

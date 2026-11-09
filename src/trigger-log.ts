@@ -85,7 +85,7 @@ const KEEP = 500;
  *  diagnostic: the whole point is to be reading it on the bad morning. */
 export function recordTriggerEvent(tenant: string, workspace: string, event: TriggerEvent): void {
   try {
-    const port = records();
+    const port = records(tenant, workspace);
     if (port) {
       // Only a workspace that is there: a delivery for one that is not leaves no row.
       if (fs.existsSync(workspaceDir(tenant, workspace))) port.triggerAppend(tenant, workspace, event);
@@ -106,7 +106,7 @@ export function recordTriggerEvent(tenant: string, workspace: string, event: Tri
 }
 
 export function readTriggerEvents(tenant: string, workspace: string, limit = 200): TriggerEvent[] {
-  const port = records();
+  const port = records(tenant, workspace);
   if (port) {
     try {
       return port.triggerRead(tenant, workspace, limit);
