@@ -1092,50 +1092,54 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
   const deps = backend;
   if (!deps) return null;
   const ws: WorkspaceRef = { tenant, workspace };
-  // The heads first, then the folder: a folder read older than the heads
-  // would diff a stale copy against a newer head, and with that head as each
-  // path's base the publish would undo the newer write without a conflict.
-  const heads = await headsOf(deps, ws);
-  const tree = currentTree(tenant, workspace);
-  if (!tree) return null;
-  const head = await manifestsAt(deps, tenant, heads);
-  const bytes = new Map<string, Buffer>();
-  const want: Manifest = emptyManifest();
-  const have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
-  for (const f of tree) {
-    const side = sideOf(f.path);
-    if (!side || f.after === null) continue;
-    const buf = Buffer.from(f.after, "utf8");
-    const sha = sha256Hex(buf);
-    bytes.set(sha, buf);
-    want.files[f.path] = { sha, size: buf.length, mode: modeOf(tenant, workspace, f.path) };
+  const k = key(tenant, workspace);
+  // The mark goes BEFORE the folder is read, so one set after the read (a run
+  // writing a file too big to journal while this publishes) asks for another
+  // repair; a repair that fails puts it back for the next one.
+  const wasMarked = marked.delete(k);
+  try {
+    // The heads first, then the folder: a folder read older than the heads
+    // would diff a stale copy against a newer head, and with that head as each
+    // path's base the publish would undo the newer write without a conflict.
+    const heads = await headsOf(deps, ws);
+    const tree = currentTree(tenant, workspace);
+    if (!tree) return null;
+    const head = await manifestsAt(deps, tenant, heads);
+    const bytes = new Map<string, Buffer>();
+    const want: Manifest = emptyManifest();
+    const have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
+    for (const f of tree) {
+      const side = sideOf(f.path);
+      if (!side || f.after === null) continue;
+      const buf = Buffer.from(f.after, "utf8");
+      const sha = sha256Hex(buf);
+      bytes.set(sha, buf);
+      want.files[f.path] = { sha, size: buf.length, mode: modeOf(tenant, workspace, f.path) };
+    }
+    // A path the tree reader does not list but the folder still holds (a binary
+    // file) is neither added nor removed here; one that is gone from the folder
+    // is gone from the head.
+    const dir = workspaceDir(tenant, workspace);
+    for (const p of Object.keys(have.files)) {
+      if (!(p in want.files) && fs.existsSync(path.join(dir, p))) want.files[p] = have.files[p];
+    }
+    const changes = diffManifests(have, want);
+    if (!Object.keys(changes).length) return null;
+    return await publish(deps, {
+      ws,
+      // The heads it was diffed against are part of the id: the same changes
+      // over a different head (the head was restored since) are a new repair,
+      // not a retry of the earlier one.
+      opId: opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40)),
+      by,
+      message: "workspace content recorded",
+      changes,
+      bytesOf: async (sha) => bytes.get(sha)!,
+    });
+  } catch (err) {
+    if (wasMarked) marked.add(k);
+    throw err;
   }
-  // A path the tree reader does not list but the folder still holds (a binary
-  // file) is neither added nor removed here; one that is gone from the folder
-  // is gone from the head.
-  const dir = workspaceDir(tenant, workspace);
-  for (const p of Object.keys(have.files)) {
-    if (!(p in want.files) && fs.existsSync(path.join(dir, p))) want.files[p] = have.files[p];
-  }
-  const changes = diffManifests(have, want);
-  if (!Object.keys(changes).length) {
-    marked.delete(key(tenant, workspace));
-    return null;
-  }
-  const result = await publish(deps, {
-    ws,
-    // The heads it was diffed against are part of the id: the same changes
-    // over a different head (the head was restored since) are a new repair,
-    // not a retry of the earlier one.
-    opId: opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40)),
-    by,
-    message: "workspace content recorded",
-    changes,
-    bytesOf: async (sha) => bytes.get(sha)!,
-  });
-  // Only now: a reconcile that failed leaves the workspace marked for the next one.
-  marked.delete(key(tenant, workspace));
-  return result;
 }
 
 // ------------------------------------------------------------- reading
