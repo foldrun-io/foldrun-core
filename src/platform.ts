@@ -17,6 +17,7 @@ import type { FlowInfo, FlowStep, RunRecord } from "./store.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.ts";
 import type { EgressHooks } from "./egress.ts";
 import { matchFilter } from "./trigger-filter.ts";
+import type { RecordsPort } from "./records.ts";
 
 export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
@@ -241,6 +242,12 @@ export interface PlatformHooks {
    * preferences and sends what it always sent.
    */
   mailPreference(tenant: string, email: string, category: string, workspace: string | null): Promise<boolean>;
+  /**
+   * Where runs, the run index, the trigger log and the storage file index
+   * live (records.ts). Absent: files under the workspace, which is what a
+   * laptop and a self-hosted install with no database have.
+   */
+  records?: RecordsPort;
 }
 
 /** What handing a webhook over came to: the delivery's id (the
@@ -360,4 +367,5 @@ export function platformQueues(): boolean {
 /** Back to the local defaults — for tests that register and must not leak. */
 export function resetPlatform(): void {
   Object.assign(platform, local, { isolation: {} });
+  delete platform.records;
 }

@@ -39,7 +39,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { deployedCommit } from "./deploy.ts";
-import { latestRevisionId } from "./history.ts";
+import { latestRevisionIdLocal as latestRevisionId } from "./history.ts";
 import matter from "./matter.ts";
 import { spawn } from "node:child_process";
 import { hostSafeEnv } from "./host-env.ts";

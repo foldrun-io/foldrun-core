@@ -153,3 +153,24 @@ test("FOLDRUN_LOG_MODE=raw keeps a process out of the boundary — the marker th
   const { out, err } = await runChild("all", { FOLDRUN_LOG_MODE: "raw" });
   assert.ok(Buffer.concat([out, err]).toString("utf8").includes(MARKER));
 });
+
+test("our files are recognised from where the module is, whatever the checkout's folder is called (dot-folder, worktree, CI workspace)", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ops-log-root-"));
+  try {
+    for (const name of [".prepush-foldrun-core-abc123-42", "checkout", "work tree"]) {
+      const src = path.join(root, name, "src");
+      fs.mkdirSync(src, { recursive: true });
+      fs.copyFileSync(path.join(here, "..", "src", "ops-log.ts"), path.join(src, "ops-log.ts"));
+      fs.writeFileSync(path.join(src, "thrower.ts"), 'export function boom(): Error { return new Error("x"); }\n');
+      const log = await import(path.join(src, "ops-log.ts"));
+      const thrower = await import(path.join(src, "thrower.ts"));
+      const frames = log.stackFrames(thrower.boom().stack) as string[];
+      assert.ok(frames.some((f) => f.startsWith("thrower.ts:")), `${name}: ${JSON.stringify(frames)}`);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

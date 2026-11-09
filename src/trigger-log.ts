@@ -28,6 +28,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { workspaceDir } from "./store.ts";
+import { records } from "./records.ts";
 
 /** What became of one trigger firing. `started` is here too: without it the
  *  log answers "why did nothing run" and not "how often does anything",
@@ -84,6 +85,12 @@ const KEEP = 500;
  *  diagnostic: the whole point is to be reading it on the bad morning. */
 export function recordTriggerEvent(tenant: string, workspace: string, event: TriggerEvent): void {
   try {
+    const port = records(tenant, workspace);
+    if (port) {
+      // Only a workspace that is there: a delivery for one that is not leaves no row.
+      if (fs.existsSync(workspaceDir(tenant, workspace))) port.triggerAppend(tenant, workspace, event);
+      return;
+    }
     const file = logFile(tenant, workspace);
     if (!fs.existsSync(path.dirname(file))) return;
     fs.appendFileSync(file, JSON.stringify(event) + "\n");
@@ -99,6 +106,14 @@ export function recordTriggerEvent(tenant: string, workspace: string, event: Tri
 }
 
 export function readTriggerEvents(tenant: string, workspace: string, limit = 200): TriggerEvent[] {
+  const port = records(tenant, workspace);
+  if (port) {
+    try {
+      return port.triggerRead(tenant, workspace, limit);
+    } catch {
+      return [];
+    }
+  }
   let lines: string[];
   try {
     lines = fs.readFileSync(logFile(tenant, workspace), "utf8").split("\n").filter(Boolean);

@@ -42,6 +42,8 @@
 
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Why something failed, in one word an operator can count. Small on
  *  purpose: a class is a bucket on a dashboard, not a diagnosis. */
@@ -225,6 +227,26 @@ export function errorClass(err: unknown): ErrorClass {
   }
 }
 
+/** The checkout this file runs from, found from where it is, not from what
+ *  the folder is called: a copy under another name (the pre-push hook's
+ *  `.prepush-foldrun-core-<sha>`, a worktree, a CI workspace) is still ours. */
+const OWN_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+function ownTree(p: string): boolean {
+  if (!p.startsWith(OWN_ROOT + path.sep)) return false;
+  return /^(src|server|app|lib|dist|tests|scripts|instrumentation)\//.test(p.slice(OWN_ROOT.length + 1));
+}
+
+/** A frame's file as a path: V8 writes an ES module as a file: URL, with a
+ *  space or a non-ASCII letter percent-encoded. */
+function framePath(raw: string): string {
+  if (!raw.startsWith("file://")) return raw;
+  try {
+    return fileURLToPath(raw);
+  } catch {
+    return raw.slice(7);
+  }
+}
+
 /** Is this source path the platform's own code (core, platform, web, their
  *  dependencies), not something an account brought — and a file that is
  *  really there? A stack is a settable string; a frame naming a file that
@@ -234,7 +256,7 @@ function ourPath(p: string): boolean {
   if (/^node:[a-z_/]+$/.test(p)) return true;
   // A checkout (the image runs core and platform from source), the web's
   // build, or the published package (`node_modules/@foldrun/core/dist`).
-  if (!/\/foldrun-(core|platform|web)\/(src|server|app|lib|dist|\.next|node_modules|tests|scripts|instrumentation)|\/node_modules\/@foldrun\//.test(p)) return false;
+  if (!ownTree(p) && !/\/foldrun-(core|platform|web)\/(src|server|app|lib|dist|\.next|node_modules|tests|scripts|instrumentation)|\/node_modules\/@foldrun\//.test(p)) return false;
   let known = seenPaths.get(p);
   if (known === undefined) {
     try {
@@ -258,7 +280,7 @@ export function stackFrames(stack: unknown, max = 5, skip = 0): string[] {
   for (const raw of stack.slice(0, 20_000).split("\n")) {
     const m = /^\s+at (?:.*? \()?(.+?):(\d+):\d+\)?$/.exec(raw);
     if (!m) continue;
-    const where = m[1].replace(/^file:\/\//, "");
+    const where = framePath(m[1]);
     if (!ourPath(where)) continue;
     if (seen++ < skip) continue;
     const frame = `${where.split("/").pop()}:${m[2]}`;
@@ -327,7 +349,7 @@ function callsite(): string | undefined {
   for (const raw of stack.split("\n").slice(1)) {
     const m = /^\s+at (?:.*? \()?(.+?):(\d+):\d+\)?$/.exec(raw);
     if (!m || /\/ops-log\.(ts|js)$/.test(m[1])) continue;
-    const where = m[1].replace(/^file:\/\//, "");
+    const where = framePath(m[1]);
     if (!ourPath(where)) return undefined;
     const frame = `${where.split("/").pop()}:${m[2]}`;
     return FRAME.test(frame) ? frame : undefined;

@@ -12,14 +12,14 @@ import path from "node:path";
 
 import {
   diffLines,
-  ensureBaseline,
-  headRevision,
-  latestRevisionId,
-  listRevisions,
-  readRevision,
+  ensureBaselineLocal as ensureBaseline,
+  headRevisionLocal as headRevision,
+  latestRevisionIdLocal as latestRevisionId,
+  listRevisionsLocal as listRevisions,
+  readRevisionLocal as readRevision,
   recordRevision,
-  resolveRevision,
-  snapshotAt,
+  resolveRevisionLocal as resolveRevision,
+  snapshotAtLocal as snapshotAt,
 } from "../src/history.ts";
 import {
   deleteWorkspacePath,
