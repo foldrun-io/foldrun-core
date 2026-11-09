@@ -268,6 +268,81 @@ test("a retained manifest that cannot be read stops the account's sweep: no dele
   assert.equal(await has(blobKey("orphan\n")), true);
 });
 
+test("a revision committed during the sweep whose manifest cannot be read stops the account's sweep, not just one delete", async () => {
+  const marks = memorySweepMarks(); // the real clock, as in the race test above
+  await put({ "memory/a.md": "a\n" });
+  const orphans = ["u1\n", "u2\n", "u3\n"];
+  for (const o of orphans) await blobs.putIfAbsent(blobKey(o), Buffer.from(o));
+  await sweepBlobs(deps, marks, opts({ delayMs: 0 }));
+  await new Promise((r) => setTimeout(r, 5));
+  let armed = true;
+  fp.pins.before = async () => {
+    if (!armed) return;
+    armed = false;
+    // A publish that names every orphan commits after the mark, and its
+    // manifest is then unreadable: none of the orphans may go.
+    const r = await put({ "memory/u1.md": orphans[0], "memory/u2.md": orphans[1], "memory/u3.md": orphans[2] });
+    await blobs.delete(manifestObjectKey(T, r.revision!.authored));
+  };
+  const r = await sweepBlobs(deps, marks, opts({ delayMs: 0 }));
+  assert.equal(r.deleted, 0, "no candidate after the unreadable manifest is deleted");
+  assert.equal(r.errors, 1, "the stop is reported");
+  for (const o of orphans) assert.equal(await has(blobKey(o)), true, `${o.trim()} is named by the new revision`);
+});
+
+test("maxDeletes is one budget: an account that fails part-way still pays for what it deleted", async () => {
+  for (const failAt of ["delete", "clear"] as const) {
+    fs.rmSync(root, { recursive: true, force: true });
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-sweep-"));
+    blobs = bounded(fsBlobStore(path.join(root, ".objects")), { backoffMs: 1 });
+    revisions = localRevisionStore(path.join(root, ".revisions"));
+    deps = { blobs, revisions, pins: fp.pins };
+    now = Date.parse("2026-11-08T00:00:00Z");
+    const marks = memorySweepMarks(clock);
+    await put({ "memory/a.md": "a\n" });
+    for (const t of [T, "beta"]) for (const i of [1, 2, 3]) await blobs.putIfAbsent(blobObjectKey(t, sha256Hex(Buffer.from(`${t}${i}\n`))), Buffer.from(`${t}${i}\n`));
+    await sweepBlobs(deps, marks, opts({ tenants: [T, "beta"] }));
+    now += 8 * DAY;
+    // acme deletes two objects and then fails: on its third delete, or when it
+    // clears the records of the two it deleted.
+    let deletes = 0;
+    const failing = {
+      ...blobs,
+      async delete(key: string) {
+        if (failAt === "delete" && key.startsWith(`t/${T}/`) && ++deletes === 3) throw new Error("store fault");
+        return blobs.delete!(key);
+      },
+    } as typeof blobs;
+    const failingMarks = {
+      ...marks,
+      async clear(tenant: string, kind: "blob" | "manifest" | "workspace", refs: string[]) {
+        if (failAt === "clear" && tenant === T) throw new Error("database fault");
+        return marks.clear(tenant, kind, refs);
+      },
+    };
+    const budget = failAt === "delete" ? 4 : 3; // "clear" deletes all three of acme's before failing
+    const r = await sweepBlobs({ blobs: failing, revisions, pins: fp.pins }, failingMarks, opts({ tenants: [T, "beta"], maxDeletes: budget }));
+    assert.equal(r.errors, 1, failAt);
+    assert.equal(r.deleted, budget, `${failAt}: the shared budget holds across accounts`);
+    let left = 0;
+    for await (const _ of blobs.list!("t/beta/")) left++;
+    assert.equal(left, failAt === "delete" ? 1 : 3, `${failAt}: beta got only what acme left of the budget`);
+  }
+});
+
+test("a dry run charges the shared budget like a real run: two accounts, one maxDeletes", async () => {
+  const marks = memorySweepMarks(clock);
+  await put({ "memory/a.md": "a\n" });
+  for (const t of [T, "beta"]) for (const i of [1, 2, 3]) await blobs.putIfAbsent(blobObjectKey(t, sha256Hex(Buffer.from(`${t}${i}\n`))), Buffer.from(`${t}${i}\n`));
+  await sweepBlobs(deps, marks, opts({ tenants: [T, "beta"] }));
+  now += 8 * DAY;
+  const dry = await sweepBlobs(deps, marks, opts({ tenants: [T, "beta"], maxDeletes: 4, dryRun: true }));
+  const real = await sweepBlobs(deps, marks, opts({ tenants: [T, "beta"], maxDeletes: 4 }));
+  assert.equal(real.deleted, 4);
+  assert.equal(dry.wouldDelete, real.deleted, "the dry run promises what the real run does");
+  assert.equal(dry.wouldDeleteBytes, real.deletedBytes);
+});
+
 test("keys it does not own are left alone; the per-run cap and the minimum age are honoured", async () => {
   const marks = memorySweepMarks(clock);
   await put({ "memory/a.md": "a\n" });

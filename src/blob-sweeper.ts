@@ -26,8 +26,15 @@
 // Refusals (nothing deleted, said in the report): the store cannot list; the
 // database holds no revision at all while the bucket holds objects (a wiped or
 // not-yet-restored database); a retained manifest cannot be read (its blobs are
-// unknown). `dryRun` marks and counts nothing it would not report: it writes no
-// records and deletes nothing.
+// unknown). A manifest committed DURING the sweep that cannot be read stops that
+// account's sweep where it is: the objects deleted before it stay deleted (they
+// were checked), nothing after it goes. `dryRun` marks and counts nothing it
+// would not report: it writes no records and deletes nothing.
+//
+// `maxDeletes` is one budget for all accounts. It is charged from the report
+// (what was deleted, or in a dry run what would be), so an account whose sweep
+// fails part-way still pays for what it deleted, and a dry run stops counting
+// where a real run would stop deleting.
 //
 // An account that was deleted needs no special case: its rows and pins are gone,
 // so everything under its prefix is unreferenced, waits the delay, and goes.
@@ -120,15 +127,17 @@ export async function sweepBlobs(deps: SweepDeps, marks: SweepMarks, opts: Sweep
   if (!opts.allowEmpty && tenants.length && !(await deps.revisions.anyRevisions())) {
     return refuse(rep, "the database holds no revision but the store holds objects: not deleting on that evidence");
   }
-  let budget = Math.max(0, opts.maxDeletes);
   for (const tenant of tenants) {
     if (!TENANT.test(tenant)) {
       rep.foreign++;
       continue;
     }
     rep.tenants++;
+    // Read from the report, not from what sweepTenant returns: a tenant that
+    // throws after deleting never returns, and its deletions must still count.
+    const budget = Math.max(0, opts.maxDeletes - rep.deleted - rep.wouldDelete);
     try {
-      budget -= await sweepTenant(deps, marks, opts, tenant, rep, budget);
+      await sweepTenant(deps, marks, opts, tenant, rep, budget);
     } catch (err) {
       rep.errors++;
       opsError("blobs.sweep_failed", err, { tenant });
@@ -145,7 +154,9 @@ function refuse(rep: SweepReport, why: string): SweepReport {
   return rep;
 }
 
-async function sweepTenant(deps: SweepDeps, marks: SweepMarks, opts: SweepOptions, tenant: string, rep: SweepReport, budget: number): Promise<number> {
+/** Adds what it did to `rep` as it goes, so a throw part-way leaves the report
+ *  (and with it the shared budget) true to what was deleted. */
+async function sweepTenant(deps: SweepDeps, marks: SweepMarks, opts: SweepOptions, tenant: string, rep: SweepReport, budget: number): Promise<void> {
   const { blobs, revisions, pins } = deps;
   const started = await marks.now();
 
@@ -221,47 +232,64 @@ async function sweepTenant(deps: SweepDeps, marks: SweepMarks, opts: SweepOption
   }
 
   // ---- sweep
+  due.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "blob" ? -1 : 1)); // blobs before manifests
   if (opts.dryRun) {
+    // The same objects, in the same order, a real run would take with this
+    // budget; adding to the report is what charges the shared budget.
     rep.wouldDelete += Math.min(due.length, budget);
     rep.wouldDeleteBytes += due.slice(0, budget).reduce((a, o) => a + o.size, 0);
-    return 0;
+    return;
   }
   let did = 0;
   const since = new Date(started.getTime() - 60_000);
   const newlyLive = new Map<string, Set<string>>(); // manifest id → its blobs, for revisions made since the mark began
   const gone: Record<"blob" | "manifest", string[]> = { blob: [], manifest: [] };
-  due.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "blob" ? -1 : 1)); // blobs before manifests
-  for (const o of due) {
-    if (did >= budget) break;
-    const ran = await (pins ?? NO_GUARD).guardDelete(tenant, o.kind === "blob" ? "blob" : "manifest", o.ref, async () => {
-      // Inside the pin lock: whatever was committed since the mark began.
-      const recent = await revisions.manifestIds(tenant, { since });
-      if (o.kind === "manifest" && recent.includes(o.ref)) return void rep.skippedHeld++;
-      if (o.kind === "blob") {
-        for (const id of recent) {
-          let set = newlyLive.get(id);
-          if (!set) {
-            set = new Set();
-            try {
-              for (const f of Object.values((await loadManifest({ blobs, revisions }, tenant, id)).files)) set.add(f.sha);
-            } catch {
-              set.add(o.ref); // unreadable: keep what we were about to delete
+  const clearGone = async () => {
+    for (const kind of ["blob", "manifest"] as const) if (gone[kind].length) await marks.clear(tenant, kind, gone[kind]);
+  };
+  try {
+    for (const o of due) {
+      if (did >= budget) break;
+      const ran = await (pins ?? NO_GUARD).guardDelete(tenant, o.kind === "blob" ? "blob" : "manifest", o.ref, async () => {
+        // Inside the pin lock: whatever was committed since the mark began.
+        const recent = await revisions.manifestIds(tenant, { since });
+        if (o.kind === "manifest" && recent.includes(o.ref)) return void rep.skippedHeld++;
+        if (o.kind === "blob") {
+          for (const id of recent) {
+            let set = newlyLive.get(id);
+            if (!set) {
+              // A new revision's manifest that cannot be read leaves its blobs
+              // unknown, for this candidate and every one after it. Caching
+              // anything here would let a later candidate it names be deleted,
+              // so the account's sweep stops instead (the caller counts it).
+              let m;
+              try {
+                m = await loadManifest({ blobs, revisions }, tenant, id);
+              } catch (err) {
+                throw new Error(`a revision committed during the sweep names manifest ${id.slice(0, 12)}…, which cannot be read: stopping this account's sweep`, { cause: err });
+              }
+              set = new Set(Object.values(m.files).map((f) => f.sha));
+              newlyLive.set(id, set);
             }
-            newlyLive.set(id, set);
+            if (set.has(o.ref)) return void rep.skippedHeld++;
           }
-          if (set.has(o.ref)) return void rep.skippedHeld++;
         }
-      }
-      await blobs.delete(o.key);
-      rep.deleted++;
-      rep.deletedBytes += o.size;
-      did++;
-      gone[o.kind].push(o.ref);
-    });
-    if (!ran) rep.skippedHeld++; // a live pin
+        await blobs.delete(o.key);
+        rep.deleted++;
+        rep.deletedBytes += o.size;
+        did++;
+        gone[o.kind].push(o.ref);
+      });
+      if (!ran) rep.skippedHeld++; // a live pin
+    }
+  } catch (err) {
+    // What was deleted before the failure is gone; its records go too, best
+    // effort (one left behind is stale next run, since its object is not
+    // listed, and is cleared then).
+    await clearGone().catch((e) => opsError("blobs.sweep_marks_not_cleared", e, { tenant }));
+    throw err;
   }
-  for (const kind of ["blob", "manifest"] as const) if (gone[kind].length) await marks.clear(tenant, kind, gone[kind]);
-  return did;
+  await clearGone();
 }
 
 const NO_GUARD = {
