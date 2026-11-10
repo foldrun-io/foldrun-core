@@ -13,6 +13,22 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.3.0] — 2026-11-10
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunRecord` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+- Bump @anthropic-ai/claude-agent-sdk (#76) ([337dd66](https://github.com/foldrun-io/foldrun-core/commit/337dd66))
+- build(deps): Bump softprops/action-gh-release (#75) ([d596a42](https://github.com/foldrun-io/foldrun-core/commit/d596a42))
+- refactor(snapshot): additive shapes — createFlowRun takes snapshot as a trailing argument, holdsSnapshot is a platform hook ([287e717](https://github.com/foldrun-io/foldrun-core/commit/287e717))
+- feat(scan): a foldrun key is a secret (secret/hardcoded, warn) — fr_api_/fr_gw_/fr_a2a_/fr_dep_ and mda_/mdk_ (FOL-154) ([d7824ff](https://github.com/foldrun-io/foldrun-core/commit/d7824ff))
+- feat(snapshot): a run can carry a snapshot; only an executor that can hold one runs it (Part B3) ([84cc28f](https://github.com/foldrun-io/foldrun-core/commit/84cc28f))
+
 ## [18.2.0] — 2026-11-10
 
 ### New in the public API
