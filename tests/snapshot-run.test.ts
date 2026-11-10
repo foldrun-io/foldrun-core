@@ -38,14 +38,15 @@ test("keepOnly: only that folder comes back — the snapshot and anything copied
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-async function withWorkspace(iso: string | undefined, runners: Record<string, IsolatedStepRunner>, fn: (ws: string) => Promise<void>) {
+async function withWorkspace(iso: string | undefined, runners: Record<string, IsolatedStepRunner>, fn: (ws: string) => Promise<void>, holds: string[] = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-snaprun-"));
   const prev = { data: process.env.FOLDRUN_DATA, iso: process.env.FOLDRUN_RUN_ISOLATION };
   const prevIso = platform.isolation;
+  const prevHolds = platform.holdsSnapshot;
   process.env.FOLDRUN_DATA = root;
   if (iso) process.env.FOLDRUN_RUN_ISOLATION = iso;
   else delete process.env.FOLDRUN_RUN_ISOLATION;
-  registerPlatform({ isolation: runners });
+  registerPlatform({ isolation: runners, holdsSnapshot: (i) => holds.includes(i) });
   try {
     const ws = path.join(root, "acme/workspaces/desk");
     fs.mkdirSync(path.join(ws, "agents/coder"), { recursive: true });
@@ -54,7 +55,7 @@ async function withWorkspace(iso: string | undefined, runners: Record<string, Is
     fs.writeFileSync(path.join(ws, "agents/coder/agent.md"), "---\nname: coder\ndescription: codes\n---\n\nCode.\n");
     await fn(ws);
   } finally {
-    registerPlatform({ isolation: prevIso });
+    registerPlatform({ isolation: prevIso, holdsSnapshot: prevHolds });
     for (const [k, v] of [["FOLDRUN_DATA", prev.data], ["FOLDRUN_RUN_ISOLATION", prev.iso]] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -64,7 +65,7 @@ async function withWorkspace(iso: string | undefined, runners: Record<string, Is
 }
 
 const go = async () => {
-  const run = createFlowRun("acme", "desk", [{ agent: "coder", instruction: "fix it", group: 1, optional: false }], "adhoc:coder", "running", [], null, { snapshot: SNAP });
+  const run = createFlowRun("acme", "desk", [{ agent: "coder", instruction: "fix it", group: 1, optional: false }], "adhoc:coder", "running", [], null, {}, undefined, SNAP);
   assert.deepEqual(run.snapshot, { id: SNAP }, "on the record from the start");
   await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
   return readRun("acme", "desk", run.id)!;
@@ -72,16 +73,16 @@ const go = async () => {
 
 test("a supporting executor gets the snapshot id, and the step is told where the folder is", async () => {
   let seen: RunInContainerArgs | null = null;
-  const able: IsolatedStepRunner = Object.assign(async (args: RunInContainerArgs): Promise<ContainerStepOutcome> => {
+  const able: IsolatedStepRunner = async (args: RunInContainerArgs): Promise<ContainerStepOutcome> => {
     seen = args;
     return { status: "completed", result: "done", costUsd: 0, applied: [] };
-  }, { supportsSnapshot: true });
+  };
   await withWorkspace("able", { able }, async () => {
     const done = await go();
     assert.equal(done.status, "completed", JSON.stringify(done.steps[0]));
     assert.deepEqual(seen!.snapshot, { id: SNAP });
     assert.match(seen!.input.prompt, /snapshot\//);
-  });
+  }, ["able"]);
 });
 
 test("an executor that cannot hold one, and a step with no sandbox, fail before anything runs", async () => {

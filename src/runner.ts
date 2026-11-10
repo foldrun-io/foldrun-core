@@ -2917,8 +2917,8 @@ async function runStep(
     // copy-back stands between what it writes and the workspace (Codex).
     const snapshotId = runId ? readRun(tenant, path.basename(workspaceRootOf(agentDir)), runId)?.snapshot?.id : undefined;
     if (snapshotId) {
-      const exec = isolatedRun() && isolation !== "container" ? platform.isolation[isolation!] : undefined;
-      if (!exec?.supportsSnapshot) {
+      const able = isolatedRun() && isolation !== "container" && Boolean(platform.isolation[isolation!]) && platform.holdsSnapshot?.(isolation!) === true;
+      if (!able) {
         throw new Error("this run has a snapshot (a folder sent to work on), and this install cannot hold one: it needs the k8s sandbox (FOLDRUN_RUN_ISOLATION=k8s). Nothing was run.");
       }
     }
@@ -4515,10 +4515,13 @@ export function createFlowRun(
   status: "queued" | "running",
   tags: string[] = [],
   startedBy: string | null = null,
-  opts: { test?: boolean; snapshot?: string } = {},
+  opts: { test?: boolean } = {},
   /** An A2A task's correlation (foldrun-platform flow-admission.ts) — its
    *  own trailing argument, so the signature only widened. */
   a2a?: { task: string; key: string },
+  /** A snapshot run's folder (Part B3): the id POST …/snapshots answered.
+   *  Its own trailing argument, as a2a is, so the signature only widened. */
+  snapshot?: string,
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4535,7 +4538,7 @@ export function createFlowRun(
     ...(opts.test ? { test: true } : {}),
     // An outside agent asked, over A2A: the task it serves, and whose key.
     ...(a2a ? { trigger: "a2a" as const, a2a: { task: a2a.task, key: a2a.key } } : {}),
-    ...(opts.snapshot ? { snapshot: { id: opts.snapshot } } : {}),
+    ...(snapshot ? { snapshot: { id: snapshot } } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({

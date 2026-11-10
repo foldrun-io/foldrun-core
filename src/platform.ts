@@ -19,11 +19,7 @@ import type { EgressHooks } from "./egress.ts";
 import { matchFilter } from "./trigger-filter.ts";
 import type { RecordsPort } from "./records.ts";
 
-export type IsolatedStepRunner = ((args: RunInContainerArgs) => Promise<ContainerStepOutcome>) & {
-  /** It can run a snapshot step (RunInContainerArgs.snapshot). A run with a
-   *  snapshot on any other executor fails before anything starts. */
-  supportsSnapshot?: boolean;
-};
+export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
 /** Who this install is for. `hosted` means someone is paying the operator
  *  for it — a wallet, a plan, a bill. `self-hosted` is everything else: a
@@ -172,6 +168,11 @@ export interface PlatformHooks {
    * trace as not enforced.
    */
   confinesBrowsing?(isolation: string): boolean;
+  /** Can this executor run a snapshot step (RunInContainerArgs.snapshot:
+   *  stage the folder, give back outputs/ alone, make the patch)? A run with a
+   *  snapshot on any executor that cannot fails before anything starts.
+   *  Default: none can. */
+  holdsSnapshot?(isolation: string): boolean;
   /**
    * Does this isolation mode wall a step whose `network:` is restricted and
    * enforced to the egress proxy alone (a `filtered` pod)? True: such a
