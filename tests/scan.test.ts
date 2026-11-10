@@ -374,3 +374,14 @@ test("a snapshot on its way out is scanned for secrets with nothing the files ca
   assert.deepEqual(r.unscanned, ["assets/logo.png"], "a file that is not text is said, not passed quietly");
   assert.ok(!JSON.stringify(r).includes(STRIPE.slice(8)), "the finding does not carry the key itself");
 });
+
+test("FOL-154: a foldrun key — every kind, and the old prefixes — is a secret; a placeholder is not", () => {
+  const hex = () => crypto.randomBytes(24).toString("hex");
+  const keys = ["fr_api_", "fr_gw_", "fr_a2a_", "fr_dep_", "mda_", "mdk_"].map((p) => p + hex());
+  const files = keys.map((k, i) => ({ path: `knowledge/k${i}.md`, content: `the key is ${k}\n` }));
+  files.push({ path: "knowledge/docs.md", content: "export FOLDRUN_TOKEN=fr_api_...\nANTHROPIC_API_KEY=fr_gw_…\n" });
+  const found = scanFiles(files).filter((f) => f.rule === "secret/hardcoded");
+  assert.deepEqual(found.map((f) => f.file).sort(), keys.map((_, i) => `knowledge/k${i}.md`).sort(), "each kind found once; the placeholders are not");
+  assert.ok(found.every((f) => /a foldrun key/.test(f.message) && f.level === "warn"));
+  assert.ok(!found.some((f) => keys.some((k) => f.message.includes(k))), "never the key itself");
+});

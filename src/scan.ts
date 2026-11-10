@@ -481,6 +481,9 @@ const SECRET_SHAPES: [RegExp, string][] = [
   [/\bnpm_[A-Za-z0-9]{36}\b/g, "an npm token"],
   [/\bhf_[A-Za-z0-9]{34,}\b/g, "a Hugging Face token"],
   [/\blin_api_[A-Za-z0-9]{40}\b/g, "a Linear key"],
+  // foldrun's own (FOL-154): API, gateway, A2A and deploy keys, and the
+  // prefixes before them. 48 hex: the exact shape minted, never `fr_api_…`.
+  [/\b(?:fr_(?:api|gw|a2a|dep)|md[ak])_[0-9a-f]{48}\b/g, "a foldrun key"],
   [/\bdop_v1_[a-f0-9]{64}\b/g, "a DigitalOcean token"],
   [/\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/g, "a Shopify token"],
   [/\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{16,}\b/g, "a Resend key"],
