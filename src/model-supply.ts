@@ -16,12 +16,16 @@
 import { providerPreset, type WireFormat } from "./providers.ts";
 import { fitEffort, EFFORT_ORDER } from "./effort-fit.ts";
 
-export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "deepseek" | "moonshot";
+export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "deepseek" | "moonshot" | "zai" | "qwen" | "minimax" | "mimo";
 
 export interface SupplyProvider {
   name: SupplyProviderName;
-  /** The preset the step's provider block is built from (providers.ts). */
+  /** The preset the step's provider block is built from (providers.ts);
+   *  "" when the runtime has none for this provider. */
   preset: string;
+  /** The endpoint, where the preset has none (a per-account address) or
+   *  there is no preset: the one place the platform's key is used. */
+  baseUrl?: string;
   format: WireFormat;
   /** The one host the key is granted to. */
   host: string;
@@ -49,6 +53,10 @@ export interface SendShape {
   drop?: string[];
   /** The keys of `thinking` that are sent; null drops `thinking` whole. */
   thinking?: string[] | null;
+  /** `thinking.type` as this provider spells it (Claude Code sends
+   *  `adaptive` to newer models; an endpoint that documents enabled |
+   *  disabled alone gets `enabled`). A type not listed is sent as it is. */
+  thinkingType?: Record<string, string>;
   /** `output_config.effort`, as this provider spells it. */
   effort?: Record<string, string>;
   /** A `system` message inside `messages` (Anthropic's mid-conversation
@@ -133,6 +141,77 @@ export const SUPPLY_PROVIDERS: Record<SupplyProviderName, SupplyProvider> = {
       dropDeferredTools: true,
     },
   },
+  // Four more open-weight coding families (owner, 10 Nov 2026), each on its
+  // own Anthropic-format endpoint, pay-as-you-go keys (a coding-plan key is
+  // a different product). What each documents was read from its own docs on
+  // 10 Nov 2026; `service_tier` is dropped everywhere — MiniMax bills its
+  // priority tier at 1.5x, and the others do not say what it does.
+  zai: {
+    name: "zai",
+    preset: "zai",
+    format: "anthropic",
+    host: "api.z.ai",
+    auth: "bearer",
+    metered: ["/api/anthropic/v1/messages"],
+    free: [],
+    // docs.z.ai documents no request schema for its Anthropic endpoint, only
+    // that Claude Code runs on it; its OpenAI one takes thinking.type
+    // enabled | disabled (GLM-5.3 refuses disabled). Context editing and
+    // tool search are Claude's alone.
+    send: { drop: ["context_management", "service_tier"], thinking: ["type", "budget_tokens"], thinkingType: { adaptive: "enabled" }, mergeSystemMessages: true, dropDeferredTools: true },
+  },
+  qwen: {
+    name: "qwen",
+    preset: "qwen",
+    // The preset's address is per account and per plan; the platform's
+    // pay-as-you-go key is used on the region-wide Singapore host.
+    baseUrl: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+    format: "anthropic",
+    // Alibaba Model Studio, Singapore: the region-wide host (still fully
+    // supported; the per-workspace host differs per account).
+    host: "dashscope-intl.aliyuncs.com",
+    auth: "x-api-key",
+    metered: ["/apps/anthropic/v1/messages"],
+    free: [],
+    // alibabacloud.com/help/en/model-studio/anthropic-api-messages (5 Nov
+    // 2026): thinking.type enabled | disabled, budget_tokens; effort xhigh |
+    // medium | low (max and high run as xhigh); user and assistant roles
+    // only. Web search is a typed tool, refused like Anthropic's.
+    send: { drop: ["context_management", "service_tier"], thinking: ["type", "budget_tokens"], thinkingType: { adaptive: "enabled" }, mergeSystemMessages: true, dropDeferredTools: true },
+  },
+  minimax: {
+    name: "minimax",
+    preset: "minimax",
+    format: "anthropic",
+    host: "api.minimax.io",
+    auth: "bearer",
+    metered: ["/anthropic/v1/messages"],
+    free: [{ method: "GET", path: "/anthropic/v1/models" }],
+    // platform.minimax.io/docs/api-reference/text-chat-anthropic (10 Nov
+    // 2026): thinking.type disabled | adaptive (no budget); effort takes
+    // every word ours does; no system role in messages (roles alternate);
+    // context_management, stop_sequences and top_k ignored.
+    send: { drop: ["context_management", "service_tier"], thinking: ["type"], thinkingType: { enabled: "adaptive" }, mergeSystemMessages: true, dropDeferredTools: true },
+  },
+  mimo: {
+    name: "mimo",
+    preset: "",
+    baseUrl: "https://api.xiaomimimo.com/anthropic",
+    format: "anthropic",
+    host: "api.xiaomimimo.com",
+    auth: "bearer",
+    metered: ["/anthropic/v1/messages"],
+    free: [],
+    // mimo.mi.com/static/docs/api/chat/anthropic-api-post (10 Nov 2026):
+    // the request schema is these fields alone; thinking.type enabled |
+    // disabled; a system role in messages is accepted; no effort.
+    send: {
+      fields: ["model", "messages", "max_tokens", "system", "stream", "stop_sequences", "temperature", "top_p", "tools", "tool_choice", "thinking"],
+      thinking: ["type"],
+      thinkingType: { adaptive: "enabled" },
+      dropDeferredTools: true,
+    },
+  },
 };
 
 export const SUPPLY_PROVIDER_NAMES = Object.keys(SUPPLY_PROVIDERS) as SupplyProviderName[];
@@ -144,6 +223,10 @@ export const SUPPLY_TITLES: Record<SupplyProviderName, string> = {
   gemini: "Google Gemini",
   deepseek: "DeepSeek",
   moonshot: "Moonshot Kimi",
+  zai: "Z.ai GLM",
+  qwen: "Alibaba Qwen",
+  minimax: "MiniMax",
+  mimo: "Xiaomi MiMo",
 };
 
 export function isSupplyProvider(name: unknown): name is SupplyProviderName {
@@ -192,12 +275,16 @@ export function supplyProviderOfToken(value: string | null | undefined): SupplyP
  *  placeholder only. */
 export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial<Record<"fast" | "default" | "max", string>>): Record<string, unknown> {
   const p = SUPPLY_PROVIDERS[provider];
-  const preset = providerPreset(p.preset);
-  if (!preset?.baseUrl) throw new Error(`model supply: no preset endpoint for ${provider}`);
+  const preset = p.preset ? providerPreset(p.preset) : undefined;
+  const baseUrl = p.baseUrl ?? preset?.baseUrl;
+  if (!baseUrl) throw new Error(`model supply: no endpoint for ${provider}`);
   return {
-    name: p.preset,
-    base_url: preset.baseUrl,
+    // A provider the runtime has no preset for is spelled out whole: its
+    // address, format and auth, no name to look up.
+    ...(preset ? { name: p.preset } : {}),
+    base_url: baseUrl,
     format: p.format,
+    auth: p.auth,
     token: supplyToken(provider),
     ...(Object.keys(tiers).length ? { models: tiers } : {}),
   };
@@ -224,6 +311,14 @@ export function shapeRequest(p: SupplyProvider, json: Record<string, unknown>): 
     } else if (json.thinking && typeof json.thinking === "object") {
       const t = json.thinking as Record<string, unknown>;
       for (const k of Object.keys(t)) if (!shape.thinking.includes(k)) (delete t[k], (changed = true));
+    }
+  }
+  if (shape.thinkingType && json.thinking && typeof json.thinking === "object") {
+    const t = json.thinking as Record<string, unknown>;
+    const to = typeof t.type === "string" ? shape.thinkingType[t.type] : undefined;
+    if (to !== undefined && to !== t.type) {
+      t.type = to;
+      changed = true;
     }
   }
   if (shape.dropDeferredTools && Array.isArray(json.tools)) {
@@ -271,6 +366,11 @@ export function shapeRequest(p: SupplyProvider, json: Record<string, unknown>): 
  *  "medium and xhigh both map to high"). Said, not rewritten. */
 const DEEPSEEK_RUNS: Record<string, string> = { low: "low", medium: "high", high: "high", xhigh: "high", max: "max" };
 
+/** Qwen 3.8 runs xhigh, medium and low ("max and high map to xhigh",
+ *  Alibaba's Anthropic API page, 5 Nov 2026). Its other models' levels are
+ *  not documented: said as written. */
+const QWEN38_RUNS: Record<string, string> = { low: "low", medium: "medium", high: "xhigh", xhigh: "xhigh", max: "xhigh" };
+
 /**
  * The effort a foldrun level actually runs at on one of foldrun's models:
  * the provider's own aliases (DeepSeek), its reshaping (Kimi), the model's
@@ -283,6 +383,7 @@ export function effortRunsAs(provider: SupplyProviderName, model: string, word: 
   const p = SUPPLY_PROVIDERS[provider];
   if (p.send?.effort) return p.send.effort[word] ?? null;
   if (provider === "deepseek") return DEEPSEEK_RUNS[word] ?? null;
+  if (provider === "qwen" && /^qwen3\.8/i.test(model)) return QWEN38_RUNS[word] ?? null;
   if (p.format === "anthropic") return word;
   return fitEffort(model, word);
 }

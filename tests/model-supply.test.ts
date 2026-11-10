@@ -351,3 +351,49 @@ test("a nested flow's max_output_tokens holds for its own steps; a step's own st
     assert.deepEqual(f.steps.map((s) => s.maxOutputTokens), [undefined, 4000, 2000]);
   });
 });
+
+test("Z.ai, Qwen, MiniMax and MiMo are sent only what each documents (10 Nov 2026)", async () => {
+  const { SUPPLY_PROVIDERS, SUPPLY_TITLES, shapeRequest, supplyProviderBlock, effortRunsAs } = await import("../src/model-supply.ts");
+  const sdk = () => ({
+    model: "m", max_tokens: 32000, stream: true, system: [{ type: "text", text: "s" }],
+    messages: [{ role: "user", content: "hi" }, { role: "system", content: [{ type: "text", text: "# Environment" }] }],
+    tools: [{ name: "Read", input_schema: { type: "object" } }, { name: "DeferredToolPlaceholder", defer_loading: true, input_schema: { type: "object" } }],
+    metadata: { user_id: "u" }, service_tier: "priority",
+    thinking: { type: "adaptive", display: "updates" }, output_config: { effort: "medium" }, context_management: { edits: [] },
+  });
+  for (const name of ["zai", "qwen", "minimax", "mimo"] as const) {
+    const p = SUPPLY_PROVIDERS[name];
+    const b: Record<string, unknown> = sdk();
+    assert.equal(shapeRequest(p, b), true, name);
+    assert.ok(!("context_management" in b), `${name}: no context editing`);
+    assert.ok(!("service_tier" in b), `${name}: no tier that bills more (MiniMax's priority is 1.5x)`);
+    assert.deepEqual((b.tools as { name: string }[]).map((t) => t.name), ["Read"], `${name}: the deferred-tool placeholder is dropped`);
+    assert.ok(SUPPLY_TITLES[name]);
+    // The step's provider block points at the one host the key is granted to.
+    const block = supplyProviderBlock(name, { default: "x" });
+    assert.equal(new URL(String(block.base_url)).host, p.host, name);
+    assert.ok(p.metered.every((m) => m.startsWith(new URL(String(block.base_url)).pathname)), `${name}: metered under the base URL`);
+  }
+  const z: Record<string, unknown> = sdk();
+  shapeRequest(SUPPLY_PROVIDERS.zai, z);
+  assert.deepEqual(z.thinking, { type: "enabled" }, "Z.ai documents enabled | disabled");
+  assert.equal((z.messages as unknown[]).length, 1, "the mid-conversation system message joins the user turn");
+  const q: Record<string, unknown> = sdk();
+  shapeRequest(SUPPLY_PROVIDERS.qwen, q);
+  assert.deepEqual(q.thinking, { type: "enabled" });
+  assert.equal((q.messages as unknown[]).length, 1, "Qwen takes user and assistant roles only");
+  const mm: Record<string, unknown> = { ...sdk(), thinking: { type: "enabled", budget_tokens: 4000 } };
+  shapeRequest(SUPPLY_PROVIDERS.minimax, mm);
+  assert.deepEqual(mm.thinking, { type: "adaptive" }, "MiniMax documents disabled | adaptive, no budget");
+  assert.deepEqual(mm.output_config, { effort: "medium" }, "MiniMax spells every level");
+  const mi: Record<string, unknown> = sdk();
+  shapeRequest(SUPPLY_PROVIDERS.mimo, mi);
+  assert.deepEqual(Object.keys(mi).sort(), ["max_tokens", "messages", "model", "stream", "system", "thinking", "tools"], "MiMo's schema alone");
+  assert.deepEqual(mi.thinking, { type: "enabled" });
+  assert.equal((mi.messages as unknown[]).length, 2, "MiMo takes a system role in messages");
+  assert.equal(effortRunsAs("minimax", "MiniMax-M3", "xhigh"), "xhigh");
+  assert.equal(effortRunsAs("qwen", "qwen3.8-max", "high"), "xhigh", "Qwen 3.8: high and max run as xhigh");
+  assert.equal(effortRunsAs("qwen", "qwen3.8-flash", "max"), "xhigh");
+  assert.equal(effortRunsAs("qwen", "qwen3.8-max", "medium"), "medium");
+  assert.equal(effortRunsAs("qwen", "qwen3.7-plus", "high"), "high", "its other models: as written");
+});

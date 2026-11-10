@@ -99,7 +99,7 @@ const lastError = (s: StepRecord | undefined) => {
  *  says whose model it was: the platform's own Claude credential, or one of
  *  foldrun's models. An account's own provider: block could be anyone's, so
  *  it says nothing rather than guess. */
-const PROVIDER: Record<string, string> = { anthropic: "anthropic", openai: "openai", gemini: "gcp.gemini", deepseek: "deepseek", moonshot: "moonshot_ai" };
+const PROVIDER: Record<string, string> = { anthropic: "anthropic", openai: "openai", gemini: "gcp.gemini", deepseek: "deepseek", moonshot: "moonshot_ai", zai: "z_ai", qwen: "alibaba_qwen", minimax: "minimax", mimo: "xiaomi_mimo" };
 function providerOf(step: StepRecord | undefined): string | null {
   if (!step) return null;
   // A refusal retried on the fallback supply (runner.ts) runs calls the
