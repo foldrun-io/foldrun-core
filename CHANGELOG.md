@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.1.0] — 2026-11-10
+
+- feat(model-supply): Z.ai GLM, Alibaba Qwen, MiniMax and Xiaomi MiMo as foldrun's models ([9418a0b](https://github.com/foldrun-io/foldrun-core/commit/9418a0b))
+
 ## [18.0.1] — 2026-11-10
 
 - fix(translator): a failed or cut-off Responses stream ends in an error, not a normal stop ([b00c260](https://github.com/foldrun-io/foldrun-core/commit/b00c260))
