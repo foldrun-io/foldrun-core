@@ -482,6 +482,10 @@ export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Bu
 }
 
 export interface ApplyOptions {
+  /** Take back only what is under this workspace-relative folder (with its
+   *  trailing `/`) — a snapshot run's outputs (Part B3): the folder it was
+   *  given, and anything it copied anywhere else, never reach the workspace. */
+  keepOnly?: string;
   /** What the host handed back into this sandbox mid-step — a `sandbox: own`
    *  job's files (delegate-tools.ts), path → sha256 — as the HOST recorded
    *  it (StepRecord.handedBack). The sandbox's own note of the same is only
@@ -552,10 +556,14 @@ export function applyContainerChanges(
       // A link to a directory threw EISDIR and aborted the whole copy-out.
       // (kubectl cp already skips symlinks; this makes the two tiers agree.)
       if (entry.isSymbolicLink()) continue;
+      const posix = rel.replaceAll("\\", "/");
       if (entry.isDirectory()) {
+        const d = posix + "/";
+        if (opts.keepOnly && !(d.startsWith(opts.keepOnly) || opts.keepOnly.startsWith(d))) continue;
         if (allowedBack(rel + "/")) walk(abs);
         continue;
       }
+      if (opts.keepOnly && !posix.startsWith(opts.keepOnly)) continue;
       if (!allowedBack(rel)) continue;
       let next: Buffer = fs.readFileSync(abs);
       // What the step was handed: its bytes (a staging dir) or its hash.
@@ -1861,6 +1869,12 @@ export function heldCores(cpus: string, isolation: string | undefined, available
 
 export interface RunInContainerArgs {
   workspaceRoot: string;
+  /** A snapshot run (Part B3): the folder a person sent, by id, for this
+   *  step to work on. Only an executor that says it can (`supportsSnapshot`
+   *  on its IsolatedStepRunner) is ever given one: it stages the folder at
+   *  agents/<name>/snapshot/, takes back only that agent's outputs/, and
+   *  leaves the patch there as outputs/snapshot.patch. */
+  snapshot?: { id: string };
   /** A person approved this step before it ran: configuration and code it
    *  changed are kept, not refused (copy-back.ts, FOL-96). */
   configWrites?: boolean;

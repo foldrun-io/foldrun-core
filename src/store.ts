@@ -4002,6 +4002,11 @@ export interface RunRecord {
    *  first id, kept across rotations) that asked. A correlation only — the
    *  protocol's own state lives in the platform's a2a_tasks. */
   a2a?: { task: string; key: string };
+  /** A snapshot run (Part B3): the folder a person sent (its sha256), staged
+   *  for the step at agents/<name>/snapshot/; the patch of what the step
+   *  changed is outputs/snapshot.patch. Set when the run is made, never by a
+   *  step. */
+  snapshot?: { id: string };
   steps: StepRecord[];
 }
 

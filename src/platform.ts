@@ -19,7 +19,11 @@ import type { EgressHooks } from "./egress.ts";
 import { matchFilter } from "./trigger-filter.ts";
 import type { RecordsPort } from "./records.ts";
 
-export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
+export type IsolatedStepRunner = ((args: RunInContainerArgs) => Promise<ContainerStepOutcome>) & {
+  /** It can run a snapshot step (RunInContainerArgs.snapshot). A run with a
+   *  snapshot on any other executor fails before anything starts. */
+  supportsSnapshot?: boolean;
+};
 
 /** Who this install is for. `hosted` means someone is paying the operator
  *  for it — a wallet, a plan, a bill. `self-hosted` is everything else: a

@@ -460,6 +460,13 @@ export function readAgentsMd(dir: string): { data: Record<string, unknown>; body
 
 const workspaceRootOf = (agentDir: string) => path.join(agentDir, "..", "..");
 
+/** What a snapshot step is told (Part B3). */
+const SNAPSHOT_NOTE =
+  "The folder you were sent to work on is in snapshot/ (inside your working directory). Make your changes there, as files: " +
+  "when you finish, foldrun turns what changed in snapshot/ into a patch the person applies. " +
+  "Only snapshot/ (as that patch) and your outputs/ come back from this step; anything you write elsewhere is not kept. " +
+  "Do not create links or a .git folder in snapshot/ — links make the patch refused, and .git is left out.";
+
 /**
  * Configuration from AGENTS.md, nearest-wins: the workspace's overrides the
  * account's, key by key.
@@ -2904,6 +2911,17 @@ async function runStep(
     if (stepHookNames.length) push("info", `hooks: ${stepHookNames.join(", ")}`);
 
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
+    // A snapshot run (Part B3): the folder is on the run record, set when the
+    // run was made. Only an executor that says it can hold one may run it —
+    // in-process, the step would work in the real workspace folder, and no
+    // copy-back stands between what it writes and the workspace (Codex).
+    const snapshotId = runId ? readRun(tenant, path.basename(workspaceRootOf(agentDir)), runId)?.snapshot?.id : undefined;
+    if (snapshotId) {
+      const exec = isolatedRun() && isolation !== "container" ? platform.isolation[isolation!] : undefined;
+      if (!exec?.supportsSnapshot) {
+        throw new Error("this run has a snapshot (a folder sent to work on), and this install cannot hold one: it needs the k8s sandbox (FOLDRUN_RUN_ISOLATION=k8s). Nothing was run.");
+      }
+    }
     if (isolatedRun()) {
       // The isolated path: the whole loop — model, built-in tools, scripts —
       // runs inside a throwaway container (a docker sibling, or a pod), and
@@ -3285,6 +3303,7 @@ async function runStep(
       const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
       const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
+        ...(snapshotId ? { snapshot: { id: snapshotId } } : {}),
         libraryRoot: libraryDir(tenant),
         galleryRoot: platform.galleryDir() ?? undefined,
         // Keys this step's dependency cache. Per-account by design — see
@@ -3294,7 +3313,8 @@ async function runStep(
           agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
           // Its file tools inside the sandbox get the same allowance (FOL-96).
           configWrites: step.approve === true && Boolean(step.approvedAt),
-          prompt,
+          // A snapshot step is told where its folder is, and what comes back.
+          prompt: snapshotId ? `${prompt}\n\n${SNAPSHOT_NOTE}` : prompt,
           model,
           effort,
           systemPrompt,
@@ -4495,7 +4515,7 @@ export function createFlowRun(
   status: "queued" | "running",
   tags: string[] = [],
   startedBy: string | null = null,
-  opts: { test?: boolean } = {},
+  opts: { test?: boolean; snapshot?: string } = {},
   /** An A2A task's correlation (foldrun-platform flow-admission.ts) — its
    *  own trailing argument, so the signature only widened. */
   a2a?: { task: string; key: string },
@@ -4515,6 +4535,7 @@ export function createFlowRun(
     ...(opts.test ? { test: true } : {}),
     // An outside agent asked, over A2A: the task it serves, and whose key.
     ...(a2a ? { trigger: "a2a" as const, a2a: { task: a2a.task, key: a2a.key } } : {}),
+    ...(opts.snapshot ? { snapshot: { id: opts.snapshot } } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
