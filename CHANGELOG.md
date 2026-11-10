@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.0.1] — 2026-11-10
+
+- fix(translator): a failed or cut-off Responses stream ends in an error, not a normal stop ([b00c260](https://github.com/foldrun-io/foldrun-core/commit/b00c260))
+
 ## [18.0.0] — 2026-11-09
 
 ### Breaking changes
