@@ -118,6 +118,7 @@ import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, stepInstallEn
 import { buildInstallTool, INSTALL_TOOL } from "./install-tool.ts";
 import { dataRoot } from "./paths.ts";
 import { materializeFiles, harvestFiles, storageBaseline } from "./storage.ts";
+import { readStorageBaseline, writeStorageBaseline } from "./step-state.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
@@ -4937,10 +4938,9 @@ function driveRunInner(
       // posted it a second time. So a run that has been here before (its
       // baseline is on disk) stores what it changed first; files it did not
       // touch still come fresh from the store.
-      const baselineFile = path.join(runRoot, "runs", run.id, "storage-baseline.json");
-      if (fs.existsSync(baselineFile)) {
+      const changedFrom = await readStorageBaseline(runRoot, tenant, workspace, run.id).catch(() => undefined);
+      if (changedFrom) {
         try {
-          const changedFrom = JSON.parse(fs.readFileSync(baselineFile, "utf8")) as Record<string, string>;
           const { saved } = await harvestFiles(tenant, workspace, `run:${run.id}`, { changedFrom });
           if (saved.length) {
             run.steps[0]?.events.push({
@@ -4962,8 +4962,7 @@ function driveRunInner(
             text: `files: ${brought.length} brought into the workspace`,
           });
         }
-        fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
-        fs.writeFileSync(baselineFile, JSON.stringify(storageBaseline(tenant, workspace)));
+        await writeStorageBaseline(runRoot, tenant, workspace, run.id, storageBaseline(tenant, workspace));
       } catch (err) {
         // A file store that is down must not take the run with it: most flows
         // never touch storage/, and the ones that do will fail their own verify.

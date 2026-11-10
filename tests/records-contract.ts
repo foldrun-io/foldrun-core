@@ -18,6 +18,8 @@ import {
   type RunRecord,
 } from "../src/store.ts";
 import { recordTriggerEvent, readTriggerEvents, summariseTriggers } from "../src/trigger-log.ts";
+import { writeHandedIn, readHandedIn, writeBaseRevision, readBaseRevision } from "../src/run-container.ts";
+import { readStorageBaseline, writeStorageBaseline } from "../src/step-state.ts";
 import { putFile, getFile, listStorage, deleteFile, readFileBytes, withFileStoreLock, purgeWorkspaceStorage, moveWorkspaceStorage, usedBytes } from "../src/storage.ts";
 
 const run = (id: string, at: string, extra: Partial<RunRecord> = {}): RunRecord => ({
@@ -222,6 +224,57 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     deleteWorkspace(T, W);
     assert.equal(readRun(T, W, "r1"), null);
     assert.equal(fs.existsSync(path.join(root, T, "workspaces", W)), false);
+  });
+
+  // Step state (FOL-126 phase 7): rows beside the run's own, gone with it.
+  const withSteps = () => registerPlatform({ records: { ...subject.port, stepStateOn: () => true } });
+  const wsRoot = (w: string) => workspaceDir(T, w);
+
+  test(t("step state round-trips as rows, writes nothing under runs/, and follows the run: deleted with it"), async () => {
+    withSteps();
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    writeRun(T, W, run("r2", "2026-11-01T02:00:00.000Z"));
+    for (const id of ["r1", "r2"]) {
+      await writeHandedIn(wsRoot(W), id, "pod-a", { "a.md": `h-${id}` }, T);
+      await writeBaseRevision(wsRoot(W), id, "pod-a", { workspace: `w-${id}`, state: null }, T);
+      await writeStorageBaseline(wsRoot(W), T, W, id, { "p.json": `s-${id}` });
+    }
+    assert.equal(fs.existsSync(path.join(wsRoot(W), "runs", "r1")), false, "no folder under runs/");
+    assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-a", T), { "a.md": "h-r1" });
+    assert.deepEqual(await readBaseRevision(wsRoot(W), "r2", "pod-a", T), { workspace: "w-r2", state: null });
+    // putting again replaces
+    await writeHandedIn(wsRoot(W), "r1", "pod-a", { "a.md": "again" }, T);
+    assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-a", T), { "a.md": "again" });
+    deleteRun(T, W, "r1");
+    assert.equal(await readHandedIn(wsRoot(W), "r1", "pod-a", T), undefined);
+    assert.equal(await readBaseRevision(wsRoot(W), "r1", "pod-a", T), undefined);
+    assert.equal(await readStorageBaseline(wsRoot(W), T, W, "r1"), undefined, "the run's storage baseline went with it");
+    assert.deepEqual(await readStorageBaseline(wsRoot(W), T, W, "r2"), { "p.json": "s-r2" }, "another run's rows are untouched");
+  });
+
+  test(t("step state follows a renamed workspace and is dropped with a deleted one"), async () => {
+    withSteps();
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    await writeHandedIn(wsRoot(W), "r1", "pod-a", { x: "1" }, T);
+    renameWorkspace(T, W, "moved");
+    withSteps();
+    assert.deepEqual(await readHandedIn(wsRoot("moved"), "r1", "pod-a", T), { x: "1" }, "under the new name");
+    assert.equal(await readHandedIn(wsRoot(W), "r1", "pod-a", T), undefined, "not under the old");
+    deleteWorkspace(T, "moved");
+    mkWs("moved");
+    assert.equal(await readHandedIn(wsRoot("moved"), "r1", "pod-a", T), undefined, "a workspace made again under the name starts clean");
+  });
+
+  test(t("step state is files while the switch is off, and rows already written are still read"), async () => {
+    let on = true;
+    registerPlatform({ records: { ...subject.port, stepStateOn: () => on } });
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    await writeHandedIn(wsRoot(W), "r1", "pod-a", { a: "row" }, T);
+    on = false;
+    await writeHandedIn(wsRoot(W), "r1", "pod-b", { b: "file" }, T);
+    assert.ok(fs.existsSync(path.join(wsRoot(W), "runs", "r1", "sandbox", "pod-b.json")));
+    assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-a", T), { a: "row" });
+    assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-b", T), { b: "file" });
   });
 
   test(t("the trigger log answers newest first, keeps the newest 500, and feeds the summary"), () => {

@@ -47,6 +47,7 @@ import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
 import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
 import type { RemoteSpec } from "./a2a-remotes.ts";
+import { putStepState, getStepState, dropStepState } from "./step-state.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -346,28 +347,37 @@ export function handedInPath(workspaceRoot: string, runId: string, ref: string):
   return path.join(workspaceRoot, "runs", runId, "sandbox", `${ref}.json`);
 }
 
-/** Note what a sandbox was handed, on the host. */
-export function writeHandedIn(workspaceRoot: string, runId: string, ref: string, hashes: Record<string, string>): void {
+/** Note what a sandbox was handed, on the host. With `tenant`, where step
+ *  state is kept in the database (step-state.ts), a row; otherwise the file. */
+export async function writeHandedIn(workspaceRoot: string, runId: string, ref: string, hashes: Record<string, string>, tenant?: string): Promise<void> {
+  if (await putStepState(tenant, path.basename(workspaceRoot), runId, "handed-in", ref, hashes)) return;
   const file = handedInPath(workspaceRoot, runId, ref);
   if (!file) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(hashes));
 }
 
+const isHashes = (m: unknown): m is Record<string, string> => !!m && typeof m === "object" && !Array.isArray(m);
+
 /** What the host noted a sandbox was handed, or undefined. */
-export function readHandedIn(workspaceRoot: string, runId: string, ref: string): Record<string, string> | undefined {
+export async function readHandedIn(workspaceRoot: string, runId: string, ref: string, tenant?: string): Promise<Record<string, string> | undefined> {
+  const row = await getStepState(tenant, path.basename(workspaceRoot), runId, "handed-in", ref);
+  if (isHashes(row)) return row;
   const file = handedInPath(workspaceRoot, runId, ref);
   if (!file) return undefined;
   try {
     const m = JSON.parse(fs.readFileSync(file, "utf8"));
-    return m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, string>) : undefined;
+    return isHashes(m) ? m : undefined;
   } catch {
     return undefined;
   }
 }
 
 /** Forget it once the step's copy-out is done. */
-export function dropHandedIn(workspaceRoot: string, runId: string, ref: string): void {
+export async function dropHandedIn(workspaceRoot: string, runId: string, ref: string, tenant?: string): Promise<void> {
+  // Best effort: a row left behind goes with the run (deleteRun), and failing
+  // the step it belongs to, after its copy-out succeeded, would be worse.
+  for (const kind of ["handed-in", "base"] as const) await dropStepState(tenant, path.basename(workspaceRoot), runId, kind, ref).catch(() => {});
   const file = handedInPath(workspaceRoot, runId, ref);
   if (file) fs.rmSync(file, { force: true });
   const base = baseRevisionPath(workspaceRoot, runId, ref);
@@ -384,19 +394,24 @@ export function baseRevisionPath(workspaceRoot: string, runId: string, ref: stri
   const file = handedInPath(workspaceRoot, runId, ref);
   return file ? file.replace(/\.json$/, ".base.json") : null;
 }
-export function writeBaseRevision(workspaceRoot: string, runId: string, ref: string, base: RunBase): void {
+export async function writeBaseRevision(workspaceRoot: string, runId: string, ref: string, base: RunBase, tenant?: string): Promise<void> {
+  if (await putStepState(tenant, path.basename(workspaceRoot), runId, "base", ref, base)) return;
   const file = baseRevisionPath(workspaceRoot, runId, ref);
   if (!file) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(base));
 }
-export function readBaseRevision(workspaceRoot: string, runId: string, ref: string): RunBase | undefined {
+const asBase = (m: Partial<RunBase> | null | undefined): RunBase | undefined => {
+  const ok = (v: unknown) => v === null || typeof v === "string";
+  return m && typeof m === "object" && ok(m.workspace) && ok(m.state) ? { workspace: m.workspace ?? null, state: m.state ?? null } : undefined;
+};
+export async function readBaseRevision(workspaceRoot: string, runId: string, ref: string, tenant?: string): Promise<RunBase | undefined> {
+  const row = asBase((await getStepState(tenant, path.basename(workspaceRoot), runId, "base", ref)) as Partial<RunBase> | undefined);
+  if (row) return row;
   const file = baseRevisionPath(workspaceRoot, runId, ref);
   if (!file) return undefined;
   try {
-    const m = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<RunBase>;
-    const ok = (v: unknown) => v === null || typeof v === "string";
-    return m && ok(m.workspace) && ok(m.state) ? { workspace: m.workspace ?? null, state: m.state ?? null } : undefined;
+    return asBase(JSON.parse(fs.readFileSync(file, "utf8")) as Partial<RunBase>);
   } catch {
     return undefined;
   }

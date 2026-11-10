@@ -29,6 +29,8 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
       m.delete(key);
     }
   };
+  const steps = new Map<string, unknown>();
+  const sk = (t: string, w: string, run: string, kind: string, ref: string) => `${k(t, w, run)}\0${kind}\0${ref}`;
   const fenced: string[] = [];
   const syncPort = {
     runGet: (t: string, w: string, id: string) => (runs.has(k(t, w, id)) ? structuredClone(runs.get(k(t, w, id))!.run) : null),
@@ -37,7 +39,14 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
   };
   return {
     fenced,
+    stepStateOn: () => true,
     async: {
+      stepGet: async (t, w, run, kind, ref) => (steps.has(sk(t, w, run, kind, ref)) ? structuredClone(steps.get(sk(t, w, run, kind, ref))) : undefined),
+      stepPut: async (t, w, run, kind, ref, data) => void steps.set(sk(t, w, run, kind, ref), structuredClone(data)),
+      stepDrop: async (t, w, run, kind, ref) => {
+        const p = `${k(t, w, run)}\0${kind}\0`;
+        for (const key of [...steps.keys()]) if (key.startsWith(p) && (ref === null || key === p + ref)) steps.delete(key);
+      },
       runGet: async (t, w, id) => syncPort.runGet(t, w, id),
       runSummaries: async (t, w) => syncPort.runSummaries(t, w),
       runLive: async (t, w) => syncPort.runLive(t, w),
@@ -45,7 +54,10 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
     },
     runPut: (t, w, run, summary, live) => void runs.set(k(t, w, run.id), { run: structuredClone(run), summary: structuredClone(summary), live, stamp: Date.now() * 1000 + tick++ }),
     runGet: (t, w, id) => (runs.has(k(t, w, id)) ? structuredClone(runs.get(k(t, w, id))!.run) : null),
-    runDelete: (t, w, id) => runs.delete(k(t, w, id)),
+    runDelete(t, w, id) {
+      for (const key of [...steps.keys()]) if (key.startsWith(`${k(t, w, id)}\0`)) steps.delete(key);
+      return runs.delete(k(t, w, id));
+    },
     runSummaries: (t, w) => inWs(t, w).sort(newest).map((r) => structuredClone(r.summary)),
     runLive: (t, w) => inWs(t, w).filter((r) => r.live).sort(newest).map((r) => structuredClone(r.run)),
     runCount: (t, w) => inWs(t, w).length,
@@ -78,10 +90,12 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
       for (const key of [...runs.keys()]) if (key.startsWith(k(t, w))) runs.delete(key);
       triggers.delete(k(t, w));
       files.delete(k(t, w));
+      for (const key of [...steps.keys()]) if (key.startsWith(k(t, w))) steps.delete(key);
     },
     workspaceMove(t, from, to) {
       move(runs, t, from, to);
       move(triggers, t, from, to);
+      move(steps, t, from, to);
     },
     fileMove(t, from, to) {
       move(files, t, from, to);
