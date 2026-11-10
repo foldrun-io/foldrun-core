@@ -13,6 +13,23 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.2.0] — 2026-11-10
+
+### New in the public API
+
+- `uploadSecretFindings` from `@foldrun/core/scan`
+- `@foldrun/core/snapshot-archive`
+- `SnapshotEntry` from `@foldrun/core/snapshot-archive`
+- `SnapshotLimits` from `@foldrun/core/snapshot-archive`
+- `SNAPSHOT_LIMITS` from `@foldrun/core/snapshot-archive`
+- `SnapshotRefused` from `@foldrun/core/snapshot-archive`
+- `snapshotPathProblem` from `@foldrun/core/snapshot-archive`
+- `packSnapshot` from `@foldrun/core/snapshot-archive`
+- `unpackSnapshot` from `@foldrun/core/snapshot-archive`
+
+- feat(snapshot-archive): a strict, deterministic archive for folders sent to foldrun (Part B3) ([3d6e3f0](https://github.com/foldrun-io/foldrun-core/commit/3d6e3f0))
+- feat(scan): uploadSecretFindings — secrets in files about to leave the machine, with nothing the files can turn off ([943c309](https://github.com/foldrun-io/foldrun-core/commit/943c309))
+
 ## [18.1.0] — 2026-11-10
 
 - feat(model-supply): Z.ai GLM, Alibaba Qwen, MiniMax and Xiaomi MiMo as foldrun's models ([9418a0b](https://github.com/foldrun-io/foldrun-core/commit/9418a0b))
