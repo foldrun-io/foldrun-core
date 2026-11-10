@@ -679,6 +679,33 @@ export function untrustedTextFindings(text: string): { rule: string; line: numbe
   return out;
 }
 
+/**
+ * Secrets in files about to LEAVE this machine (a snapshot upload, Part B3,
+ * 10 Nov 2026): every file, with nothing the files themselves can turn off —
+ * no foldrun-ignore, no vendored-path skip (Codex: a repo comment must not
+ * silence a key on its way out). A file that is not text (a NUL in its
+ * first 8 KB) cannot be read for secrets and is returned as unscanned, for
+ * the caller to say so rather than pass it quietly.
+ */
+export function uploadSecretFindings(files: ScanFile[]): { findings: { rule: string; file: string; line?: number; message: string }[]; unscanned: string[] } {
+  const findings: { rule: string; file: string; line?: number; message: string }[] = [];
+  const unscanned: string[] = [];
+  const seen = new Set<string>();
+  for (const f of files) {
+    if (f.content.slice(0, 8000).includes("\u0000")) {
+      unscanned.push(f.path);
+      continue;
+    }
+    scanSecrets(f, f.content.split(/\r?\n/), (rule, file, line, _text, message) => {
+      const key = `${rule}\0${file}\0${line ?? ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      findings.push({ rule, file, ...(line ? { line } : {}), message });
+    });
+  }
+  return { findings, unscanned };
+}
+
 /** The text hidden in tag characters: each is U+E0000 + an ASCII code. */
 function decodeTags(s: string): string {
   let out = "";

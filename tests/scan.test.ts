@@ -361,3 +361,16 @@ test("config/output-fitted: a max_output_tokens above the model's ceiling on fol
   assert.match(found[0].message, /runs as 32000 on foldrun's models \(Anthropic\)/);
   assert.equal(scanFiles(files).filter((f) => f.rule === "config/output-fitted").length, 0, "offline: nothing to say");
 });
+
+test("a snapshot on its way out is scanned for secrets with nothing the files can turn off (Part B3)", async () => {
+  const { uploadSecretFindings } = await import("../src/scan.ts");
+  const r = uploadSecretFindings([
+    { path: "src/config.ts", content: `// foldrun-ignore-file secret/hardcoded: test fixtures\nexport const key = "${STRIPE}";\n` },
+    { path: "node_modules/pkg/index.js", content: `const t = "${GITHUB}";\n` },
+    { path: "README.md", content: "Nothing secret here.\n" },
+    { path: "assets/logo.png", content: "\u0089PNG\u0000\u0000binary" },
+  ]);
+  assert.deepEqual(r.findings.map((f) => `${f.rule} ${f.file}:${f.line}`), ["secret/hardcoded src/config.ts:2", "secret/hardcoded node_modules/pkg/index.js:1"], "an ignore comment and a vendored path silence nothing here");
+  assert.deepEqual(r.unscanned, ["assets/logo.png"], "a file that is not text is said, not passed quietly");
+  assert.ok(!JSON.stringify(r).includes(STRIPE.slice(8)), "the finding does not carry the key itself");
+});
