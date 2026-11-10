@@ -615,6 +615,11 @@ export class ToolCallExtras {
   get size(): number {
     return this.byId.size;
   }
+  /** Every kept call's extras, oldest first — for a caller that keeps them
+   *  between separate requests (the LLM gateway, per account). */
+  entries(): [string, Json][] {
+    return [...this.byId.entries()];
+  }
 }
 
 export class StreamTranslator {
@@ -824,6 +829,10 @@ export class ResponsesStreamTranslator {
   private incomplete: string | null = null;
   private sawTool = false;
   private sawRefusal = false;
+  /** The stream's last word: completed or incomplete (an answer), or the
+   *  provider's error. None at all means it was cut off. */
+  private terminal: "done" | "failed" | null = null;
+  private failure: string | null = null;
   private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
   private readonly model: string;
   constructor(model: string) {
@@ -925,6 +934,18 @@ export class ResponsesStreamTranslator {
       if (u) this.usage = anthropicUsage(u, "responses");
       const reason = (r.incomplete_details as Json | undefined)?.reason;
       if (typeof reason === "string") this.incomplete = reason;
+      if (type === "response.failed") {
+        // A failure is not an answer (Codex review, 10 Nov 2026): it was
+        // ended as a normal stop, so the caller read a failed reply as done.
+        this.terminal = "failed";
+        const err = (r.error as Json | undefined) ?? {};
+        this.failure = typeof err.message === "string" ? err.message : "the provider reported the response failed";
+      } else this.terminal = "done";
+      return out;
+    }
+    if (type === "error") {
+      this.terminal = "failed";
+      this.failure = typeof ev.message === "string" ? ev.message : "the provider sent an error mid-stream";
       return out;
     }
     return out;
@@ -938,6 +959,13 @@ export class ResponsesStreamTranslator {
         if (!entry.argsSeen) out.push(this.event("content_block_delta", { type: "content_block_delta", index: entry.block, delta: { type: "input_json_delta", partial_json: "{}" } }));
       }
       out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
+    }
+    // Failed, or cut off before any last word: an Anthropic error event, the
+    // shape a client reads as a failed request, never a normal stop.
+    if (this.terminal !== "done") {
+      const message = this.terminal === "failed" ? this.failure! : "the provider's stream ended before the response finished";
+      out.push(this.event("error", { type: "error", error: { type: "api_error", message } }));
+      return out;
     }
     const reason = responsesStop(this.incomplete, this.sawTool, this.sawRefusal);
     out.push(

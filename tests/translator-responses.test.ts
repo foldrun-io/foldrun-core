@@ -367,3 +367,26 @@ test("Gemini is sent reasoning_effort; a deferred-tool placeholder is no tool on
   const r = toResponses({ ...req, model: "gpt-6.1-sol" }, { stream: false, reasoningEffort: true });
   assert.deepEqual((r.tools as { name: string }[]).map((t) => t.name), ["Read"]);
 });
+
+test("a failed Responses stream ends in an Anthropic error, not a normal stop (Codex review, 10 Nov 2026)", async () => {
+  const { ResponsesStreamTranslator } = await import("../src/translator.ts");
+  const t = new ResponsesStreamTranslator("gpt-x");
+  const out = [
+    ...t.feed({ type: "response.created", response: { id: "resp_1", model: "gpt-x" } }),
+    ...t.feed({ type: "response.failed", response: { error: { message: "server overloaded" }, usage: { input_tokens: 5, output_tokens: 0 } } }),
+    ...t.finishStream(),
+  ].join("");
+  assert.match(out, /event: error\ndata: \{"type":"error","error":\{"type":"api_error","message":"server overloaded"\}\}/);
+  assert.doesNotMatch(out, /message_stop/, "never read as a finished answer");
+});
+
+test("a Responses stream cut off before its last word is an error; a completed one stops normally", async () => {
+  const { ResponsesStreamTranslator } = await import("../src/translator.ts");
+  const cut = new ResponsesStreamTranslator("gpt-x");
+  const out = [...cut.feed({ type: "response.created", response: { id: "r", model: "gpt-x" } }), ...cut.finishStream()].join("");
+  assert.match(out, /stream ended before the response finished/);
+  const ok = new ResponsesStreamTranslator("gpt-x");
+  const done = [...ok.feed({ type: "response.created", response: { id: "r", model: "gpt-x" } }), ...ok.feed({ type: "response.completed", response: { usage: { input_tokens: 3, output_tokens: 2 } } }), ...ok.finishStream()].join("");
+  assert.match(done, /message_stop/);
+  assert.doesNotMatch(done, /event: error/);
+});
