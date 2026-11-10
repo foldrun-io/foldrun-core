@@ -85,3 +85,77 @@ test("--tenant / --workspace select what is scanned", async () => {
     fs.rmSync(src, { recursive: true, force: true });
   }
 });
+
+// Codex review of PR #80 (11 Nov 2026), each finding reproduced first.
+const tinySource = (files: Record<string, string>, home = "workspaces") => {
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-imp-tiny-"));
+  for (const [rel, text] of Object.entries(files)) {
+    const abs = path.join(src, "acme", home, "desk", rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text);
+  }
+  return src;
+};
+
+test("A → B → A → B: the second A → B is a new import, not a replay of the first", async () => {
+  const h = await harness();
+  const src = tinySource({ "AGENTS.md": "---\nname: desk\n---\n", "knowledge/x.md": "A\n" });
+  const x = path.join(src, "acme/workspaces/desk/knowledge/x.md");
+  try {
+    for (const text of ["A\n", "B\n", "A\n", "B\n"]) {
+      fs.writeFileSync(x, text);
+      const scan = await scanSource({ source: src });
+      const out = await runImport(scan, { deps: h.deps });
+      assert.ok(out.results.every((w) => w.status !== "failed"), JSON.stringify(out.results));
+      const v = await verifyImport(scan, { deps: h.deps });
+      assert.equal(v.pass, true, `after importing ${JSON.stringify(text)}: ${JSON.stringify(v.workspaces[0])}`);
+    }
+  } finally {
+    await h.cleanup();
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+});
+
+test("a workspace in both projects/ and workspaces/ is imported from projects/, as workspaceDir resolves it", async () => {
+  const src = tinySource({ "AGENTS.md": "---\nname: desk\n---\nthe one in use\n" }, "projects");
+  const stale = path.join(src, "acme/workspaces/desk/AGENTS.md");
+  fs.mkdirSync(path.dirname(stale), { recursive: true });
+  fs.writeFileSync(stale, "---\nname: desk\n---\nstale copy\n");
+  try {
+    const scan = await scanSource({ source: src });
+    const ws = scan.tenants[0]!.workspaces;
+    assert.equal(ws.length, 1);
+    assert.match(ws[0]!.dir, /[/\\]projects[/\\]desk$/);
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+});
+
+test("verify reads the folder as it is now: a file added or an exec bit changed since the scan fails it", async () => {
+  const h = await harness();
+  const src = tinySource({ "AGENTS.md": "---\nname: desk\n---\n", "scripts/run.sh": "#!/bin/sh\n" });
+  const dir = path.join(src, "acme/workspaces/desk");
+  try {
+    const scan = await scanSource({ source: src });
+    await runImport(scan, { deps: h.deps });
+    assert.equal((await verifyImport(scan, { deps: h.deps })).pass, true);
+    fs.mkdirSync(path.join(dir, "knowledge"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "knowledge/new.md"), "added after the scan\n");
+    const added = await verifyImport(scan, { deps: h.deps });
+    assert.equal(added.pass, false);
+    assert.deepEqual(added.workspaces[0]!.missing, ["knowledge/new.md"]);
+    fs.rmSync(path.join(dir, "knowledge/new.md"));
+    fs.chmodSync(path.join(dir, "scripts/run.sh"), 0o755);
+    const moded = await verifyImport(scan, { deps: h.deps });
+    assert.equal(moded.pass, false, "the exec bit is part of the file");
+    assert.deepEqual(moded.workspaces[0]!.mismatched, ["scripts/run.sh"]);
+    fs.chmodSync(path.join(dir, "scripts/run.sh"), 0o644);
+    fs.rmSync(path.join(dir, "scripts/run.sh"));
+    const gone = await verifyImport(scan, { deps: h.deps, allowExtra: true });
+    assert.equal(gone.pass, false, "a file the import had and the folder no longer gives is a failure, extras allowed or not");
+    assert.deepEqual(gone.workspaces[0]!.mismatched, ["scripts/run.sh"]);
+  } finally {
+    await h.cleanup();
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+});

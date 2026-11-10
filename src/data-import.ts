@@ -343,7 +343,9 @@ export async function scanSource(opts: ScanOptions): Promise<SourceScan> {
     if (!st.isDirectory() || st.isSymbolicLink()) continue;
     if ((opts.tenants?.length || opts.workspaces?.length) && !opts.tenants?.includes(tenant) && !opts.workspaces?.some((w) => w.startsWith(`${tenant}/`))) continue;
     const t: TenantScan = { tenant, workspaces: [], unmapped: [] };
-    const homes = ["workspaces", "projects"].map((n) => path.join(troot, n));
+    // The legacy home first: a workspace in both is the projects/ one, the
+    // copy workspaceDir (store.ts) resolves and the platform actually uses.
+    const homes = ["projects", "workspaces"].map((n) => path.join(troot, n));
     const seen = new Set<string>();
     for (const home of homes) {
       let wsNames: string[] = [];
@@ -449,7 +451,12 @@ export async function importWorkspace(scan: WorkspaceScan, opts: ImportOptions):
     if (!opts.mirror) changes = Object.fromEntries(Object.entries(changes).filter(([, c]) => c.op === "put"));
     if (!Object.keys(changes).length) return { ...res, status: scan.files.length ? "unchanged" : "empty" };
 
-    const opId = `import-${requestDigest("import", changes).slice(0, 32)}`;
+    // The heads it starts from are part of the operation: the same changes
+    // from a different head (A → B, back to A, then A → B again) are a new
+    // import, not a retry of the first — which publish would replay, leaving
+    // A in place and reporting success (Codex review). A real retry starts
+    // from the same heads and still finds its operation.
+    const opId = `import-${requestDigest("import", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 32)}`;
     const bySha = new Map(scan.files.map((f) => [f.sha, f]));
 
     // A large file goes up from disk, pinned first (as a publish pins what it
@@ -614,11 +621,26 @@ export async function verifyImport(scan: SourceScan, opts: VerifyOptions): Promi
         const v: VerifyWorkspace = { tenant: w.tenant, workspace: w.workspace, pass: true, expected: w.files.length, inHead: 0, matched: 0, missing: [], mismatched: [], extra: [], badBlobs: [], notes: [] };
         try {
           if (w.error) throw new Error(w.error);
+          // The folder as it is NOW — its paths and modes, not the scan's:
+          // a file added, or an exec bit changed, since the scan must fail
+          // the check, not pass it on stale data (Codex review).
+          const current = await scanWorkspace(w.tenant, w.workspace, w.dir);
+          if (current.error) throw new Error(current.error);
+          v.expected = current.files.length;
           const have = await manifestsAt(deps, w.tenant, await headsOf(deps, wsRef(w)));
           const all = { ...have.authored.files, ...have.state.files };
           v.inHead = Object.keys(all).length;
           const checked = new Set<string>();
+          // A file the import had that the folder no longer gives back — gone,
+          // or now unreadable (the scan lists those apart, not as files) —
+          // is a mismatch, as before the rescan; never a quietly smaller set.
+          const nowThere = new Set(current.files.map((f) => f.path));
           for (const f of w.files) {
+            if (nowThere.has(f.path)) continue;
+            v.notes.push(`${f.path}: the source file can no longer be read`);
+            v.mismatched.push(f.path);
+          }
+          for (const f of current.files) {
             let now: string;
             try {
               now = await hashFile(f.abs);
@@ -652,7 +674,7 @@ export async function verifyImport(scan: SourceScan, opts: VerifyOptions): Promi
               }
             }
           }
-          const wanted = new Set(w.files.map((f) => f.path));
+          const wanted = new Set(current.files.map((f) => f.path));
           v.extra = Object.keys(all).filter((p) => !wanted.has(p)).sort();
           v.pass = !v.missing.length && !v.mismatched.length && !v.badBlobs.length && (opts.allowExtra || !v.extra.length);
           if (!opts.allowExtra && v.extra.length) v.notes.push(`${v.extra.length} path(s) in the head are not in the source (work done after the import, or --mirror was not used)`);
