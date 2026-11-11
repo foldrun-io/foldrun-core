@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [19.1.0] — 2026-11-11
+
+- feat(runner): an end customer's open runs, counted from the run records (FOL-168 phase 2) ([a0a0e7c](https://github.com/foldrun-io/foldrun-core/commit/a0a0e7c))
+
 ## [19.0.0] — 2026-11-11
 
 ### Breaking changes
