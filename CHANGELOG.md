@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [19.2.0] — 2026-11-11
+
+- fix(data-import): refuse a linked projects/ home, read the whole history, real-path report check (review of #80) ([b6bec06](https://github.com/foldrun-io/foldrun-core/commit/b6bec06))
+- fix(data-import): a repeated transition is a new import; projects/ wins; verify rereads the folder (review of #80) ([c823335](https://github.com/foldrun-io/foldrun-core/commit/c823335))
+- Test importer on local stores ([8915284](https://github.com/foldrun-io/foldrun-core/commit/8915284))
+- Add importer test fixture ([102abfc](https://github.com/foldrun-io/foldrun-core/commit/102abfc))
+- Add workspace data importer ([733c96b](https://github.com/foldrun-io/foldrun-core/commit/733c96b))
+
 ## [19.1.0] — 2026-11-11
 
 - feat(runner): an end customer's open runs, counted from the run records (FOL-168 phase 2) ([a0a0e7c](https://github.com/foldrun-io/foldrun-core/commit/a0a0e7c))
