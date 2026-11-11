@@ -13,6 +13,19 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.5.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+- `RunRecord` from `@foldrun/core`
+- `RunSummary` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+
+- feat(runner): conversations — a run's context gives its first step the earlier turns (FOL-162) ([a88d85b](https://github.com/foldrun-io/foldrun-core/commit/a88d85b))
+
 ## [18.4.0] — 2026-11-11
 
 ### Widened in the public API
