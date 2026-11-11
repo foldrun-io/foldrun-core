@@ -136,7 +136,7 @@ export { localDate } from "./clock.ts";
 /** Remote MCP servers with each bound secret's value put back as its
  *  `${NAME}`, granted to that server's host — the sandbox then holds the
  *  name and the proxy fills it, as for an http tool. */
-function unbindMcpHeaders(
+export function unbindMcpHeaders(
   servers: Record<string, McpServerConfig>,
   bound: string[],
   values: Record<string, string>,
@@ -145,34 +145,80 @@ function unbindMcpHeaders(
   const known = Object.fromEntries(bound.filter((n) => n in values).map((n) => [n, values[n]]));
   const out: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
-    if (server.type !== "http" || !server.headers) {
+    if (server.type !== "http") {
       out[name] = server;
       continue;
     }
     const host = hostOf(server.url);
+    const tpl = MCP_TEMPLATES.get(server);
+    if (host && tpl) {
+      // From the server's own text, not by finding values in it (FOL-160,
+      // Codex): a bound name stays ${NAME} — granted to this host for the
+      // proxy to fill — however short its value; every other name is filled
+      // exactly as mcpConfig filled it.
+      const render = (text: string) =>
+        text.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, n: string) => {
+          if (n in known) {
+            addGrant(grant, n, known[n]!, host);
+            return whole;
+          }
+          return getSecret(tpl.tenant, n, tpl.workspace)?.value ?? whole;
+        });
+      // The address itself — scheme and host — must stay routable: a bound
+      // secret there would leave the sandbox a URL it cannot call, and filling
+      // it would send the secret in. Refused, saying where it may go (Codex).
+      const origin = /^[^:/?#]*:\/\/[^/?#]*/.exec(tpl.url)?.[0] ?? tpl.url;
+      const inOrigin = placeholderNames(origin).filter((n) => n in known);
+      if (inOrigin.length) {
+        throw new Error(`MCP server ${name}: ${inOrigin.join(", ")} is bound to sites and names part of the server's address — bind it to the server's host and put it in a header or the URL's path or query`);
+      }
+      out[name] = { ...server, url: render(tpl.url), headers: Object.fromEntries(Object.entries(tpl.headers).map(([k, v]) => [k, render(v)])) };
+      continue;
+    }
+    // A config made elsewhere (no template): put each bound value back by value.
     out[name] = host
-      ? { ...server, headers: Object.fromEntries(Object.entries(server.headers).map(([k, v]) => [k, unsubstitute(v, known, host, grant)])) }
+      ? {
+          ...server,
+          url: unsubstitute(server.url, known, host, grant),
+          ...(server.headers ? { headers: Object.fromEntries(Object.entries(server.headers).map(([k, v]) => [k, unsubstitute(v, known, host, grant)])) } : {}),
+        }
       : server;
   }
   return out;
 }
 
-function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerConfig {
+function remembered(cfg: McpServerConfig, tpl: { url: string; headers: Record<string, string>; tenant: string; workspace: string }): McpServerConfig {
+  MCP_TEMPLATES.set(cfg, tpl);
+  return cfg;
+}
+
+/** The secrets a remote MCP server names in its URL and headers. */
+function mcpSecretNames(spec: McpSpec): string[] {
+  return spec.url ? [...placeholderNames(spec.url), ...Object.values(spec.headers ?? {}).flatMap(placeholderNames)] : [];
+}
+
+/** A remote server's config → the text it was filled from, so a bound secret
+ *  is put back by NAME (unbindMcpHeaders), never found by its value. */
+const MCP_TEMPLATES = new WeakMap<McpServerConfig, { url: string; headers: Record<string, string>; tenant: string; workspace: string }>();
+
+export function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerConfig {
+  const fillOne = (v: string) =>
+    v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
+      const hit = getSecret(tenant, secretName, workspace);
+      return hit ? hit.value : whole;
+    });
   const fill = (values: Record<string, string>) => {
     const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(values)) {
-      out[k] = v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
-        const hit = getSecret(tenant, secretName, workspace);
-        return hit ? hit.value : whole;
-      });
-    }
+    for (const [k, v] of Object.entries(values)) out[k] = fillOne(v);
     return out;
   };
   // alwaysLoad: the SDK defers MCP tools behind tool search by default, which
   // hides them from an agent whose toolset we've already narrowed. A server
   // the author explicitly granted should be present from turn one.
   return spec.url
-    ? { type: "http", url: spec.url, headers: fill(spec.headers), alwaysLoad: true }
+    ? // ${NAME} in the URL as in the headers (FOL-160); a site-bound one goes
+      // back to its name for the egress proxy (unbindMcpHeaders).
+      remembered({ type: "http", url: fillOne(spec.url), headers: fill(spec.headers), alwaysLoad: true }, { url: spec.url, headers: spec.headers, tenant, workspace })
     : {
         type: "stdio",
         command: spec.command!,
@@ -1190,6 +1236,10 @@ export function agentContext(
   // Does any granted tool act outside the workspace (`outward: true`)? The
   // retry policy reads it: see launchStep.
   let outward = false;
+  // The secrets a REMOTE MCP server names in its URL or headers (FOL-160,
+  // Codex): resolved and checked for site bindings as an API's are, so a
+  // bound one is put back by name and filled by the proxy, never sent in.
+  const mcpSecretRefs: string[] = [];
   const grantOwnTool = (name: string) => {
     const def = available[name];
     if (!def) {
@@ -1208,6 +1258,7 @@ export function agentContext(
     else {
       mcpServers[def.name] = mcpConfig(def.spec, tenant, workspace);
       mcpNames.push(def.name);
+      mcpSecretRefs.push(...mcpSecretNames(def.spec));
     }
   };
 
@@ -1220,6 +1271,7 @@ export function agentContext(
       if (def?.kind === "mcp") {
         mcpServers[name] = mcpConfig(def.spec, tenant, workspace);
         mcpNames.push(name);
+        mcpSecretRefs.push(...mcpSecretNames(def.spec));
       }
     }
   }
@@ -1315,7 +1367,7 @@ export function agentContext(
   ];
   // One name once, however many places asked for it.
   declared.splice(0, declared.length, ...new Set(declared));
-  const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
+  const referenced = [...new Set([...apis.flatMap(secretsUsedByApi), ...mcpSecretRefs])];
   // A remote's secret travels with the remote, as an API's does: naming it
   // under remotes: is enough. One nothing else in the step uses is resolved
   // apart, into remoteSecretEnv, and reaches the a2a tools alone — never
