@@ -66,6 +66,7 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
         .sort(newest)
         .slice(0, limit)
         .map((r) => structuredClone(r.run)),
+    openRunsOfCustomer: (t, customer) => [...runs.entries()].filter(([key, r]) => key.startsWith(`${t}\0`) && r.live && r.summary.customer === customer).length,
     runStamp: (t, w, id) => runs.get(k(t, w, id))?.stamp ?? null,
     triggerAppend(t, w, e) {
       const l = triggers.get(k(t, w)) ?? [];

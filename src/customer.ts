@@ -15,6 +15,8 @@
 // never leaves foldrun.
 
 import crypto from "node:crypto";
+import { listRunSummaries, listWorkspaces } from "./store.ts";
+import { records } from "./records.ts";
 
 /** A customer id as a partner writes it: printable, no spaces, 1–128. */
 export const CUSTOMER_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
@@ -60,4 +62,27 @@ export function withProviderUser(body: Buffer, userId: string, shape: "anthropic
     parsed.user = userId;
   }
   return Buffer.from(JSON.stringify(parsed), "utf8");
+}
+
+const OPEN = new Set(["queued", "running", "awaiting-approval"]);
+
+/**
+ * How many runs of this end customer are open — queued, running or parked
+ * at a gate — across every workspace of the account. Read from the run
+ * records themselves, so a wiped cache never hands out more room than the
+ * customer has. What the platform's open-runs limit counts under its lock.
+ */
+export function openRunsOfCustomer(tenant: string, customer: string): number {
+  const workspaces = listWorkspaces(tenant).map((w) => w.name);
+  const port = records();
+  // The database's count covers every workspace whose records live there;
+  // a workspace still on files (its import pending — records() answers
+  // null for it) is counted from its own summaries and added (Codex review).
+  const counted = port?.openRunsOfCustomer ? port.openRunsOfCustomer(tenant, customer) : null;
+  let n = counted ?? 0;
+  for (const ws of workspaces) {
+    if (counted !== null && records(tenant, ws)) continue;
+    for (const s of listRunSummaries(tenant, ws)) if (s.customer === customer && OPEN.has(s.status)) n++;
+  }
+  return n;
 }
