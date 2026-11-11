@@ -30,7 +30,7 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
-import { PROTECTED_PARAMS } from "./providers.ts";
+import { PROTECTED_PARAMS, providerPreset } from "./providers.ts";
 import { viaEgress } from "./egress.ts";
 import { fetchUntrusted } from "./untrusted-fetch.ts";
 import { trimSlashes } from "./paths.ts";
@@ -74,6 +74,24 @@ function usageBlock(u: { input: number; cached: number; output: number } | null)
  *  (FOL-95). A step never gets it (translatorSpecFor returns null there). */
 export type TranslatorWire = "chat" | "responses" | "anthropic";
 
+/** What an endpoint can be shown — images, PDFs. Unset: the format's default. */
+export interface TranslatorMedia {
+  images?: boolean;
+  pdf?: boolean;
+}
+
+/** What the model reads where a file could not be shown to it. */
+export const NOT_SHOWN = {
+  image: "[an image was here, but this model endpoint cannot be shown images — it was not delivered]",
+  pdf: "[a PDF was here, but this model endpoint cannot be shown PDFs — it was not delivered; read it with a script if you need its text]",
+} as const;
+
+function pdfData(block: Json): { filename: string; data: string; mime: string } | null {
+  const src = block.source as Json | undefined;
+  if (src?.type !== "base64" || typeof src.data !== "string") return null;
+  return { filename: typeof block.title === "string" ? block.title : "document.pdf", data: src.data, mime: String(src.media_type ?? "application/pdf") };
+}
+
 export interface TranslatorSpec {
   /** The provider's base, e.g. https://api.openai.com/v1 — `/chat/completions`
    *  or `/responses` is appended, by `wire`. */
@@ -106,6 +124,11 @@ export interface TranslatorSpec {
   /** The step's own zone, from the clock cascade — what a reset time in a
    *  refusal is told in. UTC when nothing said otherwise. */
   timezone?: string;
+  /** What the endpoint can be shown (FOL-163), from its preset. Images:
+   *  yes unless said. PDFs: yes on `responses` (input_file), no on `chat`
+   *  unless the preset says the endpoint takes Chat's `file` part. What it
+   *  cannot be shown is not sent, and the model is told so in its place. */
+  media?: TranslatorMedia;
 
 }
 
@@ -211,9 +234,13 @@ export function toChatCompletions(
     params?: Record<string, unknown>;
     /** What the provider attached to earlier tool calls, to send back. */
     extras?: ToolCallExtras;
+    /** What the endpoint can be shown (FOL-163). */
+    media?: TranslatorMedia;
   },
   drop: Dropped = dropped(),
 ): Json {
+  const images = opts.media?.images !== false;
+  const pdfs = opts.media?.pdf === true;
   const out: Json = { model: req.model, stream: opts.stream };
   if (opts.cacheKey) out.prompt_cache_key = opts.cacheKey;
   const messages: Json[] = [];
@@ -221,9 +248,21 @@ export function toChatCompletions(
   const system = textOf(req.system);
   if (system) messages.push({ role: "system", content: system });
 
-  for (const m of (Array.isArray(req.messages) ? req.messages : []) as Json[]) {
+  const all = (Array.isArray(req.messages) ? req.messages : []) as Json[];
+  // A user message's own parts (and the media lifted out of its tool
+  // results) wait while the next message is a user message still carrying
+  // tool results: Chat Completions wants every result of a turn before any
+  // user message (Codex review, FOL-163).
+  let carried: Json[] = [];
+  const hasToolResult = (x: Json | undefined) => x?.role === "user" && Array.isArray(x.content) && (x.content as Json[]).some((b) => b?.type === "tool_result");
+  for (let mi = 0; mi < all.length; mi++) {
+    const m = all[mi]!;
     const content = m.content;
     if (m.role === "assistant") {
+      if (carried.length) {
+        messages.push({ role: "user", content: carried.length === 1 && carried[0].type === "text" ? carried[0].text : carried });
+        carried = [];
+      }
       const text = textOf(content);
       const toolCalls: Json[] = [];
       for (const b of Array.isArray(content) ? (content as Json[]) : []) {
@@ -248,28 +287,75 @@ export function toChatCompletions(
     }
     // user
     if (typeof content === "string") {
-      messages.push({ role: "user", content });
+      if (carried.length) {
+        messages.push({ role: "user", content: [...carried, { type: "text", text: content }] });
+        carried = [];
+      } else messages.push({ role: "user", content });
       continue;
     }
     const parts: Json[] = [];
+    // A tool message carries text alone, so what a tool returned that is not
+    // text — an image the agent opened, a PDF it read — follows the tool
+    // messages in one user message, each labelled with the call it came
+    // from (FOL-163). Where the endpoint cannot be shown it, the tool's own
+    // message says so, so the model never answers as though it had seen it.
+    const lifted: Json[] = [];
     for (const b of Array.isArray(content) ? (content as Json[]) : []) {
       if (b.type === "tool_result") {
         const inner = b.content;
         const text = typeof inner === "string" ? inner : textOf(inner);
+        const notes: string[] = [];
+        const attached: Json[] = [];
+        for (const x of Array.isArray(inner) ? (inner as Json[]) : []) {
+          if (x.type === "image") {
+            const p = images ? imagePart(x) : null;
+            if (p) attached.push(p);
+            else {
+              notes.push(NOT_SHOWN.image);
+              drop.add("images this endpoint cannot be shown");
+            }
+          } else if (x.type === "document") {
+            const d = pdfs ? pdfData(x) : null;
+            if (d) attached.push({ type: "file", file: { filename: d.filename, file_data: `data:${d.mime};base64,${d.data}` } });
+            else {
+              notes.push(NOT_SHOWN.pdf);
+              drop.add("PDFs (this endpoint cannot be shown them)");
+            }
+          }
+        }
+        if (attached.length) {
+          lifted.push({ type: "text", text: `What the tool call ${String(b.tool_use_id)} returned:` }, ...attached);
+          notes.push(`[${attached.length === 1 ? "the file it returned is" : `the ${attached.length} files it returned are`} attached in the next message]`);
+        }
+        const body = [text, ...notes].filter(Boolean).join("\n");
         messages.push({
           role: "tool",
           tool_call_id: String(b.tool_use_id),
-          content: text || (b.is_error ? "error" : "ok"),
+          content: body || (b.is_error ? "error" : "ok"),
         });
-        if (Array.isArray(inner) && (inner as Json[]).some((x) => x.type === "image")) drop.add("images inside tool results");
       } else if (b.type === "text") {
         parts.push({ type: "text", text: String(b.text ?? "") });
       } else if (b.type === "image") {
-        const p = imagePart(b);
+        const p = images ? imagePart(b) : null;
         if (p) parts.push(p);
+        else {
+          parts.push({ type: "text", text: NOT_SHOWN.image });
+          drop.add("images this endpoint cannot be shown");
+        }
       } else if (b.type === "document") {
-        drop.add("document blocks");
+        const d = pdfs ? pdfData(b) : null;
+        if (d) parts.push({ type: "file", file: { filename: d.filename, file_data: `data:${d.mime};base64,${d.data}` } });
+        else {
+          parts.push({ type: "text", text: NOT_SHOWN.pdf });
+          drop.add("PDFs (this endpoint cannot be shown them)");
+        }
       }
+    }
+    parts.unshift(...carried, ...lifted);
+    carried = [];
+    if (parts.length && hasToolResult(all[mi + 1])) {
+      carried = parts;
+      continue;
     }
     if (parts.length) {
       // A single text part reads as a plain string on every endpoint;
@@ -370,9 +456,13 @@ export function toResponses(
     stream: boolean;
     cacheKey?: string;
     params?: Record<string, unknown>;
+    /** What the endpoint can be shown (FOL-163); this shape takes both by default. */
+    media?: TranslatorMedia;
   },
   drop: Dropped = dropped(),
 ): Json {
+  const showImages = opts.media?.images !== false;
+  const showPdfs = opts.media?.pdf !== false;
   const out: Json = { model: req.model, stream: opts.stream, store: false };
   if (opts.cacheKey) out.prompt_cache_key = opts.cacheKey;
   const system = textOf(req.system);
@@ -402,20 +492,45 @@ export function toResponses(
       if (b.type === "tool_result") {
         const inner = b.content;
         const text = typeof inner === "string" ? inner : textOf(inner);
-        // A tool result that holds images (a picture the agent opened) is
-        // sent as a list of parts, which Responses takes in a tool output.
+        // A tool result that holds images (a picture the agent opened) or a
+        // PDF it read is sent as a list of parts, which Responses takes in a
+        // tool output (FOL-163: PDFs too). What this endpoint cannot be shown
+        // is said in its place.
+        const notes: string[] = [];
         const images = Array.isArray(inner)
-          ? (inner as Json[]).flatMap((x) => {
-              const src = x.type === "image" ? (x.source as Json | undefined) : undefined;
-              if (src?.type === "base64" && typeof src.data === "string") return [{ type: "input_image", image_url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}`, detail: "auto" }];
-              if (src?.type === "url" && typeof src.url === "string") return [{ type: "input_image", image_url: src.url, detail: "auto" }];
+          ? (inner as Json[]).flatMap((x): Json[] => {
+              if (x.type === "image") {
+                const src = x.source as Json | undefined;
+                if (!showImages) {
+                  notes.push(NOT_SHOWN.image);
+                  drop.add("images this endpoint cannot be shown");
+                  return [];
+                }
+                if (src?.type === "base64" && typeof src.data === "string") return [{ type: "input_image", image_url: `data:${String(src.media_type ?? "image/png")};base64,${src.data}`, detail: "auto" }];
+                if (src?.type === "url" && typeof src.url === "string") return [{ type: "input_image", image_url: src.url, detail: "auto" }];
+                return [];
+              }
+              if (x.type === "document") {
+                const d = showPdfs ? pdfData(x) : null;
+                if (d) return [{ type: "input_file", filename: d.filename, file_data: `data:${d.mime};base64,${d.data}` }];
+                notes.push(NOT_SHOWN.pdf);
+                drop.add("PDFs (this endpoint cannot be shown them)");
+                return [];
+              }
               return [];
             })
           : [];
-        const output = images.length ? [...(text ? [{ type: "input_text", text }] : []), ...images] : text || (b.is_error ? "error" : "ok");
+        const said = [text, ...notes].filter(Boolean).join("\n");
+        const output = images.length ? [...(said ? [{ type: "input_text", text: said }] : []), ...images] : said || (b.is_error ? "error" : "ok");
         input.push({ type: "function_call_output", call_id: String(b.tool_use_id), output });
       } else if (b.type === "text") {
         parts.push({ type: "input_text", text: String(b.text ?? "") });
+      } else if (b.type === "image" && !showImages) {
+        parts.push({ type: "input_text", text: NOT_SHOWN.image });
+        drop.add("images this endpoint cannot be shown");
+      } else if (b.type === "document" && !showPdfs) {
+        parts.push({ type: "input_text", text: NOT_SHOWN.pdf });
+        drop.add("PDFs (this endpoint cannot be shown them)");
       } else if (b.type === "image") {
         const src = b.source as Json | undefined;
         if (src?.type === "base64" && typeof src.data === "string") {
@@ -1072,8 +1187,8 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
       const drop = dropped();
       const responses = spec.wire === "responses";
       const outbound = responses
-        ? toResponses(body, { reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream }, drop)
-        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream, extras }, drop);
+        ? toResponses(body, { reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream, media: spec.media }, drop)
+        : toChatCompletions(body, { maxTokensParam: spec.maxTokensParam, reasoningEffort: spec.reasoningEffort, params: spec.params, cacheKey: spec.cacheKey, stream, extras, media: spec.media }, drop);
       for (const line of drop.lines()) if (!log.includes(line)) log.push(line);
 
       let upstream: Response;
@@ -1325,6 +1440,8 @@ export function translatorSpecFor(spec: {
     maxTokensParam: spec.maxTokensParam,
     reasoningEffort: spec.reasoningEffort,
     ...(spec.cacheKey ? { cacheKey: spec.cacheKey } : {}),
+    // What the endpoint can be shown, from its preset (FOL-163).
+    ...(spec.name && providerPreset(spec.name)?.media ? { media: providerPreset(spec.name)!.media } : {}),
     label: spec.name ? `${spec.name} (${spec.baseUrl})` : spec.baseUrl,
   };
 }

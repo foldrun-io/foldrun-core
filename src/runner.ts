@@ -127,6 +127,7 @@ import { resolveLanguage, languageName, type LanguageChoice } from "./language.t
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
 import { earlierTurns, conversationBlock, type RunContext, type RunInput } from "./conversation.ts";
+import { inputsNote, type RunInputFile } from "./run-inputs.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
 export { localDate } from "./clock.ts";
@@ -2982,7 +2983,19 @@ async function runStep(
     // run was made. Only an executor that says it can hold one may run it —
     // in-process, the step would work in the real workspace folder, and no
     // copy-back stands between what it writes and the workspace (Codex).
-    const snapshotId = runId ? readRun(tenant, path.basename(workspaceRootOf(agentDir)), runId)?.snapshot?.id : undefined;
+    const runRecord = runId ? readRun(tenant, path.basename(workspaceRootOf(agentDir)), runId) : null;
+    const snapshotId = runRecord?.snapshot?.id;
+    // The run's inputs (FOL-163), for the step its task reaches. Staged only
+    // by an executor that can hold them: in-process the step would share the
+    // real agents/<name>/inputs/ with every other run of the agent, and its
+    // writes there would land in the workspace.
+    const stepInputs = step.inputsTurn && runRecord?.inputs?.length ? runRecord.inputs : null;
+    if (stepInputs) {
+      const able = isolatedRun() && (isolation === "container" || (Boolean(platform.isolation[isolation!]) && platform.holdsInputs?.(isolation!) === true));
+      if (!able) {
+        throw new Error("this run was handed input files, and this install cannot stage them: it needs a sandbox (FOLDRUN_RUN_ISOLATION=k8s or container). Nothing was run.");
+      }
+    }
     if (snapshotId) {
       const able = isolatedRun() && isolation !== "container" && Boolean(platform.isolation[isolation!]) && platform.holdsSnapshot?.(isolation!) === true;
       if (!able) {
@@ -3371,6 +3384,7 @@ async function runStep(
       const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
         ...(snapshotId ? { snapshot: { id: snapshotId } } : {}),
+        ...(stepInputs && runId ? { inputs: { runId, files: stepInputs } } : {}),
         libraryRoot: libraryDir(tenant),
         galleryRoot: platform.galleryDir() ?? undefined,
         // Keys this step's dependency cache. Per-account by design — see
@@ -3381,7 +3395,7 @@ async function runStep(
           // Its file tools inside the sandbox get the same allowance (FOL-96).
           configWrites: step.approve === true && Boolean(step.approvedAt),
           // A snapshot step is told where its folder is, and what comes back.
-          prompt: snapshotId ? `${prompt}\n\n${SNAPSHOT_NOTE}` : prompt,
+          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs)}` : ""}`,
           model,
           effort,
           systemPrompt,
@@ -4593,6 +4607,10 @@ export function createFlowRun(
    *  asked — written with the record, before any worker can see it. The
    *  run's first step (the one its task reaches) reads the earlier turns. */
   conversation?: { context: RunContext; input?: RunInput },
+  /** FOL-163: the files the run is handed, already held for it (storage.ts
+   *  holdRunInputs). The run's first step — the one its task reaches — is
+   *  given them at agents/<name>/inputs/. */
+  inputs?: RunInputFile[],
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4660,6 +4678,10 @@ export function createFlowRun(
     run.context = conversation.context;
     if (conversation.input) run.input = conversation.input;
     if (run.steps[0]) run.steps[0].conversationTurn = true;
+  }
+  if (inputs?.length) {
+    run.inputs = inputs;
+    if (run.steps[0]) run.steps[0].inputsTurn = true;
   }
   writeRun(tenant, workspace, run);
 
@@ -6152,8 +6174,10 @@ function driveRunInner(
             // medium-desk).
             output: step.output,
             ...(step.verify ? { verify: step.verify } : {}),
-            // Taking over the step the run's task reached: the conversation too.
+            // Taking over the step the run's task reached: the conversation
+            // and the inputs too.
             ...(step.conversationTurn ? { conversationTurn: true } : {}),
+            ...(step.inputsTurn ? { inputsTurn: true } : {}),
             attempts: 0,
             status: "pending",
             events: [],

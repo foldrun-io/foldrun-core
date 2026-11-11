@@ -72,6 +72,7 @@ import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, t
 import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
 import type { RunContext, RunInput, ConversationRecord } from "./conversation.ts";
+import type { RunInputFile } from "./storage.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -3803,6 +3804,11 @@ export interface StepRecord {
   /** What that step was given, written when it starts: which runs, how many
    *  did not fit, and a hash of the block (conversation.ts). Never the text. */
   history?: ConversationRecord;
+  /** FOL-163: this step is handed the run's `inputs`, staged at
+   *  agents/<name>/inputs/. Set when the run is made on the step the task
+   *  reaches; fan-out instances and an on-fail rescue inherit it; a re-run
+   *  sets it on the first step it runs. */
+  inputsTurn?: boolean;
   /** On an isolated sub-agent's run: the workspace paths its sandbox's
    *  changes were applied to — what its delegating step is told it wrote. */
   wrote?: string[];
@@ -4024,6 +4030,9 @@ export interface RunRecord {
    *  an A2A message's text and data. Kept on a run with a `context`, so a
    *  later turn reads the question, never a step's decorated instruction. */
   input?: RunInput;
+  /** FOL-163: the files the run was handed — storage paths and the blob each
+   *  named when the run was made (held for it; storage.ts holdRunInputs). */
+  inputs?: RunInputFile[];
   steps: StepRecord[];
 }
 
@@ -4095,7 +4104,13 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   const file = runFilePath(tenant, workspace, runId);
   const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
   const port = records(tenant, workspace);
-  const had = port ? port.runGet(tenant, workspace, runId) !== null : fs.existsSync(file);
+  let prior: RunRecord | null = null;
+  try {
+    prior = port ? port.runGet(tenant, workspace, runId) : fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as RunRecord) : null;
+  } catch {
+    prior = null; // a half-written record still goes
+  }
+  const had = port ? prior !== null : fs.existsSync(file);
   if (!had && !fs.existsSync(dir)) return false;
   // The folder first (archived outputs, captured calls), the record last:
   // a delete that fails halfway leaves the record, so a retry finds the run
@@ -4106,6 +4121,12 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   else {
     fs.rmSync(file, { force: true });
     noteRunDeleted(path.dirname(file), runId);
+  }
+  // Its held inputs go with it (FOL-163): a blob nothing else names is
+  // collected. Asynchronous, and never the delete's failure — storage's own
+  // sweep (sweepHeldInputs) finds any a crash left behind.
+  if (prior?.inputs?.length) {
+    void import("./storage.ts").then((m) => m.releaseRunInputs(tenant, workspace, runId)).catch(() => {});
   }
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing

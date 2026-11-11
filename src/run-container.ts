@@ -47,6 +47,8 @@ import type { SearchRoot, RunDigest } from "./context-tools.ts";
 import type { TranslatorSpec } from "./translator.ts";
 import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
 import type { RemoteSpec } from "./a2a-remotes.ts";
+import { stageRunInputs, type RunInputFile } from "./storage.ts";
+import { INPUTS_DIR, stagedLine } from "./run-inputs.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -482,6 +484,10 @@ export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Bu
 }
 
 export interface ApplyOptions {
+  /** Never take back what is under this workspace-relative folder (with its
+   *  trailing `/`) — a step's staged inputs (FOL-163): whatever it does in
+   *  there stays in the sandbox. Checked before anything is read. */
+  drop?: string;
   /** Take back only what is under this workspace-relative folder (with its
    *  trailing `/`) — a snapshot run's outputs (Part B3): the folder it was
    *  given, and anything it copied anywhere else, never reach the workspace. */
@@ -559,10 +565,12 @@ export function applyContainerChanges(
       const posix = rel.replaceAll("\\", "/");
       if (entry.isDirectory()) {
         const d = posix + "/";
+        if (opts.drop && d.startsWith(opts.drop)) continue;
         if (opts.keepOnly && !(d.startsWith(opts.keepOnly) || opts.keepOnly.startsWith(d))) continue;
         if (allowedBack(rel + "/")) walk(abs);
         continue;
       }
+      if (opts.drop && (posix.startsWith(opts.drop) || `${posix}/` === opts.drop)) continue;
       if (opts.keepOnly && !posix.startsWith(opts.keepOnly)) continue;
       if (!allowedBack(rel)) continue;
       let next: Buffer = fs.readFileSync(abs);
@@ -1875,6 +1883,9 @@ export interface RunInContainerArgs {
    *  agents/<name>/snapshot/, takes back only that agent's outputs/, and
    *  leaves the patch there as outputs/snapshot.patch. */
   snapshot?: { id: string };
+  /** FOL-163: the run's inputs, for the step its task reaches — staged at
+   *  <agentRel>/inputs/ after the workspace copy, never copied back. */
+  inputs?: { runId: string; files: RunInputFile[] };
   /** A person approved this step before it ran: configuration and code it
    *  changed are kept, not refused (copy-back.ts, FOL-96). */
   configWrites?: boolean;
@@ -2159,6 +2170,14 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       const laid = overlayTestWrites(wsIn, args.divert.to);
       if (laid.length) args.emit("info", `test: this step sees ${laid.length} file${laid.length === 1 ? "" : "s"} earlier steps of this run wrote`);
     }
+    // The run's inputs (FOL-163), at <agentRel>/inputs/ — after the copy and
+    // the test overlay, so the copy is their baseline too and a folder of
+    // that name in the workspace never mixes in.
+    if (args.inputs?.files.length) {
+      if (!args.tenant) throw new Error("a step with inputs needs its account");
+      const staged = await stageRunInputs(args.tenant, path.basename(args.workspaceRoot), args.inputs.runId, args.inputs.files, path.join(wsIn, args.input.agentRel, INPUTS_DIR));
+      args.emit("info", stagedLine(staged.files, staged.bytes));
+    }
     const libIn = path.join(staging, "library");
     if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });
@@ -2324,6 +2343,8 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
         allowConfig: args.configWrites === true,
         onKept: (r) => kept.push(r),
         revision: args.tenant ? { tenant: args.tenant, runId: args.runId, step: containerId, base: pinned?.base ?? null } : undefined,
+        // Staged inputs stay in the sandbox, whatever the step did there (FOL-163).
+        ...(args.inputs?.files.length ? { drop: `${args.input.agentRel}/${INPUTS_DIR}/` } : {}),
       });
       if (refused.length) args.emit("info", refusedLine(refused));
       if (kept.length) args.emit("info", keptLine(kept));

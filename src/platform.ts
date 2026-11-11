@@ -173,6 +173,11 @@ export interface PlatformHooks {
    *  snapshot on any executor that cannot fails before anything starts.
    *  Default: none can. */
   holdsSnapshot?(isolation: string): boolean;
+  /** Can this executor stage a run's inputs (RunInContainerArgs.inputs: the
+   *  files at agents/<name>/inputs/, never copied back)? The docker executor
+   *  can; a run with inputs on one that cannot fails before anything starts
+   *  (FOL-163). Default: none can. */
+  holdsInputs?(isolation: string): boolean;
   /**
    * Does this isolation mode wall a step whose `network:` is restricted and
    * enforced to the egress proxy alone (a `filtered` pod)? True: such a
