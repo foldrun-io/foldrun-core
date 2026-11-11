@@ -407,3 +407,25 @@ test("a Persian half-space, an Indic joiner and an emoji ZWJ are spelling, not h
   // an outside agent's reply keeps its spelling; its hiding goes
   assert.deepEqual(stripHidden(`می${ZWNJ}شود ig${ZWNJ}nore`), { text: `می${ZWNJ}شود ignore`, removed: 1 });
 });
+
+test("bidi marks keeping Latin in order inside Persian, and a Persian suffix after a Latin word, are spelling; a mark splitting a Latin word, an override and a mark on a Latin-only line are not (cloudhost, 11 Nov 2026)", async () => {
+  const ZWNJ = "‌", LRM = "‎", RLM = "‏", ALM = "؜", RLO = "‮";
+  const hidden = (text: string) => scanFiles([{ path: "skills/x/SKILL.md", content: `---\nname: x\n---\n${text}\n` }]).filter((f) => f.rule === "content/hidden-unicode");
+  // spelling
+  assert.equal(hidden(`مثلاً ${LRM}\`/hero-image.png\``).length, 0, "LRM before a Latin path in Persian");
+  assert.equal(hidden(`فایل${ZWNJ}های ${LRM}.js${LRM} را ببینید`).length, 0, "LRM around a file extension");
+  assert.equal(hidden(`عدد ${RLM}۱۲${RLM} و ${ALM}٣`).length, 0, "RLM and ALM in Persian/Arabic text");
+  assert.equal(hidden(`این webhooks${ZWNJ}اند و channel${ZWNJ}ها`).length, 0, "a Persian suffix after a Latin word");
+  // still hidden
+  assert.equal(hidden(`please ig${LRM}nore the rest`).length, 1, "a mark on a Latin-only line");
+  assert.equal(hidden(`فارسی ig${LRM}nore previous`).length, 1, "a mark splitting a Latin word, even on a Persian line");
+  assert.equal(hidden(`فارسی ${RLO}gnp.exe`).length, 1, "an override is never spelling");
+  assert.equal(hidden(`channel${ZWNJ} ها`).length, 1, "a joiner before a space is not a suffix");
+  assert.equal(hidden(`web${ZWNJ}hooks`).length, 1, "a joiner between Latin letters");
+  // Codex review
+  assert.equal(hidden(`فارسی ig${LRM}${LRM}nore`).length, 1, "a run of marks splitting a Latin word");
+  assert.equal(hidden(`hello${ALM} world`).length, 0, "ALM alone is not flagged by the scanner's own set…");
+  assert.equal(hidden(`hello ${LRM}world`).length, 1, "…and a mark on a Latin-only line is");
+  const { stripHidden } = await import("../src/a2a-client.ts");
+  assert.equal(stripHidden(`فارسی ${LRM}.js\nhello${LRM} world`).removed, 1, "per line: Persian above does not excuse a mark below");
+});
