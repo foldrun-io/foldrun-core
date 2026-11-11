@@ -13,6 +13,24 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.4.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `sendPlainNotification` from `@foldrun/core`
+- `sendPlainNotificationOutcome` from `@foldrun/core`
+
+### New in the public API
+
+- `unbindMcpHeaders` from `@foldrun/core`
+- `mcpConfig` from `@foldrun/core`
+
+- refactor(notify): question fields as a trailing optional argument, so the release is a minor (FOL-159) ([8f4d5b5](https://github.com/foldrun-io/foldrun-core/commit/8f4d5b5))
+- fix(mcp): a site-bound secret in a remote MCP server's URL or headers never enters the sandbox (FOL-160) ([4820949](https://github.com/foldrun-io/foldrun-core/commit/4820949))
+- feat(notify): a question's webhook says it is one; events: [asking] subscribes to questions alone (FOL-159) ([d9c219f](https://github.com/foldrun-io/foldrun-core/commit/d9c219f))
+
 ## [18.3.2] — 2026-11-11
 
 - fix(scan): bidi marks keeping Latin in order in RTL text, and a Persian suffix after a Latin word, are spelling (cloudhost, 11 Nov 2026) ([a063de6](https://github.com/foldrun-io/foldrun-core/commit/a063de6))
