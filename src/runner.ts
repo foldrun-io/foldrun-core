@@ -2065,6 +2065,10 @@ async function notifyQuestion(tenant: string, workspace: string, runId: string, 
     headline: `${agent} is asking you something`,
     detail: `${question}${options?.length ? `\n\nOptions: ${options.join(" · ")}` : ""}\n\nAnswer it on ${where}, or \`foldrun answer ${runId} "…"\`.`,
     runId,
+    // A webhook tells a question from a gate (FOL-159), and `events: [asking]`
+    // subscribes to questions alone; awaiting-approval keeps getting them.
+    asking: true,
+    extra: { reason: "question", question: { text: question, ...(options?.length ? { options } : {}), agent } },
   }).catch(() => false);
 }
 
