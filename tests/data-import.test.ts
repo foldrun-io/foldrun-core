@@ -12,7 +12,7 @@ import path from "node:path";
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRevisionStore } from "../src/revision-store.ts";
 import { blobObjectKey } from "../src/manifest.ts";
-import { placeCaseVariants, runImport, scanSource, verifyImport } from "../src/data-import.ts";
+import { placeCaseVariants, runImport, scanSource, verifyImport, writeVerifyReport } from "../src/data-import.ts";
 import { dataImportSuite } from "./data-import-suite.ts";
 import { buildSource, BIG } from "./data-import-fixture.ts";
 import { sha256Hex } from "../src/manifest.ts";
@@ -157,5 +157,70 @@ test("verify reads the folder as it is now: a file added or an exec bit changed 
   } finally {
     await h.cleanup();
     fs.rmSync(src, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked projects/ or workspaces/ folder is refused and reported, never followed (Codex review)", async () => {
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-imp-link-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-imp-outside-"));
+  try {
+    fs.mkdirSync(path.join(outside, "secretdesk", "agents", "x"), { recursive: true });
+    fs.writeFileSync(path.join(outside, "secretdesk", "AGENTS.md"), "outside the source\n");
+    fs.writeFileSync(path.join(outside, "secretdesk", "agents", "x", "agent.md"), "---\nname: x\n---\nhi\n");
+    fs.mkdirSync(path.join(src, "acme"));
+    fs.symlinkSync(outside, path.join(src, "acme", "workspaces"));
+    const scan = await scanSource({ source: src });
+    const t = scan.tenants.find((x) => x.tenant === "acme")!;
+    assert.equal(t.workspaces.length, 0, "nothing under the link was scanned");
+    assert.ok(t.unmapped.some((u) => u.path === "workspaces" && /symbolic link/.test(u.reason)), "the link is reported");
+  } finally {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("the report folder is compared by real paths: a link into the source is refused (Codex review)", async () => {
+  const src = buildSource();
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-imp-rep-"));
+  try {
+    const link = path.join(elsewhere, "report");
+    fs.symlinkSync(path.join(src, "acme"), link);
+    const r = { verifiedAt: "x", source: src, pass: true, workspaces: [] };
+    assert.throws(() => writeVerifyReport(link, src, r), /outside the source/);
+    assert.throws(() => writeVerifyReport(path.join(link, "not-yet"), src, r), /outside the source/, "a folder not made yet, under a link into the source");
+    const ok = writeVerifyReport(path.join(elsewhere, "real"), src, r);
+    assert.ok(fs.existsSync(ok.json));
+  } finally {
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test("a revision by anyone else is found however deep in the history, and only the importer's own name counts as the importer (Codex review)", async () => {
+  const h = await harness();
+  const src = buildSource();
+  try {
+    const ref = { tenant: "acme", workspace: "desk", scope: "workspace" as const };
+    const mine = (seq: number) => ({ seq, by: "import:data-folder" });
+    // A store whose history is 600 importer revisions on top of one by someone else.
+    const history = [...Array.from({ length: 600 }, (_, i) => mine(601 - i)), { seq: 1, by: "user:ana@example.com" }];
+    const deep = {
+      ...h.deps,
+      revisions: {
+        ...h.deps.revisions,
+        revisions: async (ws: { scope: string }, opts: { limit?: number; before?: number } = {}) =>
+          ws.scope === "workspace" ? history.filter((r) => opts.before === undefined || r.seq < opts.before).slice(0, opts.limit ?? 50).map((r) => ({ ...r, id: `r${r.seq}` })) : [],
+      },
+    } as unknown as typeof h.deps;
+    const scan = await scanSource({ source: src, workspaces: ["acme/desk"] });
+    const [res] = (await runImport(scan, { deps: deep })).results;
+    assert.equal(res.status, "skipped", "the foreign revision 600 deep still blocks the import");
+    assert.match(res.reason ?? "", /user:ana@example\.com/);
+    void ref;
+    // "import:" + anything else is not the importer.
+    const other = { ...h.deps, revisions: { ...h.deps.revisions, revisions: async (ws: { scope: string }) => (ws.scope === "workspace" ? [{ seq: 1, id: "r1", by: "import:zip" }] : []) } } as unknown as typeof h.deps;
+    const [res2] = (await runImport(scan, { deps: other })).results;
+    assert.equal(res2.status, "skipped");
+  } finally {
+    await h.cleanup();
   }
 });

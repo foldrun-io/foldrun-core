@@ -348,6 +348,17 @@ export async function scanSource(opts: ScanOptions): Promise<SourceScan> {
     const homes = ["projects", "workspaces"].map((n) => path.join(troot, n));
     const seen = new Set<string>();
     for (const home of homes) {
+      // The home itself is checked before it is read: readdir follows a link,
+      // and a linked projects/ or workspaces/ would scan a folder outside the
+      // source (Codex review).
+      try {
+        if (fs.lstatSync(home).isSymbolicLink()) {
+          t.unmapped.push({ path: path.basename(home), reason: "symbolic link (refused, never followed)" });
+          continue;
+        }
+      } catch {
+        continue;
+      }
       let wsNames: string[] = [];
       try {
         wsNames = fs.readdirSync(home).filter((n) => SAFE_NAME.test(n)).sort();
@@ -417,11 +428,24 @@ export interface ImportReport {
 
 const wsRef = (w: Pick<WorkspaceScan, "tenant" | "workspace">): WorkspaceRef => ({ tenant: w.tenant, workspace: w.workspace });
 
-async function foreignRevisions(deps: Deps, ref: WorkspaceRef): Promise<Revision[]> {
+/** Revisions anyone but this importer made, newest first per side. The whole
+ *  history is read, page by page, until one is found: the promise is about ANY
+ *  such revision, not the last 200 (Codex review). Only the importer's own
+ *  author name counts as the importer, not any name starting "import". */
+async function foreignRevisions(deps: Deps, ref: WorkspaceRef, by: string = IMPORT_BY): Promise<Revision[]> {
   const out: Revision[] = [];
   for (const scope of ["workspace", "state"] as const) {
-    const revs = await deps.revisions.revisions({ ...ref, scope }, { limit: 200 });
-    out.push(...revs.filter((r) => !r.by.startsWith("import")));
+    let before: number | undefined;
+    for (;;) {
+      const page = await deps.revisions.revisions({ ...ref, scope }, { limit: 500, ...(before !== undefined ? { before } : {}) });
+      const foreign = page.filter((r) => r.by !== by);
+      if (foreign.length) {
+        out.push(...foreign);
+        break;
+      }
+      if (page.length < 500) break;
+      before = Math.min(...page.map((r) => r.seq));
+    }
   }
   return out;
 }
@@ -440,7 +464,7 @@ export async function importWorkspace(scan: WorkspaceScan, opts: ImportOptions):
   let holder: { kind: "publish"; id: string } | null = null;
   try {
     if (!opts.force) {
-      const foreign = await foreignRevisions(deps, ref);
+      const foreign = await foreignRevisions(deps, ref, opts.by ?? IMPORT_BY);
       if (foreign.length) return { ...res, status: "skipped", reason: `${foreign.length} revision(s) were made after the import (latest by ${foreign[0].by}); rerun with force to import over them` };
     }
     const heads = await headsOf(deps, ref);
@@ -706,11 +730,31 @@ export function renderVerify(r: VerifyReport): string {
   return L.join("\n") + "\n";
 }
 
-/** Write import-verify.json and import-verify.txt. Refuses a folder inside the source. */
+/** A path with every link resolved, for a folder that may not exist yet: the
+ *  nearest existing ancestor's real path plus the rest. */
+function canonical(p: string): string {
+  let head = path.resolve(p);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), ...rest);
+    } catch {
+      const up = path.dirname(head);
+      if (up === head) return path.resolve(p);
+      rest.unshift(path.basename(head));
+      head = up;
+    }
+  }
+}
+
+/** Write import-verify.json and import-verify.txt. Refuses a folder inside the
+ *  source, compared by real paths, so a link cannot point the report into it
+ *  (Codex review). */
 export function writeVerifyReport(dir: string, source: string, r: VerifyReport): { json: string; txt: string } {
   const out = path.resolve(dir);
-  const src = path.resolve(source);
-  if (out === src || out.startsWith(src + path.sep)) throw new Error("the report folder must be outside the source folder");
+  const src = canonical(source);
+  const real = canonical(dir);
+  if (real === src || real.startsWith(src + path.sep)) throw new Error("the report folder must be outside the source folder");
   fs.mkdirSync(out, { recursive: true });
   const json = path.join(out, "import-verify.json");
   const txt = path.join(out, "import-verify.txt");
