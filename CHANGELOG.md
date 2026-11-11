@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [18.3.1] — 2026-11-11
+
+- fix(scan): a Persian half-space is spelling, not hidden text — joiners inside a word of a joining script, or an emoji sequence, are not flagged ([e17e05d](https://github.com/foldrun-io/foldrun-core/commit/e17e05d))
+
 ## [18.3.0] — 2026-11-10
 
 ### Widened in the public API
