@@ -46,3 +46,12 @@ test("1.5k is fifteen hundred; a whole record is searched by its events (Codex r
   assert.equal(parseRunFilter(new URLSearchParams({ min_tokens: "1.5k" })).filter.minTokens, 1500);
   assert.ok(matchesRunFilter(run as unknown as Parameters<typeof matchesRunFilter>[0], parseRunFilter(new URLSearchParams({ tool: "web", tool_error: "1" })).filter), "the record itself, not its index row");
 });
+
+test("context: the runs of one conversation, by its id exactly (FOL-162)", () => {
+  const { filter } = parseRunFilter(new URLSearchParams("context=order-42"));
+  assert.equal(filter.context, "order-42");
+  const run = (id?: string) => ({ startedAt: "2026-11-11T00:00:00.000Z", finishedAt: "2026-11-11T00:01:00.000Z", ...(id ? { context: { id } } : {}), steps: [] });
+  assert.equal(matchesRunFilter(run("order-42"), filter), true);
+  assert.equal(matchesRunFilter(run("order-421"), filter), false, "exactly, not a substring");
+  assert.equal(matchesRunFilter(run(), filter), false);
+});

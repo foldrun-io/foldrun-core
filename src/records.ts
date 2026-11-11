@@ -58,6 +58,12 @@ export interface RecordsPort {
   runRecent(tenant: string, workspace: string, flow: string, limit: number): RunRecord[];
   /** Runs that started at or after `sinceMs`, whole, newest first. */
   runsSince(tenant: string, workspace: string, sinceMs: number): RunRecord[];
+  /** FOL-162: a conversation's earlier turns — finished (completed or
+   *  failed) runs whose summary's context key is `key`, with this test
+   *  flag, that started before `before` and finished no later than it;
+   *  whole, newest first, at most `limit`. Optional: without it
+   *  conversation.ts filters the run summaries itself. */
+  runsInContext?(tenant: string, workspace: string, key: string, before: string, test: boolean, limit: number): RunRecord[];
   /** When the row last changed, in epoch MICROseconds, or null when there is
    *  none — what a poller compares instead of a file's mtime (two writes in one
    *  millisecond still differ), and what runUpdatedMs divides by 1000 for the

@@ -126,6 +126,7 @@ import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
+import { earlierTurns, conversationBlock, type RunContext, type RunInput } from "./conversation.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
 export { localDate } from "./clock.ts";
@@ -2224,6 +2225,10 @@ async function runStep(
    *  mayDefer). Absent: it waits here, however long — a rescue, a step
    *  outside a flow, a foreground run. */
   mayDefer?: () => boolean,
+  /** FOL-162: the earlier turns of the run's conversation, as the block
+   *  conversation.ts built — read before the instruction. Already escaped;
+   *  never resolved for [[links]] (it is other runs' words). */
+  conversation?: string,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -2360,6 +2365,8 @@ async function runStep(
     // The ceiling it was given rides on the line, so the budget arithmetic
     // around fan-out is testable without a model to stop.
     push("info", `stub call ${call + 1}${stepBudgetUsd !== null ? ` (ceiling $${stepBudgetUsd.toFixed(2)})` : ""}`);
+    // What a real step would have read before its instruction (FOL-162).
+    if (conversation) push("info", `stub conversation: ${conversation}`);
     step.status = "completed";
     // A stub answer may open with `cost: 0.25` — a pretend price, so the
     // parts of orchestration that watch money (budget:) are testable too.
@@ -2779,6 +2786,9 @@ async function runStep(
     let prompt = step.instruction
       ? resolveDocLinks(step.instruction, workspaceRoot)
       : "Begin your run now, following your instructions.";
+    // The conversation's earlier turns go first, the request after them —
+    // in the user turn, not the system prompt (conversation.ts says why).
+    if (conversation) prompt = `${conversation}\n\n${prompt}`;
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, CONTEXT_CHARS)}\n</previous_step_results>`;
     if (priorData !== undefined) {
       // The value itself, beside the prose that mentioned it. This is the
@@ -4579,6 +4589,10 @@ export function createFlowRun(
   /** A snapshot run's folder (Part B3): the id POST …/snapshots answered.
    *  Its own trailing argument, as a2a is, so the signature only widened. */
   snapshot?: string,
+  /** FOL-162: the conversation this run is a turn of, and what it was
+   *  asked — written with the record, before any worker can see it. The
+   *  run's first step (the one its task reaches) reads the earlier turns. */
+  conversation?: { context: RunContext; input?: RunInput },
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4642,6 +4656,11 @@ export function createFlowRun(
       costUsd: null,
     })),
   };
+  if (conversation?.context) {
+    run.context = conversation.context;
+    if (conversation.input) run.input = conversation.input;
+    if (run.steps[0]) run.steps[0].conversationTurn = true;
+  }
   writeRun(tenant, workspace, run);
 
   // Start every run from an empty outputs/ for each agent it will touch.
@@ -5736,6 +5755,32 @@ function driveRunInner(
         // of its group is under way (a sibling still running keeps the run
         // here anyway), and only once the group has waited a while, so a
         // short wait stays a short wait. Never on a foreground run.
+        // FOL-162: the earlier turns of the run's conversation, for the step
+        // the run's task reaches. Read fresh at each start (a retry, a
+        // resume) — the same turns each time, since which runs count is
+        // fixed by when this run was made. A lookup that fails costs the
+        // step its history, never the step.
+        const conversationFor = (step: StepRecord): string | undefined => {
+          if (!step.conversationTurn || !run.context) return undefined;
+          try {
+            const built = conversationBlock(run, earlierTurns(tenant, workspace, run));
+            if (!built) {
+              delete step.history;
+              return undefined;
+            }
+            step.history = built.record;
+            const r = built.record;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `conversation ${run.context.id}: given ${r.runs.length} earlier run${r.runs.length === 1 ? "" : "s"} (${r.chars.toLocaleString("en")} characters)${r.omitted ? `, ${r.omitted} older not given` : ""}${r.truncated ? `, ${r.truncated} cut short` : ""}`,
+            });
+            return built.text;
+          } catch (err) {
+            step.events.push({ t: new Date().toISOString(), type: "info", text: `conversation ${run.context.id}: the earlier runs could not be read (${err instanceof Error ? err.message : String(err)}) — this step runs without them` });
+            return undefined;
+          }
+        };
         const mayDefer = (step: StepRecord) => () => {
           if (!opts.parkOnApproval) return false;
           if (launching.some((s) => s !== step && s.status === "running" && !s.roomWait)) return false;
@@ -5875,6 +5920,7 @@ function driveRunInner(
                   peerBus,
                   delegateFor(step),
                   mayDefer(step),
+                  conversationFor(step),
                 ).finally(() => reserved.delete(step));
                 // Sent back for room: not a try. The run parks once the
                 // group is done (below) and this attempt starts again later.
@@ -6063,7 +6109,7 @@ function driveRunInner(
             resumed.attempts = Math.max(1, resumed.attempts ?? 0);
             resumed.status = "running";
             save();
-            await runStep(rescuerDir, tenant, resumed, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(resumed));
+            await runStep(rescuerDir, tenant, resumed, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(resumed), [], undefined, undefined, undefined, conversationFor(resumed));
             settleRescue(step, resumed);
             return;
           }
@@ -6106,6 +6152,8 @@ function driveRunInner(
             // medium-desk).
             output: step.output,
             ...(step.verify ? { verify: step.verify } : {}),
+            // Taking over the step the run's task reached: the conversation too.
+            ...(step.conversationTurn ? { conversationTurn: true } : {}),
             attempts: 0,
             status: "pending",
             events: [],
@@ -6117,7 +6165,7 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(rescue));
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(rescue), [], undefined, undefined, undefined, conversationFor(rescue));
           settleRescue(step, rescue);
         };
         // What a rescue's end means for the step it took over.

@@ -71,6 +71,7 @@ import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
+import type { RunContext, RunInput, ConversationRecord } from "./conversation.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -3794,6 +3795,14 @@ export interface StepRecord {
   delegation?: string;
   /** On a step that delegated to isolated sub-agents: each job, in order. */
   delegations?: StepDelegation[];
+  /** FOL-162: this step reads the run's conversation — the earlier runs of
+   *  its `context` — before its instruction. Set when the run is made on
+   *  the step the run's task reaches (its fan-out instances and an on-fail
+   *  rescue of it inherit it; a re-run sets it on the first step it runs). */
+  conversationTurn?: boolean;
+  /** What that step was given, written when it starts: which runs, how many
+   *  did not fit, and a hash of the block (conversation.ts). Never the text. */
+  history?: ConversationRecord;
   /** On an isolated sub-agent's run: the workspace paths its sandbox's
    *  changes were applied to — what its delegating step is told it wrote. */
   wrote?: string[];
@@ -4007,6 +4016,14 @@ export interface RunRecord {
    *  changed is outputs/snapshot.patch. Set when the run is made, never by a
    *  step. */
   snapshot?: { id: string };
+  /** FOL-162: the conversation this run belongs to — the id its caller
+   *  gave and the key it is found by (conversation.ts). Set when the run
+   *  is made, carried onto a re-run. */
+  context?: RunContext;
+  /** What the run was asked, as given: the task of an agent or flow run,
+   *  an A2A message's text and data. Kept on a run with a `context`, so a
+   *  later turn reads the question, never a step's decorated instruction. */
+  input?: RunInput;
   steps: StepRecord[];
 }
 
@@ -4409,6 +4426,8 @@ export interface RunSummary {
   /** RunRecord.trigger and .a2a: an outside agent started it. */
   trigger?: "a2a";
   a2a?: { task: string; key: string };
+  /** RunRecord.context: the conversation it belongs to (FOL-162). */
+  context?: RunContext;
   steps: RunSummaryStep[];
 }
 
@@ -4453,6 +4472,7 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.revision ? { revision: run.revision } : {}),
     ...(run.trigger ? { trigger: run.trigger } : {}),
     ...(run.a2a ? { a2a: run.a2a } : {}),
+    ...(run.context ? { context: run.context } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
       // A failed step's last error — and, on a run that failed between

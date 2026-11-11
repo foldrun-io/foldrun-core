@@ -18,6 +18,7 @@ import {
   type RunRecord,
 } from "../src/store.ts";
 import { recordTriggerEvent, readTriggerEvents, summariseTriggers } from "../src/trigger-log.ts";
+import { contextKey, earlierTurns } from "../src/conversation.ts";
 import { putFile, getFile, listStorage, deleteFile, readFileBytes, withFileStoreLock, purgeWorkspaceStorage, moveWorkspaceStorage, usedBytes } from "../src/storage.ts";
 
 const run = (id: string, at: string, extra: Partial<RunRecord> = {}): RunRecord => ({
@@ -68,6 +69,24 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
   });
 
   const t = (name: string) => `[${label}] ${name}`;
+
+  test(t("a conversation's earlier turns (FOL-162): its key, its test flag, finished before the asking run was made, newest first"), () => {
+    const key = contextKey("chat");
+    const ctx = { context: { id: "chat", key } };
+    writeRun(T, W, run("c1", "2026-11-01T01:00:00.000Z", { ...ctx, finishedAt: "2026-11-01T01:05:00.000Z" }));
+    writeRun(T, W, run("c2", "2026-11-01T02:00:00.000Z", { ...ctx, status: "failed", finishedAt: "2026-11-01T02:05:00.000Z" }));
+    writeRun(T, W, run("c-test", "2026-11-01T02:10:00.000Z", { ...ctx, test: true, finishedAt: "2026-11-01T02:15:00.000Z" }));
+    writeRun(T, W, run("c-live", "2026-11-01T02:20:00.000Z", { ...ctx, status: "running", finishedAt: null }));
+    writeRun(T, W, run("c-late", "2026-11-01T02:30:00.000Z", { ...ctx, finishedAt: "2026-11-01T09:00:00.000Z" }));
+    writeRun(T, W, run("c-other", "2026-11-01T02:40:00.000Z", { context: { id: "other", key: contextKey("other") }, finishedAt: "2026-11-01T02:45:00.000Z" }));
+    writeRun(T, W, run("c-none", "2026-11-01T02:50:00.000Z", { finishedAt: "2026-11-01T02:55:00.000Z" }));
+    const asking = { id: "c-now", startedAt: "2026-11-01T03:00:00.000Z", ...ctx };
+    assert.deepEqual(earlierTurns(T, W, asking).map((r) => r.id), ["c2", "c1"]);
+    assert.deepEqual(earlierTurns(T, W, { ...asking, test: true }).map((r) => r.id), ["c-test"]);
+    assert.deepEqual(earlierTurns(T, W, asking, 1).map((r) => r.id), ["c2"], "the limit holds");
+    assert.deepEqual(earlierTurns(T, W, { ...asking, id: "c2", startedAt: "2026-11-01T02:00:00.000Z" }).map((r) => r.id), ["c1"]);
+    assert.equal(earlierTurns(T, W, asking)[0]!.context?.key, key, "whole records come back");
+  });
 
   test(t("a run round-trips whole, events and all, and nothing is written under runs/"), () => {
     const r = run("run-a", "2026-11-01T01:00:00.000Z");
