@@ -118,6 +118,10 @@ export interface EgressGrant {
    *  that has to put a rate-limit reset into words — and a reset time is
    *  only useful in the calendar the step works to. See refusal.ts. */
   timezone?: string;
+  /** FOL-168: the end customer the run is for — written by the worker from
+   *  the run record, never by the sandbox. The proxy refuses a blocked one's
+   *  model calls and tells the provider its hashed end-user id. */
+  customer?: string;
   /** Which sites the step may reach through the proxy's forward door
    *  (network.ts). Absent on a grant from a runner that predates it: the
    *  forward door then allows only the hosts the secrets were granted to. */

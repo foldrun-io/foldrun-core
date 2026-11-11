@@ -3023,7 +3023,7 @@ async function runStep(
       // before anything is copied in. Null where no proxy is configured
       // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
       // everything below materialises exactly as it always did.
-      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone };
+      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone, ...(runRecord?.customer ? { customer: runRecord.customer } : {}) };
       // A direct search API's key: granted to that API's host and no other,
       // exactly as an http tool's key is granted to its base URL's host. The
       // script sends the placeholder; the worker fills it on the way out.
@@ -4611,6 +4611,8 @@ export function createFlowRun(
    *  holdRunInputs). The run's first step — the one its task reaches — is
    *  given them at agents/<name>/inputs/. */
   inputs?: RunInputFile[],
+  /** FOL-168: which of the partner's own users the run is for. */
+  customer?: string,
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4683,6 +4685,7 @@ export function createFlowRun(
     run.inputs = inputs;
     if (run.steps[0]) run.steps[0].inputsTurn = true;
   }
+  if (customer) run.customer = customer;
   writeRun(tenant, workspace, run);
 
   // Start every run from an empty outputs/ for each agent it will touch.

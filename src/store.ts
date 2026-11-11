@@ -4033,6 +4033,10 @@ export interface RunRecord {
   /** FOL-163: the files the run was handed — storage paths and the blob each
    *  named when the run was made (held for it; storage.ts holdRunInputs). */
   inputs?: RunInputFile[];
+  /** FOL-168: which of the partner's own users this run is for — an opaque
+   *  id the partner maps (customer.ts). Limits, blocks and the provider's
+   *  end-user id follow it. Set when the run is made, carried on a re-run. */
+  customer?: string;
   steps: StepRecord[];
 }
 
@@ -4449,6 +4453,8 @@ export interface RunSummary {
   a2a?: { task: string; key: string };
   /** RunRecord.context: the conversation it belongs to (FOL-162). */
   context?: RunContext;
+  /** RunRecord.customer (FOL-168). */
+  customer?: string;
   steps: RunSummaryStep[];
 }
 
@@ -4494,6 +4500,7 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.trigger ? { trigger: run.trigger } : {}),
     ...(run.a2a ? { a2a: run.a2a } : {}),
     ...(run.context ? { context: run.context } : {}),
+    ...(run.customer ? { customer: run.customer } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
       // A failed step's last error — and, on a run that failed between

@@ -18,6 +18,8 @@ export interface RunFilter {
   minSecs?: number;
   /** The run is a turn of this conversation: its `context` id, exactly (FOL-162). */
   context?: string;
+  /** The run is for this end customer, exactly (FOL-168). */
+  customer?: string;
 }
 
 /** The query parameters a filter comes from: tool, tool_error, agent,
@@ -36,6 +38,8 @@ export function parseRunFilter(q: { get(name: string): string | null }): { filte
   if (model) filter.model = model.toLowerCase();
   const context = q.get("context");
   if (context) filter.context = context;
+  const customer = q.get("customer");
+  if (customer) filter.customer = customer;
   for (const [k, field] of [["min_tokens", "minTokens"], ["min_secs", "minSecs"]] as const) {
     const v = text(k);
     if (v === undefined) continue;
@@ -61,7 +65,7 @@ type FilterableStep = {
   startedAt?: string;
   finishedAt?: string;
 };
-type FilterableRun = { startedAt: string; finishedAt?: string | null; context?: { id: string }; steps: FilterableStep[] };
+type FilterableRun = { startedAt: string; finishedAt?: string | null; context?: { id: string }; customer?: string; steps: FilterableStep[] };
 
 /** The index's facts, or worked out from a whole record's events (Codex
  *  review: the workspace runs page reads whole records). */
@@ -79,6 +83,7 @@ function factsOf(s: FilterableStep): { tools: string[]; toolErrors: number } {
 
 export function matchesRunFilter(run: FilterableRun, f: RunFilter, now = Date.now()): boolean {
   if (f.context !== undefined && run.context?.id !== f.context) return false;
+  if (f.customer !== undefined && run.customer !== f.customer) return false;
   const steps = (run.steps ?? []).map((s) => ({ ...s, ...factsOf(s) }));
   if (f.tool && !steps.some((s) => (s.tools ?? []).some((t) => t.toLowerCase().includes(f.tool!)))) return false;
   if (f.toolError !== undefined && steps.some((s) => (s.toolErrors ?? 0) > 0) !== f.toolError) return false;
