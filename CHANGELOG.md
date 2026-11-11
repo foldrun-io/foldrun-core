@@ -13,6 +13,20 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [19.3.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `s3Config` from `@foldrun/core`
+
+### New in the public API
+
+- `storeOrigin` from `@foldrun/core`
+
+- feat(storage): storeOrigin() — the object store origin the presigned URLs use ([9dc2151](https://github.com/foldrun-io/foldrun-core/commit/9dc2151))
+
 ## [19.2.0] — 2026-11-11
 
 - fix(data-import): refuse a linked projects/ home, read the whole history, real-path report check (review of #80) ([b6bec06](https://github.com/foldrun-io/foldrun-core/commit/b6bec06))
