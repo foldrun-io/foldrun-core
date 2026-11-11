@@ -26,6 +26,7 @@
 // The reason is required: an ignore without one ignores nothing and is itself
 // reported, because "why is this allowed?" is the question a reviewer asks.
 
+import { spellingJoiners } from "./joiners.ts";
 import crypto from "node:crypto";
 import matter, { frontmatterErrorLine, frontmatterErrorText, parseLenient, configMatter } from "./matter.ts";
 import { refNames } from "./refs.ts";
@@ -647,10 +648,14 @@ function scanContent(file: ScanFile, lines: string[], push: Push, untrusted = fa
   for (let i = 0; i < lines.length; i++) {
     const line = i === 0 ? lines[i]!.replace(/^﻿/, "") : lines[i]!;
     if (!untrusted && /^\s*(?:```|~~~)/.test(line)) fenced = !fenced;
-    HIDDEN.lastIndex = 0;
-    if (HIDDEN.test(line)) {
-      const kind = HIDDEN_NAMES.find(([re]) => re.test(line))?.[1] ?? "invisible characters";
-      const n = line.match(HIDDEN)?.length ?? 0;
+    // A half-space inside a Persian word, a joiner in an Indic word or an
+    // emoji sequence is spelling, not hiding (joiners.ts): not counted.
+    const spelling = spellingJoiners(line);
+    const hits = [...line.matchAll(HIDDEN)].filter((m) => !spelling.has(m.index!));
+    if (hits.length) {
+      const found = hits.map((m) => m[0]).join("");
+      const kind = HIDDEN_NAMES.find(([re]) => re.test(found))?.[1] ?? "invisible characters";
+      const n = hits.length;
       const tagged = /\uDB40[\uDC00-\uDC7F]/.test(line) ? ` that read as: "${decodeTags(line).slice(0, 80)}"` : "";
       push("content/hidden-unicode", file.path, i + 1, line, `${n} ${kind}${redactText(tagged)} — invisible to a reviewer, read by the model`);
     }
