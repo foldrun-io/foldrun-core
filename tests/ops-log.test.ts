@@ -174,3 +174,18 @@ test("our files are recognised from where the module is, whatever the checkout's
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("who asked: a member id, a key id, a request id and the surface fit; an email never does (D239 phase 1)", () => {
+  const line = opsLine("warn", "auth.refused", { surface: "login", reason: "bad_password", tenant: "acme", user: "u_7Hk2", key: "k_91ab", requestId: "r-0f3a9c", status: 401 });
+  assert.deepEqual(
+    { surface: line.surface, user: line.user, key: line.key, requestId: line.requestId, dropped: line.dropped },
+    { surface: "login", user: "u_7Hk2", key: "k_91ab", requestId: "r-0f3a9c", dropped: undefined },
+  );
+  // An email in any of them is dropped whole, never logged.
+  const leak = opsLine("warn", "auth.refused", { user: "ana@example.com", key: "ana@example.com", requestId: "a b", surface: "Login Page" });
+  assert.equal(leak.user, undefined);
+  assert.equal(leak.key, undefined);
+  assert.equal(leak.requestId, undefined);
+  assert.equal(leak.surface, undefined);
+  assert.equal(leak.dropped, 4);
+});

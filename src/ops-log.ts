@@ -105,12 +105,18 @@ export const FIELDS: Record<string, Kind> = {
   runId: "id", jobId: "id", taskId: "id", proposal: "id", lease: "id", pod: "id",
   worker: "id", provider: "id", plan: "id", fingerprint: "id", invoice: "id", order: "id",
   stripeEvent: "id", subscription: "id", migration: "id", housekeeping: "id",
+  // Who asked, for the operator console's per-account timeline (D239 phase 1,
+  // 12 Nov 2026): a member's id and an API key's id (never an email — `@`
+  // does not fit an id, so one cannot slip in), and the request's own id.
+  user: "id", key: "id", requestId: "id",
   // How many, how long, how much.
   count: "num", ms: "num", secs: "num", bytes: "num", usd: "num", attempt: "num",
   step: "num", port: "num", status: "num", exitCode: "num", percent: "num", tries: "num",
   // What kind.
   op: "word", role: "word", outcome: "word", reason: "word", stream: "word", kind: "word",
   verdict: "word", phase: "word", signal: "code", where: "word",
+  // Where a refusal happened: login, api, gateway, mcp, a2a, egress, webhook.
+  surface: "word",
   // A run's sandbox (FOL-122): the runner image and size class — the
   // platform's own words — and the model, an identifier like a flow's name
   // (one with `/` or `:` in it does not fit, and is dropped).
