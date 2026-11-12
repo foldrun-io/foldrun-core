@@ -120,15 +120,24 @@ test("a step's journal entry is on disk before the commit, so a crash cannot lea
   assert.equal(fs.existsSync(dir), false);
 });
 
-test("files that are not workspace content, binaries and over-size files are not journalled; a big one is left to the reconcile", async () => {
+test("files that are not workspace content and over-size files are not journalled; a big one is left to the reconcile", async () => {
   const n = recordStepOutputs(T, W, [
     { path: "runs/run-1/x.json", base: null, after: Buffer.from("{}") },
-    { path: "memory/pic.png", base: null, after: Buffer.from([0xff, 0xfe, 0x00, 0x80]) },
+    { path: "agents/writer/.claude/settings.json", base: null, after: Buffer.from("{}") },
     { path: "state/big.json", base: null, after: Buffer.alloc(1024 * 1024 + 1, 97) },
   ], { runId: "run-2", step: "p" });
   assert.equal(n, 0);
   assert.equal(pendingRevisions(), 0);
   assert.equal(needsReconcile(T, W), true, "the oversize file is recorded from the folder by the reconcile");
+});
+
+test("a step's binary file is committed byte for byte, beside its text", async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80]);
+  const out = sandbox({ "agents/writer/outputs/pic.png": png, "memory/a.md": "a1\n" });
+  applyContainerChanges(ws, out, { "memory/a.md": sha("a0\n") }, undefined, undefined, { revision: { tenant: T, runId: "run-b", step: "p" } });
+  await flushRevisions({ tenant: T, workspace: W });
+  assert.deepEqual(await readAtHead(T, W, "agents/writer/outputs/pic.png"), png);
+  assert.equal(await text("memory/a.md"), "a1\n");
 });
 
 test("without a backend nothing is recorded and no journal appears (laptop, Compose)", async () => {

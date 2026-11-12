@@ -181,16 +181,19 @@ test("a revision store that is down loses nothing: changes stay queued in order 
 
 test("a change the manifest refuses is dropped and named, not retried for ever: later changes still commit", async () => {
   setRevisionBackend(deps, ON);
-  fs.mkdirSync(path.join(workspaceDir(T, W), "memory"), { recursive: true });
-  fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "Notes.md"), "upper\n");
+  writeWorkspaceFile(T, W, "memory/Notes.md", "upper\n", { by: "user:a", message: "first" });
+  await flushRevisions({ tenant: T, workspace: W });
   fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "notes.md"), "lower\n"); // on a case-sensitive disk
   if (fs.readdirSync(path.join(workspaceDir(T, W), "memory")).length < 2) return; // a case-insensitive disk cannot hold both
   const { recordRevision } = await import("../src/history.ts");
-  recordRevision(T, W, [{ path: "memory/Notes.md", before: null, after: "upper\n" }], { by: "user:a", message: "collide" });
+  recordRevision(T, W, [{ path: "memory/notes.md", before: null, after: "lower\n" }], { by: "user:a", message: "collide" });
   const r = await flushRevisions({ tenant: T, workspace: W });
   assert.equal(r.pending, 0, "the queue is not stuck behind it");
-  assert.equal(needsReconcile(T, W), true);
-  fs.rmSync(path.join(workspaceDir(T, W), "memory", "Notes.md"));
+  // The repair that follows records one of the two names (the folder's first)
+  // and is not stopped by the other (until 13 Nov 2026 it was, for good).
+  assert.equal(await text("memory/Notes.md"), "upper\n");
+  assert.equal(await text("memory/notes.md"), null);
+  assert.equal(needsReconcile(T, W), false);
   writeWorkspaceFile(T, W, "memory/fine.md", "ok\n", { by: "user:a", message: "fine" });
   await flushRevisions();
   assert.equal(await text("memory/fine.md"), "ok\n");
@@ -216,6 +219,84 @@ test("reconcile brings the heads to the folder's content in one revision, and is
   assert.equal(r2.status, "committed");
   assert.equal(await text("agents/writer/AGENTS.md"), AGENT("edited outside"));
   assert.equal(await text("AGENTS.md"), null, "a file that is gone from the folder is gone from the head");
+});
+
+test("reconcile records every file of the folder — binaries, an agent's outputs — keeps them current, and removes what is gone", async () => {
+  setRevisionBackend(deps, ON);
+  const dir = workspaceDir(T, W);
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0x80]);
+  fs.mkdirSync(path.join(dir, "agents", "writer", "outputs", ".cache"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "agents", "writer", "outputs", "pic.png"), png);
+  fs.writeFileSync(path.join(dir, "agents", "writer", "outputs", ".cache", "blob"), Buffer.from([0, 1, 2, 0xff]));
+  fs.writeFileSync(path.join(dir, "agents", "writer", "outputs", "page.html"), "<p>hi</p>\n");
+  // never content: the engine's own folder, run records, a link
+  fs.mkdirSync(path.join(dir, "agents", "writer", ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "agents", "writer", ".claude", "settings.json"), "{}");
+  fs.mkdirSync(path.join(dir, "memory"), { recursive: true });
+  fs.symlinkSync(path.join(dir, "AGENTS.md"), path.join(dir, "memory", "link.md"));
+  await reconcileWorkspace(T, W);
+  const bytes = async (rel: string) => readAtHead(T, W, rel);
+  assert.deepEqual(await bytes("agents/writer/outputs/pic.png"), png);
+  assert.deepEqual(await bytes("agents/writer/outputs/.cache/blob"), Buffer.from([0, 1, 2, 0xff]));
+  assert.equal(await text("agents/writer/outputs/page.html"), "<p>hi</p>\n");
+  assert.equal(await bytes("agents/writer/.claude/settings.json"), null);
+  assert.equal(await bytes("memory/link.md"), null);
+  assert.equal(await reconcileWorkspace(T, W), null, "nothing differs");
+
+  // the binary changes, another goes: the head follows
+  const png2 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xfe, 0x01]);
+  fs.writeFileSync(path.join(dir, "agents", "writer", "outputs", "pic.png"), png2);
+  fs.rmSync(path.join(dir, "agents", "writer", "outputs", ".cache"), { recursive: true });
+  const r = (await reconcileWorkspace(T, W))!;
+  assert.equal(r.status, "committed");
+  assert.deepEqual(await bytes("agents/writer/outputs/pic.png"), png2);
+  assert.equal(await bytes("agents/writer/outputs/.cache/blob"), null);
+
+  // history shows what it is; a snapshot (what a restore writes, as text) leaves it out
+  const d = (await readRevisionDetail(T, W, r.revision!.id, "agents/writer/outputs/pic.png"))!;
+  assert.match(d.files[0].before!, /^\(binary file, 7 bytes/);
+  assert.match(d.files[0].after!, /^\(binary file, 6 bytes/);
+  const snap = (await snapshotFiles(T, W, r.revision!.id))!;
+  assert.equal(snap.some((f) => f.path.endsWith("pic.png")), false);
+  assert.ok(snap.some((f) => f.path === "agents/writer/outputs/page.html"));
+});
+
+test("a folder that cannot be listed stops the reconcile: its files are not read as deleted", { skip: process.getuid?.() === 0 }, async () => {
+  setRevisionBackend(deps, ON);
+  const sub = path.join(workspaceDir(T, W), "memory", "sub");
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, "kept.md"), "kept\n");
+  await reconcileWorkspace(T, W);
+  fs.chmodSync(sub, 0o000);
+  try {
+    await assert.rejects(reconcileWorkspace(T, W));
+  } finally {
+    fs.chmodSync(sub, 0o755);
+  }
+  assert.equal(await text("memory/sub/kept.md"), "kept\n");
+});
+
+test("two names that differ only by case: one is recorded, and the reconcile still commits the rest", { skip: process.platform === "darwin" || process.platform === "win32" }, async () => {
+  setRevisionBackend(deps, ON);
+  const dir = path.join(workspaceDir(T, W), "memory");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "a.md"), "lower\n");
+  await reconcileWorkspace(T, W);
+  fs.writeFileSync(path.join(dir, "A.md"), "upper\n");
+  fs.writeFileSync(path.join(dir, "other.md"), "other\n");
+  await reconcileWorkspace(T, W);
+  assert.equal(await text("memory/other.md"), "other\n");
+  assert.equal(await text("memory/A.md"), "upper\n");
+  assert.equal(await text("memory/a.md"), null);
+});
+
+test("a large file goes to the store from disk and reads back whole", async () => {
+  setRevisionBackend(deps, ON);
+  const big = crypto.randomBytes(9 * 1024 * 1024);
+  fs.mkdirSync(path.join(workspaceDir(T, W), "state"), { recursive: true });
+  fs.writeFileSync(path.join(workspaceDir(T, W), "state", "big.db"), big);
+  await reconcileWorkspace(T, W);
+  assert.ok((await readAtHead(T, W, "state/big.db"))!.equals(big));
 });
 
 test("the cache seam: a read asks the cache first, fills it on a miss, and a hit never touches the store", async () => {

@@ -35,13 +35,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { currentTree, registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
-import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath } from "./store.ts";
+import { pipeline } from "node:stream/promises";
+import { registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
+import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath } from "./store.ts";
 import { dataRoot } from "./paths.ts";
 import { opsError, opsLog } from "./ops-log.ts";
-import { readAll, BlobNotFound, type BlobSweeper } from "./blob-store.ts";
+import { readAll, fileSource, BlobNotFound, type BlobSweeper } from "./blob-store.ts";
 import { fsJournalStore, type JournalStore, type JournalRecord } from "./journal-store.ts";
 import {
+  AUTHORED_DIRS,
+  AUTHORED_ROOT_FILES,
+  STATE_DIRS,
+  assertManifestPath,
   blobObjectKey,
   diffManifests,
   emptyManifest,
@@ -159,7 +164,18 @@ export function setBlobCache(c: BlobCache | null): void {
  *  writer STARTED from (null: the path did not exist), so the commit can tell
  *  a concurrent writer apart (same path = conflict, disjoint paths replay). A
  *  dashboard save has none: its base is whatever the head holds. */
-type EntryFile = RevisionFile & { base?: string | null; handed?: string | null };
+type EntryFile = RevisionFile & {
+  base?: string | null;
+  handed?: string | null;
+  /** `after` is the file's bytes in base64: a file that is not UTF-8 text (an
+   *  image, a database). Such an entry is written down as version 2, which a
+   *  release from before 13 Nov 2026 sets aside instead of committing the
+   *  base64 as the file's text. */
+  enc?: "base64";
+};
+const bytesOfEntry = (f: EntryFile): Buffer => Buffer.from(f.after ?? "", f.enc === "base64" ? "base64" : "utf8");
+/** Is this exactly the UTF-8 of some text? (What a history page can show.) */
+const isText = (b: Buffer): boolean => Buffer.from(b.toString("utf8"), "utf8").equals(b);
 interface Entry {
   id: string;
   files: EntryFile[];
@@ -200,7 +216,7 @@ const journalRoot = () => path.join(dataRoot(), ".revision-journal");
 function persist(tenant: string, workspace: string, e: Entry): void {
   const store = entryStore();
   try {
-    e.handle = store.put({ v: 1, tenant, workspace, id: e.id, files: e.files as JournalRecord["files"], by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev });
+    e.handle = store.put({ v: e.files.some((f) => f.enc) ? 2 : 1, tenant, workspace, id: e.id, files: e.files as JournalRecord["files"], by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev });
     e.store = store;
   } catch (err) {
     opsError("revisions.journal_not_persisted", err, { tenant, workspace, store: store.kind }, "warn");
@@ -288,8 +304,9 @@ const MAX_STEP_ENTRY = 8 * 1024 * 1024;
  * whose copy-out itself failed wrote nothing and commits nothing. A test run's
  * diverted state/ and storage/ writes never reach the folder and never here.
  *
- * Text only: a binary file is not versioned yet (see phase 3). Returns the
- * number of paths queued.
+ * Every file, whatever it holds: one that is not text rides as base64 (13 Nov
+ * 2026; until then a binary file was left out, and the head went stale against
+ * the folder). Returns the number of paths queued.
  */
 export function recordStepOutputs(
   tenant: string,
@@ -308,8 +325,7 @@ export function recordStepOutputs(
   let total = 0;
   for (const w of writes) {
     if (!sideOf(w.path)) continue; // not workspace content (runs/, .foldrun/ …)
-    const text = w.after.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(w.after)) continue; // binary: not versioned
+    if (isPlatformPath(w.path)) continue; // the engine's own files: never content
     if (w.after.length > MAX_STEP_FILE) {
       marked.add(k); // the folder has it; the reconcile records it
       continue;
@@ -319,7 +335,9 @@ export function recordStepOutputs(
       continue;
     }
     total += w.after.length;
-    files.push({ path: w.path, before: null, after: text, base: w.base, ...(w.handed !== undefined ? { handed: w.handed } : {}) });
+    // Bytes that are not text (an image, a database) ride as base64.
+    const body = isText(w.after) ? { after: w.after.toString("utf8") } : { after: w.after.toString("base64"), enc: "base64" as const };
+    files.push({ path: w.path, before: null, ...body, base: w.base, ...(w.handed !== undefined ? { handed: w.handed } : {}) });
   }
   if (!files.length) return 0;
   const idSource = meta.runId ? `${meta.runId}\0${meta.step ?? ""}` : crypto.randomBytes(12).toString("hex");
@@ -922,7 +940,7 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
           }
           if (minAge > 0 && ageMs < minAge) continue;
           const e = store.read(tenant, workspace, handle);
-          if (e.v !== 1 || !Array.isArray(e.files)) throw new Error("not a journal entry");
+          if ((e.v !== 1 && e.v !== 2) || !Array.isArray(e.files)) throw new Error("not a journal entry");
           found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev, store, handle });
         } catch (err) {
           // a torn or foreign entry: set it aside, never replay it
@@ -984,6 +1002,118 @@ export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {
 
 // ------------------------------------------------------------- committing
 
+/** A file this big is sent to the store from disk, never read whole. */
+const LARGE_FILE = 8 * 1024 * 1024;
+const LARGE_PIN_TTL_MS = 30 * 60_000;
+
+interface FolderFile {
+  abs: string;
+  sha: string;
+  size: number;
+  mode: number;
+}
+
+async function hashOf(abs: string, size: number): Promise<string> {
+  if (size <= LARGE_FILE) return sha256Hex(fs.readFileSync(abs));
+  const h = crypto.createHash("sha256");
+  await pipeline(fs.createReadStream(abs), h);
+  return h.digest("hex");
+}
+
+/**
+ * The workspace's content as the folder holds it now: every regular file on
+ * one of the two sides (manifest.ts sideOf), whatever its bytes — the rule
+ * the data importer has (data-import.ts scanWorkspace) and what a run's
+ * stage-in copies, so a head made from it is the folder. Left out, and listed
+ * in `left` when the folder holds them: a symbolic link (never followed), the
+ * platform's and the engine's own files (isPlatformPath), a name a manifest
+ * refuses, the later of two names that differ only by case, a file that could
+ * not be read. Null when the folder is not there.
+ */
+async function scanFolder(tenant: string, workspace: string): Promise<{ files: Map<string, FolderFile>; left: Set<string> } | null> {
+  const dir = workspaceDir(tenant, workspace);
+  if (!fs.existsSync(dir)) return null;
+  const found: { rel: string; abs: string; st: fs.Stats }[] = [];
+  const left = new Set<string>();
+  const walk = (rel: string) => {
+    // A folder that cannot be listed (gone since its parent was read aside)
+    // ends the scan: skipped, everything under it would read as deleted.
+    let names: string[];
+    try {
+      names = fs.readdirSync(path.join(dir, rel)).sort();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    for (const name of names) {
+      const r = `${rel}/${name}`;
+      const abs = path.join(dir, r);
+      let st: fs.Stats;
+      try {
+        st = fs.lstatSync(abs);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; // deleted meanwhile
+        throw err;
+      }
+      if (st.isDirectory()) walk(r);
+      else if (st.isFile()) found.push({ rel: r, abs, st });
+      else left.add(r);
+    }
+  };
+  let top: string[];
+  try {
+    top = fs.readdirSync(dir).sort();
+  } catch {
+    return null;
+  }
+  for (const name of top) {
+    const abs = path.join(dir, name);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(abs);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory() && (AUTHORED_DIRS.includes(name) || STATE_DIRS.includes(name))) walk(name);
+    else if (st.isFile() && sideOf(name) === "authored") found.push({ rel: name, abs, st });
+    else if (AUTHORED_ROOT_FILES.includes(name)) left.add(name);
+  }
+  const files = new Map<string, FolderFile>();
+  const lower = new Set<string>();
+  for (const f of found.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
+    if (isPlatformPath(f.rel)) continue;
+    const fold = f.rel.toLowerCase();
+    try {
+      assertManifestPath(f.rel);
+      if (lower.has(fold)) throw new Error("differs only by case");
+      files.set(f.rel, { abs: f.abs, sha: await hashOf(f.abs, f.st.size), size: f.st.size, mode: f.st.mode & 0o111 ? MODE_EXEC : MODE_FILE });
+      lower.add(fold);
+    } catch {
+      left.add(f.rel);
+    }
+  }
+  return { files, left };
+}
+
+/** Send the large files among `changes` to the store from disk, pinned first
+ *  (as a publish pins what it uploads), so none is held whole in memory; the
+ *  publish then finds each in the store and does not ask for its bytes. */
+async function uploadLarge(deps: Deps, tenant: string, changes: Changes, onDisk: Map<string, string>, opId: string): Promise<() => Promise<void>> {
+  const large = [...new Set(Object.values(changes).flatMap((c) => (c.op === "put" && c.size > LARGE_FILE && onDisk.has(c.sha) ? [c.sha] : [])))];
+  if (!large.length) return async () => {};
+  const holder = { kind: "publish" as const, id: `${opId}-large` };
+  // The pin is held until the caller's publish is over (it returns the release).
+  const release = async () => void (await deps.pins?.release(tenant, holder).catch(() => {}));
+  await deps.pins?.pinBlobs(tenant, large, holder, { ttlMs: LARGE_PIN_TTL_MS });
+  try {
+    for (const sha of large) await deps.blobs.putSourceIfAbsent(blobObjectKey(tenant, sha), fileSource(onDisk.get(sha)!), { sha256: sha });
+  } catch (err) {
+    await release();
+    throw err;
+  }
+  return release;
+}
+
 function modeOf(tenant: string, workspace: string, rel: string): number {
   try {
     return fs.statSync(path.join(workspaceDir(tenant, workspace), rel)).mode & 0o111 ? MODE_EXEC : MODE_FILE;
@@ -1031,6 +1161,8 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   const heads = await headsOf(deps, ws);
   const head = await manifestsAt(deps, tenant, heads);
   const bytes = new Map<string, Buffer>();
+  const onDisk = new Map<string, string>(); // sha → a file of the folder that holds it
+  let releaseLarge: () => Promise<void> = async () => {};
   const changes: Changes = {};
   const baseline: { authored: boolean; state: boolean } = { authored: !heads.workspace, state: !heads.state };
 
@@ -1040,8 +1172,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   // the revision cannot be read any more, the folder's sha stands in.
   const fromRev = await baseManifests(deps, tenant, workspace, entry.baseRev);
 
-  const put = (rel: string, text: string, side: "authored" | "state", pinned?: string | null, handed?: string | null) => {
-    const buf = Buffer.from(text, "utf8");
+  const put = (rel: string, buf: Buffer, side: "authored" | "state", pinned?: string | null, handed?: string | null) => {
     const sha = sha256Hex(buf);
     bytes.set(sha, buf);
     const was = head[side].files[rel];
@@ -1060,12 +1191,15 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     // Nothing is recorded for (part of) this workspace yet: its tree, as the
     // folder holds it now, is the first revision. That already contains this
     // entry's change, since the writer wrote before it journalled.
-    for (const f of currentTree(tenant, workspace) ?? []) {
-      const side = sideOf(f.path);
-      if (!side || f.after === null) continue;
+    // Every file, as scanFolder lists them (binaries too); each one's bytes are
+    // read when the publish asks for them, never all at once.
+    for (const [rel, f] of (await scanFolder(tenant, workspace))?.files ?? []) {
+      const side = sideOf(rel)!;
       if ((side === "authored" && !baseline.authored) || (side === "state" && !baseline.state)) continue;
-      put(f.path, f.after, side);
+      onDisk.set(f.sha, f.abs);
+      changes[rel] = { op: "put", base: null, sha: f.sha, size: f.size, mode: f.mode };
     }
+    releaseLarge = await uploadLarge(deps, tenant, changes, onDisk, `jb-${entry.id}`);
   }
   for (const f of entry.files) {
     const side = sideOf(f.path);
@@ -1075,7 +1209,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     if (f.after === null) {
       if (was) changes[f.path] = { op: "delete", base: entryId(was) };
     } else {
-      put(f.path, f.after, side, f.base, f.handed);
+      put(f.path, bytesOfEntry(f), side, f.base, f.handed);
     }
   }
   if (!Object.keys(changes).length) return null;
@@ -1090,34 +1224,38 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   // 2026 that was taken as the whole entry being done and the state half was
   // never committed (FOL-152). Asked again after an OpIdReused: another pod
   // replaying the same entry may finish a side between the look and the publish.
-  for (let attempt = 0; ; attempt++) {
-    const done = await sidesDone(deps, ws, entry.id);
-    const todo: Changes = {};
-    for (const [p, c] of Object.entries(changes)) if (!done[sideOf(p)!]) todo[p] = c;
-    if (!Object.keys(todo).length) return null;
-    try {
-      return await publish(deps, {
-        ws,
-        // The op id of a side that finished, when one did, so the other side's
-        // conflict copies are named the way the first attempt would have.
-        opId: done.opId ?? opIdOf(prefix, entry.id),
-        by: entry.by,
-        message: entry.message,
-        changes: todo,
-        restoredFrom: done.authored ? undefined : restoredFrom,
-        bytesOf: async (sha) => {
-          const b = bytes.get(sha);
-          if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
-          return b;
-        },
-      });
-    } catch (err) {
-      // Never "done" by itself: a side that finished is found by sidesDone on
-      // the next look. One that keeps answering OpIdReused without having
-      // finished is a bug, and permanent(): the entry is dropped and the
-      // workspace reconciled from the folder, so nothing is lost silently.
-      if (!(err instanceof OpIdReused) || attempt >= 2) throw err;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const done = await sidesDone(deps, ws, entry.id);
+      const todo: Changes = {};
+      for (const [p, c] of Object.entries(changes)) if (!done[sideOf(p)!]) todo[p] = c;
+      if (!Object.keys(todo).length) return null;
+      try {
+        return await publish(deps, {
+          ws,
+          // The op id of a side that finished, when one did, so the other side's
+          // conflict copies are named the way the first attempt would have.
+          opId: done.opId ?? opIdOf(prefix, entry.id),
+          by: entry.by,
+          message: entry.message,
+          changes: todo,
+          restoredFrom: done.authored ? undefined : restoredFrom,
+          bytesOf: async (sha) => {
+            const b = bytes.get(sha) ?? (onDisk.has(sha) ? fs.readFileSync(onDisk.get(sha)!) : null);
+            if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
+            return b;
+          },
+        });
+      } catch (err) {
+        // Never "done" by itself: a side that finished is found by sidesDone on
+        // the next look. One that keeps answering OpIdReused without having
+        // finished is a bug, and permanent(): the entry is dropped and the
+        // workspace reconciled from the folder, so nothing is lost silently.
+        if (!(err instanceof OpIdReused) || attempt >= 2) throw err;
+      }
     }
+  } finally {
+    await releaseLarge();
   }
 }
 
@@ -1140,7 +1278,10 @@ async function sidesDone(deps: Deps, ws: WorkspaceRef, id: string): Promise<{ au
 
 /** Bring the heads to the folder's content in one revision: the way in for a
  *  workspace that predates the journal (the importer, phase 8), and the repair
- *  after a journal overflow. Text files only, as the tree reader lists them. */
+ *  after a journal overflow. Every file scanFolder lists, whatever it holds
+ *  (until 13 Nov 2026: only the text files the editor lists, so a binary file
+ *  never reached a head and one the importer had put there was never updated
+ *  or removed — a run staged from the head was handed files deleted days ago). */
 export async function reconcileWorkspace(tenant: string, workspace: string, by = "reconcile"): Promise<PublishResult | null> {
   const deps = backend;
   if (!deps) return null;
@@ -1157,40 +1298,47 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
     // would diff a stale copy against a newer head, and with that head as each
     // path's base the publish would undo the newer write without a conflict.
     const heads = await headsOf(deps, ws);
-    const tree = currentTree(tenant, workspace);
-    if (!tree) return null;
+    const scan = await scanFolder(tenant, workspace);
+    if (!scan) return null;
     const head = await manifestsAt(deps, tenant, heads);
-    const bytes = new Map<string, Buffer>();
+    const onDisk = new Map<string, string>();
     const want: Manifest = emptyManifest();
     const have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
-    for (const f of tree) {
-      const side = sideOf(f.path);
-      if (!side || f.after === null) continue;
-      const buf = Buffer.from(f.after, "utf8");
-      const sha = sha256Hex(buf);
-      bytes.set(sha, buf);
-      want.files[f.path] = { sha, size: buf.length, mode: modeOf(tenant, workspace, f.path) };
+    for (const [rel, f] of scan.files) {
+      onDisk.set(f.sha, f.abs);
+      want.files[rel] = { sha: f.sha, size: f.size, mode: f.mode };
     }
-    // A path the tree reader does not list but the folder still holds (a binary
-    // file) is neither added nor removed here; one that is gone from the folder
-    // is gone from the head.
-    const dir = workspaceDir(tenant, workspace);
+    // A path the scan could not take (unreadable now, a name the manifest
+    // refuses) but the folder still holds is neither added nor removed here;
+    // one that is gone from the folder is gone from the head.
+    // Never beside a name that differs from it only by case (a manifest holds
+    // one of the two): the folder's first, as the scan chose, is the one kept.
+    const taken = new Set(Object.keys(want.files).map((p) => p.toLowerCase()));
     for (const p of Object.keys(have.files)) {
-      if (!(p in want.files) && fs.existsSync(path.join(dir, p))) want.files[p] = have.files[p];
+      if (!(p in want.files) && scan.left.has(p) && !taken.has(p.toLowerCase())) want.files[p] = have.files[p];
     }
     const changes = diffManifests(have, want);
     if (!Object.keys(changes).length) return null;
-    return await publish(deps, {
+    // The heads it was diffed against are part of the id: the same changes
+    // over a different head (the head was restored since) are a new repair,
+    // not a retry of the earlier one.
+    const opId = opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40));
+    const release = await uploadLarge(deps, tenant, changes, onDisk, opId);
+    try {
+      return await publish(deps, {
       ws,
-      // The heads it was diffed against are part of the id: the same changes
-      // over a different head (the head was restored since) are a new repair,
-      // not a retry of the earlier one.
-      opId: opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40)),
+      opId,
       by,
       message: "workspace content recorded",
       changes,
-      bytesOf: async (sha) => bytes.get(sha)!,
-    });
+      // Read when asked, one file at a time; publish checks the bytes against
+      // the sha, so a file that changed since the scan fails this repair (the
+      // mark is put back and the next one sees the new bytes).
+        bytesOf: async (sha) => fs.readFileSync(onDisk.get(sha)!),
+      });
+    } finally {
+      await release();
+    }
   } catch (err) {
     if (wasMarked) marked.add(k);
     if (wasUnjournalled) unjournalled.add(k);
@@ -1308,7 +1456,11 @@ export async function readRevisionDetail(tenant: string, workspace: string, id: 
     if (forPath && p !== forPath) continue;
     const was = before.files[p];
     const now = mine.files[p];
-    const text = async (e: typeof was) => (e ? (await blobBytes(deps, tenant, e.sha))?.toString("utf8") ?? null : null);
+    const text = async (e: typeof was) => {
+      const b = e ? await blobBytes(deps, tenant, e.sha) : null;
+      // A file that is not text has nothing to diff: say what it is.
+      return b ? (isText(b) ? b.toString("utf8") : `(binary file, ${b.length} bytes, sha256 ${e!.sha.slice(0, 12)})`) : null;
+    };
     files.push({ path: p, before: clip(await text(was)), after: c.op === "delete" ? null : clip(await text(now)) });
   }
   return { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, files };
@@ -1330,6 +1482,11 @@ export async function snapshotFiles(tenant: string, workspace: string, id: strin
   for (const [p, e] of Object.entries(m.files).sort(([a], [b]) => a.localeCompare(b))) {
     const b = await blobBytes(deps, tenant, e.sha);
     if (!b) throw new BlobMissing(p, e.sha);
+    // Text only: this is what a restore writes back through a deploy, as text.
+    // A binary file is left where it is, as files outside history always were
+    // (13 Nov 2026: until then its bytes were decoded as text here, and a
+    // restore would have written the damaged copy over the file).
+    if (!isText(b)) continue;
     out.push({ path: p, content: b.toString("utf8") });
   }
   return out;
@@ -1381,6 +1538,16 @@ export async function readHeadText(tenant: string, workspace: string, rel: strin
     opsError("revisions.read_failed", err, { tenant, workspace }, "warn");
     return null;
   }
+}
+
+/** The folder and the head were seen to disagree (a run's stage-in compares
+ *  them): bring the head to the folder, in the background. */
+export function requestReconcile(tenant: string, workspace: string): void {
+  if (!journalOn()) return;
+  const k = key(tenant, workspace);
+  if (marked.has(k)) return;
+  marked.add(k);
+  setImmediate(() => void drain(k));
 }
 
 /** Is the head known, in this process, not to hold the folder's copy of `rel`?

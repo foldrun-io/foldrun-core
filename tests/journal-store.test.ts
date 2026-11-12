@@ -15,7 +15,7 @@ import { fsJournalStore, type JournalStore, type JournalRecord } from "../src/jo
 import { workspaceDir, writeWorkspaceFile } from "../src/store.ts";
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRevisionStore } from "../src/revision-store.ts";
-import { setRevisionBackend, resetJournalForTests, flushRevisions, recoverJournal, readAtHead, pendingRevisions, dropJournal } from "../src/workspace-revisions.ts";
+import { setRevisionBackend, resetJournalForTests, flushRevisions, recoverJournal, readAtHead, pendingRevisions, dropJournal, recordStepOutputs } from "../src/workspace-revisions.ts";
 import type { Deps } from "../src/publish.ts";
 
 /** A store in memory: what a table does, for the contract and the wiring. */
@@ -128,13 +128,30 @@ test("boot replays the store's entries AND what the volume held from before, old
 test("a torn entry in the store is set aside, not replayed, and does not stop the others", async () => {
   fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "good.md"), "body journalgood001\n");
   const mem = memoryJournalStore();
-  mem.put({ ...rec("journalbad0001"), v: 2 as unknown as 1 });
+  mem.put({ ...rec("journalbad0001"), v: 3 as unknown as 1 });
   mem.put(rec("journalgood001", "memory/good.md"));
   setRevisionBackend(deps, { ...ON, journalStore: mem });
   const out = await recoverJournal({ minAgeMs: 0 });
   assert.equal(out.entries, 1);
   assert.equal(mem.rows.get(`${T}\0${W}\0journalbad0001`)?.aside, true);
   assert.equal((await readAtHead(T, W, "memory/good.md"))?.toString(), "body journalgood001\n");
+});
+
+test("a binary file is written down as base64 in a version-2 entry, and a replay commits its bytes", async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80]);
+  fs.mkdirSync(path.join(workspaceDir(T, W), "agents", "a", "outputs"), { recursive: true });
+  fs.writeFileSync(path.join(workspaceDir(T, W), "agents", "a", "outputs", "pic.png"), png);
+  const mem = memoryJournalStore();
+  setRevisionBackend(deps, { ...ON, journalStore: mem });
+  assert.equal(recordStepOutputs(T, W, [{ path: "agents/a/outputs/pic.png", base: null, after: png }, { path: "memory/t.md", base: null, after: Buffer.from("t\n") }], { runId: "run-bin", step: 1 }), 2);
+  const [row] = [...mem.rows.values()];
+  assert.equal(row.rec.v, 2);
+  assert.deepEqual(row.rec.files.map((f) => [f.path, f.enc ?? "text", f.after]), [["agents/a/outputs/pic.png", "base64", png.toString("base64")], ["memory/t.md", "text", "t\n"]]);
+  // the process dies before the commit; the next one replays the row
+  resetJournalForTests();
+  assert.equal((await recoverJournal({ minAgeMs: 0 })).entries, 1);
+  assert.deepEqual(await readAtHead(T, W, "agents/a/outputs/pic.png"), png);
+  assert.equal(mem.rows.size, 0);
 });
 
 test("a store that refuses the write leaves the change in memory (and says so); the commit still happens", async () => {

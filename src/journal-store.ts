@@ -20,11 +20,12 @@ import path from "node:path";
 
 /** What is stored: the whole entry (new content only, never the old text). */
 export interface JournalRecord {
-  v: 1;
+  /** 2: some file is not text and rides as base64 (`enc`). */
+  v: 1 | 2;
   tenant: string;
   workspace: string;
   id: string;
-  files: { path: string; before: null; after: string | null; base?: string | null; handed?: string | null }[];
+  files: { path: string; before: null; after: string | null; base?: string | null; handed?: string | null; enc?: "base64" }[];
   by: string;
   message: string;
   at: string;
