@@ -450,8 +450,12 @@ export async function sendPlainNotification(
   tenant: string,
   workspace: string,
   msg: { event: string; headline: string; detail: string; flow?: string; runId?: string },
+  /** FOL-159, its own trailing argument so the signature only widened:
+   *  `asking` — a question an agent asked, which also matches `events: [asking]`;
+   *  `extra` — fields the webhook body gains (bodies only ever gain fields). */
+  opts: { asking?: boolean; extra?: Record<string, unknown> } = {},
 ): Promise<boolean> {
-  return (await sendPlainNotificationOutcome(tenant, workspace, msg)).ok;
+  return (await sendPlainNotificationOutcome(tenant, workspace, msg, opts)).ok;
 }
 
 /**
@@ -464,6 +468,10 @@ export async function sendPlainNotificationOutcome(
   tenant: string,
   workspace: string,
   msg: { event: string; headline: string; detail: string; flow?: string; runId?: string },
+  /** FOL-159, its own trailing argument so the signature only widened:
+   *  `asking` — a question an agent asked, which also matches `events: [asking]`;
+   *  `extra` — fields the webhook body gains (bodies only ever gain fields). */
+  opts: { asking?: boolean; extra?: Record<string, unknown> } = {},
 ): Promise<{ ok: boolean; retrying: boolean }> {
   const no = { ok: false, retrying: false };
   const config = notifyConfig(tenant, workspace);
@@ -473,9 +481,10 @@ export async function sendPlainNotificationOutcome(
   // happens to produce no failed run for the normal path to report. A
   // destination hearing about failures hears about these; naming one
   // explicitly also turns it on; leaving `failed` out silences them.
-  if (!config.events.includes(msg.event) && !config.events.includes("failed")) return no;
+  if (!config.events.includes(msg.event) && !(opts.asking && config.events.includes("asking")) && !config.events.includes("failed")) return no;
 
   const body = {
+    ...(opts.extra ?? {}),
     text: `${msg.headline} — ${msg.detail} · ${workspace}`,
     workspace,
     status: msg.event,

@@ -23,6 +23,7 @@
 //
 // No vault, no MCP: values in, values out. a2a-tools.ts is the agent's side.
 
+import { spellingJoiners } from "./joiners.ts";
 import crypto from "node:crypto";
 import { viaEgress } from "./egress.ts";
 import { capBody, ResponseTooLarge } from "./untrusted-fetch.ts";
@@ -168,7 +169,11 @@ const HIDDEN = /[​-‏‪-‮⁠-⁤⁦-⁩﻿\u0000-\u0008\u000B\u000C\u000E-
 /** `text` with hidden characters removed, and how many there were. */
 export function stripHidden(text: string): { text: string; removed: number } {
   let removed = 0;
-  const out = text.replace(HIDDEN, () => {
+  // A joiner that is spelling (a Persian half-space, an Indic or emoji
+  // joiner — joiners.ts) stays: removing it misspells the word.
+  const spelling = spellingJoiners(text);
+  const out = text.replace(HIDDEN, (m: string, at: number) => {
+    if (spelling.has(at)) return m;
     removed++;
     return "";
   });

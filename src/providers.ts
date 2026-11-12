@@ -59,6 +59,11 @@ export interface ProviderPreset {
    *  to. Only set where the parameter is documented; an endpoint that does
    *  not know it may refuse the request. */
   promptCacheKey?: boolean;
+  /** What the endpoint can be shown (FOL-163): unset is the format's
+   *  default — images yes; PDFs on `responses`, not on `openai` (Chat
+   *  Completions has no portable PDF part). Set `pdf: true` only where the
+   *  endpoint is documented to take Chat's `file` part. */
+  media?: { images?: boolean; pdf?: boolean };
   /** One line a person should read before relying on it. */
   note?: string;
   /** A tool loop was driven through this endpoint from this runtime. */

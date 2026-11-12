@@ -105,12 +105,18 @@ export const FIELDS: Record<string, Kind> = {
   runId: "id", jobId: "id", taskId: "id", proposal: "id", lease: "id", pod: "id",
   worker: "id", provider: "id", plan: "id", fingerprint: "id", invoice: "id", order: "id",
   stripeEvent: "id", subscription: "id", migration: "id", housekeeping: "id",
+  // Who asked, for the operator console's per-account timeline (D239 phase 1,
+  // 12 Nov 2026): a member's id and an API key's id (never an email — `@`
+  // does not fit an id, so one cannot slip in), and the request's own id.
+  user: "id", key: "id", requestId: "id",
   // How many, how long, how much.
   count: "num", ms: "num", secs: "num", bytes: "num", usd: "num", attempt: "num",
   step: "num", port: "num", status: "num", exitCode: "num", percent: "num", tries: "num",
   // What kind.
   op: "word", role: "word", outcome: "word", reason: "word", stream: "word", kind: "word",
   verdict: "word", phase: "word", signal: "code", where: "word",
+  // Where a refusal happened: login, api, gateway, mcp, a2a, egress, webhook.
+  surface: "word",
   // A run's sandbox (FOL-122): the runner image and size class — the
   // platform's own words — and the model, an identifier like a flow's name
   // (one with `/` or `:` in it does not fit, and is dropped).
@@ -163,12 +169,21 @@ export function opsLine(level: OpsLevel, event: string, fields: OpsFields = {}):
 // ------------------------------------------------------------------ writing
 
 type Write = (text: string) => void;
-/** The real streams, once the boundary holds them; null outside it. */
-let real: { out: Write; err: Write } | null = null;
+/** The real streams, once the boundary holds them; null outside it. Held on
+ *  globalThis, not in this module: a bundler can load this file more than
+ *  once in one process (Next.js gives the instrumentation hook and the route
+ *  handlers their own copies), and a copy that could not see the boundary
+ *  printed the readable form through console.*, which the boundary then
+ *  turned into a bare {"event":"console"} line — every web route's ops line
+ *  was lost that way (D239 phase 1, found on dev 12 Nov 2026). */
+const BOUNDARY = Symbol.for("foldrun.ops-log.boundary");
+type Streams = { out: Write; err: Write };
+const shared = globalThis as unknown as Record<symbol, Streams | null | undefined>;
+const boundary = (): Streams | null => shared[BOUNDARY] ?? null;
 
 /** Is this process inside the boundary — a hosted pod? */
 export function opsBoundaryInstalled(): boolean {
-  return real !== null;
+  return boundary() !== null;
 }
 
 function readable(level: OpsLevel, line: Record<string, unknown>, detail?: string): string {
@@ -179,6 +194,7 @@ function readable(level: OpsLevel, line: Record<string, unknown>, detail?: strin
 }
 
 function emit(level: OpsLevel, line: Record<string, unknown>, detail?: string): void {
+  const real = boundary();
   if (real) {
     (level === "info" ? real.out : real.err)(JSON.stringify(line) + "\n");
     return;
@@ -337,7 +353,7 @@ function messageOf(err: unknown): string {
 /** A failure: its class and where it happened — never its words inside the
  *  boundary. A field the caller names (an `errorClass` it knows) wins. */
 export function opsError(event: string, err: unknown, fields: OpsFields = {}, level: OpsLevel = "error"): void {
-  emit(level, opsLine(level, event, { ...errorFields(err), ...fields }), real ? undefined : messageOf(err));
+  emit(level, opsLine(level, event, { ...errorFields(err), ...fields }), boundary() ? undefined : messageOf(err));
 }
 
 // ----------------------------------------------------------------- boundary
@@ -371,11 +387,11 @@ export interface BoundaryOptions {
  */
 export function installOpsBoundary(opts: BoundaryOptions = {}): boolean {
   const env = opts.env ?? process.env;
-  if (real) return true;
+  if (boundary()) return true;
   if (env.FOLDRUN_LOG_MODE === "raw" || (env.FOLDRUN_LOG_MODE !== "ops" && env.NODE_ENV === "development")) return false;
   const outWrite = process.stdout.write.bind(process.stdout) as (s: string) => boolean;
   const errWrite = process.stderr.write.bind(process.stderr) as (s: string) => boolean;
-  real = { out: (s) => void outWrite(s), err: (s) => void errWrite(s) };
+  shared[BOUNDARY] = { out: (s) => void outWrite(s), err: (s) => void errWrite(s) };
 
   const fromConsole = (level: OpsLevel) => (...args: unknown[]) => {
     // Never formatted: an argument's text, its inspect() and its toJSON()

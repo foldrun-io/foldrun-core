@@ -48,6 +48,9 @@ import type { TranslatorSpec } from "./translator.ts";
 import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
 import type { RemoteSpec } from "./a2a-remotes.ts";
 import { putStepState, getStepState, dropStepState } from "./step-state.ts";
+import { stageRunInputs, type RunInputFile } from "./storage.ts";
+import { INPUTS_DIR, stagedLine } from "./run-inputs.ts";
+import { textBesideInputs } from "./input-text.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -121,6 +124,9 @@ export interface ContainerStepInput {
    *  parallel group, gathered host-side at launch. The driver rebuilds the
    *  colleagues' tools in here over the lease's /peers door. */
   peers?: { self: string; siblings: PeerInfo[] };
+  /** tools: [text] — extract_text, rebuilt in here over the lease's /text
+   *  door to the extraction service (text-tool.ts). */
+  text?: boolean;
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -497,6 +503,14 @@ export function mergeAppends(was: Buffer | string | null, host: Buffer, next: Bu
 }
 
 export interface ApplyOptions {
+  /** Never take back what is under this workspace-relative folder (with its
+   *  trailing `/`) — a step's staged inputs (FOL-163): whatever it does in
+   *  there stays in the sandbox. Checked before anything is read. */
+  drop?: string;
+  /** Take back only what is under this workspace-relative folder (with its
+   *  trailing `/`) — a snapshot run's outputs (Part B3): the folder it was
+   *  given, and anything it copied anywhere else, never reach the workspace. */
+  keepOnly?: string;
   /** What the host handed back into this sandbox mid-step — a `sandbox: own`
    *  job's files (delegate-tools.ts), path → sha256 — as the HOST recorded
    *  it (StepRecord.handedBack). The sandbox's own note of the same is only
@@ -567,10 +581,16 @@ export function applyContainerChanges(
       // A link to a directory threw EISDIR and aborted the whole copy-out.
       // (kubectl cp already skips symlinks; this makes the two tiers agree.)
       if (entry.isSymbolicLink()) continue;
+      const posix = rel.replaceAll("\\", "/");
       if (entry.isDirectory()) {
+        const d = posix + "/";
+        if (opts.drop && d.startsWith(opts.drop)) continue;
+        if (opts.keepOnly && !(d.startsWith(opts.keepOnly) || opts.keepOnly.startsWith(d))) continue;
         if (allowedBack(rel + "/")) walk(abs);
         continue;
       }
+      if (opts.drop && (posix.startsWith(opts.drop) || `${posix}/` === opts.drop)) continue;
+      if (opts.keepOnly && !posix.startsWith(opts.keepOnly)) continue;
       if (!allowedBack(rel)) continue;
       let next: Buffer = fs.readFileSync(abs);
       // What the step was handed: its bytes (a staging dir) or its hash.
@@ -895,6 +915,7 @@ try {
   const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
   const { httpChannel, buildAskTool, buildPeerTools, inboxReader } = await import("@foldrun/core/operator");
   const { buildDelegateTools } = await import("@foldrun/core/delegate-tools");
+  const { buildTextTools } = await import("@foldrun/core/text-tool");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
@@ -1008,6 +1029,9 @@ try {
   const ask = input.ask ? buildAskTool({ channel, timeoutSec: input.ask.timeoutSec, emit }) : { server: null };
   const peers = input.peers ? buildPeerTools({ channel, self: input.peers.self, siblings: input.peers.siblings, emit }) : { server: null };
   const inbox = channel ? inboxReader(channel, emit) : undefined;
+  // tools: [text] — a file as text, through the extraction service behind
+  // the same proxy; the lease was granted the door only for this tool.
+  const textTool = input.text ? buildTextTools({ egress: env.FOLDRUN_EGRESS || null, agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", emit }) : { server: null };
   // sandbox: own sub-agents: a tool each, whose job runs in its own sandbox
   // on the worker, reached over the same proxy door.
   const delegate = input.delegates?.length ? buildDelegateTools({ specs: input.delegates, channel, emit, timeoutSec: input.timeoutSec, workspaceRoot: "/workspace" }) : { server: null };
@@ -1064,6 +1088,7 @@ try {
       ...(desks.server ? { foldrun_desks: desks.server } : {}),
       ...(ask.server ? { foldrun_ask: ask.server } : {}),
       ...(peers.server ? { foldrun_peers: peers.server } : {}),
+      ...(textTool.server ? { foldrun_text: textTool.server } : {}),
       ...(delegate.server ? { foldrun_delegate: delegate.server } : {}),
       ...(install.server ? { foldrun_install: install.server } : {}),
       ...input.mcpServers,
@@ -1876,6 +1901,15 @@ export function heldCores(cpus: string, isolation: string | undefined, available
 
 export interface RunInContainerArgs {
   workspaceRoot: string;
+  /** A snapshot run (Part B3): the folder a person sent, by id, for this
+   *  step to work on. Only an executor that says it can (`supportsSnapshot`
+   *  on its IsolatedStepRunner) is ever given one: it stages the folder at
+   *  agents/<name>/snapshot/, takes back only that agent's outputs/, and
+   *  leaves the patch there as outputs/snapshot.patch. */
+  snapshot?: { id: string };
+  /** FOL-163: the run's inputs, for the step its task reaches — staged at
+   *  <agentRel>/inputs/ after the workspace copy, never copied back. */
+  inputs?: { runId: string; files: RunInputFile[] };
   /** A person approved this step before it ran: configuration and code it
    *  changed are kept, not refused (copy-back.ts, FOL-96). */
   configWrites?: boolean;
@@ -2160,6 +2194,28 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       const laid = overlayTestWrites(wsIn, args.divert.to);
       if (laid.length) args.emit("info", `test: this step sees ${laid.length} file${laid.length === 1 ? "" : "s"} earlier steps of this run wrote`);
     }
+    // The run's inputs (FOL-163), at <agentRel>/inputs/ — after the copy and
+    // the test overlay, so the copy is their baseline too and a folder of
+    // that name in the workspace never mixes in.
+    if (args.inputs?.files.length) {
+      if (!args.tenant) throw new Error("a step with inputs needs its account");
+      const inputsDir = path.join(wsIn, args.input.agentRel, INPUTS_DIR);
+      const staged = await stageRunInputs(args.tenant, path.basename(args.workspaceRoot), args.inputs.runId, args.inputs.files, inputsDir);
+      args.emit("info", stagedLine(staged.files, staged.bytes));
+      // `<file>.txt` beside the media ones, when the platform extracts text:
+      // best effort, bounded, never a reason the step does not start.
+      if (platform.extractText) {
+        await textBesideInputs({
+          tenant: args.tenant,
+          workspace: path.basename(args.workspaceRoot),
+          runId: args.inputs.runId,
+          files: args.inputs.files,
+          dir: inputsDir,
+          extract: (ask) => platform.extractText!(ask),
+          emit: (line) => args.emit("info", line),
+        });
+      }
+    }
     const libIn = path.join(staging, "library");
     if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });
     if (fs.existsSync(args.libraryRoot)) fs.cpSync(args.libraryRoot, libIn, { recursive: true });
@@ -2325,6 +2381,8 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
         allowConfig: args.configWrites === true,
         onKept: (r) => kept.push(r),
         revision: args.tenant ? { tenant: args.tenant, runId: args.runId, step: containerId, base: pinned?.base ?? null } : undefined,
+        // Staged inputs stay in the sandbox, whatever the step did there (FOL-163).
+        ...(args.inputs?.files.length ? { drop: `${args.input.agentRel}/${INPUTS_DIR}/` } : {}),
       });
       if (refused.length) args.emit("info", refusedLine(refused));
       if (kept.length) args.emit("info", keptLine(kept));

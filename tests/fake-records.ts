@@ -72,6 +72,13 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
     runAll: (t, w) => inWs(t, w).sort(newest).map((r) => structuredClone(r.run)),
     runRecent: (t, w, flow, limit) => inWs(t, w).filter((r) => r.run.flow === flow).sort(newest).slice(0, limit).map((r) => structuredClone(r.run)),
     runsSince: (t, w, ms) => inWs(t, w).filter((r) => Date.parse(r.run.startedAt) >= ms).sort(newest).map((r) => structuredClone(r.run)),
+    runsInContext: (t, w, key, before, test, limit) =>
+      inWs(t, w)
+        .filter((r) => r.summary.context?.key === key && (r.run.status === "completed" || r.run.status === "failed") && r.run.startedAt < before && !!r.run.finishedAt && r.run.finishedAt <= before && (r.run.test === true) === test)
+        .sort(newest)
+        .slice(0, limit)
+        .map((r) => structuredClone(r.run)),
+    openRunsOfCustomer: (t, customer) => [...runs.entries()].filter(([key, r]) => key.startsWith(`${t}\0`) && r.live && r.summary.customer === customer).length,
     runStamp: (t, w, id) => runs.get(k(t, w, id))?.stamp ?? null,
     triggerAppend(t, w, e) {
       const l = triggers.get(k(t, w)) ?? [];

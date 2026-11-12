@@ -378,3 +378,39 @@ test("a failed attempt's error never quotes the URL with its secret filled in", 
       server.close();
     }
   }));
+
+test("a question an agent asks: `asking` subscribes to questions alone, the body says it is one, awaiting-approval still hears it (FOL-159)", () =>
+  withWorkspace(null, async () => {
+    const { sendPlainNotification } = await import("../src/notify.ts");
+    const bodies: string[] = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        bodies.push(body);
+        res.writeHead(200).end("ok");
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    const events = (list: string) =>
+      fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nnotify:\n  url: http://127.0.0.1:${port}/hook\n  events: [${list}]\n---\n`);
+    const question = { event: "awaiting-approval", headline: "writer is asking you something", detail: "Which colour?", runId: "run-q" };
+    const asking = { asking: true, extra: { reason: "question", question: { text: "Which colour?", options: ["blue", "red"], agent: "writer" } } };
+    const gate = { event: "awaiting-approval", headline: "a gate", detail: "approve the publish step", runId: "run-g" };
+    try {
+      events("asking");
+      assert.equal(await sendPlainNotification("acme", "desk", question, asking), true, "asking hears a question");
+      assert.equal(await sendPlainNotification("acme", "desk", gate), false, "asking alone does not hear a gate");
+      const payload = JSON.parse(bodies[0]!);
+      assert.equal(payload.reason, "question");
+      assert.deepEqual(payload.question, { text: "Which colour?", options: ["blue", "red"], agent: "writer" });
+      assert.equal(payload.status, "awaiting-approval");
+      assert.equal(payload.runId, "run-q");
+      events("awaiting-approval");
+      assert.equal(await sendPlainNotification("acme", "desk", question, asking), true, "the old subscription still hears questions");
+    } finally {
+      server.close();
+    }
+  }));

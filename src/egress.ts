@@ -118,6 +118,10 @@ export interface EgressGrant {
    *  that has to put a rate-limit reset into words — and a reset time is
    *  only useful in the calendar the step works to. See refusal.ts. */
   timezone?: string;
+  /** FOL-168: the end customer the run is for — written by the worker from
+   *  the run record, never by the sandbox. The proxy refuses a blocked one's
+   *  model calls and tells the provider its hashed end-user id. */
+  customer?: string;
   /** Which sites the step may reach through the proxy's forward door
    *  (network.ts). Absent on a grant from a runner that predates it: the
    *  forward door then allows only the hosts the secrets were granted to. */
@@ -188,11 +192,14 @@ export interface EgressHooks {
    *  addresses a colleague's message to the right inbox.
    *  `delegates` — the `sandbox: own` sub-agents this step may hand a job
    *  to over the delegate door (delegate-tools.ts); the proxy refuses any
-   *  other name. */
+   *  other name.
+   *  `text` — the step's agent holds tools: [text] (text-tool.ts): the proxy
+   *  serves its `POST /text/<lease>` door to the extraction service, and
+   *  refuses it on every other lease. */
   /** `job` — a lease for a host-side model call (an eval's judge, a
    *  grader, a draft, the assistant) rather than a step: what the model
    *  gateway records the call against. */
-  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[]; job?: { kind: "grade" | "judge" | "draft" | "assistant"; name?: string } }): Promise<EgressLease | null>;
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[]; text?: boolean; job?: { kind: "grade" | "judge" | "draft" | "assistant"; name?: string } }): Promise<EgressLease | null>;
   /** The run is still being driven: renew its leases' heartbeat. Optional —
    *  an install without leases has nothing to renew. */
   renew?(runId: string): Promise<number>;

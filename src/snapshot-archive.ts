@@ -64,6 +64,9 @@ export function snapshotPathProblem(p: string): string | null {
   const parts = p.split("/");
   if (parts.length > MAX_DEPTH) return `a path deeper than ${MAX_DEPTH} folders`;
   if (parts.some((s) => s === "" || s === "." || s === "..")) return "an empty, `.` or `..` segment";
+  // The files, never a repository: a `.git` sent in could become git's own
+  // configuration (hooks, fsmonitor) wherever git later reads the folder.
+  if (parts.some((s) => s.toLowerCase() === ".git")) return "a `.git` folder or file — send the files, not the repository";
   return null;
 }
 

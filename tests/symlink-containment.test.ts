@@ -21,7 +21,7 @@ import {
   writeWorkspaceFile,
   renameWorkspaceFile,
   deleteWorkspacePath,
-  runOutputPath,
+  runOutputPathOnVolume as runOutputPath,
 } from "../src/store.ts";
 
 const TENANT = "fol83-links";

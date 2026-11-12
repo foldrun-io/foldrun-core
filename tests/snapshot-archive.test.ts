@@ -75,6 +75,10 @@ test("paths that escape, hide or confuse are refused", () => {
   refused(archive(raw("ctl\u0007.txt", { content: Buffer.from("x") })), /control/);
   refused(archive(raw("x".repeat(90), { prefix: "/abs", content: Buffer.from("x") })), /absolute/);
   refused(archive(raw(`${"d/".repeat(33)}f`.slice(0, 99), { content: Buffer.from("x") })), /deeper/);
+  refused(archive(raw(".git/config", { content: Buffer.from("[core]\n\tfsmonitor = sh -c id\n") })), /`\.git`/);
+  refused(archive(raw("sub/.GIT/hooks/pre-commit", { content: Buffer.from("x") })), /`\.git`/);
+  assert.throws(() => packSnapshot([f(".git", "gitdir: /elsewhere")]), /`\.git`/);
+  assert.equal(unpackSnapshot(archive(raw(".gitignore", { content: Buffer.from("dist/\n") }), raw(".github/ci.yml", { content: Buffer.from("x") }))).entries.length, 2, "only the exact name");
 });
 
 test("a path twice (also by case) and a file where a folder is are refused", () => {

@@ -29,6 +29,7 @@ import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-sc
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
 import { SUPPLY_TITLES, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
 import type { StepSupply } from "./store.ts";
+import { archiveRunOutputs, noteRefused } from "./run-outputs.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
 import { platform } from "./platform.ts";
 import { healthKey } from "./secret-health.ts";
@@ -45,6 +46,7 @@ import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentToo
 import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNames, localDelegateChannel, readCopyBack } from "./delegate-tools.ts";
 import type { DelegationResult } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
+import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
@@ -127,6 +129,9 @@ import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
+import { earlierTurns, conversationBlock, type RunContext, type RunInput } from "./conversation.ts";
+import { inputsNote, type RunInputFile } from "./run-inputs.ts";
+import { textCandidates } from "./input-text.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
 export { localDate } from "./clock.ts";
@@ -137,7 +142,7 @@ export { localDate } from "./clock.ts";
 /** Remote MCP servers with each bound secret's value put back as its
  *  `${NAME}`, granted to that server's host — the sandbox then holds the
  *  name and the proxy fills it, as for an http tool. */
-function unbindMcpHeaders(
+export function unbindMcpHeaders(
   servers: Record<string, McpServerConfig>,
   bound: string[],
   values: Record<string, string>,
@@ -146,34 +151,80 @@ function unbindMcpHeaders(
   const known = Object.fromEntries(bound.filter((n) => n in values).map((n) => [n, values[n]]));
   const out: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
-    if (server.type !== "http" || !server.headers) {
+    if (server.type !== "http") {
       out[name] = server;
       continue;
     }
     const host = hostOf(server.url);
+    const tpl = MCP_TEMPLATES.get(server);
+    if (host && tpl) {
+      // From the server's own text, not by finding values in it (FOL-160,
+      // Codex): a bound name stays ${NAME} — granted to this host for the
+      // proxy to fill — however short its value; every other name is filled
+      // exactly as mcpConfig filled it.
+      const render = (text: string) =>
+        text.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, n: string) => {
+          if (n in known) {
+            addGrant(grant, n, known[n]!, host);
+            return whole;
+          }
+          return getSecret(tpl.tenant, n, tpl.workspace)?.value ?? whole;
+        });
+      // The address itself — scheme and host — must stay routable: a bound
+      // secret there would leave the sandbox a URL it cannot call, and filling
+      // it would send the secret in. Refused, saying where it may go (Codex).
+      const origin = /^[^:/?#]*:\/\/[^/?#]*/.exec(tpl.url)?.[0] ?? tpl.url;
+      const inOrigin = placeholderNames(origin).filter((n) => n in known);
+      if (inOrigin.length) {
+        throw new Error(`MCP server ${name}: ${inOrigin.join(", ")} is bound to sites and names part of the server's address — bind it to the server's host and put it in a header or the URL's path or query`);
+      }
+      out[name] = { ...server, url: render(tpl.url), headers: Object.fromEntries(Object.entries(tpl.headers).map(([k, v]) => [k, render(v)])) };
+      continue;
+    }
+    // A config made elsewhere (no template): put each bound value back by value.
     out[name] = host
-      ? { ...server, headers: Object.fromEntries(Object.entries(server.headers).map(([k, v]) => [k, unsubstitute(v, known, host, grant)])) }
+      ? {
+          ...server,
+          url: unsubstitute(server.url, known, host, grant),
+          ...(server.headers ? { headers: Object.fromEntries(Object.entries(server.headers).map(([k, v]) => [k, unsubstitute(v, known, host, grant)])) } : {}),
+        }
       : server;
   }
   return out;
 }
 
-function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerConfig {
+function remembered(cfg: McpServerConfig, tpl: { url: string; headers: Record<string, string>; tenant: string; workspace: string }): McpServerConfig {
+  MCP_TEMPLATES.set(cfg, tpl);
+  return cfg;
+}
+
+/** The secrets a remote MCP server names in its URL and headers. */
+function mcpSecretNames(spec: McpSpec): string[] {
+  return spec.url ? [...placeholderNames(spec.url), ...Object.values(spec.headers ?? {}).flatMap(placeholderNames)] : [];
+}
+
+/** A remote server's config → the text it was filled from, so a bound secret
+ *  is put back by NAME (unbindMcpHeaders), never found by its value. */
+const MCP_TEMPLATES = new WeakMap<McpServerConfig, { url: string; headers: Record<string, string>; tenant: string; workspace: string }>();
+
+export function mcpConfig(spec: McpSpec, tenant: string, workspace: string): McpServerConfig {
+  const fillOne = (v: string) =>
+    v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
+      const hit = getSecret(tenant, secretName, workspace);
+      return hit ? hit.value : whole;
+    });
   const fill = (values: Record<string, string>) => {
     const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(values)) {
-      out[k] = v.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, secretName) => {
-        const hit = getSecret(tenant, secretName, workspace);
-        return hit ? hit.value : whole;
-      });
-    }
+    for (const [k, v] of Object.entries(values)) out[k] = fillOne(v);
     return out;
   };
   // alwaysLoad: the SDK defers MCP tools behind tool search by default, which
   // hides them from an agent whose toolset we've already narrowed. A server
   // the author explicitly granted should be present from turn one.
   return spec.url
-    ? { type: "http", url: spec.url, headers: fill(spec.headers), alwaysLoad: true }
+    ? // ${NAME} in the URL as in the headers (FOL-160); a site-bound one goes
+      // back to its name for the egress proxy (unbindMcpHeaders).
+      remembered({ type: "http", url: fillOne(spec.url), headers: fill(spec.headers), alwaysLoad: true }, { url: spec.url, headers: spec.headers, tenant, workspace })
     : {
         type: "stdio",
         command: spec.command!,
@@ -460,6 +511,13 @@ export function readAgentsMd(dir: string): { data: Record<string, unknown>; body
 }
 
 const workspaceRootOf = (agentDir: string) => path.join(agentDir, "..", "..");
+
+/** What a snapshot step is told (Part B3). */
+const SNAPSHOT_NOTE =
+  "The folder you were sent to work on is in snapshot/ (inside your working directory). Make your changes there, as files: " +
+  "when you finish, foldrun turns what changed in snapshot/ into a patch the person applies. " +
+  "Only snapshot/ (as that patch) and your outputs/ come back from this step; anything you write elsewhere is not kept. " +
+  "Do not create links or a .git folder in snapshot/ — links make the patch refused, and .git is left out.";
 
 /**
  * Configuration from AGENTS.md, nearest-wins: the workspace's overrides the
@@ -1184,6 +1242,10 @@ export function agentContext(
   // Does any granted tool act outside the workspace (`outward: true`)? The
   // retry policy reads it: see launchStep.
   let outward = false;
+  // The secrets a REMOTE MCP server names in its URL or headers (FOL-160,
+  // Codex): resolved and checked for site bindings as an API's are, so a
+  // bound one is put back by name and filled by the proxy, never sent in.
+  const mcpSecretRefs: string[] = [];
   const grantOwnTool = (name: string) => {
     const def = available[name];
     if (!def) {
@@ -1202,6 +1264,7 @@ export function agentContext(
     else {
       mcpServers[def.name] = mcpConfig(def.spec, tenant, workspace);
       mcpNames.push(def.name);
+      mcpSecretRefs.push(...mcpSecretNames(def.spec));
     }
   };
 
@@ -1214,6 +1277,7 @@ export function agentContext(
       if (def?.kind === "mcp") {
         mcpServers[name] = mcpConfig(def.spec, tenant, workspace);
         mcpNames.push(name);
+        mcpSecretRefs.push(...mcpSecretNames(def.spec));
       }
     }
   }
@@ -1309,7 +1373,7 @@ export function agentContext(
   ];
   // One name once, however many places asked for it.
   declared.splice(0, declared.length, ...new Set(declared));
-  const referenced = [...new Set(apis.flatMap(secretsUsedByApi))];
+  const referenced = [...new Set([...apis.flatMap(secretsUsedByApi), ...mcpSecretRefs])];
   // A remote's secret travels with the remote, as an API's does: naming it
   // under remotes: is enough. One nothing else in the step uses is resolved
   // apart, into remoteSecretEnv, and reaches the a2a tools alone — never
@@ -1712,6 +1776,7 @@ export function agentContext(
   let wantDesks = false;
   let wantAsk = false;
   let wantPeers = false;
+  let wantText = false;
 
   for (const ref of toolRefs(front)) {
     const toolName = ref.name;
@@ -1744,13 +1809,14 @@ export function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
-    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers") {
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
       if (toolName === "search") wantSearch = true;
       else if (toolName === "history") wantHistory = true;
       else if (toolName === "ask") wantAsk = true;
       else if (toolName === "peers") wantPeers = true;
+      else if (toolName === "text") wantText = true;
       else wantDesks = true;
       if (available[toolName]) shadowed.push(toolName);
     } else if (toolName === "install") {
@@ -1815,6 +1881,14 @@ export function agentContext(
   // prompt's line are the step's (runStep).
   const peers = wantPeers;
   if (peers) allowed.push(...PEER_TOOLS);
+  // tools: [text] — extract_text, through the extraction service behind the
+  // step's egress proxy. The server is the step's (it needs the step's roots
+  // and, in a pod, the lease address); here the grant and the prompt's line.
+  const textTool = wantText;
+  if (textTool) {
+    allowed.push(TEXT_TOOL);
+    parts.add("text", `# Files as text\n\n${textPromptLine()}`);
+  }
   if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
     parts.add("finding", `# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
   }
@@ -1836,6 +1910,7 @@ export function agentContext(
   }
   const denied: string[] = refNames(front.disallowedTools);
   if (denied.includes("install")) denied.push(INSTALL_TOOL);
+  if (denied.includes("text")) denied.push(TEXT_TOOL);
   const finalAllowed = allowed.filter((t) => !denied.includes(t));
   readsFiles = canReadBack(finalAllowed);
   const prompt = parts.assemble();
@@ -1885,6 +1960,7 @@ export function agentContext(
     deskTools,
     ask,
     peers,
+    textTool,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2059,6 +2135,11 @@ async function notifyQuestion(tenant: string, workspace: string, runId: string, 
     headline: `${agent} is asking you something`,
     detail: `${question}${options?.length ? `\n\nOptions: ${options.join(" · ")}` : ""}\n\nAnswer it on ${where}, or \`foldrun answer ${runId} "…"\`.`,
     runId,
+  }, {
+    // A webhook tells a question from a gate (FOL-159), and `events: [asking]`
+    // subscribes to questions alone; awaiting-approval keeps getting them.
+    asking: true,
+    extra: { reason: "question", question: { text: question, ...(options?.length ? { options } : {}), agent } },
   }).catch(() => false);
 }
 
@@ -2161,6 +2242,10 @@ async function runStep(
    *  mayDefer). Absent: it waits here, however long — a rescue, a step
    *  outside a flow, a foreground run. */
   mayDefer?: () => boolean,
+  /** FOL-162: the earlier turns of the run's conversation, as the block
+   *  conversation.ts built — read before the instruction. Already escaped;
+   *  never resolved for [[links]] (it is other runs' words). */
+  conversation?: string,
 ) {
   // Secret values are injected into scripts as environment variables and
   // substituted into API headers, so a model that reads one back — from a
@@ -2297,6 +2382,8 @@ async function runStep(
     // The ceiling it was given rides on the line, so the budget arithmetic
     // around fan-out is testable without a model to stop.
     push("info", `stub call ${call + 1}${stepBudgetUsd !== null ? ` (ceiling $${stepBudgetUsd.toFixed(2)})` : ""}`);
+    // What a real step would have read before its instruction (FOL-162).
+    if (conversation) push("info", `stub conversation: ${conversation}`);
     step.status = "completed";
     // A stub answer may open with `cost: 0.25` — a pretend price, so the
     // parts of orchestration that watch money (budget:) are testable too.
@@ -2307,6 +2394,16 @@ async function runStep(
     answer = answer
       .split("\n")
       .filter((line) => {
+        // `write: <path> => <text>` / `bytes: <path> => <n>`: the step leaves a
+        // file in its outputs/ (n bytes of "x"), so what archive() does with a
+        // run's outputs is testable end to end.
+        const w = /^(write|bytes): (\S+) => (.*)$/.exec(line);
+        if (w) {
+          const target = path.join(agentDir, "outputs", w[2]!);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, w[1] === "write" ? w[3]! : "x".repeat(Number(w[3])));
+          return false;
+        }
         const m = /^call: (\S+) (.*?) => (.*)$/.exec(line);
         if (!m) return true;
         const id = `toolu_stub${(step.calls?.length ?? 0) + 1}`;
@@ -2368,6 +2465,7 @@ async function runStep(
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       ask,
       peers,
+      textTool,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -2716,6 +2814,9 @@ async function runStep(
     let prompt = step.instruction
       ? resolveDocLinks(step.instruction, workspaceRoot)
       : "Begin your run now, following your instructions.";
+    // The conversation's earlier turns go first, the request after them —
+    // in the user turn, not the system prompt (conversation.ts says why).
+    if (conversation) prompt = `${conversation}\n\n${prompt}`;
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, CONTEXT_CHARS)}\n</previous_step_results>`;
     if (priorData !== undefined) {
       // The value itself, beside the prose that mentioned it. This is the
@@ -2774,6 +2875,7 @@ async function runStep(
       ...(consults.length ? ["foldrun_agents"] : []),
       ...(ask ? ["foldrun_ask"] : []),
       ...(peers ? ["foldrun_peers"] : []),
+      ...(textTool ? [TEXT_SERVER] : []),
     ];
     if (peers) {
       // The colleagues' contract, in the prompt the step reads: who runs
@@ -2905,6 +3007,29 @@ async function runStep(
     if (stepHookNames.length) push("info", `hooks: ${stepHookNames.join(", ")}`);
 
     const isolation = process.env.FOLDRUN_RUN_ISOLATION;
+    // A snapshot run (Part B3): the folder is on the run record, set when the
+    // run was made. Only an executor that says it can hold one may run it —
+    // in-process, the step would work in the real workspace folder, and no
+    // copy-back stands between what it writes and the workspace (Codex).
+    const runRecord = runId ? readRun(tenant, path.basename(workspaceRootOf(agentDir)), runId) : null;
+    const snapshotId = runRecord?.snapshot?.id;
+    // The run's inputs (FOL-163), for the step its task reaches. Staged only
+    // by an executor that can hold them: in-process the step would share the
+    // real agents/<name>/inputs/ with every other run of the agent, and its
+    // writes there would land in the workspace.
+    const stepInputs = step.inputsTurn && runRecord?.inputs?.length ? runRecord.inputs : null;
+    if (stepInputs) {
+      const able = isolatedRun() && (isolation === "container" || (Boolean(platform.isolation[isolation!]) && platform.holdsInputs?.(isolation!) === true));
+      if (!able) {
+        throw new Error("this run was handed input files, and this install cannot stage them: it needs a sandbox (FOLDRUN_RUN_ISOLATION=k8s or container). Nothing was run.");
+      }
+    }
+    if (snapshotId) {
+      const able = isolatedRun() && isolation !== "container" && Boolean(platform.isolation[isolation!]) && platform.holdsSnapshot?.(isolation!) === true;
+      if (!able) {
+        throw new Error("this run has a snapshot (a folder sent to work on), and this install cannot hold one: it needs the k8s sandbox (FOLDRUN_RUN_ISOLATION=k8s). Nothing was run.");
+      }
+    }
     if (isolatedRun()) {
       // The isolated path: the whole loop — model, built-in tools, scripts —
       // runs inside a throwaway container (a docker sibling, or a pod), and
@@ -2926,7 +3051,7 @@ async function runStep(
       // before anything is copied in. Null where no proxy is configured
       // (the CLI, a compose install without FOLDRUN_EGRESS_URL), and then
       // everything below materialises exactly as it always did.
-      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone };
+      const grant: EgressGrant = { secrets: {}, timezone: clock.timezone, ...(runRecord?.customer ? { customer: runRecord.customer } : {}) };
       // A direct search API's key: granted to that API's host and no other,
       // exactly as an http tool's key is granted to its base URL's host. The
       // script sends the placeholder; the worker fills it on the way out.
@@ -3041,6 +3166,8 @@ async function runStep(
         ...(peers && stepIndex !== undefined && stepIndex >= 0 ? { agent: step.agent, peers: siblings } : {}),
         // sandbox: own sub-agents: the only names the delegate door takes.
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
+        // tools: [text] — the only leases the proxy serves the /text door on.
+        ...(textTool ? { text: true } : {}),
       });
       // foldrun's models need the proxy: it holds the platform's key and
       // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and
@@ -3286,6 +3413,8 @@ async function runStep(
       const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
       const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
+        ...(snapshotId ? { snapshot: { id: snapshotId } } : {}),
+        ...(stepInputs && runId ? { inputs: { runId, files: stepInputs } } : {}),
         libraryRoot: libraryDir(tenant),
         galleryRoot: platform.galleryDir() ?? undefined,
         // Keys this step's dependency cache. Per-account by design — see
@@ -3295,7 +3424,8 @@ async function runStep(
           agentRel: path.relative(workspaceRoot, agentDir).replaceAll("\\", "/"),
           // Its file tools inside the sandbox get the same allowance (FOL-96).
           configWrites: step.approve === true && Boolean(step.approvedAt),
-          prompt,
+          // A snapshot step is told where its folder is, and what comes back.
+          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs, platform.extractText ? { textBeside: textCandidates(stepInputs).map((f) => f.path) } : undefined)}` : ""}`,
           model,
           effort,
           systemPrompt,
@@ -3312,6 +3442,7 @@ async function runStep(
           runtime: runtime.spec,
           consults,
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
+          ...(textTool ? { text: true } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -3765,6 +3896,11 @@ async function runStep(
       const peerChannel = peerBus && stepIndex !== undefined && stepIndex >= 0 ? peerBus.channelFor({ agent: step.agent, step: stepIndex }, siblings) : null;
       const peerTools = peers ? buildPeerTools({ channel: peerChannel, self: step.agent, siblings, emit: push }) : null;
       const localInbox = peerChannel ? inboxReader(peerChannel, push) : undefined;
+      // tools: [text] — no proxy in this process, so no extraction service:
+      // the tool is there and says so, rather than going missing.
+      const textTools = textTool
+        ? buildTextTools({ egress: null, agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), emit: (type, t) => push(type, t) })
+        : null;
       // sandbox: own sub-agents, here: no proxy between the step and this
       // process, so the job is handed to the drive loop directly.
       const delegateTools = delegates.length && delegateJob
@@ -3831,6 +3967,7 @@ async function runStep(
           ...(deskTools.server ? { foldrun_desks: deskTools.server } : {}),
           ...(askTools ? { foldrun_ask: askTools.server } : {}),
           ...(peerTools ? { foldrun_peers: peerTools.server } : {}),
+          ...(textTools ? { [TEXT_SERVER]: textTools.server } : {}),
           ...(delegateTools?.server ? { foldrun_delegate: delegateTools.server } : {}),
           ...(a2aTools?.server ? { foldrun_a2a: a2aTools.server } : {}),
           ...(installTools ? { foldrun_install: installTools.server } : {}),
@@ -4500,6 +4637,19 @@ export function createFlowRun(
   /** An A2A task's correlation (foldrun-platform flow-admission.ts) — its
    *  own trailing argument, so the signature only widened. */
   a2a?: { task: string; key: string },
+  /** A snapshot run's folder (Part B3): the id POST …/snapshots answered.
+   *  Its own trailing argument, as a2a is, so the signature only widened. */
+  snapshot?: string,
+  /** FOL-162: the conversation this run is a turn of, and what it was
+   *  asked — written with the record, before any worker can see it. The
+   *  run's first step (the one its task reaches) reads the earlier turns. */
+  conversation?: { context: RunContext; input?: RunInput },
+  /** FOL-163: the files the run is handed, already held for it (storage.ts
+   *  holdRunInputs). The run's first step — the one its task reaches — is
+   *  given them at agents/<name>/inputs/. */
+  inputs?: RunInputFile[],
+  /** FOL-168: which of the partner's own users the run is for. */
+  customer?: string,
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4516,6 +4666,7 @@ export function createFlowRun(
     ...(opts.test ? { test: true } : {}),
     // An outside agent asked, over A2A: the task it serves, and whose key.
     ...(a2a ? { trigger: "a2a" as const, a2a: { task: a2a.task, key: a2a.key } } : {}),
+    ...(snapshot ? { snapshot: { id: snapshot } } : {}),
     startedAt: new Date().toISOString(),
     finishedAt: null,
     steps: steps.map((s) => ({
@@ -4562,6 +4713,16 @@ export function createFlowRun(
       costUsd: null,
     })),
   };
+  if (conversation?.context) {
+    run.context = conversation.context;
+    if (conversation.input) run.input = conversation.input;
+    if (run.steps[0]) run.steps[0].conversationTurn = true;
+  }
+  if (inputs?.length) {
+    run.inputs = inputs;
+    if (run.steps[0]) run.steps[0].inputsTurn = true;
+  }
+  if (customer) run.customer = customer;
   writeRun(tenant, workspace, run);
 
   // Start every run from an empty outputs/ for each agent it will touch.
@@ -4815,11 +4976,18 @@ function driveRunInner(
   };
 
   // Archive what a run produced, so history survives the next run's reset.
-  const archive = () => {
+  // Where a backend is registered and `runs.outputs_store` is on, each agent's
+  // outputs are published to the blob store (run-outputs.ts) and what could
+  // not be kept is written on the run; otherwise (a laptop, the setting off, or
+  // — TEMPORARILY, until the EFS cutover — a publish that failed) the folder is
+  // copied to the volume as before.
+  const archive = async () => {
     for (const agent of new Set(run.steps.map((s) => s.agent))) {
       const from = path.join(runRoot, "agents", agent, "outputs");
       if (!fs.existsSync(from) || fs.readdirSync(from).length === 0) continue;
-      copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
+      const done = await archiveRunOutputs(tenant, workspace, run.id, agent, from);
+      if (done.where === "store") noteRefused(run, done.refused);
+      else copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
     }
   };
 
@@ -5654,6 +5822,32 @@ function driveRunInner(
         // of its group is under way (a sibling still running keeps the run
         // here anyway), and only once the group has waited a while, so a
         // short wait stays a short wait. Never on a foreground run.
+        // FOL-162: the earlier turns of the run's conversation, for the step
+        // the run's task reaches. Read fresh at each start (a retry, a
+        // resume) — the same turns each time, since which runs count is
+        // fixed by when this run was made. A lookup that fails costs the
+        // step its history, never the step.
+        const conversationFor = (step: StepRecord): string | undefined => {
+          if (!step.conversationTurn || !run.context) return undefined;
+          try {
+            const built = conversationBlock(run, earlierTurns(tenant, workspace, run));
+            if (!built) {
+              delete step.history;
+              return undefined;
+            }
+            step.history = built.record;
+            const r = built.record;
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `conversation ${run.context.id}: given ${r.runs.length} earlier run${r.runs.length === 1 ? "" : "s"} (${r.chars.toLocaleString("en")} characters)${r.omitted ? `, ${r.omitted} older not given` : ""}${r.truncated ? `, ${r.truncated} cut short` : ""}`,
+            });
+            return built.text;
+          } catch (err) {
+            step.events.push({ t: new Date().toISOString(), type: "info", text: `conversation ${run.context.id}: the earlier runs could not be read (${err instanceof Error ? err.message : String(err)}) — this step runs without them` });
+            return undefined;
+          }
+        };
         const mayDefer = (step: StepRecord) => () => {
           if (!opts.parkOnApproval) return false;
           if (launching.some((s) => s !== step && s.status === "running" && !s.roomWait)) return false;
@@ -5793,6 +5987,7 @@ function driveRunInner(
                   peerBus,
                   delegateFor(step),
                   mayDefer(step),
+                  conversationFor(step),
                 ).finally(() => reserved.delete(step));
                 // Sent back for room: not a try. The run parks once the
                 // group is done (below) and this attempt starts again later.
@@ -5981,7 +6176,7 @@ function driveRunInner(
             resumed.attempts = Math.max(1, resumed.attempts ?? 0);
             resumed.status = "running";
             save();
-            await runStep(rescuerDir, tenant, resumed, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(resumed));
+            await runStep(rescuerDir, tenant, resumed, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(resumed), [], undefined, undefined, undefined, conversationFor(resumed));
             settleRescue(step, resumed);
             return;
           }
@@ -6024,6 +6219,10 @@ function driveRunInner(
             // medium-desk).
             output: step.output,
             ...(step.verify ? { verify: step.verify } : {}),
+            // Taking over the step the run's task reached: the conversation
+            // and the inputs too.
+            ...(step.conversationTurn ? { conversationTurn: true } : {}),
+            ...(step.inputsTurn ? { inputsTurn: true } : {}),
             attempts: 0,
             status: "pending",
             events: [],
@@ -6035,7 +6234,7 @@ function driveRunInner(
           rescue.attempts = 1;
           rescue.status = "running";
           save();
-          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(rescue));
+          await runStep(rescuerDir, tenant, rescue, ctx, save, modelOverride, tags, effortOverride, run.id, ctxData, null, undefined, run.test === true, stopPoll, flowTimezone, run.steps.indexOf(rescue), [], undefined, undefined, undefined, conversationFor(rescue));
           settleRescue(step, rescue);
         };
         // What a rescue's end means for the step it took over.
@@ -6242,7 +6441,7 @@ function driveRunInner(
         // failure too.
         try {
           stampMemories();
-          archive();
+          await archive();
         } catch {
           // never let bookkeeping fail a run that already finished
         }

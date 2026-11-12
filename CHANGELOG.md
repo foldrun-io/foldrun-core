@@ -13,6 +13,125 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [19.3.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `s3Config` from `@foldrun/core`
+
+### New in the public API
+
+- `storeOrigin` from `@foldrun/core`
+
+- feat(storage): storeOrigin() — the object store origin the presigned URLs use ([9dc2151](https://github.com/foldrun-io/foldrun-core/commit/9dc2151))
+
+## [19.2.0] — 2026-11-11
+
+- fix(data-import): refuse a linked projects/ home, read the whole history, real-path report check (review of #80) ([b6bec06](https://github.com/foldrun-io/foldrun-core/commit/b6bec06))
+- fix(data-import): a repeated transition is a new import; projects/ wins; verify rereads the folder (review of #80) ([c823335](https://github.com/foldrun-io/foldrun-core/commit/c823335))
+- Test importer on local stores ([8915284](https://github.com/foldrun-io/foldrun-core/commit/8915284))
+- Add importer test fixture ([102abfc](https://github.com/foldrun-io/foldrun-core/commit/102abfc))
+- Add workspace data importer ([733c96b](https://github.com/foldrun-io/foldrun-core/commit/733c96b))
+
+## [19.1.0] — 2026-11-11
+
+- feat(runner): an end customer's open runs, counted from the run records (FOL-168 phase 2) ([a0a0e7c](https://github.com/foldrun-io/foldrun-core/commit/a0a0e7c))
+
+## [19.0.0] — 2026-11-11
+
+### Breaking changes
+
+- `toChatCompletions` from `@foldrun/core` — parameter 2 changed
+- `toResponses` from `@foldrun/core` — parameter 2 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+- `RunRecord` from `@foldrun/core`
+- `RunSummary` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+- `ProviderPreset` from `@foldrun/core`
+- `TranslatorSpec` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+- `ProviderPreset` from `@foldrun/core/providers`
+
+### New in the public API
+
+- `TranslatorMedia` from `@foldrun/core`
+- `NOT_SHOWN` from `@foldrun/core`
+- `RUN_INPUTS_PREFIX` from `@foldrun/core`
+- `isReservedPath` from `@foldrun/core`
+- `assertNotReserved` from `@foldrun/core`
+- `RunInputFile` from `@foldrun/core`
+- `MissingInput` from `@foldrun/core`
+- `resolveRunInputs` from `@foldrun/core`
+- `holdRunInputs` from `@foldrun/core`
+- `releaseRunInputs` from `@foldrun/core`
+- `sweepHeldInputs` from `@foldrun/core`
+- `stageRunInputs` from `@foldrun/core`
+
+- feat(runner): an end customer's id on a run, carried to the egress lease (FOL-168) ([e5730f5](https://github.com/foldrun-io/foldrun-core/commit/e5730f5))
+- feat(runner): inputs on a run — files staged into the step, held as they were; images and PDFs reach the model (FOL-163) ([861d978](https://github.com/foldrun-io/foldrun-core/commit/861d978))
+
+## [18.5.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+- `RunRecord` from `@foldrun/core`
+- `RunSummary` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+
+- feat(runner): conversations — a run's context gives its first step the earlier turns (FOL-162) ([a88d85b](https://github.com/foldrun-io/foldrun-core/commit/a88d85b))
+
+## [18.4.0] — 2026-11-11
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `sendPlainNotification` from `@foldrun/core`
+- `sendPlainNotificationOutcome` from `@foldrun/core`
+
+### New in the public API
+
+- `unbindMcpHeaders` from `@foldrun/core`
+- `mcpConfig` from `@foldrun/core`
+
+- refactor(notify): question fields as a trailing optional argument, so the release is a minor (FOL-159) ([8f4d5b5](https://github.com/foldrun-io/foldrun-core/commit/8f4d5b5))
+- fix(mcp): a site-bound secret in a remote MCP server's URL or headers never enters the sandbox (FOL-160) ([4820949](https://github.com/foldrun-io/foldrun-core/commit/4820949))
+- feat(notify): a question's webhook says it is one; events: [asking] subscribes to questions alone (FOL-159) ([d9c219f](https://github.com/foldrun-io/foldrun-core/commit/d9c219f))
+
+## [18.3.2] — 2026-11-11
+
+- fix(scan): bidi marks keeping Latin in order in RTL text, and a Persian suffix after a Latin word, are spelling (cloudhost, 11 Nov 2026) ([a063de6](https://github.com/foldrun-io/foldrun-core/commit/a063de6))
+
+## [18.3.1] — 2026-11-11
+
+- fix(scan): a Persian half-space is spelling, not hidden text — joiners inside a word of a joining script, or an emoji sequence, are not flagged ([e17e05d](https://github.com/foldrun-io/foldrun-core/commit/e17e05d))
+
+## [18.3.0] — 2026-11-10
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunRecord` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+- Bump @anthropic-ai/claude-agent-sdk (#76) ([337dd66](https://github.com/foldrun-io/foldrun-core/commit/337dd66))
+- build(deps): Bump softprops/action-gh-release (#75) ([d596a42](https://github.com/foldrun-io/foldrun-core/commit/d596a42))
+- refactor(snapshot): additive shapes — createFlowRun takes snapshot as a trailing argument, holdsSnapshot is a platform hook ([287e717](https://github.com/foldrun-io/foldrun-core/commit/287e717))
+- feat(scan): a foldrun key is a secret (secret/hardcoded, warn) — fr_api_/fr_gw_/fr_a2a_/fr_dep_ and mda_/mdk_ (FOL-154) ([d7824ff](https://github.com/foldrun-io/foldrun-core/commit/d7824ff))
+- feat(snapshot): a run can carry a snapshot; only an executor that can hold one runs it (Part B3) ([84cc28f](https://github.com/foldrun-io/foldrun-core/commit/84cc28f))
+
 ## [18.2.0] — 2026-11-10
 
 ### New in the public API

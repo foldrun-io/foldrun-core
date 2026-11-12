@@ -78,6 +78,7 @@ const TOOL_GROUPS: Completion[] = [
   { label: "web", hint: "search, fetch, browse, crawl, map, extract, answer, monitor — providers under web:" },
   { label: "ask", hint: "ask_person — ask the person running the desk mid-step, and wait for the answer" },
   { label: "peers", hint: "peers_list + peers_message — the colleagues running beside it in its parallel group, and a message to one of them" },
+  { label: "text", hint: "extract_text — an image, scanned PDF, office file, audio or video as text (Persian + English OCR, speech)" },
   { label: "install", hint: "install apt, pip or npm packages mid-step — every agent has it; disallowedTools: [install] removes it" },
 ];
 

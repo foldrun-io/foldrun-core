@@ -172,6 +172,159 @@ export function assertFilePath(rel: string): string {
   return norm;
 }
 
+// ---------- foldrun's own records: a run's held inputs (FOL-163) ----------
+//
+// A run with `inputs` reads the files as they were when it was made, not as
+// they are when its step starts: an overwrite or a delete in between changes
+// nothing it reads. Each input is held by a record of foldrun's own under
+// `.foldrun/run-inputs/<runId>/<path>`, naming the same blob — zero copies,
+// and the collector (collectLocked) keeps a blob while any record names it,
+// so nothing new had to learn about holds. Those records are never listed,
+// mirrored into a sandbox or harvested, and no person's write, upload or
+// delete may name the prefix; they go when the run's record does.
+
+const RESERVED = ".foldrun";
+export const RUN_INPUTS_PREFIX = `${RESERVED}/run-inputs/`;
+
+/** A path under foldrun's own prefix. */
+export function isReservedPath(rel: string): boolean {
+  return rel === RESERVED || rel.startsWith(`${RESERVED}/`);
+}
+
+/** Refuse foldrun's own prefix on a person's or a run's write. */
+export function assertNotReserved(norm: string): string {
+  if (isReservedPath(norm)) throw new Error(`${norm}: storage/${RESERVED}/ is foldrun's own — choose another path`);
+  return norm;
+}
+
+/** One input as the run holds it: the storage path it was given and the
+ *  blob it named then. */
+export interface RunInputFile {
+  path: string;
+  sha: string;
+  size: number;
+  mime: string;
+}
+
+/** An input path that names no stored file (or a reserved one). */
+export class MissingInput extends Error {
+  readonly path: string;
+  constructor(path: string) {
+    super(`no stored file ${path}`);
+    this.path = path;
+  }
+}
+
+const heldPath = (runId: string, rel: string) => `${RUN_INPUTS_PREFIX}${runId}/${rel}`;
+
+/**
+ * Resolve `paths` (storage-relative, as GET …/storage lists them) to the
+ * blob each names now. Throws MissingInput for a path with no record.
+ * Returns them in the order given, duplicates dropped. Holds nothing:
+ * holdRunInputs does, once the run exists.
+ */
+export function resolveRunInputs(tenant: string, workspace: string, paths: string[]): RunInputFile[] {
+  const files = readIndex(tenant, workspace).files;
+  const out: RunInputFile[] = [];
+  const seen = new Set<string>();
+  for (const p of paths) {
+    let norm: string;
+    try {
+      norm = assertFilePath(p);
+    } catch {
+      throw new MissingInput(p);
+    }
+    if (isReservedPath(norm)) throw new MissingInput(norm);
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    const rec = files.find((f) => f.path === norm);
+    if (!rec) throw new MissingInput(norm);
+    out.push({ path: norm, sha: rec.sha, size: rec.size, mime: rec.mime });
+  }
+  return out;
+}
+
+/**
+ * Hold `inputs` for `runId`, under the workspace's lock: from here no
+ * overwrite or delete can take the bytes the run will read. Each blob must
+ * still be named by some record — the file itself, or another run's hold (a
+ * re-run reads what its source read). Throws MissingInput for one that is
+ * gone; nothing is held then.
+ */
+export async function holdRunInputs(tenant: string, workspace: string, runId: string, inputs: RunInputFile[]): Promise<void> {
+  assertSafeName(runId, "run id");
+  await withFileStoreLock(tenant, workspace, async () => {
+    const shas = new Set(readIndex(tenant, workspace).files.map((f) => f.sha));
+    for (const i of inputs) if (!shas.has(i.sha)) throw new MissingInput(i.path);
+    holdLocked(tenant, workspace, runId, inputs);
+  });
+}
+
+function holdLocked(tenant: string, workspace: string, runId: string, inputs: RunInputFile[]) {
+  const now = new Date().toISOString();
+  for (const i of inputs) {
+    // Re-read each time: the file store rewrites the whole index per put.
+    indexPut(tenant, workspace, readIndex(tenant, workspace), { path: heldPath(runId, i.path), sha: i.sha, size: i.size, mime: i.mime, updatedAt: now, by: `run:${runId}:inputs` });
+  }
+}
+
+/** Let go of a run's held inputs; a blob nothing else names is collected. */
+export async function releaseRunInputs(tenant: string, workspace: string, runId: string): Promise<number> {
+  if (!fileStoreEnabled()) return 0;
+  const prefix = `${RUN_INPUTS_PREFIX}${runId}/`;
+  return withFileStoreLock(tenant, workspace, async () => {
+    const held = readIndex(tenant, workspace).files.filter((f) => f.path.startsWith(prefix));
+    for (const f of held) indexRemove(tenant, workspace, readIndex(tenant, workspace), f.path);
+    for (const sha of new Set(held.map((f) => f.sha))) await collectLocked(tenant, workspace, sha);
+    return held.length;
+  });
+}
+
+/** Let go of the holds of runs that no longer exist — what a crash between
+ *  a run's delete and its release left. `alive` says whether a run is there.
+ *  Returns how many runs' holds went. */
+export async function sweepHeldInputs(tenant: string, workspace: string, alive: (runId: string) => boolean): Promise<number> {
+  if (!fileStoreEnabled()) return 0;
+  const runs = new Set(
+    readIndex(tenant, workspace)
+      .files.filter((f) => f.path.startsWith(RUN_INPUTS_PREFIX))
+      .map((f) => f.path.slice(RUN_INPUTS_PREFIX.length).split("/")[0]!)
+      .filter(Boolean),
+  );
+  let gone = 0;
+  for (const runId of runs) {
+    if (alive(runId)) continue;
+    if ((await releaseRunInputs(tenant, workspace, runId)) > 0) gone++;
+  }
+  return gone;
+}
+
+/**
+ * Write a run's held inputs into `intoDir` (made fresh: whatever was there
+ * is removed first, so a folder of the same name never mixes in), each at
+ * its storage path. Reads the blob each input named when the run was made,
+ * never the path again. Throws when one is gone.
+ */
+export async function stageRunInputs(tenant: string, workspace: string, runId: string, inputs: RunInputFile[], intoDir: string): Promise<{ files: number; bytes: number }> {
+  fs.rmSync(intoDir, { recursive: true, force: true });
+  fs.mkdirSync(intoDir, { recursive: true });
+  const held = new Set(readIndex(tenant, workspace).files.filter((f) => f.path.startsWith(`${RUN_INPUTS_PREFIX}${runId}/`)).map((f) => f.sha));
+  const driver = driverFor(tenant, workspace);
+  let bytes = 0;
+  for (const i of inputs) {
+    const norm = assertFilePath(i.path);
+    if (!held.has(i.sha)) throw new MissingInput(norm);
+    const body = await driver.get(blobKey(tenant, workspace, i.sha));
+    if (sha256(body) !== i.sha) throw new Error(`input ${norm}: the stored bytes do not match what the run was given`);
+    const abs = path.join(intoDir, norm);
+    if (!abs.startsWith(intoDir + path.sep)) throw new MissingInput(norm);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, body, { flag: "wx" });
+    bytes += body.length;
+  }
+  return { files: inputs.length, bytes };
+}
+
 // ---------- mime ----------
 
 const MIME: Record<string, string> = {
@@ -248,7 +401,8 @@ function indexRemove(tenant: string, workspace: string, index: Index, rel: strin
 }
 
 export function listStorage(tenant: string, workspace: string): FileRecord[] {
-  return readIndex(tenant, workspace).files.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  // foldrun's own records (a run's held inputs) are not the workspace's files.
+  return readIndex(tenant, workspace).files.filter((f) => !isReservedPath(f.path)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export function getFile(tenant: string, workspace: string, rel: string): FileRecord | null {
@@ -375,29 +529,53 @@ export function regionOfEndpoint(endpoint: string): string | null {
 /** True when this process runs under an AWS role handed out through the
  *  container credential endpoint — EKS Pod Identity, ECS, or an IRSA-style
  *  shim. The endpoint is the pod's, and the token file is mounted beside it. */
-function containerCredentialsAvailable(): boolean {
-  return Boolean(process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
+function containerCredentialsAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.AWS_CONTAINER_CREDENTIALS_FULL_URI || env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
 }
 
-export function s3Config(): S3Config | null {
-  const endpoint = process.env.FOLDRUN_S3_ENDPOINT;
-  const bucket = process.env.FOLDRUN_S3_BUCKET;
-  const accessKeyId = process.env.FOLDRUN_S3_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.FOLDRUN_S3_SECRET_ACCESS_KEY;
+export function s3Config(env: NodeJS.ProcessEnv = process.env): S3Config | null {
+  const endpoint = env.FOLDRUN_S3_ENDPOINT;
+  const bucket = env.FOLDRUN_S3_BUCKET;
+  const accessKeyId = env.FOLDRUN_S3_ACCESS_KEY_ID;
+  const secretAccessKey = env.FOLDRUN_S3_SECRET_ACCESS_KEY;
   if (!endpoint || !bucket) return null;
   const staticKeys = Boolean(accessKeyId && secretAccessKey);
   // No key and no role is a half-set environment: fall back to fs rather
   // than fail at the first upload (driverFor says why).
-  if (!staticKeys && !containerCredentialsAvailable()) return null;
+  if (!staticKeys && !containerCredentialsAvailable(env)) return null;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     bucket,
     // R2 has one region and calls it `auto`. An AWS endpoint names its own;
     // anything else says so in the env.
-    region: process.env.FOLDRUN_S3_REGION ?? regionOfEndpoint(endpoint) ?? "auto",
+    region: env.FOLDRUN_S3_REGION ?? regionOfEndpoint(endpoint) ?? "auto",
     ...(staticKeys ? { accessKeyId, secretAccessKey } : {}),
-    pathStyle: process.env.FOLDRUN_S3_PATH_STYLE !== "false",
+    pathStyle: env.FOLDRUN_S3_PATH_STYLE !== "false",
   };
+}
+
+/**
+ * The origin the browser reaches the object store at — where a presigned PUT
+ * (an upload) and a presigned GET (a video, audio or PDF preview) go — so the
+ * dashboard's Content-Security-Policy can name it and nothing wider. Null
+ * unless S3 is the driver in force (the same test driverFor makes), or when
+ * the address is not a plain http(s) host. It is built by the same function
+ * as the signed URLs (bucketHost), so the two cannot drift: path-style gives
+ * the endpoint's origin, virtual-hosted gives `https://<bucket>.<host>`.
+ * Reads only the environment; it fetches no credentials.
+ */
+export function storeOrigin(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.FOLDRUN_STORAGE_DRIVER !== "s3") return null;
+  try {
+    const cfg = s3Config(env);
+    if (!cfg) return null;
+    const u = new URL(bucketHost(cfg).origin);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (!u.hostname || u.hostname.includes("*") || u.origin === "null") return null;
+    return u.origin;
+  } catch {
+    return null; // an endpoint that is not a URL: no source, never a broken one
+  }
 }
 
 // ---------- credentials ----------
@@ -476,13 +654,19 @@ function signingKey(cfg: S3Config, creds: Credentials, dateStamp: string) {
 
 /** Where a key lives, split into the host and the canonical path SigV4 signs. */
 function target(cfg: S3Config, key: string) {
-  const url = new URL(cfg.endpoint);
   const encoded = uriEncode(key, true);
-  if (cfg.pathStyle) {
-    return { host: url.host, origin: url.origin, canonicalUri: `/${cfg.bucket}/${encoded}` };
-  }
+  const { host, origin } = bucketHost(cfg);
+  return { host, origin, canonicalUri: cfg.pathStyle ? `/${cfg.bucket}/${encoded}` : `/${encoded}` };
+}
+
+/** The host a request for this bucket goes to: the endpoint's own
+ *  (path-style), or `<bucket>.<endpoint host>` (virtual-hosted). Shared by
+ *  target() and storeOrigin(). */
+function bucketHost(cfg: S3Config): { host: string; origin: string } {
+  const url = new URL(cfg.endpoint);
+  if (cfg.pathStyle) return { host: url.host, origin: url.origin };
   const host = `${cfg.bucket}.${url.host}`;
-  return { host, origin: `${url.protocol}//${host}`, canonicalUri: `/${encoded}` };
+  return { host, origin: `${url.protocol}//${host}` };
 }
 
 /**
@@ -910,7 +1094,7 @@ async function putFileQuietly(
   body: Buffer,
   by: string,
 ): Promise<FileRecord> {
-  const norm = assertFilePath(rel);
+  const norm = assertNotReserved(assertFilePath(rel));
   if (body.length > maxBytes()) {
     throw new Error(`${norm} is ${Math.round(body.length / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
   }
@@ -979,7 +1163,7 @@ export async function registerUpload(
   _claimed: number,
   by: string,
 ): Promise<FileRecord> {
-  const norm = assertFilePath(rel);
+  const norm = assertNotReserved(assertFilePath(rel));
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("expected a sha256");
   requireWorkspace(tenant, workspace);
   const driver = driverFor(tenant, workspace);
@@ -1066,7 +1250,7 @@ export async function openFile(
 }
 
 export async function deleteFile(tenant: string, workspace: string, rel: string): Promise<boolean> {
-  const norm = assertFilePath(rel);
+  const norm = assertNotReserved(assertFilePath(rel));
   return withFileStoreLock(tenant, workspace, async () => {
     const index = readIndex(tenant, workspace);
     const record = index.files.find((f) => f.path === norm);
@@ -1141,7 +1325,7 @@ export async function uploadUrl(
   sha: string,
   size?: number,
 ): Promise<string | null> {
-  const norm = assertFilePath(rel);
+  const norm = assertNotReserved(assertFilePath(rel));
   if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("expected a sha256");
   requireWorkspace(tenant, workspace);
   // The limits, before a byte moves, and the length signed into the URL so
@@ -1269,6 +1453,8 @@ export async function materializeFiles(tenant: string, workspace: string): Promi
   const brought: string[] = [];
 
   for (const record of readIndex(tenant, workspace).files) {
+    // A run's held inputs are staged into its own step, never mirrored.
+    if (isReservedPath(record.path)) continue;
     const target = path.join(root, record.path);
     try {
       const stat = fs.statSync(target);
@@ -1303,7 +1489,7 @@ export async function materializeFiles(tenant: string, workspace: string): Promi
  *  files it was handed. */
 export function storageBaseline(tenant: string, workspace: string): Record<string, string> {
   if (!fileStoreEnabled()) return {};
-  return Object.fromEntries(readIndex(tenant, workspace).files.map((f) => [f.path, f.sha]));
+  return Object.fromEntries(readIndex(tenant, workspace).files.filter((f) => !isReservedPath(f.path)).map((f) => [f.path, f.sha]));
 }
 
 /**

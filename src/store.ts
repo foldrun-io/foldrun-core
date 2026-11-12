@@ -71,6 +71,8 @@ import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
+import type { RunContext, RunInput, ConversationRecord } from "./conversation.ts";
+import type { RunInputFile } from "./storage.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -3794,6 +3796,19 @@ export interface StepRecord {
   delegation?: string;
   /** On a step that delegated to isolated sub-agents: each job, in order. */
   delegations?: StepDelegation[];
+  /** FOL-162: this step reads the run's conversation — the earlier runs of
+   *  its `context` — before its instruction. Set when the run is made on
+   *  the step the run's task reaches (its fan-out instances and an on-fail
+   *  rescue of it inherit it; a re-run sets it on the first step it runs). */
+  conversationTurn?: boolean;
+  /** What that step was given, written when it starts: which runs, how many
+   *  did not fit, and a hash of the block (conversation.ts). Never the text. */
+  history?: ConversationRecord;
+  /** FOL-163: this step is handed the run's `inputs`, staged at
+   *  agents/<name>/inputs/. Set when the run is made on the step the task
+   *  reaches; fan-out instances and an on-fail rescue inherit it; a re-run
+   *  sets it on the first step it runs. */
+  inputsTurn?: boolean;
   /** On an isolated sub-agent's run: the workspace paths its sandbox's
    *  changes were applied to — what its delegating step is told it wrote. */
   wrote?: string[];
@@ -3896,6 +3911,16 @@ export interface PriceSnapshot {
   values: Record<string, number>;
 }
 
+export interface RefusedOutput {
+  agent: string;
+  /** Relative to that agent's outputs/. */
+  path: string;
+  bytes: number;
+  reason: "file-cap" | "run-cap" | "name" | "count";
+  /** The cap in bytes that was exceeded (the count for "count"). */
+  limit?: number;
+}
+
 export interface RunRecord {
   id: string;
   flow: string; // flow name, or "adhoc:<agent>" for direct agent runs
@@ -3963,6 +3988,12 @@ export interface RunRecord {
    *  the agents decided was worth remembering, listed so a person can review
    *  the lesson without diffing the folder. */
   memoryWrites?: string[];
+  /** Files a run's agents left in outputs/ that were NOT kept, and why (FOL-126
+   *  phase 5): over the per-file or per-run size cap, a name the store cannot
+   *  hold, or too many files. Shown on the run page and listed by /files. At
+   *  most 100 are named; `outputsRefusedCount` is the whole number. */
+  outputsRefused?: RefusedOutput[];
+  outputsRefusedCount?: number;
   /** The workspace's deployed commit when the run was created — which
    *  version of the files it ran (FOL-54 step 4). Absent for a workspace
    *  never deployed, and before 19 Oct 2026. */
@@ -4002,6 +4033,26 @@ export interface RunRecord {
    *  first id, kept across rotations) that asked. A correlation only — the
    *  protocol's own state lives in the platform's a2a_tasks. */
   a2a?: { task: string; key: string };
+  /** A snapshot run (Part B3): the folder a person sent (its sha256), staged
+   *  for the step at agents/<name>/snapshot/; the patch of what the step
+   *  changed is outputs/snapshot.patch. Set when the run is made, never by a
+   *  step. */
+  snapshot?: { id: string };
+  /** FOL-162: the conversation this run belongs to — the id its caller
+   *  gave and the key it is found by (conversation.ts). Set when the run
+   *  is made, carried onto a re-run. */
+  context?: RunContext;
+  /** What the run was asked, as given: the task of an agent or flow run,
+   *  an A2A message's text and data. Kept on a run with a `context`, so a
+   *  later turn reads the question, never a step's decorated instruction. */
+  input?: RunInput;
+  /** FOL-163: the files the run was handed — storage paths and the blob each
+   *  named when the run was made (held for it; storage.ts holdRunInputs). */
+  inputs?: RunInputFile[];
+  /** FOL-168: which of the partner's own users this run is for — an opaque
+   *  id the partner maps (customer.ts). Limits, blocks and the provider's
+   *  end-user id follow it. Set when the run is made, carried on a re-run. */
+  customer?: string;
   steps: StepRecord[];
 }
 
@@ -4073,7 +4124,13 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   const file = runFilePath(tenant, workspace, runId);
   const dir = path.join(workspaceDir(tenant, workspace), "runs", runId);
   const port = records(tenant, workspace);
-  const had = port ? port.runGet(tenant, workspace, runId) !== null : fs.existsSync(file);
+  let prior: RunRecord | null = null;
+  try {
+    prior = port ? port.runGet(tenant, workspace, runId) : fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as RunRecord) : null;
+  } catch {
+    prior = null; // a half-written record still goes
+  }
+  const had = port ? prior !== null : fs.existsSync(file);
   if (!had && !fs.existsSync(dir)) return false;
   // The folder first (archived outputs, captured calls), the record last:
   // a delete that fails halfway leaves the record, so a retry finds the run
@@ -4085,11 +4142,26 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
     fs.rmSync(file, { force: true });
     noteRunDeleted(path.dirname(file), runId);
   }
+  // Its held inputs go with it (FOL-163): a blob nothing else names is
+  // collected. Asynchronous, and never the delete's failure — storage's own
+  // sweep (sweepHeldInputs) finds any a crash left behind.
+  if (prior?.inputs?.length) {
+    void import("./storage.ts").then((m) => m.releaseRunInputs(tenant, workspace, runId)).catch(() => {});
+  }
+  // Outputs published to the blob store (run-outputs.ts) are records and pins,
+  // not files under dir: they go in the background, retried.
+  onRunRemoved?.(tenant, workspace, runId);
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
   if (!opts.pruned) onRunDeleted?.(tenant, workspace, runId);
   return true;
+}
+
+/** run-outputs.ts registers here (it imports this module). */
+let onRunRemoved: ((tenant: string, workspace: string, runId: string) => void) | null = null;
+export function registerRunRemovedHook(fn: typeof onRunRemoved) {
+  onRunRemoved = fn;
 }
 
 /** ledger.ts registers here — store cannot import it without a cycle, and
@@ -4107,14 +4179,17 @@ export interface RunOutputFile {
 }
 
 /**
- * What a run archived: every file its agents left in outputs/, copied under
- * runs/<id>/outputs/<agent>/ when the run finished (runner.ts, archive()).
+ * What a run archived ON THE VOLUME: every file its agents left in outputs/,
+ * copied under runs/<id>/outputs/<agent>/ when the run finished (runner.ts,
+ * archive()). Where run outputs are published to the blob store (FOL-126
+ * phase 5, run-outputs.ts) this is only the fallback and the laptop's copy;
+ * callers use run-outputs.ts listRunOutputs, which asks both.
  *
  * Per agent, not per step — the archive is a copy of each agent's folder,
  * and the record cannot say which step wrote which file. An agent that
  * steps twice in one run shows the same files against both steps.
  */
-export function listRunOutputs(tenant: string, workspace: string, runId: string): RunOutputFile[] {
+export function listRunOutputsOnVolume(tenant: string, workspace: string, runId: string): RunOutputFile[] {
   const root = path.join(workspaceDir(tenant, workspace), "runs", runId, "outputs");
   if (!fs.existsSync(root)) return [];
   const out: RunOutputFile[] = [];
@@ -4134,7 +4209,7 @@ export function listRunOutputs(tenant: string, workspace: string, runId: string)
 
 /** The absolute path of one archived output, or null when the name escapes
  *  the archive or names nothing — the API serves only what this returns. */
-export function runOutputPath(
+export function runOutputPathOnVolume(
   tenant: string,
   workspace: string,
   runId: string,
@@ -4404,6 +4479,10 @@ export interface RunSummary {
   /** RunRecord.trigger and .a2a: an outside agent started it. */
   trigger?: "a2a";
   a2a?: { task: string; key: string };
+  /** RunRecord.context: the conversation it belongs to (FOL-162). */
+  context?: RunContext;
+  /** RunRecord.customer (FOL-168). */
+  customer?: string;
   steps: RunSummaryStep[];
 }
 
@@ -4448,6 +4527,8 @@ export function summarizeRun(run: RunRecord): RunSummary {
     ...(run.revision ? { revision: run.revision } : {}),
     ...(run.trigger ? { trigger: run.trigger } : {}),
     ...(run.a2a ? { a2a: run.a2a } : {}),
+    ...(run.context ? { context: run.context } : {}),
+    ...(run.customer ? { customer: run.customer } : {}),
     awaitingApproval: run.steps.some((s) => s.status === "awaiting-approval" && s.waitFor !== "event"),
     steps: run.steps.map((s) => {
       // A failed step's last error — and, on a run that failed between
