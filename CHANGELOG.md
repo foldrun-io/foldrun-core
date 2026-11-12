@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [20.3.0] — 2026-11-12
+
+- feat(runtime): a marker for entries unpacked from a store, and the snapshot key in the system-install status (FOL-126) ([abd4aa7](https://github.com/foldrun-io/foldrun-core/commit/abd4aa7))
+
 ## [20.2.0] — 2026-11-12
 
 ### Widened in the public API
