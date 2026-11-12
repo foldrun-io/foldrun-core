@@ -13,6 +13,21 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [20.2.0] — 2026-11-12
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `VaultStore` from `@foldrun/core`
+
+### New in the public API
+
+- `vaultFilePath` from `@foldrun/core`
+- `readVaultFile` from `@foldrun/core`
+
+- feat(secrets): a store is told when a scope's file is written behind it; file helpers for the store ([49f477e](https://github.com/foldrun-io/foldrun-core/commit/49f477e))
+
 ## [20.1.0] — 2026-11-12
 
 ### New in the public API
