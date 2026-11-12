@@ -30,9 +30,9 @@ export function memoryVaultStore(): VaultStore & { scopes: Map<string, SecretsFi
 
 let n = 0;
 
-/** `make` returns the store to register, or null for files. `filesExpected`:
- *  whether a secrets.json may appear under the data root. */
-export function vaultContract(label: string, make: () => Promise<VaultStore | null> | VaultStore | null): void {
+/** `make` returns the store to register, or null for files. `mirrors`: the
+ *  store also keeps the scope's file current, so files may appear. */
+export function vaultContract(label: string, make: () => Promise<VaultStore | null> | VaultStore | null, opts: { mirrors?: boolean } = {}): void {
   const t = (name: string, fn: (s: typeof import("../src/secrets.ts"), T: string, store: VaultStore | null, data: string) => Promise<void> | void) =>
     test(`vault [${label}]: ${name}`, async () => {
       const data = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-vault-contract-"));
@@ -46,7 +46,7 @@ export function vaultContract(label: string, make: () => Promise<VaultStore | nu
       const T = `vc${Date.now().toString(36)}${n++}`;
       try {
         await fn(s, T, store, data);
-        if (store) {
+        if (store && !opts.mirrors) {
           const files: string[] = [];
           const walk = (d: string) => fs.existsSync(d) && fs.readdirSync(d, { withFileTypes: true }).forEach((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.name.startsWith("secrets.json") && files.push(e.name)));
           walk(path.join(data, T));

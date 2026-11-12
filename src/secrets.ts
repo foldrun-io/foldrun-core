@@ -272,6 +272,10 @@ export interface VaultStore {
   mutate(tenant: string, workspace: string | undefined, change: (all: SecretsFile) => SecretsFile | null): SecretsFile;
   /** The workspaces of this account whose scope is in the store. */
   workspaces(tenant: string): string[];
+  /** The scope's FILE was just written while the store is not serving it
+   *  (switched off): whatever the store still holds for it is stale and must
+   *  go, so switching back on starts from the file. */
+  forget?(tenant: string, workspace?: string): void;
 }
 
 let vaultStore: VaultStore | null = null;
@@ -289,7 +293,25 @@ function read(tenant: string, workspace?: string): SecretsFile {
 /** Change one vault scope safely, wherever it lives (see mutateVaultFile). */
 function mutateVault(tenant: string, workspace: string | undefined, change: (all: SecretsFile) => SecretsFile | null): SecretsFile {
   const store = inStore(tenant, workspace);
-  return store ? store.mutate(tenant, workspace, change) : mutateVaultFile(secretsFile(tenant, workspace), change);
+  if (store) return store.mutate(tenant, workspace, change);
+  let wrote = false;
+  const after = mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+    const next = change(all);
+    wrote = next !== null;
+    return next;
+  });
+  if (wrote) vaultStore?.forget?.(tenant, workspace);
+  return after;
+}
+
+/** Where a scope's vault file is (a platform store imports from it and keeps
+ *  it current while files remain the fallback). */
+export function vaultFilePath(tenant: string, workspace?: string): string {
+  return secretsFile(tenant, workspace);
+}
+/** A vault file's records as they are stored; {} when there is none. */
+export function readVaultFile(file: string): SecretsFile {
+  return readFile(file);
 }
 
 // ------------------------------------------------------------ safe writes

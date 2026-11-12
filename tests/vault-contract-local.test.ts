@@ -27,6 +27,14 @@ test("a scope is served from one place: with a store on, a file left behind is n
     // A store that says a scope is not its own leaves that scope on files.
     s.setVaultStore({ ...store, on: () => false });
     assert.equal(s.getSecret("acme", "OLD")?.value, "from-the-file");
+    // …and a file written then tells the store its copy is stale.
+    const forgotten: string[] = [];
+    s.setVaultStore({ ...store, on: () => false, forget: (t, w) => void forgotten.push(`${t}|${w ?? ""}`) });
+    s.deleteSecret("acme", "NOT_THERE");
+    assert.deepEqual(forgotten, [], "nothing written, nothing to forget");
+    s.setSecret("acme", "NEW_ONE", "v");
+    s.setSecret("acme", "WS_ONE", "v", "desk");
+    assert.deepEqual(forgotten, ["acme|", "acme|desk"]);
   } finally {
     s.setVaultStore(null);
     prev.data === undefined ? delete process.env.FOLDRUN_DATA : (process.env.FOLDRUN_DATA = prev.data);
