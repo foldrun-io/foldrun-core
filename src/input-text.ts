@@ -140,8 +140,13 @@ export async function textBesideInputs(o: TextBesideInputs): Promise<{ wrote: st
   const late: string[] = [];
   const names = new Set(o.files.map((f) => f.path));
   const clock = new AbortController();
+  // NOT unref'd: this function awaits the deadline, so the timer must keep
+  // the process alive until it fires (cleared in finally, at most totalMs).
+  // Unref'd, a hung extractor in a process with nothing else to do — the
+  // CLI's `foldrun run`, a test — let the event loop empty and the await
+  // never settle (the dev gate, 12 Nov 2026: "Promise resolution is still
+  // pending but the event loop has already resolved").
   const timer = setTimeout(() => clock.abort(), totalMs);
-  timer.unref?.();
   try {
     for (const f of o.files) {
       const byName = mediaKindByName(f.path);
