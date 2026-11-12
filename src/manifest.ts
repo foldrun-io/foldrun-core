@@ -181,7 +181,8 @@ export function modeFor(executable: boolean): number {
 /** Sorted keys at every level, no whitespace: one tree, one byte string, one
  *  id — whichever machine wrote it. */
 export function canonicalManifest(m: Manifest): string {
-  const files: Record<string, ManifestEntry> = {};
+  // No prototype: a path may be `__proto__` (review, 12 Nov 2026).
+  const files: Record<string, ManifestEntry> = Object.create(null);
   for (const p of Object.keys(m.files).sort()) {
     const e = m.files[p];
     files[p] = { sha: e.sha, size: e.size, mode: e.mode };

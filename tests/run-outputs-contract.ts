@@ -397,10 +397,60 @@ export function runOutputsContract(label: string, make: () => Promise<Harness>):
     const stale = `run-${uniq()}`;
     await publishRunOutputs(be, T, x.ws, x.run, "writer", dirWith({ "x.txt": "moved" }));
     await publishRunOutputs(be, T, to, stale, "writer", dirWith({ "old.txt": "stale" }));
+    const staleManifest = (await h.store.list(T, to, stale))[0].manifest;
     await moveWorkspaceOutputs(T, x.ws, to);
     assert.deepEqual(await listRunOutputs(T, x.ws, x.run), []);
     assert.equal((await readRunOutput(T, to, x.run, "writer", "x.txt"))?.toString(), "moved");
     assert.deepEqual(await h.store.list(T, to, stale), []);
+    // Review, 12 Nov 2026: the replaced records' pins go too, or nothing
+    // could ever find and release them.
+    assert.equal(await pins.isPinned(T, "manifest", staleManifest), false, "what the new name held is no longer pinned");
+  });
+
+  t("an output may be named __proto__ (and anything else legal): kept, listed, read back", async () => {
+    const { ws, run } = ids();
+    const r = await publishRunOutputs(be, T, ws, run, "writer", dirWith({ ["__proto__"]: "proto", constructor: "ctor", "a.txt": "a" }));
+    assert.equal(r.record?.files, 3, "none silently dropped");
+    assert.deepEqual((await listRunOutputs(T, ws, run)).map((f) => f.path), ["__proto__", "a.txt", "constructor"]);
+    assert.equal((await readRunOutput(T, ws, run, "writer", "__proto__"))?.toString(), "proto");
+  });
+
+  t("a download is read only as fast as it is taken, and a cancelled one stops reading", async () => {
+    const { ws, run } = ids();
+    fileMax = 8 * 1024 * 1024;
+    runMax = 8 * 1024 * 1024;
+    await publishRunOutputs(be, T, ws, run, "writer", dirWith({ "big.bin": "x".repeat(4 * 1024 * 1024) }));
+    // Count what the store hands out, and whether the reader was cancelled.
+    let chunks = 0;
+    let cancelled = false;
+    const blobs = h.blobs;
+    const counting = Object.create(blobs) as typeof blobs;
+    counting.get = async (key, opts) => {
+      const src = (await blobs.get(key, opts)).getReader();
+      return new ReadableStream<Uint8Array>({
+        async pull(c) {
+          const { done, value } = await src.read();
+          if (done) return c.close();
+          chunks++;
+          c.enqueue(value.subarray(0, 1024)); // small chunks: many reads for one file
+          if (value.length > 1024) c.enqueue(value.subarray(1024));
+        },
+        cancel(reason) {
+          cancelled = true;
+          return src.cancel(reason);
+        },
+      });
+    };
+    setRunOutputsBackend({ ...be, blobs: counting });
+    const reader = (await openRunOutput(T, ws, run, "writer", "big.bin"))!.read().getReader();
+    await reader.read();
+    await new Promise((r) => setTimeout(r, 50));
+    const afterOne = chunks;
+    await reader.cancel();
+    await new Promise((r) => setTimeout(r, 20));
+    setRunOutputsBackend(be);
+    assert.ok(afterOne <= 3, `one read pulled ${afterOne} chunks from the store, not the whole file`);
+    assert.equal(cancelled, true, "cancelling the download cancels the store's read");
   });
 
   t("deleteRun drops the outputs too (in the background, then settled)", async () => {
