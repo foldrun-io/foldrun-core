@@ -71,6 +71,12 @@ if (mode === "all") {
   // FOL-107 itself: a dead CLI's stderr, prompt text in it.
   modelProcessError(new Error(`Claude Code process exited with code 1. stderr: A system error occurred: uv_os_homedir returned ENOENT ${M} ${"x".repeat(3000)}`), "judge");
   opsLog("info", "canary.done", { count: 1 });
+} else if (mode === "second-copy") {
+  // A bundler's second copy of the module (Next.js gives routes their own):
+  // it must write through the boundary the first copy installed.
+  const copy = (await import(`../src/ops-log.ts?second-copy=${Date.now()}`)) as typeof import("../src/ops-log.ts");
+  copy.opsLog("warn", "canary.second_copy", { tenant: "acme", reason: "key_revoked" });
+  opsLog("info", "canary.done");
 } else if (mode === "rejection") {
   void Promise.reject(forged);
 } else if (mode === "throw") {

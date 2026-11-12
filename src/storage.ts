@@ -529,29 +529,53 @@ export function regionOfEndpoint(endpoint: string): string | null {
 /** True when this process runs under an AWS role handed out through the
  *  container credential endpoint — EKS Pod Identity, ECS, or an IRSA-style
  *  shim. The endpoint is the pod's, and the token file is mounted beside it. */
-function containerCredentialsAvailable(): boolean {
-  return Boolean(process.env.AWS_CONTAINER_CREDENTIALS_FULL_URI || process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
+function containerCredentialsAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.AWS_CONTAINER_CREDENTIALS_FULL_URI || env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
 }
 
-export function s3Config(): S3Config | null {
-  const endpoint = process.env.FOLDRUN_S3_ENDPOINT;
-  const bucket = process.env.FOLDRUN_S3_BUCKET;
-  const accessKeyId = process.env.FOLDRUN_S3_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.FOLDRUN_S3_SECRET_ACCESS_KEY;
+export function s3Config(env: NodeJS.ProcessEnv = process.env): S3Config | null {
+  const endpoint = env.FOLDRUN_S3_ENDPOINT;
+  const bucket = env.FOLDRUN_S3_BUCKET;
+  const accessKeyId = env.FOLDRUN_S3_ACCESS_KEY_ID;
+  const secretAccessKey = env.FOLDRUN_S3_SECRET_ACCESS_KEY;
   if (!endpoint || !bucket) return null;
   const staticKeys = Boolean(accessKeyId && secretAccessKey);
   // No key and no role is a half-set environment: fall back to fs rather
   // than fail at the first upload (driverFor says why).
-  if (!staticKeys && !containerCredentialsAvailable()) return null;
+  if (!staticKeys && !containerCredentialsAvailable(env)) return null;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     bucket,
     // R2 has one region and calls it `auto`. An AWS endpoint names its own;
     // anything else says so in the env.
-    region: process.env.FOLDRUN_S3_REGION ?? regionOfEndpoint(endpoint) ?? "auto",
+    region: env.FOLDRUN_S3_REGION ?? regionOfEndpoint(endpoint) ?? "auto",
     ...(staticKeys ? { accessKeyId, secretAccessKey } : {}),
-    pathStyle: process.env.FOLDRUN_S3_PATH_STYLE !== "false",
+    pathStyle: env.FOLDRUN_S3_PATH_STYLE !== "false",
   };
+}
+
+/**
+ * The origin the browser reaches the object store at — where a presigned PUT
+ * (an upload) and a presigned GET (a video, audio or PDF preview) go — so the
+ * dashboard's Content-Security-Policy can name it and nothing wider. Null
+ * unless S3 is the driver in force (the same test driverFor makes), or when
+ * the address is not a plain http(s) host. It is built by the same function
+ * as the signed URLs (bucketHost), so the two cannot drift: path-style gives
+ * the endpoint's origin, virtual-hosted gives `https://<bucket>.<host>`.
+ * Reads only the environment; it fetches no credentials.
+ */
+export function storeOrigin(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.FOLDRUN_STORAGE_DRIVER !== "s3") return null;
+  try {
+    const cfg = s3Config(env);
+    if (!cfg) return null;
+    const u = new URL(bucketHost(cfg).origin);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (!u.hostname || u.hostname.includes("*") || u.origin === "null") return null;
+    return u.origin;
+  } catch {
+    return null; // an endpoint that is not a URL: no source, never a broken one
+  }
 }
 
 // ---------- credentials ----------
@@ -630,13 +654,19 @@ function signingKey(cfg: S3Config, creds: Credentials, dateStamp: string) {
 
 /** Where a key lives, split into the host and the canonical path SigV4 signs. */
 function target(cfg: S3Config, key: string) {
-  const url = new URL(cfg.endpoint);
   const encoded = uriEncode(key, true);
-  if (cfg.pathStyle) {
-    return { host: url.host, origin: url.origin, canonicalUri: `/${cfg.bucket}/${encoded}` };
-  }
+  const { host, origin } = bucketHost(cfg);
+  return { host, origin, canonicalUri: cfg.pathStyle ? `/${cfg.bucket}/${encoded}` : `/${encoded}` };
+}
+
+/** The host a request for this bucket goes to: the endpoint's own
+ *  (path-style), or `<bucket>.<endpoint host>` (virtual-hosted). Shared by
+ *  target() and storeOrigin(). */
+function bucketHost(cfg: S3Config): { host: string; origin: string } {
+  const url = new URL(cfg.endpoint);
+  if (cfg.pathStyle) return { host: url.host, origin: url.origin };
   const host = `${cfg.bucket}.${url.host}`;
-  return { host, origin: `${url.protocol}//${host}`, canonicalUri: `/${encoded}` };
+  return { host, origin: `${url.protocol}//${host}` };
 }
 
 /**

@@ -49,6 +49,7 @@ import { parseBrowserPod, type BrowserPodOutcome } from "./browser-pod.ts";
 import type { RemoteSpec } from "./a2a-remotes.ts";
 import { stageRunInputs, type RunInputFile } from "./storage.ts";
 import { INPUTS_DIR, stagedLine } from "./run-inputs.ts";
+import { textBesideInputs } from "./input-text.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -122,6 +123,9 @@ export interface ContainerStepInput {
    *  parallel group, gathered host-side at launch. The driver rebuilds the
    *  colleagues' tools in here over the lease's /peers door. */
   peers?: { self: string; siblings: PeerInfo[] };
+  /** tools: [text] — extract_text, rebuilt in here over the lease's /text
+   *  door to the extraction service (text-tool.ts). */
+  text?: boolean;
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -896,6 +900,7 @@ try {
   const { buildSearchTools, buildHistoryTools, buildDeskTools } = await import("@foldrun/core/context-tools");
   const { httpChannel, buildAskTool, buildPeerTools, inboxReader } = await import("@foldrun/core/operator");
   const { buildDelegateTools } = await import("@foldrun/core/delegate-tools");
+  const { buildTextTools } = await import("@foldrun/core/text-tool");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
@@ -1009,6 +1014,9 @@ try {
   const ask = input.ask ? buildAskTool({ channel, timeoutSec: input.ask.timeoutSec, emit }) : { server: null };
   const peers = input.peers ? buildPeerTools({ channel, self: input.peers.self, siblings: input.peers.siblings, emit }) : { server: null };
   const inbox = channel ? inboxReader(channel, emit) : undefined;
+  // tools: [text] — a file as text, through the extraction service behind
+  // the same proxy; the lease was granted the door only for this tool.
+  const textTool = input.text ? buildTextTools({ egress: env.FOLDRUN_EGRESS || null, agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", emit }) : { server: null };
   // sandbox: own sub-agents: a tool each, whose job runs in its own sandbox
   // on the worker, reached over the same proxy door.
   const delegate = input.delegates?.length ? buildDelegateTools({ specs: input.delegates, channel, emit, timeoutSec: input.timeoutSec, workspaceRoot: "/workspace" }) : { server: null };
@@ -1065,6 +1073,7 @@ try {
       ...(desks.server ? { foldrun_desks: desks.server } : {}),
       ...(ask.server ? { foldrun_ask: ask.server } : {}),
       ...(peers.server ? { foldrun_peers: peers.server } : {}),
+      ...(textTool.server ? { foldrun_text: textTool.server } : {}),
       ...(delegate.server ? { foldrun_delegate: delegate.server } : {}),
       ...(install.server ? { foldrun_install: install.server } : {}),
       ...input.mcpServers,
@@ -2175,8 +2184,22 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     // that name in the workspace never mixes in.
     if (args.inputs?.files.length) {
       if (!args.tenant) throw new Error("a step with inputs needs its account");
-      const staged = await stageRunInputs(args.tenant, path.basename(args.workspaceRoot), args.inputs.runId, args.inputs.files, path.join(wsIn, args.input.agentRel, INPUTS_DIR));
+      const inputsDir = path.join(wsIn, args.input.agentRel, INPUTS_DIR);
+      const staged = await stageRunInputs(args.tenant, path.basename(args.workspaceRoot), args.inputs.runId, args.inputs.files, inputsDir);
       args.emit("info", stagedLine(staged.files, staged.bytes));
+      // `<file>.txt` beside the media ones, when the platform extracts text:
+      // best effort, bounded, never a reason the step does not start.
+      if (platform.extractText) {
+        await textBesideInputs({
+          tenant: args.tenant,
+          workspace: path.basename(args.workspaceRoot),
+          runId: args.inputs.runId,
+          files: args.inputs.files,
+          dir: inputsDir,
+          extract: (ask) => platform.extractText!(ask),
+          emit: (line) => args.emit("info", line),
+        });
+      }
     }
     const libIn = path.join(staging, "library");
     if (args.galleryRoot && fs.existsSync(args.galleryRoot)) fs.cpSync(args.galleryRoot, libIn, { recursive: true });

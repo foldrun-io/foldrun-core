@@ -138,6 +138,18 @@ test("inside the boundary, no way of printing gets the marker onto stdout or std
   assert.ok(events.includes("canary.done"), "the process got to the end");
 });
 
+test("a second copy of the module (a bundler's) writes through the boundary the first installed — never as a bare console line", async () => {
+  const { code, out, err } = await runChild("second-copy");
+  const all = Buffer.concat([out, err]).toString("utf8");
+  assert.equal(code, 0, all);
+  const parsed = [...lines(out), ...lines(err)].map((l) => JSON.parse(l) as Record<string, unknown>);
+  const line = parsed.find((p) => p.event === "canary.second_copy");
+  assert.ok(line, all);
+  assert.equal(line!.tenant, "acme");
+  assert.equal(line!.reason, "key_revoked");
+  assert.ok(!parsed.some((p) => p.event === "console"), "no line turned into a bare console event");
+});
+
 for (const mode of ["rejection", "throw"]) {
   test(`inside the boundary, an uncaught ${mode} exits 1 and says only its class`, async () => {
     const { code, out, err } = await runChild(mode);
@@ -173,4 +185,19 @@ test("our files are recognised from where the module is, whatever the checkout's
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("who asked: a member id, a key id, a request id and the surface fit; an email never does (D239 phase 1)", () => {
+  const line = opsLine("warn", "auth.refused", { surface: "login", reason: "bad_password", tenant: "acme", user: "u_7Hk2", key: "k_91ab", requestId: "r-0f3a9c", status: 401 });
+  assert.deepEqual(
+    { surface: line.surface, user: line.user, key: line.key, requestId: line.requestId, dropped: line.dropped },
+    { surface: "login", user: "u_7Hk2", key: "k_91ab", requestId: "r-0f3a9c", dropped: undefined },
+  );
+  // An email in any of them is dropped whole, never logged.
+  const leak = opsLine("warn", "auth.refused", { user: "ana@example.com", key: "ana@example.com", requestId: "a b", surface: "Login Page" });
+  assert.equal(leak.user, undefined);
+  assert.equal(leak.key, undefined);
+  assert.equal(leak.requestId, undefined);
+  assert.equal(leak.surface, undefined);
+  assert.equal(leak.dropped, 4);
 });

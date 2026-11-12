@@ -21,6 +21,18 @@ import type { RecordsPort } from "./records.ts";
 
 export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
+/** One of a run's inputs, sent for its text at staging (input-text.ts). */
+export interface ExtractTextAsk {
+  tenant: string;
+  workspace: string;
+  runId: string;
+  /** The file's name (its last segment): the extension helps the parser. */
+  name: string;
+  bytes: Buffer;
+  /** Aborts when staging's time for inputs runs out. */
+  signal: AbortSignal;
+}
+
 /** Who this install is for. `hosted` means someone is paying the operator
  *  for it — a wallet, a plan, a bill. `self-hosted` is everything else: a
  *  laptop, a dev install, a box nobody bills on. */
@@ -178,6 +190,15 @@ export interface PlatformHooks {
    *  can; a run with inputs on one that cannot fails before anything starts
    *  (FOL-163). Default: none can. */
   holdsInputs?(isolation: string): boolean;
+  /**
+   * The text of one of a run's media inputs, for the `<file>.txt` written
+   * beside it at staging (input-text.ts textBesideInputs): OCR, a
+   * document's text, a transcript. Throws when it cannot — the caller notes
+   * why and moves on; the run never fails for it. Absent: no extraction on
+   * this install (a laptop, or a platform without the service), and no
+   * `.txt` is written or promised in the prompt.
+   */
+  extractText?(ask: ExtractTextAsk): Promise<{ text: string; warnings?: string[] }>;
   /**
    * Does this isolation mode wall a step whose `network:` is restricted and
    * enforced to the egress proxy alone (a `filtered` pod)? True: such a
@@ -378,4 +399,5 @@ export function platformQueues(): boolean {
 export function resetPlatform(): void {
   Object.assign(platform, local, { isolation: {} });
   delete platform.records;
+  delete platform.extractText;
 }

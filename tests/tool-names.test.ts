@@ -20,7 +20,7 @@ import { listAgents } from "../src/store.ts";
 import { convert } from "../scripts/migrate-use-to-tools.mjs";
 
 test("a built-in name is never one of the author's own", () => {
-  for (const name of ["read", "write", "files", "code", "bash", "search", "history", "Read", "Bash"]) {
+  for (const name of ["read", "write", "files", "code", "bash", "search", "history", "ask", "peers", "text", "Read", "Bash"]) {
     assert.ok(isRuntimeTool(name), `${name} is a runtime tool`);
   }
   assert.ok(!isRuntimeTool("site_repo"));

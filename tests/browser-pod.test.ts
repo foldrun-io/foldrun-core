@@ -46,6 +46,7 @@ test("reads: file reads, search, fetch, a browse that looks, screenshots, GETs, 
     ["mcp__foldrun_search__search_files", { query: "x" }],
     ["mcp__foldrun_agents__consult_editor", { question: "?" }],
     ["mcp__foldrun_peers__peers_list", {}],
+    ["mcp__foldrun_text__extract_text", { path: "workspace/storage/scan.pdf" }],
     ["Agent", { subagent_type: "r" }],
   ] as const) {
     assert.deepEqual(classifyCall(tool, input as Record<string, unknown>, { methods: { "mcp__foldrun_apis__crm_list_contacts": "GET" } }), { write: false }, `${tool} ${JSON.stringify(input)}`);
@@ -74,6 +75,7 @@ test("writes: files, shell, scripts, non-GET API calls, paid web, clicks and fil
   assert.match(w(WEB, { action: "browse", actions: "{not json" }), /could not read/, "unreadable actions are a write");
   assert.equal(w("mcp__foldrun_ask__ask_person", { question: "?" }), "a question to a person");
   assert.equal(w("mcp__foldrun_peers__peers_message", { to: "writer", text: "?" }), "a message to a colleague");
+  assert.equal(w("mcp__foldrun_text__extract_text", { path: "workspace/storage/scan.pdf", save: true }), "workspace/storage/scan.pdf.txt (extract_text)");
   assert.equal(w("mcp__linear__create_issue", {}), "linear create_issue");
   assert.equal(w("SomethingNew", {}), "SomethingNew");
 });

@@ -59,6 +59,7 @@ test("each kind of tool counts under the name it is granted as", () => {
   assert.deepEqual(limitKeysFor("mcp__foldrun_search__search_files", {}), ["calls", "search"]);
   assert.deepEqual(limitKeysFor("mcp__foldrun_ask__ask_person", {}), ["calls", "ask"]);
   assert.deepEqual(limitKeysFor("mcp__foldrun_peers__peers_message", {}), ["calls", "peers"]);
+  assert.deepEqual(limitKeysFor("mcp__foldrun_text__extract_text", {}), ["calls", "text"]);
   assert.deepEqual(limitKeysFor("mcp__foldrun_agents__consult_editor", {}), ["calls", "editor"]);
   // built-ins: the group and the SDK name
   assert.deepEqual(limitKeysFor("Read", {}), ["calls", "read", "Read"]);

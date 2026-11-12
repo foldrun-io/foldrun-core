@@ -502,7 +502,7 @@ model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
 resources: { memory: 4Gi }  # optional: cpu, memory, disk in numbers, over the size class
-tools: [web, read, ask, peers, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it
+tools: [web, read, ask, peers, text, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it, \`text\` reads images, PDFs, office files and recordings as text
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/
 hooks: [no-force-push]      # from hooks/ or the library: code at every tool call

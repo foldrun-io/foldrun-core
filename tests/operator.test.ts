@@ -202,6 +202,7 @@ const SIBS: PeerInfo[] = [
 
 test("peers: the group is a platform group, the names are fixed, and `by` tells a colleague from a person", () => {
   assert.ok(PLATFORM_GROUPS.has("peers"));
+  assert.ok(PLATFORM_GROUPS.has("text"), "tools: [text] (text-tool.ts) is a platform group too");
   assert.deepEqual(PEER_TOOLS, ["mcp__foldrun_peers__peers_list", "mcp__foldrun_peers__peers_message"]);
   assert.equal(peerOf(`${PEER_BY_PREFIX}writer`), "writer");
   assert.equal(peerOf("dev@example.com"), null);

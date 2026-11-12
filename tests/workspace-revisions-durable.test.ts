@@ -83,8 +83,14 @@ test("a crash with changes queued: boot replays the journal, in order, once", as
   writeWorkspaceFile(T, W, "memory/base.md", "base\n", { by: "user:a" });
   await flushRevisions();
   state.down = true;
+  // A few ms apart: the history lists newest first by time, and two writes
+  // in one millisecond are a tie it may list either way (seen on the dev
+  // gate, 12 Nov 2026: "second" before "third").
+  const tick = () => new Promise((r) => setTimeout(r, 3));
   writeWorkspaceFile(T, W, "memory/a.md", "one\n", { by: "user:a", message: "first" });
+  await tick();
   writeWorkspaceFile(T, W, "memory/a.md", "two\n", { by: "user:b", message: "second" });
+  await tick();
   deleteWorkspacePath(T, W, "memory/base.md", { by: "user:a", message: "third" });
   assert.equal((await flushRevisions()).pending, 3);
   // the process dies: memory is gone, the files stay
