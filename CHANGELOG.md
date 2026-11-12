@@ -13,6 +13,40 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [20.0.0] — 2026-11-12
+
+### Breaking changes
+
+- `listRunOutputs` from `@foldrun/core` is gone (it was never deprecated)
+- `runOutputPath` from `@foldrun/core` is gone (it was never deprecated)
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunRecord` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+### New in the public API
+
+- `RefusedOutput` from `@foldrun/core`
+- `registerRunRemovedHook` from `@foldrun/core`
+- `listRunOutputsOnVolume` from `@foldrun/core`
+- `runOutputPathOnVolume` from `@foldrun/core`
+- `ExtractTextAsk` from `@foldrun/core`
+
+- fix(step-state): a failed baseline read is an error; a write with the switch off drops the stale row ([970f36f](https://github.com/foldrun-io/foldrun-core/commit/970f36f))
+- fix(run-outputs): review fixes — __proto__ names, pin release, move, streaming ([35911b9](https://github.com/foldrun-io/foldrun-core/commit/35911b9))
+- test(revisions): space the journal test's writes a few ms apart ([8e7dabc](https://github.com/foldrun-io/foldrun-core/commit/8e7dabc))
+- fix(input-text): the budget timer keeps the process alive while it is awaited ([c44d4b6](https://github.com/foldrun-io/foldrun-core/commit/c44d4b6))
+- feat(text): built-in `text` tool (extract_text) and text beside media run inputs ([c0e859e](https://github.com/foldrun-io/foldrun-core/commit/c0e859e))
+- fix(ops-log): one boundary per process, shared by every copy of the module ([0c06603](https://github.com/foldrun-io/foldrun-core/commit/0c06603))
+- feat(ops-log): user, key, requestId and surface fields — who a refusal was for ([fe2b975](https://github.com/foldrun-io/foldrun-core/commit/fe2b975))
+- Archive run outputs through the store ([29bfce4](https://github.com/foldrun-io/foldrun-core/commit/29bfce4))
+- Publish run outputs to the blob store ([747c989](https://github.com/foldrun-io/foldrun-core/commit/747c989))
+- Allow run-output manifests ([29d6a17](https://github.com/foldrun-io/foldrun-core/commit/29d6a17))
+- Keep step state in rows when the database has them ([a531a88](https://github.com/foldrun-io/foldrun-core/commit/a531a88))
+
 ## [19.3.0] — 2026-11-11
 
 ### Widened in the public API
