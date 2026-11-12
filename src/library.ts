@@ -437,7 +437,7 @@ registerTreeReader((tenant, scope) => {
     }
   }
   return out;
-});
+}, "library");
 
 
 

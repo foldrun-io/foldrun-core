@@ -24,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { accountDir } from "./store.ts";
+import { processState } from "./process-state.ts";
 
 /** How a credential is identified here. A name alone is not enough: the
  *  account and each workspace can hold a secret by the same name, and they
@@ -112,11 +113,12 @@ const fileStore: SecretHealthStore = {
   },
 };
 
-let store: SecretHealthStore = fileStore;
+/** One per process (process-state.ts), so every bundle writes to the store the boot chose. */
+const HEALTH = processState("secret-health", () => ({ store: fileStore as SecretHealthStore }));
 
 /** The platform's store (Postgres), or back to files with null. */
 export function setSecretHealthStore(next: SecretHealthStore | null): void {
-  store = next ?? fileStore;
+  HEALTH.store = next ?? fileStore;
 }
 
 // Writes are queued and coalesced off the caller's path. The egress proxy
@@ -135,7 +137,7 @@ function drain(): void {
       for (const [tenant, updates] of pending) {
         pending.delete(tenant);
         try {
-          await store.apply(tenant, updates);
+          await HEALTH.store.apply(tenant, updates);
         } catch {
           // best effort, always
         }
@@ -201,14 +203,14 @@ export function flushSecretHealth(): Promise<void> {
  *  vault holds but nothing has used are simply absent, which is the honest
  *  answer: unused is not the same as broken. */
 export async function secretHealth(tenant: string): Promise<HealthFile> {
-  return store.read(tenant);
+  return HEALTH.store.read(tenant);
 }
 
 /** The credentials worth saying something about: refused the last time they
  *  were used. Sorted worst first — most consecutive refusals, then oldest
  *  last-success, which is the order someone would work through them. */
 export async function failingSecrets(tenant: string): Promise<{ name: string; record: SecretRecord }[]> {
-  return Object.entries(await store.read(tenant))
+  return Object.entries(await HEALTH.store.read(tenant))
     .filter(([, r]) => r.last.outcome === "refused")
     .map(([name, record]) => ({ name, record }))
     .sort((a, b) => b.record.refusals - a.record.refusals || (a.record.lastAccepted ?? "").localeCompare(b.record.lastAccepted ?? ""));
@@ -218,7 +220,7 @@ export async function failingSecrets(tenant: string): Promise<{ name: string; re
  *  where the old key's refusals say nothing about the new one. */
 export async function forgetSecretHealth(tenant: string, name: string): Promise<void> {
   try {
-    await store.forget(tenant, name);
+    await HEALTH.store.forget(tenant, name);
   } catch {
     // best effort
   }

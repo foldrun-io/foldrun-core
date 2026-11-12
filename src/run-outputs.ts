@@ -39,6 +39,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
+import { processState } from "./process-state.ts";
 import { BlobNotFound, type BlobStore } from "./blob-store.ts";
 import { PUBLISH_PIN_TTL_MS, noPins, type BlobPins, type PinHolder } from "./blob-pins.ts";
 import {
@@ -181,14 +182,16 @@ export interface RunOutputsBackend {
   runMaxBytes: () => number;
 }
 
-let backend: RunOutputsBackend | null = null;
+/** One per process (process-state.ts): the store the boot registered, and the
+ *  clean-ups in flight, whichever copy of this module started them. */
+const OUT = processState("run-outputs", () => ({ backend: null as RunOutputsBackend | null, background: new Set<Promise<unknown>>() }));
 
 /** Where run outputs are published, or null (every run archives to the volume). */
 export function setRunOutputsBackend(b: RunOutputsBackend | null): void {
-  backend = b;
+  OUT.backend = b;
   registerRunRemovedHook(b ? runDeleted : null);
 }
-export const runOutputsBackend = (): RunOutputsBackend | null => backend;
+export const runOutputsBackend = (): RunOutputsBackend | null => OUT.backend;
 function safeCall<T>(fn: () => T, fallback: T): T {
   try {
     return fn();
@@ -197,7 +200,7 @@ function safeCall<T>(fn: () => T, fallback: T): T {
   }
 }
 /** Publishing is on: a backend is registered and the operator has said so. */
-export const runOutputsOn = (): boolean => !!backend && safeCall(backend.enabled, false);
+export const runOutputsOn = (): boolean => !!OUT.backend && safeCall(OUT.backend.enabled, false);
 
 const pinsOf = (b: RunOutputsBackend): BlobPins => b.pins ?? noPins;
 
@@ -407,7 +410,7 @@ export async function archiveRunOutputs(
   agent: string,
   dir: string,
 ): Promise<{ where: "store"; refused: RefusedOutput[] } | { where: "volume" }> {
-  const b = backend;
+  const b = OUT.backend;
   if (!b || !runOutputsOn()) return { where: "volume" };
   try {
     const r = await publishRunOutputs(b, tenant, workspace, runId, agent, dir);
@@ -427,9 +430,9 @@ export async function archiveRunOutputs(
 const readDeps = (b: RunOutputsBackend): Deps => ({ blobs: b.blobs, revisions: undefined as unknown as Deps["revisions"] });
 
 async function recordsOf(tenant: string, workspace: string, runId: string): Promise<RunOutputRecord[]> {
-  if (!backend) return [];
+  if (!OUT.backend) return [];
   try {
-    return await backend.store.list(tenant, workspace, runId);
+    return await OUT.backend.store.list(tenant, workspace, runId);
   } catch (err) {
     opsError("run_outputs.list_failed", err, { tenant, workspace, run: runId });
     throw err;
@@ -442,7 +445,7 @@ export async function listRunOutputs(tenant: string, workspace: string, runId: s
   const recs = await recordsOf(tenant, workspace, runId);
   const out: RunOutputFile[] = [];
   for (const r of recs) {
-    const m = await loadManifest(readDeps(backend!), tenant, r.manifest);
+    const m = await loadManifest(readDeps(OUT.backend!), tenant, r.manifest);
     for (const [p, e] of Object.entries(m.files)) out.push({ agent: r.agent, path: p, bytes: e.size });
   }
   const mine = new Set(recs.map((r) => r.agent));
@@ -461,12 +464,12 @@ export interface OpenedOutput {
 export async function openRunOutput(tenant: string, workspace: string, runId: string, agent: string, rel: string): Promise<OpenedOutput | null> {
   if (!agent || !rel || agent.includes("/") || agent.includes("\\") || agent.startsWith(".")) return null;
   const rec = (await recordsOf(tenant, workspace, runId)).find((r) => r.agent === agent);
-  if (rec && backend) {
-    const m = await loadManifest(readDeps(backend), tenant, rec.manifest);
+  if (rec && OUT.backend) {
+    const m = await loadManifest(readDeps(OUT.backend), tenant, rec.manifest);
     const e = m.files[rel.normalize("NFC")];
     if (!e) return null;
     const key = blobObjectKey(tenant, e.sha);
-    const blobs = backend.blobs;
+    const blobs = OUT.backend.blobs;
     // A blob that is gone is an explicit failure (never an empty file); heading
     // here makes it one error before any byte is sent.
     if (!(await blobs.head(key))) throw new BlobMissing(`${agent}/${rel}`, e.sha);
@@ -524,14 +527,14 @@ export async function readRunOutput(tenant: string, workspace: string, runId: st
 /** A run is deleted: its records and their pins go. Throws when the store
  *  cannot be reached (deleteRun's caller retries in the background). */
 export async function dropRunOutputs(tenant: string, workspace: string, runId: string): Promise<void> {
-  const b = backend;
+  const b = OUT.backend;
   if (!b) return;
   await releaseRecords(b, await b.store.drop({ tenant, workspace, runId }));
 }
 
 /** A workspace is deleted: every run's records of it. */
 export async function dropWorkspaceOutputs(tenant: string, workspace: string): Promise<void> {
-  const b = backend;
+  const b = OUT.backend;
   if (!b) return;
   await releaseRecords(b, await b.store.drop({ tenant, workspace }));
 }
@@ -539,7 +542,7 @@ export async function dropWorkspaceOutputs(tenant: string, workspace: string): P
 /** An account is deleted. Its pins are released by dropTenantRevisions (all pins
  *  of the account); the records go here. */
 export async function dropTenantOutputs(tenant: string): Promise<void> {
-  await backend?.store.drop({ tenant });
+  await OUT.backend?.store.drop({ tenant });
 }
 
 /** A workspace was renamed: the records follow (the pins are not keyed by
@@ -548,7 +551,7 @@ export async function dropTenantOutputs(tenant: string): Promise<void> {
  *  store does both in its move too; the file store did not — review, 12 Nov
  *  2026). */
 export async function moveWorkspaceOutputs(tenant: string, from: string, to: string): Promise<void> {
-  const b = backend;
+  const b = OUT.backend;
   if (!b) return;
   await releaseRecords(b, await b.store.drop({ tenant, workspace: to }));
   await b.store.move(tenant, from, to);
@@ -559,14 +562,14 @@ export async function moveWorkspaceOutputs(tenant: string, from: string, to: str
  *  store that cannot say, or cannot be reached, counts 0 (a statement must not fail). */
 export function runOutputBytes(tenant: string, workspace: string): number {
   try {
-    return backend?.store.bytes?.(tenant, workspace) ?? 0;
+    return OUT.backend?.store.bytes?.(tenant, workspace) ?? 0;
   } catch (err) {
     opsError("run_outputs.bytes_failed", err, { tenant, workspace }, "warn");
     return 0;
   }
 }
 
-const background = new Set<Promise<unknown>>();
+const background = OUT.background;
 /** Wait for the retries a sync caller started (tests, process end). */
 export async function settleRunOutputs(): Promise<void> {
   while (background.size) await Promise.allSettled([...background]);
@@ -575,8 +578,8 @@ export async function settleRunOutputs(): Promise<void> {
 /** deleteRun cannot wait: do it now, and on a failure try again 1, 2, 4, 8 s
  *  later, then say so (`run_outputs.drop_failed`; the blobs stay until a human looks). */
 export function runDeleted(tenant: string, workspace: string, runId: string): void {
-  if (!backend) return;
-  const b = backend;
+  if (!OUT.backend) return;
+  const b = OUT.backend;
   // The records dropped are kept across the retries: a release that fails
   // after the drop must not leave the next try with nothing to release
   // (review, 12 Nov 2026).

@@ -39,6 +39,7 @@ import { pipeline } from "node:stream/promises";
 import { registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
 import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath } from "./store.ts";
 import { dataRoot } from "./paths.ts";
+import { processState } from "./process-state.ts";
 import { opsError, opsLog } from "./ops-log.ts";
 import { readAll, fileSource, BlobNotFound, type BlobSweeper } from "./blob-store.ts";
 import { fsJournalStore, type JournalStore, type JournalRecord } from "./journal-store.ts";
@@ -67,7 +68,35 @@ import { dropTenantOutputs, dropWorkspaceOutputs, moveWorkspaceOutputs, settleRu
 
 // ------------------------------------------------------------- the backend
 
-let backend: Deps | null = null;
+/** Everything this module is told at boot, and every queue that goes with it,
+ *  is one per PROCESS (process-state.ts), not one per copy of the module: the
+ *  dashboard's route handlers are compiled apart from the boot, and until 13
+ *  Nov 2026 they saw no backend — a save there was never journalled, and a read
+ *  never came from a head. */
+const S = processState("workspace-revisions", () => ({
+  backend: null as Deps | null,
+  gate: { journal: (): boolean => false, read: (): boolean => false },
+  retention: null as (() => StateRetention) | null,
+  orphanMarks: null as SweepMarks | null,
+  orphanGrace: 3_600_000,
+  retentionEvery: 10 * 60_000,
+  primary: null as JournalStore | null,
+  cache: null as BlobCache | null,
+  legacy: null as JournalStore | null,
+  queues: new Map<string, Entry[]>(),
+  chains: new Map<string, Promise<unknown>>(),
+  marked: new Set<string>(),
+  verified: new Set<string>(),
+  unjournalled: new Set<string>(),
+  repairing: new Set<string>(),
+  retryAt: new Map<string, number>(),
+  wantPrune: new Set<string>(),
+  prunedAt: new Map<string, number>(),
+  frozen: new Map<string, Promise<void>>(),
+  restoring: new Map<string, string>(),
+  lifecycleBusy: new Set<string>(),
+  background: new Set<Promise<unknown>>(),
+}));
 
 /** Two switches the host decides on every call (the settings registry's
  *  `revisions.journal` and `revisions.read`): the journal and history from
@@ -92,39 +121,33 @@ export interface BackendOptions {
    *  history is removed. Default one hour. */
   orphanGraceMs?: number;
 }
-let gate: { journal: () => boolean; read: () => boolean } = { journal: () => false, read: () => false };
-let retention: (() => StateRetention) | null = null;
-let orphanMarks: SweepMarks | null = null;
-let orphanGrace = 3_600_000;
-let retentionEvery = 10 * 60_000;
 /** The legacy place: files on the volume. Always replayed at boot (and then
  *  empty), whatever new entries are written to. */
-const legacyFiles = fsJournalStore(() => journalRoot());
-let primary: JournalStore | null = null;
-const journalStores = (): JournalStore[] => (primary && primary !== legacyFiles ? [primary, legacyFiles] : [legacyFiles]);
-const entryStore = (): JournalStore => primary ?? legacyFiles;
+const legacyFiles = (S.legacy ??= fsJournalStore(() => journalRoot()));
+const journalStores = (): JournalStore[] => (S.primary && S.primary !== legacyFiles ? [S.primary, legacyFiles] : [legacyFiles]);
+const entryStore = (): JournalStore => S.primary ?? legacyFiles;
 
 /** Where revisions live, or null (no journal, nothing changes). */
 export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {}): void {
   // Every commit asks, inside the store's workspace lock, whether the folder is
   // still there: a delete or rename on another pod removes it under that lock.
-  backend = deps ? { ...deps, workspaceExists: deps.workspaceExists ?? ((ws) => fs.existsSync(workspaceDir(ws.tenant, ws.workspace))) } : null;
-  gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
-  primary = opts.journalStore ?? null;
-  retention = opts.stateRetention ?? null;
-  retentionEvery = opts.retentionEveryMs ?? 10 * 60_000;
-  orphanMarks = opts.sweepMarks ?? null;
-  orphanGrace = opts.orphanGraceMs ?? 3_600_000;
+  S.backend = deps ? { ...deps, workspaceExists: deps.workspaceExists ?? ((ws) => fs.existsSync(workspaceDir(ws.tenant, ws.workspace))) } : null;
+  S.gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
+  S.primary = opts.journalStore ?? null;
+  S.retention = opts.stateRetention ?? null;
+  S.retentionEvery = opts.retentionEveryMs ?? 10 * 60_000;
+  S.orphanMarks = opts.sweepMarks ?? null;
+  S.orphanGrace = opts.orphanGraceMs ?? 3_600_000;
   registerJournal(deps ? journalChange : null);
   registerWorkspaceGone(deps ? (t, w) => goneNow(t, w) : null);
   registerWorkspaceLifecycle(deps ? { drop: dropWorkspaceRevisions, move: moveWorkspaceRevisions, moved: movedNow } : null);
   registerRevisionView(deps ? view : null);
 }
-export const revisionBackend = (): Deps | null => backend;
-const journalOn = (): boolean => !!backend && safe(gate.journal);
+export const revisionBackend = (): Deps | null => S.backend;
+const journalOn = (): boolean => !!S.backend && safe(S.gate.journal);
 /** Reads of content from heads (and run stage-in): its own switch, and only
  *  where the journal runs too (a head that is not kept current is not a source). */
-export const revisionReadsOn = (): boolean => journalOn() && safe(gate.read);
+export const revisionReadsOn = (): boolean => journalOn() && safe(S.gate.read);
 function safe(fn: () => boolean): boolean {
   try {
     return fn();
@@ -139,9 +162,8 @@ export interface BlobCache {
   get(tenant: string, sha: string): Promise<Buffer | null>;
   put(tenant: string, sha: string, bytes: Buffer): Promise<void>;
 }
-let cache: BlobCache | null = null;
 export function setBlobCache(c: BlobCache | null): void {
-  cache = c;
+  S.cache = c;
 }
 
 // ------------------------------------------------------------- the journal
@@ -194,18 +216,18 @@ const MAX_QUEUED = 2000;
 /** A journal file this old, that no queue of this process holds, was left by a
  *  process that died (a live one commits within seconds or keeps retrying). */
 const ORPHAN_MS = 120_000;
-const queues = new Map<string, Entry[]>();
-const chains = new Map<string, Promise<unknown>>();
-const marked = new Set<string>(); // overflowed or dropped: needs reconcileWorkspace
-const verified = new Set<string>(); // reconciled once in this process
-const unjournalled = new Set<string>(); // changed here while the journal was off: the head has not seen it
-const repairing = new Set<string>(); // a reconcile is publishing: the head is about to change
-const retryAt = new Map<string, number>();
-const wantPrune = new Set<string>(); // a state checkpoint was committed since the last look
-const prunedAt = new Map<string, number>();
+const queues = S.queues;
+const chains = S.chains;
+const marked = S.marked; // overflowed or dropped: needs reconcileWorkspace
+const verified = S.verified; // reconciled once in this process
+const unjournalled = S.unjournalled; // changed here while the journal was off: the head has not seen it
+const repairing = S.repairing; // a reconcile is publishing: the head is about to change
+const retryAt = S.retryAt;
+const wantPrune = S.wantPrune; // a state checkpoint was committed since the last look
+const prunedAt = S.prunedAt;
 /** Workspaces whose commits are held while a delete or rename runs. */
-const frozen = new Map<string, Promise<void>>();
-const restoring = new Map<string, string>();
+const frozen = S.frozen;
+const restoring = S.restoring;
 const key = (tenant: string, workspace: string) => `${tenant}\0${workspace}`;
 const split = (k: string): [string, string] => k.split("\0") as [string, string];
 
@@ -235,9 +257,9 @@ function forget(tenant: string, workspace: string, e: Entry): void {
 /** Called by history.recordRevision for every change set. Synchronous and
  *  cheap; the commit happens in the background (flushRevisions waits for it). */
 function journalChange(tenant: string, scope: string, files: RevisionFile[], meta: { by: string; message: string; at: string }): void {
-  if (!backend || scope === "@library") return; // the account shelf is not a workspace
+  if (!S.backend || scope === "@library") return; // the account shelf is not a workspace
   const k = key(tenant, scope);
-  if (!safe(gate.journal)) {
+  if (!safe(S.gate.journal)) {
     verified.delete(k); // a change the head will not see: reconcile before trusting it again
     unjournalled.add(k);
     return;
@@ -314,9 +336,9 @@ export function recordStepOutputs(
   writes: StepWrite[],
   meta: { runId?: string; step?: string | number; by?: string; base?: RunBase | null },
 ): number {
-  if (!backend || workspace === "@library") return 0;
+  if (!S.backend || workspace === "@library") return 0;
   const k = key(tenant, workspace);
-  if (!safe(gate.journal)) {
+  if (!safe(S.gate.journal)) {
     verified.delete(k); // the head will not see this: reconcile before trusting it again
     unjournalled.add(k);
     return 0;
@@ -387,7 +409,7 @@ function drain(k: string): Promise<void> {
 async function drainOne(k: string): Promise<void> {
   const [tenant, workspace] = split(k);
   const q = queues.get(k);
-  while (q && q.length && backend) {
+  while (q && q.length && S.backend) {
     const entry = q[0];
     // The workspace was deleted while this waited (or retried): nothing to
     // publish, and nothing for a later boot to replay.
@@ -397,7 +419,7 @@ async function drainOne(k: string): Promise<void> {
       continue;
     }
     try {
-      const res = await commitEntry(backend, tenant, workspace, entry);
+      const res = await commitEntry(S.backend, tenant, workspace, entry);
       if (res?.status === "committed" && res.stateRevision) wantPrune.add(k);
       q.shift();
       forget(tenant, workspace, entry);
@@ -437,7 +459,7 @@ async function drainOne(k: string): Promise<void> {
   // journal was off for a while, a run wrote the folder directly) is brought
   // to it. After the entries, never before: replaying an older change over a
   // reconciled head would write it backwards.
-  if (backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(workspaceDir(tenant, workspace))) {
+  if (S.backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(workspaceDir(tenant, workspace))) {
     verified.add(k);
     try {
       await reconcileWorkspace(tenant, workspace, "reconcile");
@@ -528,10 +550,10 @@ async function freeze(keys: string[]): Promise<() => void> {
   };
 }
 
-const lifecycleBusy = new Set<string>(); // keys a lifecycle call is handling (the sync hooks stay out of its way)
+const lifecycleBusy = S.lifecycleBusy; // keys a lifecycle call is handling (the sync hooks stay out of its way)
 
 /** What the sync hooks started and has not finished (tests, and a process that is ending). */
-const background = new Set<Promise<unknown>>();
+const background = S.background;
 export async function settleLifecycle(): Promise<void> {
   while (background.size) await Promise.allSettled([...background]);
   await settleRunOutputs();
@@ -573,7 +595,7 @@ function goneNow(tenant: string, workspace: string): void {
  * in between. A store that cannot be reached throws BEFORE `remove` runs.
  */
 export async function dropWorkspaceRevisions(tenant: string, workspace: string, remove?: () => void): Promise<void> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps || workspace === "@library") {
     remove?.();
     return;
@@ -612,7 +634,7 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
  *  rest depends on it). */
 export async function dropTenantRevisions(tenant: string): Promise<void> {
   dropJournal(tenant);
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return;
   const mine = [...chains.keys()].filter((k) => split(k)[0] === tenant);
   await Promise.all(mine.map((k) => chains.get(k)!.catch(() => {})));
@@ -640,7 +662,7 @@ function movedNow(tenant: string, from: string, to: string): void {
  * store that cannot be reached throws BEFORE `rename` runs.
  */
 export async function moveWorkspaceRevisions(tenant: string, from: string, to: string, rename?: () => void): Promise<void> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps || from === "@library" || to === "@library") {
     rename?.();
     return;
@@ -737,7 +759,7 @@ const RUN_PIN_TTL_MS = 2 * 60 * 60_000;
  * be taken.
  */
 export async function pinRunBase(tenant: string, workspace: string, holder: string): Promise<{ base: RunBase; release(): Promise<void> } | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps || !journalOn() || workspace === "@library") return null;
   try {
     const { pending } = await flushRevisions({ tenant, workspace });
@@ -754,7 +776,7 @@ export async function pinRunBase(tenant: string, workspace: string, holder: stri
 /** The same pin for a base that was recorded earlier (a driver that took over a
  *  step): null when either revision is gone. */
 export async function repinRunBase(tenant: string, workspace: string, base: RunBase, holder: string): Promise<{ base: RunBase; release(): Promise<void> } | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps || !journalOn()) return null;
   try {
     const w = base.workspace ? await deps.revisions.revision({ tenant, workspace, scope: "workspace" }, base.workspace) : null;
@@ -793,9 +815,9 @@ async function holdRunBase(deps: Deps, tenant: string, base: RunBase, revs: Head
 
 /** Look at one workspace's `state/` checkpoints now (the host's window). */
 export async function pruneStateNow(tenant: string, workspace: string): Promise<{ pruned: number; kept: number; held: number } | null> {
-  const deps = backend;
-  if (!deps || !retention || !journalOn()) return null;
-  const policy = safe2(retention);
+  const deps = S.backend;
+  if (!deps || !S.retention || !journalOn()) return null;
+  const policy = safe2(S.retention);
   if (!policy) return null;
   try {
     const res = await pruneStateRevisions(deps, { tenant, workspace }, policy);
@@ -818,7 +840,7 @@ const safe2 = (fn: () => StateRetention): StateRetention | null => {
 /** After a state commit: look, but not on every one (a checkpoint per step). */
 async function pruneIfDue(tenant: string, workspace: string): Promise<void> {
   const last = prunedAt.get(key(tenant, workspace)) ?? 0;
-  if (Date.now() - last < retentionEvery) return;
+  if (Date.now() - last < S.retentionEvery) return;
   await pruneStateNow(tenant, workspace);
 }
 
@@ -844,7 +866,7 @@ export async function cleanOrphanedHistory(
   opts: { graceMs: number; force?: boolean; dryRun?: boolean },
 ): Promise<{ checked: number; orphans: number; marked: number; dropped: number; skipped: number }> {
   const out = { checked: 0, orphans: 0, marked: 0, dropped: 0, skipped: 0 };
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return out;
   const root = dataRoot();
   let rootEntries = 0;
@@ -971,7 +993,7 @@ export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {
   // First, the history of workspaces that were deleted before the delete took
   // it with them (8 Nov 2026): it must not be reconciled, or found by a new
   // workspace of the same name.
-  if (orphanMarks) await cleanOrphanedHistory(orphanMarks, { graceMs: orphanGrace }).catch((err) => opsError("revisions.orphans_failed", err, {}, "warn"));
+  if (S.orphanMarks) await cleanOrphanedHistory(S.orphanMarks, { graceMs: S.orphanGrace }).catch((err) => opsError("revisions.orphans_failed", err, {}, "warn"));
   for (const tenant of opts.tenants ?? listTenants()) {
     for (const w of listWorkspaces(tenant)) {
       const k = key(tenant, w.name);
@@ -1014,7 +1036,9 @@ interface FolderFile {
 }
 
 async function hashOf(abs: string, size: number): Promise<string> {
-  if (size <= LARGE_FILE) return sha256Hex(fs.readFileSync(abs));
+  // Read off the event loop: a dashboard process runs this too, and a desk can
+  // hold thousands of files.
+  if (size <= LARGE_FILE) return sha256Hex(await fs.promises.readFile(abs));
   const h = crypto.createHash("sha256");
   await pipeline(fs.createReadStream(abs), h);
   return h.digest("hex");
@@ -1283,7 +1307,7 @@ async function sidesDone(deps: Deps, ws: WorkspaceRef, id: string): Promise<{ au
  *  never reached a head and one the importer had put there was never updated
  *  or removed — a run staged from the head was handed files deleted days ago). */
 export async function reconcileWorkspace(tenant: string, workspace: string, by = "reconcile"): Promise<PublishResult | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   const ws: WorkspaceRef = { tenant, workspace };
   const k = key(tenant, workspace);
@@ -1334,7 +1358,7 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
       // Read when asked, one file at a time; publish checks the bytes against
       // the sha, so a file that changed since the scan fails this repair (the
       // mark is put back and the next one sees the new bytes).
-        bytesOf: async (sha) => fs.readFileSync(onDisk.get(sha)!),
+        bytesOf: async (sha) => fs.promises.readFile(onDisk.get(sha)!),
       });
     } finally {
       await release();
@@ -1351,11 +1375,11 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
 // ------------------------------------------------------------- reading
 
 async function blobBytes(deps: Deps, tenant: string, sha: string): Promise<Buffer | null> {
-  const hit = await cache?.get(tenant, sha);
+  const hit = await S.cache?.get(tenant, sha);
   if (hit) return hit;
   try {
     const b = await readAll(deps.blobs, blobObjectKey(tenant, sha));
-    void cache?.put(tenant, sha, b).catch(() => {});
+    void S.cache?.put(tenant, sha, b).catch(() => {});
     return b;
   } catch (err) {
     if (err instanceof BlobNotFound) return null;
@@ -1366,7 +1390,7 @@ async function blobBytes(deps: Deps, tenant: string, sha: string): Promise<Buffe
 /** One file of the workspace as its heads hold it: head → manifest → blob.
  *  Null when there is no such file (or no head yet). */
 export async function readAtHead(tenant: string, workspace: string, rel: string): Promise<Buffer | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   const side = sideOf(rel);
   if (!side) return null;
@@ -1390,7 +1414,7 @@ async function parentManifest(deps: Deps, tenant: string, workspace: string, rev
  *  history.ts's summary shape. `commit` is null (a deploy's commit id rides in
  *  the message); the id is the revision's. */
 export async function listRevisionSummaries(tenant: string, workspace: string, opts: { limit?: number; forPath?: string; paths?: boolean } = {}): Promise<RevisionSummary[]> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return [];
   const want = opts.limit ?? 200;
   // `paths: false` (resolving a restore point) needs only who, when and why:
@@ -1436,7 +1460,7 @@ const FOR_PATH_SCAN = 500;
 /** One revision of the workspace head, by id, without listing: the history's
  *  "is this a restore point" and "which revision is that id". */
 export async function revisionSummary(tenant: string, workspace: string, id: string): Promise<RevisionSummary | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   const r = await deps.revisions.revision({ tenant, workspace }, id);
   return r ? { id: r.id, at: r.at, by: r.by, message: r.message, commit: null, paths: [] } : null;
@@ -1445,7 +1469,7 @@ export async function revisionSummary(tenant: string, workspace: string, id: str
 /** One revision with what changed, in history.ts's Revision shape (text
  *  before/after, clipped). */
 export async function readRevisionDetail(tenant: string, workspace: string, id: string, forPath?: string): Promise<HistoryRevision | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   const r = await deps.revisions.revision({ tenant, workspace }, id);
   if (!r) return null;
@@ -1473,7 +1497,7 @@ export async function readRevisionDetail(tenant: string, workspace: string, id: 
  *  have removed the file from the folder (FOL-152). Through history.ts the
  *  error answers "no snapshot", and the restore refuses. */
 export async function snapshotFiles(tenant: string, workspace: string, id: string): Promise<{ path: string; content: string }[] | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   const r = await deps.revisions.revision({ tenant, workspace }, id);
   if (!r) return null;
@@ -1498,7 +1522,7 @@ export async function snapshotFiles(tenant: string, workspace: string, id: strin
  *  always did; the journal sees that write as a no-op because the head already
  *  holds the content. */
 export async function restoreRevision(tenant: string, workspace: string, to: string, opts: { by: string; opId: string; message?: string; stateTo?: string }): Promise<PublishResult | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps) return null;
   return restore(deps, { ws: { tenant, workspace }, to, opId: opts.opId, by: opts.by, message: opts.message, stateTo: opts.stateTo });
 }
@@ -1568,7 +1592,7 @@ function headBehind(tenant: string, workspace: string, rel: string): boolean {
  *  a stage-in; null when reads through revisions are off, there is no head,
  *  or any blob could not be had (the caller then stages from the folder). */
 export async function readHeadTree(tenant: string, workspace: string): Promise<{ path: string; bytes: Buffer; mode: number }[] | null> {
-  const deps = backend;
+  const deps = S.backend;
   if (!deps || !revisionReadsOn()) return null;
   try {
     const heads = await headsOf(deps, { tenant, workspace });

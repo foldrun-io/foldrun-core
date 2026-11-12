@@ -47,6 +47,7 @@ const tenantKey = (tenant: string) => platform.tenantKey(tenant);
 import crypto from "node:crypto";
 import { assertSafeName } from "./store.ts";
 import { trimSlashes } from "./paths.ts";
+import { processState } from "./process-state.ts";
 import { SITE, siteCovers } from "./network.ts";
 
 const keyFile = () => path.join(dataRoot(), ".secret-key");
@@ -278,12 +279,13 @@ export interface VaultStore {
   forget?(tenant: string, workspace?: string): void;
 }
 
-let vaultStore: VaultStore | null = null;
+/** One per process (process-state.ts): the dashboard's routes must see the store the boot registered. */
+const VAULT = processState("vault", () => ({ store: null as VaultStore | null }));
 /** Register (or, with null, remove) the platform's vault store. None: files. */
 export function setVaultStore(store: VaultStore | null): void {
-  vaultStore = store;
+  VAULT.store = store;
 }
-const inStore = (tenant: string, workspace?: string): VaultStore | null => (vaultStore?.on(tenant, workspace) ? vaultStore : null);
+const inStore = (tenant: string, workspace?: string): VaultStore | null => (VAULT.store?.on(tenant, workspace) ? VAULT.store : null);
 
 function read(tenant: string, workspace?: string): SecretsFile {
   const store = inStore(tenant, workspace);
@@ -300,7 +302,7 @@ function mutateVault(tenant: string, workspace: string | undefined, change: (all
     wrote = next !== null;
     return next;
   });
-  if (wrote) vaultStore?.forget?.(tenant, workspace);
+  if (wrote) VAULT.store?.forget?.(tenant, workspace);
   return after;
 }
 
@@ -877,7 +879,7 @@ function secretFiles(tenant: string): { file: string; workspace?: string }[] {
   }
   // Scopes in the platform's store have no file; they are named by where
   // the file would be (the result's `file` is a label, never opened).
-  for (const workspace of vaultStore?.workspaces(tenant) ?? []) {
+  for (const workspace of VAULT.store?.workspaces(tenant) ?? []) {
     if (!out.some((x) => x.workspace === workspace)) out.push({ file: secretsFile(tenant, workspace), workspace });
   }
   return out;
@@ -1255,7 +1257,7 @@ function workspacesWithSecrets(tenant: string): string[] {
     }
     for (const n of names) if (fs.existsSync(path.join(base, n, "secrets.json"))) out.add(n);
   }
-  for (const n of vaultStore?.workspaces(tenant) ?? []) out.add(n);
+  for (const n of VAULT.store?.workspaces(tenant) ?? []) out.add(n);
   return [...out];
 }
 

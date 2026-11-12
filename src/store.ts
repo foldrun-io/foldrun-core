@@ -27,6 +27,7 @@ import type { BrowserPodOutcome } from "./browser-pod.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { recordRevision, registerTreeReader, assertCommitId, workspaceGone, workspaceMoved, workspaceLifecycle, type RevisionFile } from "./history.ts";
+import { processState } from "./process-state.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
@@ -4150,25 +4151,27 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   }
   // Outputs published to the blob store (run-outputs.ts) are records and pins,
   // not files under dir: they go in the background, retried.
-  onRunRemoved?.(tenant, workspace, runId);
+  RUN_HOOKS.removed?.(tenant, workspace, runId);
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
-  if (!opts.pruned) onRunDeleted?.(tenant, workspace, runId);
+  if (!opts.pruned) RUN_HOOKS.deleted?.(tenant, workspace, runId);
   return true;
 }
 
 /** run-outputs.ts registers here (it imports this module). */
-let onRunRemoved: ((tenant: string, workspace: string, runId: string) => void) | null = null;
-export function registerRunRemovedHook(fn: typeof onRunRemoved) {
-  onRunRemoved = fn;
+type RunHook = (tenant: string, workspace: string, runId: string) => void;
+/** One per process (process-state.ts): a run deleted from a route handler must
+ *  reach the hooks the boot registered. */
+const RUN_HOOKS = processState("run-hooks", () => ({ removed: null as RunHook | null, deleted: undefined as RunHook | undefined }));
+export function registerRunRemovedHook(fn: RunHook | null) {
+  RUN_HOOKS.removed = fn;
 }
 
 /** ledger.ts registers here — store cannot import it without a cycle, and
  *  money must not depend on one. */
-let onRunDeleted: ((tenant: string, workspace: string, runId: string) => void) | undefined;
-export function registerRunDeletionListener(fn: typeof onRunDeleted) {
-  onRunDeleted = fn;
+export function registerRunDeletionListener(fn: RunHook | undefined) {
+  RUN_HOOKS.deleted = fn;
 }
 
 export interface RunOutputFile {
@@ -5312,4 +5315,4 @@ registerTreeReader((tenant, scope) => {
       return [];
     }
   });
-});
+}, "workspace");

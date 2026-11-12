@@ -35,6 +35,7 @@
 //                  per save.
 
 import fs from "node:fs";
+import { processState } from "./process-state.ts";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
@@ -49,10 +50,28 @@ import { dataRoot } from "./paths.ts";
  * made a minute later has everything.
  */
 type TreeReader = (tenant: string, scope: string) => RevisionFile[] | null;
-let readTree: TreeReader = () => null;
-export function registerTreeReader(fn: TreeReader) {
-  const prev = readTree;
-  readTree = (tenant, scope) => fn(tenant, scope) ?? prev(tenant, scope);
+/** What is registered here is one per PROCESS (process-state.ts): the boot
+ *  registers the journal and the view, and a route handler compiled apart from
+ *  it must see them — until 13 Nov 2026 it did not, and a dashboard save was
+ *  never journalled as a revision. */
+const REG = processState("history", () => ({
+  readers: new Map<string, TreeReader>(),
+  journal: null as Journal | null,
+  onGone: null as ((tenant: string, workspace: string) => void) | null,
+  lifecycle: null as WorkspaceLifecycle | null,
+  view: null as RevisionView | null,
+}));
+/** `name` says which reader this is: every copy of a module registers its own,
+ *  and the last one of a name replaces the others. */
+export function registerTreeReader(fn: TreeReader, name = "default") {
+  REG.readers.set(name, fn);
+}
+function readTree(tenant: string, scope: string): RevisionFile[] | null {
+  for (const fn of REG.readers.values()) {
+    const tree = fn(tenant, scope);
+    if (tree) return tree;
+  }
+  return null;
 }
 
 /** The scope's tree as the registered readers see it (text files only), or null. */
@@ -66,20 +85,18 @@ export function currentTree(tenant: string, scope: string): RevisionFile[] | nul
  * Called after the legacy record is written; never throws into the writer.
  */
 type Journal = (tenant: string, scope: string, files: RevisionFile[], meta: { by: string; message: string; at: string }) => void;
-let journal: Journal | null = null;
 export function registerJournal(fn: Journal | null) {
-  journal = fn;
+  REG.journal = fn;
 }
 
 /** A workspace was deleted: whatever a registered journal still holds for it
  *  (queued changes, their files) goes too (FOL-126 phase 4). */
-let onGone: ((tenant: string, workspace: string) => void) | null = null;
 export function registerWorkspaceGone(fn: ((tenant: string, workspace: string) => void) | null) {
-  onGone = fn;
+  REG.onGone = fn;
 }
 export function workspaceGone(tenant: string, workspace: string): void {
   try {
-    onGone?.(tenant, workspace);
+    REG.onGone?.(tenant, workspace);
   } catch {
     // a journal that cannot be cleared now is cleared at the next boot (the replay discards a missing workspace)
   }
@@ -99,15 +116,14 @@ export interface WorkspaceLifecycle {
   move(tenant: string, from: string, to: string, rename: () => void): Promise<void>;
   moved(tenant: string, from: string, to: string): void;
 }
-let lifecycleHooks: WorkspaceLifecycle | null = null;
 export function registerWorkspaceLifecycle(l: WorkspaceLifecycle | null) {
-  lifecycleHooks = l;
+  REG.lifecycle = l;
 }
-export const workspaceLifecycle = (): WorkspaceLifecycle | null => lifecycleHooks;
+export const workspaceLifecycle = (): WorkspaceLifecycle | null => REG.lifecycle;
 /** A workspace's folder was renamed (sync path): see WorkspaceLifecycle.moved. */
 export function workspaceMoved(tenant: string, from: string, to: string): void {
   try {
-    lifecycleHooks?.moved(tenant, from, to);
+    REG.lifecycle?.moved(tenant, from, to);
   } catch {
     // finished by the next reconcile
   }
@@ -225,7 +241,7 @@ export function recordRevision(
   snapshot(tenant, scope, rev.id);
   fs.appendFileSync(path.join(dir, "index.jsonl"), `${JSON.stringify(line)}\n`);
   try {
-    journal?.(tenant, scope, changed, { by: rev.by, message: rev.message, at: rev.at });
+    REG.journal?.(tenant, scope, changed, { by: rev.by, message: rev.message, at: rev.at });
   } catch {
     // the revision store is not allowed to break a save; workspace-revisions logs and retries
   }
@@ -556,9 +572,8 @@ export interface RevisionView {
    *  the store has none. Optional: a view without it is asked through `list`. */
   get?(tenant: string, scope: string, id: string): Promise<RevisionSummary | null>;
 }
-let view: RevisionView | null = null;
 export function registerRevisionView(v: RevisionView | null) {
-  view = v;
+  REG.view = v;
 }
 
 /** Revisions first, then the local entries older than the oldest of them.
@@ -572,7 +587,7 @@ async function combinedRows(
   const limit = opts.limit ?? 200;
   // The whole of `limit`, every page of it: the store's first page is not all
   // of history (FOL-152).
-  const mine = view && scope !== "@library" ? await view.list(tenant, scope, { ...opts, limit }) : null;
+  const mine = REG.view && scope !== "@library" ? await REG.view.list(tenant, scope, { ...opts, limit }) : null;
   let local = listRevisionsLocal(tenant, scope, { forPath: opts.forPath, limit: Infinity });
   if (restorableOnly) {
     const have = snapshotIds(tenant, scope);
@@ -603,24 +618,24 @@ export async function listRevisionsRestorable(tenant: string, scope: string, opt
 
 export async function readRevision(tenant: string, scope: string, id: string, forPath?: string): Promise<Revision | null> {
   assertSafeName(id, "revision id");
-  const fromStore = view && scope !== "@library" ? await view.read(tenant, scope, id, forPath) : null;
+  const fromStore = REG.view && scope !== "@library" ? await REG.view.read(tenant, scope, id, forPath) : null;
   return fromStore ?? readRevisionLocal(tenant, scope, id, forPath);
 }
 
 export async function snapshotAt(tenant: string, scope: string, id: string): Promise<{ path: string; content: string }[] | null> {
   assertSafeName(id, "revision id");
-  const fromStore = view && scope !== "@library" ? await view.snapshot(tenant, scope, id) : null;
+  const fromStore = REG.view && scope !== "@library" ? await REG.view.snapshot(tenant, scope, id) : null;
   return fromStore ?? snapshotAtLocal(tenant, scope, id);
 }
 
 export async function hasSnapshot(tenant: string, scope: string, id: string): Promise<boolean> {
   assertSafeName(id, "revision id");
   if (hasSnapshotLocal(tenant, scope, id)) return true;
-  if (!view || scope === "@library") return false;
+  if (!REG.view || scope === "@library") return false;
   // Looked up by id: a listing stops at a page, and a revision older than it
   // was "not restorable" until 9 Nov 2026 (FOL-152).
-  if (view.get) return (await view.get(tenant, scope, id)) !== null;
-  return Boolean((await view.list(tenant, scope, { limit: Infinity, paths: false }))?.some((r) => r.id === id));
+  if (REG.view.get) return (await REG.view.get(tenant, scope, id)) !== null;
+  return Boolean((await REG.view.list(tenant, scope, { limit: Infinity, paths: false }))?.some((r) => r.id === id));
 }
 
 export async function headRevision(tenant: string, scope: string): Promise<RevisionSummary | null> {
@@ -632,8 +647,8 @@ export async function resolveRevision(tenant: string, scope: string, to: string,
   // An id in the store is one lookup; anything else (a date, a local id, a
   // commit) is answered from ALL of history — every page of the store, without
   // the changed paths, then the local entries.
-  if ("id" in want && view?.get && scope !== "@library") {
-    const hit = await view.get(tenant, scope, want.id);
+  if ("id" in want && REG.view?.get && scope !== "@library") {
+    const hit = await REG.view.get(tenant, scope, want.id);
     if (hit) return { id: hit.id, at: hit.at, by: hit.by, message: hit.message };
   }
   return pick(await combined(tenant, scope, { limit: Infinity, paths: false }, true), want);

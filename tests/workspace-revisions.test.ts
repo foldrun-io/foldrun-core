@@ -184,7 +184,8 @@ test("a change the manifest refuses is dropped and named, not retried for ever: 
   writeWorkspaceFile(T, W, "memory/Notes.md", "upper\n", { by: "user:a", message: "first" });
   await flushRevisions({ tenant: T, workspace: W });
   fs.writeFileSync(path.join(workspaceDir(T, W), "memory", "notes.md"), "lower\n"); // on a case-sensitive disk
-  if (fs.readdirSync(path.join(workspaceDir(T, W), "memory")).length < 2) return; // a case-insensitive disk cannot hold both
+  const names = fs.readdirSync(path.join(workspaceDir(T, W), "memory"));
+  if (!(names.includes("Notes.md") && names.includes("notes.md"))) return; // a case-insensitive disk cannot hold both
   const { recordRevision } = await import("../src/history.ts");
   recordRevision(T, W, [{ path: "memory/notes.md", before: null, after: "lower\n" }], { by: "user:a", message: "collide" });
   const r = await flushRevisions({ tenant: T, workspace: W });
