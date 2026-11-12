@@ -35,6 +35,7 @@
 // whatever the setting is now.
 
 import fs from "node:fs";
+import { Readable } from "node:stream";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
@@ -304,7 +305,9 @@ export async function publishRunOutputs(
 
   const pins = pinsOf(b);
   const publishHolder: PinHolder = { kind: "publish", id: `outputs:${runId}:${agent}` };
-  const files: Manifest["files"] = {};
+  // No prototype: an output may be named anything legal, `__proto__` too
+  // (review, 12 Nov 2026: a plain object dropped it silently).
+  const files: Manifest["files"] = Object.create(null);
   let pinnedRun: PinHolder | null = null;
   let id: ManifestId | null = null;
   try {
@@ -469,22 +472,27 @@ export async function openRunOutput(tenant: string, workspace: string, runId: st
     if (!(await blobs.head(key))) throw new BlobMissing(`${agent}/${rel}`, e.sha);
     return {
       size: e.size,
-      read: (range) =>
-        new ReadableStream<Uint8Array>({
-          async start(c) {
+      // Pull-driven: a chunk is fetched only when the reader asks for one,
+      // and a cancelled download stops the blob read (review, 12 Nov 2026:
+      // the eager loop buffered whole files for slow or gone clients).
+      read: (range) => {
+        let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+        return new ReadableStream<Uint8Array>({
+          async pull(c) {
             try {
-              const reader = (await blobs.get(key, range ? { range } : undefined)).getReader();
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                c.enqueue(value);
-              }
-              c.close();
+              reader ??= (await blobs.get(key, range ? { range } : undefined)).getReader();
+              const { done, value } = await reader.read();
+              if (done) c.close();
+              else c.enqueue(value);
             } catch (err) {
               c.error(err instanceof BlobNotFound ? new BlobMissing(`${agent}/${rel}`, e.sha) : err);
             }
           },
-        }),
+          async cancel(reason) {
+            await reader?.cancel(reason).catch(() => {});
+          },
+        });
+      },
     };
   }
   const file = runOutputPathOnVolume(tenant, workspace, runId, agent, rel);
@@ -492,19 +500,8 @@ export async function openRunOutput(tenant: string, workspace: string, runId: st
   const size = fs.statSync(file).size;
   return {
     size,
-    read: (range) => {
-      const s = fs.createReadStream(file, range ? { start: range.start, end: range.end } : undefined);
-      return new ReadableStream<Uint8Array>({
-        start(c) {
-          s.on("data", (d) => c.enqueue(typeof d === "string" ? Buffer.from(d) : d));
-          s.on("end", () => c.close());
-          s.on("error", (e) => c.error(e));
-        },
-        cancel() {
-          s.destroy();
-        },
-      });
-    },
+    // Node's own bridge keeps the file stream paused until the reader pulls.
+    read: (range) => Readable.toWeb(fs.createReadStream(file, range ? { start: range.start, end: range.end } : undefined)) as ReadableStream<Uint8Array>,
   };
 }
 
@@ -545,9 +542,16 @@ export async function dropTenantOutputs(tenant: string): Promise<void> {
   await backend?.store.drop({ tenant });
 }
 
-/** A workspace was renamed: the records follow (the pins are not keyed by it). */
+/** A workspace was renamed: the records follow (the pins are not keyed by
+ *  it). What the new name held belonged to a workspace that no longer
+ *  exists: those records go first, and their pins with them (the database
+ *  store does both in its move too; the file store did not — review, 12 Nov
+ *  2026). */
 export async function moveWorkspaceOutputs(tenant: string, from: string, to: string): Promise<void> {
-  await backend?.store.move(tenant, from, to);
+  const b = backend;
+  if (!b) return;
+  await releaseRecords(b, await b.store.drop({ tenant, workspace: to }));
+  await b.store.move(tenant, from, to);
 }
 
 /** What a workspace's runs hold in the store, in bytes: counted with the run
@@ -572,10 +576,16 @@ export async function settleRunOutputs(): Promise<void> {
  *  later, then say so (`run_outputs.drop_failed`; the blobs stay until a human looks). */
 export function runDeleted(tenant: string, workspace: string, runId: string): void {
   if (!backend) return;
+  const b = backend;
+  // The records dropped are kept across the retries: a release that fails
+  // after the drop must not leave the next try with nothing to release
+  // (review, 12 Nov 2026).
+  let dropped: RunOutputRecord[] | null = null;
   const p = (async () => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await dropRunOutputs(tenant, workspace, runId);
+        dropped ??= await b.store.drop({ tenant, workspace, runId });
+        return await releaseRecords(b, dropped);
       } catch (err) {
         if (attempt >= 4) return opsError("run_outputs.drop_failed", err, { tenant, workspace, run: runId });
         await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
