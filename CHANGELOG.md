@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [20.1.0] — 2026-11-12
+
+### New in the public API
+
+- `SecretsFile` from `@foldrun/core`
+- `VaultStore` from `@foldrun/core`
+- `setVaultStore` from `@foldrun/core`
+
+- feat(secrets): a vault scope can live in a platform store (FOL-126 phase 6, step 1) ([6b14a9f](https://github.com/foldrun-io/foldrun-core/commit/6b14a9f))
+
 ## [20.0.0] — 2026-11-12
 
 ### Breaking changes
