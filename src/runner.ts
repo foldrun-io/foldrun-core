@@ -5106,7 +5106,10 @@ function driveRunInner(
       // posted it a second time. So a run that has been here before (its
       // baseline is on disk) stores what it changed first; files it did not
       // touch still come fresh from the store.
-      const changedFrom = await readStorageBaseline(runRoot, tenant, workspace, run.id).catch(() => undefined);
+      // A baseline that cannot be READ is not "never here": materializing
+      // then would be the 6 Oct overwrite again. The error stands and the
+      // step fails as any store fault does (review, 12 Nov 2026).
+      const changedFrom = await readStorageBaseline(runRoot, tenant, workspace, run.id);
       if (changedFrom) {
         try {
           const { saved } = await harvestFiles(tenant, workspace, `run:${run.id}`, { changedFrom });

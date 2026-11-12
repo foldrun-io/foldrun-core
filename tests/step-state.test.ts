@@ -126,3 +126,22 @@ test("a file written before the switch is still read by a run that was in flight
   fakePort();
   assert.deepEqual(await readStorageBaseline(ws, "acme", "desk", "run-5"), { post: "6 Oct" });
 });
+
+test("switched off with a row already there: the next write removes the row, so the file written is the one read", async () => {
+  let on = true;
+  const rows = fakePort({ on: () => on });
+  await writeStorageBaseline(ws, "acme", "desk", "run-9", { "post.json": "old" });
+  assert.equal(rows.size, 1);
+  on = false;
+  await writeStorageBaseline(ws, "acme", "desk", "run-9", { "post.json": "new" });
+  assert.equal(rows.size, 0, "the stale row is gone");
+  assert.deepEqual(await readStorageBaseline(ws, "acme", "desk", "run-9"), { "post.json": "new" }, "not the old row's hashes");
+});
+
+test("the runner does not read a failed baseline as 'first visit'", () => {
+  // Source-level: the call must not swallow the error (the overwrite it guards
+  // against needs a worker crash plus a database fault to stage in a test).
+  const src = fs.readFileSync(new URL("../src/runner.ts", import.meta.url), "utf8");
+  assert.match(src, /const changedFrom = await readStorageBaseline\(runRoot, tenant, workspace, run\.id\);/);
+  assert.doesNotMatch(src, /readStorageBaseline\([^)]*\)\.catch\(/);
+});

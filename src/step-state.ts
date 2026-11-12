@@ -11,7 +11,8 @@
 // table run_step_state), deleted with the run, the workspace and the account.
 // Otherwise they are files under runs/<id>/, as before. Reads look at rows
 // first whatever the switch says, then at the file, so turning it off — or on —
-// mid-run loses nothing. A row that cannot be read is an error, not "none":
+// mid-run loses nothing; a write with the switch off removes the key's row
+// first, so the file written is the one read. A row that cannot be read is an error, not "none":
 // "none" means "start again from scratch", and that is not what a database
 // that is down means.
 
@@ -35,7 +36,15 @@ function port(tenant: string | undefined, workspace: string) {
 /** Stored as a row? False: the caller writes the file. */
 export async function putStepState(tenant: string | undefined, workspace: string, runId: string, kind: StepStateKind, ref: string, data: unknown): Promise<boolean> {
   const p = port(tenant, workspace);
-  if (!p || !tenant || !p.async?.stepPut || !safeOn(p) || !okIds(runId, ref)) return false;
+  if (!p || !tenant || !p.async?.stepPut || !okIds(runId, ref)) return false;
+  if (!safeOn(p)) {
+    // Switched off with a row already there: reads look at rows first, so
+    // the old row would shadow the file the caller is about to write (a
+    // resumed run's storage baseline is rewritten each time — review, 12 Nov
+    // 2026). The row goes; a failure here is an error, not a quiet stale read.
+    await p.async.stepDrop?.(tenant, workspace, runId, kind, ref);
+    return false;
+  }
   await p.async.stepPut(tenant, workspace, runId, kind, ref, data);
   return true;
 }
