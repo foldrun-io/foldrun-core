@@ -141,6 +141,14 @@ export function mergeRuntimes(...specs: (RuntimeSpec | null | undefined)[]): Run
   return merged;
 }
 
+/**
+ * The file a platform drops in a cache entry it unpacked from its object store
+ * (foldrun-platform runtime-archives.ts), naming the archive it came from. A
+ * rebuild removes it with the rest of the entry, so "ready, and no marker" is
+ * an entry built here, which is the one worth keeping for the next sandbox.
+ */
+export const RUNTIME_FROM_STORE = ".from-store";
+
 export function fingerprint(spec: RuntimeSpec): string {
   const canonical = JSON.stringify({
     python: spec.python ?? null,
@@ -1190,7 +1198,7 @@ FOLDRUN_SNAPSHOT_JS
       $AS sh -c '${PRUNE_SH}' sh "$S" "${cacheDir}" 2>/dev/null
     fi
   fi
-  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "stale": %s, "packages": "%s", "refused": "%s", "unsaved": "%s"}\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$STALE" "$SYS" "$WHY" "$UNSAVED" > ${logDir}/system-install.json
+  printf '{"ok": %s, "exit": %s, "seconds": %s, "mode": "%s", "stale": %s, "packages": "%s", "refused": "%s", "unsaved": "%s", "key": "%s"}\n' "$([ $RC -eq 0 ] && echo true || echo false)" "$RC" "$(( $(date +%s) - T0 ))" "$MODE" "$STALE" "$SYS" "$WHY" "$UNSAVED" "$KEY" > ${logDir}/system-install.json
   [ -n "$W" ] && rm -rf "$W"
   rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 fi`;
@@ -1338,7 +1346,7 @@ function prepareLanguageRuntime(tenant: string, spec: RuntimeSpec): PreparedRunt
     if (stale || !fs.existsSync(path.join(shared, ".ready"))) {
       // A clean slate: whatever a stale or half-finished build left behind is
       // exactly what must not be built on top of.
-      for (const leftover of [".ready", "venv", "node_modules", "package.json", "package-lock.json"]) {
+      for (const leftover of [".ready", RUNTIME_FROM_STORE, "venv", "node_modules", "package.json", "package-lock.json"]) {
         fs.rmSync(path.join(shared, leftover), { recursive: true, force: true });
       }
     }
