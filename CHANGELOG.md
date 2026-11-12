@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [21.1.0] — 2026-11-12
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `writeCapturedCall` from `@foldrun/core`
+
+- feat(records): a workspace's small state as rows, not files on the volume (FOL-126) ([c64ff9c](https://github.com/foldrun-io/foldrun-core/commit/c64ff9c))
+
 ## [21.0.0] — 2026-11-12
 
 ### Breaking changes
