@@ -20,6 +20,7 @@
 //
 // An account is a named directory (per OKF: tenancy is a hosting concern).
 
+import { opsError } from "./ops-log.ts";
 import { readCompute } from "./resources.ts";
 import { expandPlatformVars } from "./host-env.ts";
 import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
@@ -4149,9 +4150,17 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   if (prior?.inputs?.length) {
     void import("./storage.ts").then((m) => m.releaseRunInputs(tenant, workspace, runId)).catch(() => {});
   }
-  // Outputs published to the blob store (run-outputs.ts) are records and pins,
-  // not files under dir: they go in the background, retried.
-  RUN_HOOKS.removed?.(tenant, workspace, runId);
+  // Outputs and captured calls published to the blob store (run-outputs.ts,
+  // captured-calls.ts) are records and pins, not files under dir: they go in
+  // the background, retried.
+  for (const [name, hook] of RUN_HOOKS.removed) {
+    try {
+      hook(tenant, workspace, runId);
+    } catch (err) {
+      // One store's clean-up failing must not stop the next one's.
+      opsError("run_removed_hook.failed", err, { hook: name, tenant, runId });
+    }
+  }
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
@@ -4159,13 +4168,16 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   return true;
 }
 
-/** run-outputs.ts registers here (it imports this module). */
+/** run-outputs.ts and captured-calls.ts register here (they import this module). */
 type RunHook = (tenant: string, workspace: string, runId: string) => void;
 /** One per process (process-state.ts): a run deleted from a route handler must
  *  reach the hooks the boot registered. */
-const RUN_HOOKS = processState("run-hooks", () => ({ removed: null as RunHook | null, deleted: undefined as RunHook | undefined }));
-export function registerRunRemovedHook(fn: RunHook | null) {
-  RUN_HOOKS.removed = fn;
+const RUN_HOOKS = processState("run-hooks", () => ({ removed: new Map<string, RunHook>(), deleted: undefined as RunHook | undefined }));
+/** A run's content lives somewhere other than its folder: `name` says whose hook
+ *  this is, so one registering (or clearing, with null) never replaces another's. */
+export function registerRunRemovedHook(fn: RunHook | null, name = "run-outputs") {
+  if (fn) RUN_HOOKS.removed.set(name, fn);
+  else RUN_HOOKS.removed.delete(name);
 }
 
 /** ledger.ts registers here — store cannot import it without a cycle, and

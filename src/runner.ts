@@ -7,6 +7,7 @@ import { opsLog, opsError } from "./ops-log.ts";
 import { globMatch } from "./bounded-match.ts";
 import { latestRevisionId } from "./history.ts";
 import { recordCallIo, redactionsFor } from "./capture.ts";
+import { callSink, flushCalls } from "./captured-calls.ts";
 import { AUTH_REFUSAL, platformCause } from "./issues.ts";
 import { hookNames } from "./hooks.ts";
 import crypto from "node:crypto";
@@ -2194,7 +2195,16 @@ export function operatorBlock(step: Pick<StepRecord, "ask" | "approvalNote" | "a
 }
 
 
-async function runStep(
+/** A step, and then whatever its captured calls still hold (captured-calls.ts). */
+async function runStep(...args: Parameters<typeof runStepBody>): ReturnType<typeof runStepBody> {
+  try {
+    return await runStepBody(...args);
+  } finally {
+    await flushCalls(args[2]);
+  }
+}
+
+async function runStepBody(
   agentDir: string,
   tenant: string,
   step: StepRecord,
@@ -2312,6 +2322,8 @@ async function runStep(
   // calls keep their names, sizes and times (FOL-54 step 4).
   let capturedChars = 0;
   let captureFull = false;
+  const callsRoot = path.resolve(agentDir, "..", "..");
+  const sink = runId ? callSink(step, { tenant, workspace: path.basename(callsRoot), runId, workspaceRoot: callsRoot }) : undefined;
   const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
     const t = new Date().toISOString();
     // The model has begun its first response: held only in memory, for
@@ -2346,7 +2358,7 @@ async function runStep(
         captureFull = true;
         step.events.push({ t, type: "info", text: `capture: this step recorded ${Math.round(capturedChars / 1000)}k characters of tool content — the rest of its calls keep only their names, sizes and times` });
       }
-      if (runId && extra.call && capture === "full" && !captureFull && recordCallIo(path.resolve(agentDir, "..", ".."), runId, extra.call, text, io, redact)) {
+      if (runId && extra.call && capture === "full" && !captureFull && recordCallIo(callsRoot, runId, extra.call, text, io, redact, sink)) {
         capturedChars += size;
         rest = { ...others, captured: true };
       }

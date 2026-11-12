@@ -13,7 +13,7 @@ interface Row {
   stamp: number;
 }
 
-export function fakeRecords(): RecordsPort & { fenced: string[] } {
+export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort & { fenced: string[] } {
   const runs = new Map<string, Row>(); // tenant\0ws\0id
   const triggers = new Map<string, TriggerEvent[]>();
   const files = new Map<string, Map<string, FileRecord>>();
@@ -40,6 +40,7 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
   return {
     fenced,
     stepStateOn: () => true,
+    callsStoreOn: opts.callsOn ?? (() => false),
     async: {
       stepGet: async (t, w, run, kind, ref) => (steps.has(sk(t, w, run, kind, ref)) ? structuredClone(steps.get(sk(t, w, run, kind, ref))) : undefined),
       stepPut: async (t, w, run, kind, ref, data) => void steps.set(sk(t, w, run, kind, ref), structuredClone(data)),
@@ -47,6 +48,7 @@ export function fakeRecords(): RecordsPort & { fenced: string[] } {
         const p = `${k(t, w, run)}\0${kind}\0`;
         for (const key of [...steps.keys()]) if (key.startsWith(p) && (ref === null || key === p + ref)) steps.delete(key);
       },
+      stepRuns: async (t, w, kind) => [...new Set([...steps.keys()].filter((key) => key.startsWith(k(t, w)) && key.split("\0")[3] === kind).map((key) => key.split("\0")[2]!))],
       runGet: async (t, w, id) => syncPort.runGet(t, w, id),
       runSummaries: async (t, w) => syncPort.runSummaries(t, w),
       runLive: async (t, w) => syncPort.runLive(t, w),
