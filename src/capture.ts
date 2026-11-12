@@ -100,6 +100,9 @@ export function recordCallIo(
   io: CallIo,
   /** The step's own scrub: its resolved secret values → `[redacted:NAME]`. */
   redactSecrets: (text: string) => string,
+  /** Whose run it is: with it the call is kept where the platform keeps a
+   *  workspace's small state (rows), without it beside the run as a file. */
+  scope?: { tenant: string; workspace: string },
 ): boolean {
   try {
     const input = io.input === undefined ? null : maskCall(io.input, redactSecrets);
@@ -112,7 +115,7 @@ export function recordCallIo(
       ...(input ? { input: input.text, ...(io.inputChars !== undefined ? { inputChars: io.inputChars } : {}), ...(input.cut || (io.inputChars ?? 0) > io.input!.length ? { inputCut: true } : {}) } : {}),
       ...(output ? { output: output.text, ...(io.outputChars !== undefined ? { outputChars: io.outputChars } : {}), ...(output.cut || (io.outputChars ?? 0) > io.output!.length ? { outputCut: true } : {}) } : {}),
       ...(io.truncated || input?.cut || output?.cut ? { truncated: true } : {}),
-    });
+    }, scope);
     return true;
   } catch (err) {
     opsError("capture.write_failed", err, { tool, runId });

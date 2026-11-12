@@ -118,7 +118,7 @@ import { buildScriptTools, parseScripts, type ExecutionContext, type ScriptSpec 
 import { libraryDir, libraryTools, libraryMemoryIndex } from "./library.ts";
 import { fingerprint, mergeRuntimes, parseRuntime, prepareRuntime, stepInstallEnv, type PreparedRuntime, type RuntimeSpec } from "./runtime.ts";
 import { buildInstallTool, INSTALL_TOOL } from "./install-tool.ts";
-import { dataRoot } from "./paths.ts";
+import { dataRoot, singleWorkspace } from "./paths.ts";
 import { materializeFiles, harvestFiles, storageBaseline } from "./storage.ts";
 import { readStorageBaseline, writeStorageBaseline } from "./step-state.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
@@ -2346,7 +2346,7 @@ async function runStep(
         captureFull = true;
         step.events.push({ t, type: "info", text: `capture: this step recorded ${Math.round(capturedChars / 1000)}k characters of tool content — the rest of its calls keep only their names, sizes and times` });
       }
-      if (runId && extra.call && capture === "full" && !captureFull && recordCallIo(path.resolve(agentDir, "..", ".."), runId, extra.call, text, io, redact)) {
+      if (runId && extra.call && capture === "full" && !captureFull && recordCallIo(path.resolve(agentDir, "..", ".."), runId, extra.call, text, io, redact, singleWorkspace() ? undefined : { tenant, workspace: path.basename(path.resolve(agentDir, "..", "..")) })) {
         capturedChars += size;
         rest = { ...others, captured: true };
       }

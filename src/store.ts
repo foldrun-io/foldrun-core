@@ -31,6 +31,7 @@ import { processState } from "./process-state.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
+import { docRows, docStore, quietly } from "./workspace-docs.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
@@ -4065,6 +4066,7 @@ export interface RunRecord {
 // runs/<run>/). The runner writes them, secrets already masked.
 
 const SAFE_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+const CALL_KIND = "call";
 
 function capturedCallFile(workspaceRoot: string, runId: string, callId: string): string | null {
   if (!SAFE_ID.test(runId) || !SAFE_ID.test(callId) || callId.startsWith(".") || runId.startsWith(".")) return null;
@@ -4073,9 +4075,14 @@ function capturedCallFile(workspaceRoot: string, runId: string, callId: string):
 
 /** Merge one part (the input, on the call; the output, on its completion)
  *  into the call's file. */
-export function writeCapturedCall(workspaceRoot: string, runId: string, part: CapturedCall): void {
+export function writeCapturedCall(workspaceRoot: string, runId: string, part: CapturedCall, scope?: { tenant: string; workspace: string }): void {
   const file = capturedCallFile(workspaceRoot, runId, part.id);
   if (!file) return;
+  // A row when the platform keeps them (FOL-126): the two parts of a call
+  // merge in one statement, and the web's copies read it wherever they run.
+  // `truncated` is only ever sent true, so a merge keeps it once set.
+  const store = scope ? docStore(scope.tenant, scope.workspace) : null;
+  if (store && scope) return store.merge(scope.tenant, scope.workspace, CALL_KIND, `${runId}/${part.id}`, part as unknown as Record<string, unknown>);
   let prev: Partial<CapturedCall> = {};
   try {
     prev = JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
@@ -4094,11 +4101,20 @@ export function writeCapturedCall(workspaceRoot: string, runId: string, part: Ca
 export function readCapturedCall(tenant: string, workspace: string, runId: string, callId: string): CapturedCall | null {
   const file = capturedCallFile(workspaceDir(tenant, workspace), runId, callId);
   if (!file) return null;
+  const row = quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, CALL_KIND, `${runId}/${callId}`), undefined) as CapturedCall | undefined;
+  let onFile: CapturedCall | undefined;
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
+    onFile = JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
   } catch {
-    return null;
+    /* none */
   }
+  // A switch between a call's two parts leaves one part in each place: both, merged.
+  if (row && onFile) {
+    const merged: CapturedCall = { ...onFile, ...row, truncated: Boolean(onFile.truncated || row.truncated) || undefined };
+    if (!merged.truncated) delete merged.truncated;
+    return merged;
+  }
+  return row ?? onFile ?? null;
 }
 
 export function runFilePath(tenant: string, workspace: string, runId: string) {
@@ -4138,6 +4154,8 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   // and finishes — the other order left the content with nothing pointing
   // at it (Codex review, FOL-124).
   fs.rmSync(dir, { recursive: true, force: true });
+  // Its captured calls kept as rows go the same way, before the record.
+  if (SAFE_ID.test(runId)) docRows(tenant, workspace)?.dropPrefix(tenant, workspace, CALL_KIND, `${runId}/`);
   if (port) port.runDelete(tenant, workspace, runId);
   else {
     fs.rmSync(file, { force: true });

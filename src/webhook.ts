@@ -8,6 +8,8 @@ import path from "node:path";
 import { workspaceDir } from "./store.ts";
 import { installKeyMaterial } from "./secrets.ts";
 import crypto from "node:crypto";
+import { docRows, docStore, quietly } from "./workspace-docs.ts";
+import type { DocsPort } from "./records.ts";
 
 /**
  * The install's secret key. Every derived token — flow hooks, git secrets,
@@ -49,19 +51,37 @@ function readHooks(tenant: string, workspace: string): Record<string, HookState>
   }
 }
 
+/** The hook's generation: the greater of the row's and the file's, so a
+ *  rotation made while `records.docs_store` was on (a row) or off (the file)
+ *  holds whichever way the switch stands now — an old URL never comes back.
+ *  A database that cannot answer fails the call: guessing from the file could
+ *  accept a token that was rotated away. */
 export function hookGeneration(tenant: string, workspace: string, flow: string): number {
-  return readHooks(tenant, workspace)[flow]?.gen ?? 0;
+  const file = readHooks(tenant, workspace)[flow]?.gen ?? 0;
+  const row = (docRows(tenant, workspace)?.get(tenant, workspace, HOOK_KIND, flow) as HookState | undefined)?.gen ?? 0;
+  return Math.max(file, row);
 }
+
+const HOOK_KIND = "hook";
+const DELIVERY_KIND = "hook-delivery";
 
 /** Invalidate a hook's URL and mint the next one. Returns the new path. */
 export function rotateWebhook(tenant: string, workspace: string, flow: string): string {
   const hooks = readHooks(tenant, workspace);
-  hooks[flow] = { gen: (hooks[flow]?.gen ?? 0) + 1, rotatedAt: new Date().toISOString() };
   const file = hooksFile(tenant, workspace);
   // Into a workspace that exists, never making one (30 Oct 2026): the mkdir
   // here turned a rotate under a mistyped name into a workspace holding only
   // hooks.json, past the plan's workspace count.
   if (!fs.existsSync(path.dirname(file))) throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
+  const rotatedAt = new Date().toISOString();
+  const store = docStore(tenant, workspace);
+  if (store) {
+    // One statement moves the row past both its own value and the file's.
+    store.raise(tenant, workspace, HOOK_KIND, flow, "gen", (hooks[flow]?.gen ?? 0) + 1, { rotatedAt });
+    return webhookPath(tenant, workspace, flow);
+  }
+  // On the file: still past whatever a row holds (hookGeneration reads both).
+  hooks[flow] = { gen: hookGeneration(tenant, workspace, flow) + 1, rotatedAt };
   fs.writeFileSync(file, JSON.stringify(hooks, null, 2));
   return webhookPath(tenant, workspace, flow);
 }
@@ -184,6 +204,8 @@ const KEEP_DELIVERIES = 500;
 export function recordDelivery(tenant: string, workspace: string, delivery: HookDelivery) {
   const file = deliveriesFile(tenant, workspace);
   if (!fs.existsSync(path.dirname(file))) return; // no workspace, nothing to log against
+  const store = docStore(tenant, workspace);
+  if (store) return recordDeliveryRow(store, tenant, workspace, delivery);
   if (UNAUTHENTICATED.includes(delivery.outcome)) return recordRefusal(file, tenant, workspace, delivery);
   fs.appendFileSync(file, JSON.stringify(delivery) + "\n");
   // Bounded: compact to the newest KEEP when it doubles. Amortised cheap,
@@ -198,6 +220,34 @@ export function recordDelivery(tenant: string, workspace: string, delivery: Hook
   } catch {
     // compaction is best-effort; the append already landed
   }
+}
+
+/** The same log as rows: an append that keeps the newest KEEP, and a refusal
+ *  folded into the newest entry when that is a refusal too (so a flood is one
+ *  row). The fold is read-then-replace: two refusals at once may count one
+ *  short, never push a real delivery out. */
+function recordDeliveryRow(store: DocsPort, tenant: string, workspace: string, delivery: HookDelivery) {
+  if (UNAUTHENTICATED.includes(delivery.outcome)) {
+    const [last] = store.tail(tenant, workspace, DELIVERY_KIND, 1);
+    const prev = last?.data as HookDelivery | undefined;
+    if (last && prev && UNAUTHENTICATED.includes(prev.outcome)) {
+      store.replace(tenant, workspace, DELIVERY_KIND, last.id, foldRefusal(prev, delivery));
+      return;
+    }
+  }
+  store.append(tenant, workspace, DELIVERY_KIND, delivery, KEEP_DELIVERIES);
+}
+
+/** A refusal folded into the refusal before it. The flow name is not part of
+ *  the match: it comes from the URL, so a flood that varies it would
+ *  otherwise never collapse. */
+function foldRefusal(last: HookDelivery, delivery: HookDelivery): HookDelivery {
+  return {
+    ...delivery,
+    count: (last.count ?? 1) + 1,
+    first: last.first ?? last.t,
+    ...(last.detail === "more than one flow name" || last.flow !== delivery.flow ? { detail: "more than one flow name" } : {}),
+  };
 }
 
 /**
@@ -252,12 +302,7 @@ function collapseInto(file: string, delivery: HookDelivery): boolean {
     return false;
   }
   if (!UNAUTHENTICATED.includes(last.outcome)) return false;
-  const merged: HookDelivery = {
-    ...delivery,
-    count: (last.count ?? 1) + 1,
-    first: last.first ?? last.t,
-    ...(last.detail === "more than one flow name" || last.flow !== delivery.flow ? { detail: "more than one flow name" } : {}),
-  };
+  const merged = foldRefusal(last, delivery);
   const line = Buffer.from(JSON.stringify(merged) + "\n");
   const at = Buffer.byteLength(end.slice(0, cut));
   const fd = fs.openSync(file, "r+");
@@ -271,6 +316,16 @@ function collapseInto(file: string, delivery: HookDelivery): boolean {
 }
 
 export function readDeliveries(tenant: string, workspace: string, limit = 20): HookDelivery[] {
+  // Rows and the file both: the log may have been written either way.
+  const rows = quietly(() => docRows(tenant, workspace)?.tail(tenant, workspace, DELIVERY_KIND, limit) ?? [], []).map((r) => r.data as HookDelivery);
+  const lines = readDeliveryLines(tenant, workspace, limit);
+  if (!rows.length) return lines;
+  if (!lines.length) return rows;
+  // Stable: equal times keep each source's own newest-first order.
+  return [...rows, ...lines].sort((a, b) => String(b.t).localeCompare(String(a.t))).slice(0, limit);
+}
+
+function readDeliveryLines(tenant: string, workspace: string, limit: number): HookDelivery[] {
   const file = deliveriesFile(tenant, workspace);
   if (!fs.existsSync(file)) return [];
   return fs

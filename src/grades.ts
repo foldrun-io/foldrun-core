@@ -50,6 +50,13 @@ import { workspaceDir, listRunSummaries, readRun, assertSafeName, type RunRecord
 import { listEvals, checkAssertion, judgeCall, judgeProcessEnv, type EvalInfo, type Assertion } from "./evals.ts";
 import { accountModelEnv, withModelEnv } from "./model-env.ts";
 import { judgeVerdict } from "./judge-verdict.ts";
+import { docRows, docStore } from "./workspace-docs.ts";
+
+/** Grades as rows: one log per grader. The cursor: one document per grader. */
+const gradeKind = (name: string) => `grades:${name}`;
+const GRADER_KIND = "grader";
+/** More rows than pruneGrades ever leaves, so a read is the whole log. */
+const ALL_GRADE_ROWS = 100_000;
 
 /** How far back the pass looks for runs to grade. */
 export const GRADE_WINDOW_MS = 3 * 86400_000;
@@ -260,12 +267,36 @@ export async function gradeRun(
 /** Keep a grade: one line, appended. */
 export function recordGrade(tenant: string, workspace: string, grade: Grade): void {
   const file = gradesFile(tenant, workspace, grade.eval);
+  const store = docStore(tenant, workspace);
+  if (store) return store.append(tenant, workspace, gradeKind(grade.eval), grade, 0);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, `${JSON.stringify(grade)}\n`);
 }
 
-/** Every line of a grader's file, oldest first; a torn line is skipped. */
+/** The grader's rows, oldest first, each with its row id. Not quiet: a pass
+ *  that cannot read what it graded must stop, not grade every run again. */
+function rowLines(tenant: string, workspace: string, name: string): { id: string; grade: Grade }[] {
+  assertSafeName(name, "eval");
+  const rows = docRows(tenant, workspace)?.tail(tenant, workspace, gradeKind(name), ALL_GRADE_ROWS) ?? [];
+  const out: { id: string; grade: Grade }[] = [];
+  for (const r of rows.reverse()) {
+    const g = r.data as Grade;
+    if (g && typeof g.runId === "string" && typeof g.at === "string") out.push({ id: r.id, grade: g });
+  }
+  return out;
+}
+
+/** Every grade of a grader, oldest first: the file's lines and the rows (it
+ *  may have been written either way over time). */
 function readLines(tenant: string, workspace: string, name: string): Grade[] {
+  const rows = rowLines(tenant, workspace, name).map((r) => r.grade);
+  const lines = fileLines(tenant, workspace, name);
+  if (!rows.length) return lines;
+  return [...lines, ...rows].sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** Every line of a grader's file, oldest first; a torn line is skipped. */
+function fileLines(tenant: string, workspace: string, name: string): Grade[] {
   let raw: string;
   try {
     raw = fs.readFileSync(gradesFile(tenant, workspace, name), "utf8");
@@ -352,12 +383,12 @@ export function summariseGrades(grades: Grade[]): GradeSummary {
  *  never sampled, so a new grader starts from now rather than back-filling. */
 export function graderSince(tenant: string, workspace: string, name: string, now = Date.now()): number {
   const file = stateFile(tenant, workspace, name);
-  try {
-    const s = JSON.parse(fs.readFileSync(file, "utf8")) as { since?: string };
-    const t = s.since ? Date.parse(s.since) : NaN;
-    if (Number.isFinite(t)) return t;
-  } catch {
-    /* first sight */
+  const t = Date.parse(graderState(tenant, workspace, name).since ?? "");
+  if (Number.isFinite(t)) return t;
+  const store = docStore(tenant, workspace);
+  if (store) {
+    store.merge(tenant, workspace, GRADER_KIND, name, { since: new Date(now).toISOString() });
+    return now;
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(`${file}.tmp`, JSON.stringify({ since: new Date(now).toISOString() }));
@@ -368,17 +399,29 @@ export function graderSince(tenant: string, workspace: string, name: string, now
 /** When a grader last had a run graded by the pass (0: never) — the pass
  *  serves the longest-waiting grader first, so fairness holds across passes. */
 export function graderLastServed(tenant: string, workspace: string, name: string): number {
+  const t = Date.parse(graderState(tenant, workspace, name).lastServed ?? "");
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** The grader's cursor from the file and the row together: the EARLIEST
+ *  first sight (a grader is never made new again by a switch) and the LATEST
+ *  serving. */
+function graderState(tenant: string, workspace: string, name: string): { since?: string; lastServed?: string } {
+  let onFile: { since?: string; lastServed?: string } = {};
   try {
-    const s = JSON.parse(fs.readFileSync(stateFile(tenant, workspace, name), "utf8")) as { lastServed?: string };
-    const t = s.lastServed ? Date.parse(s.lastServed) : NaN;
-    return Number.isFinite(t) ? t : 0;
+    onFile = JSON.parse(fs.readFileSync(stateFile(tenant, workspace, name), "utf8")) as typeof onFile;
   } catch {
-    return 0;
+    /* none */
   }
+  const row = (docRows(tenant, workspace)?.get(tenant, workspace, GRADER_KIND, name) as typeof onFile | undefined) ?? {};
+  const pick = (a: string | undefined, b: string | undefined, later: boolean) => (!a ? b : !b ? a : (a > b) === later ? a : b);
+  return { since: pick(onFile.since, row.since, false), lastServed: pick(onFile.lastServed, row.lastServed, true) };
 }
 
 function markServed(tenant: string, workspace: string, name: string, now: number): void {
   const file = stateFile(tenant, workspace, name);
+  const store = docStore(tenant, workspace);
+  if (store) return store.merge(tenant, workspace, GRADER_KIND, name, { lastServed: new Date(now).toISOString() });
   let state: Record<string, unknown> = {};
   try {
     state = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
@@ -435,22 +478,33 @@ export function gradeCandidates(tenant: string, workspace: string, info: EvalInf
 /** Drop grades past the keeping window or the line cap. Rewritten whole
  *  (temp, then rename); only the pass prunes. */
 export function pruneGrades(tenant: string, workspace: string, name: string, now = Date.now()): number {
-  const file = gradesFile(tenant, workspace, name);
-  if (!fs.existsSync(file)) return 0;
-  // Read whatever its size: the 90 days hold for a quiet grader too.
-  const lines = readLines(tenant, workspace, name);
   // The line cap never takes a grade from the last GRADE_WINDOW_MS (and a
   // day's margin): those are what keeps the pass from grading a run twice.
   const recent = (g: Grade) => now - Date.parse(g.at) < GRADE_WINDOW_MS + 86400_000;
-  const old = lines.filter((g) => !recent(g) && now - Date.parse(g.at) < GRADE_KEEP_MS);
-  const room = GRADE_KEEP_LINES - lines.filter(recent).length;
-  const kept = [...(room > 0 ? old.slice(-room) : []), ...lines.filter(recent)]
-    .sort((a, b) => a.at.localeCompare(b.at));
-  if (kept.length === lines.length) return 0;
+  const keepers = <T>(all: T[], of: (x: T) => Grade): T[] => {
+    const old = all.filter((x) => !recent(of(x)) && now - Date.parse(of(x).at) < GRADE_KEEP_MS);
+    const room = GRADE_KEEP_LINES - all.filter((x) => recent(of(x))).length;
+    return [...(room > 0 ? old.slice(-room) : []), ...all.filter((x) => recent(of(x)))];
+  };
+  // The rows, by the same rule (each place keeps its own window).
+  let droppedRows = 0;
+  const rows = rowLines(tenant, workspace, name);
+  if (rows.length) {
+    const keep = new Set(keepers(rows, (r) => r.grade).map((r) => r.id));
+    const gone = rows.filter((r) => !keep.has(r.id)).map((r) => r.id);
+    if (gone.length) docRows(tenant, workspace)?.prune(tenant, workspace, gradeKind(name), gone);
+    droppedRows = gone.length;
+  }
+  const file = gradesFile(tenant, workspace, name);
+  if (!fs.existsSync(file)) return droppedRows;
+  // Read whatever its size: the 90 days hold for a quiet grader too.
+  const lines = fileLines(tenant, workspace, name);
+  const kept = keepers(lines, (g) => g).sort((a, b) => a.at.localeCompare(b.at));
+  if (kept.length === lines.length) return droppedRows;
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, kept.map((g) => JSON.stringify(g)).join("\n") + (kept.length ? "\n" : ""));
   fs.renameSync(tmp, file);
-  return lines.length - kept.length;
+  return droppedRows + lines.length - kept.length;
 }
 
 /**
