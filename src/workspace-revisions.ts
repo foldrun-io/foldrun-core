@@ -58,6 +58,7 @@ import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requ
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 import type { SweepMarks } from "./blob-sweeper.ts";
+import { dropTenantOutputs, dropWorkspaceOutputs, moveWorkspaceOutputs, settleRunOutputs } from "./run-outputs.ts";
 
 // ------------------------------------------------------------- the backend
 
@@ -515,6 +516,7 @@ const lifecycleBusy = new Set<string>(); // keys a lifecycle call is handling (t
 const background = new Set<Promise<unknown>>();
 export async function settleLifecycle(): Promise<void> {
   while (background.size) await Promise.allSettled([...background]);
+  await settleRunOutputs();
 }
 function inBackground(p: Promise<unknown>): void {
   const q = p.finally(() => background.delete(q));
@@ -567,6 +569,8 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
     await before?.catch(() => {});
     try {
       await deps.revisions.drop({ tenant, workspace });
+      // The run outputs published to the blob store (run-outputs.ts) are this workspace's too.
+      await dropWorkspaceOutputs(tenant, workspace);
     } catch (err) {
       // Nothing was removed and the workspace stays: whatever was queued is lost to the queue, so it is reconciled from the folder.
       marked.add(k);
@@ -576,6 +580,7 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
     remove?.();
     dropJournal(tenant, workspace);
     await deps.revisions.drop({ tenant, workspace });
+    await dropWorkspaceOutputs(tenant, workspace);
     marked.delete(k);
     verified.delete(k);
   } finally {
@@ -599,6 +604,7 @@ export async function dropTenantRevisions(tenant: string): Promise<void> {
     verified.delete(k);
   }
   await deps.revisions.drop({ tenant });
+  await dropTenantOutputs(tenant);
   await (deps.blobs as Partial<BlobSweeper>).purgeTenant?.(tenant);
 }
 
@@ -633,11 +639,16 @@ export async function moveWorkspaceRevisions(tenant: string, from: string, to: s
     // process left for it is stale.
     dropJournal(tenant, to);
     await deps.revisions.move(tenant, from, to);
+    await moveWorkspaceOutputs(tenant, from, to).catch(async (err) => {
+      await deps.revisions.move(tenant, to, from).catch((e) => opsError("revisions.move_back_failed", e, { tenant, workspace: from, to }));
+      throw err;
+    });
     if (rename) {
       try {
         rename();
       } catch (err) {
         await deps.revisions.move(tenant, to, from).catch((e) => opsError("revisions.move_back_failed", e, { tenant, workspace: from, to }));
+        await moveWorkspaceOutputs(tenant, to, from).catch((e) => opsError("run_outputs.move_back_failed", e, { tenant, workspace: from, to }));
         throw err;
       }
     }

@@ -222,17 +222,17 @@ test("the sandbox's note of what was copied back counts only where the host hand
   }
 });
 
-test("what a sandbox was handed is kept on the host, under the run, outside anything a sandbox sees (F6)", () => {
+test("what a sandbox was handed is kept on the host, under the run, outside anything a sandbox sees (F6)", async () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-handed-"));
   try {
     const file = handedInPath(ws, "run-abc", "foldrun-run-x1")!;
     assert.ok(isPlatformPath(path.relative(ws, file)), "runs/ is never staged in nor copied back");
     assert.equal(handedInPath(ws, "../x", "p"), null);
     assert.equal(handedInPath(ws, "run", "../../AGENTS"), null);
-    writeHandedIn(ws, "run-abc", "foldrun-run-x1", { "a.md": "h" });
-    assert.deepEqual(readHandedIn(ws, "run-abc", "foldrun-run-x1"), { "a.md": "h" });
-    dropHandedIn(ws, "run-abc", "foldrun-run-x1");
-    assert.equal(readHandedIn(ws, "run-abc", "foldrun-run-x1"), undefined);
+    await writeHandedIn(ws, "run-abc", "foldrun-run-x1", { "a.md": "h" });
+    assert.deepEqual(await readHandedIn(ws, "run-abc", "foldrun-run-x1"), { "a.md": "h" });
+    await dropHandedIn(ws, "run-abc", "foldrun-run-x1");
+    assert.equal(await readHandedIn(ws, "run-abc", "foldrun-run-x1"), undefined);
   } finally {
     fs.rmSync(ws, { recursive: true, force: true });
   }

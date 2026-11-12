@@ -122,12 +122,12 @@ test("stage-in records the revisions the run starts from and pins their manifest
   assert.equal(pin!.base.workspace, h0.workspace!.id);
   assert.ok(fp.all().some((x) => x.holder.kind === "run" && x.holder.id === "run-1/pod-a" && x.ref === h0.workspace!.authored), "the base's manifest is pinned for the run");
   // it can be written down for a driver that takes over, and read back
-  writeBaseRevision(ws, "run-1", "pod-a", pin!.base);
-  assert.deepEqual(readBaseRevision(ws, "run-1", "pod-a"), pin!.base);
+  await writeBaseRevision(ws, "run-1", "pod-a", pin!.base);
+  assert.deepEqual(await readBaseRevision(ws, "run-1", "pod-a"), pin!.base);
   await pin!.release();
   assert.equal(fp.all().filter((x) => x.holder.kind === "run").length, 0);
-  dropHandedIn(ws, "run-1", "pod-a");
-  assert.equal(readBaseRevision(ws, "run-1", "pod-a"), undefined, "erased with the step's hand-in record");
+  await dropHandedIn(ws, "run-1", "pod-a");
+  assert.equal(await readBaseRevision(ws, "run-1", "pod-a"), undefined, "erased with the step's hand-in record");
   await pin!.release(); // safe to repeat
 });
 
@@ -196,8 +196,8 @@ test("a base whose revision can no longer be read falls back to the folder's sha
 
 test("a driver that takes a step over pins the recorded base again; a base that is gone is null", async () => {
   const pin = await pinRunBase(T, W, "run-5/pod-a");
-  writeBaseRevision(ws, "run-5", "pod-a", pin!.base);
-  const recorded = readBaseRevision(ws, "run-5", "pod-a")!;
+  await writeBaseRevision(ws, "run-5", "pod-a", pin!.base);
+  const recorded = (await readBaseRevision(ws, "run-5", "pod-a"))!;
   const again = await repinRunBase(T, W, recorded, "run-5/pod-a");
   assert.ok(again);
   assert.deepEqual(again!.base, pin!.base);

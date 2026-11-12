@@ -34,11 +34,22 @@ export interface RecordsPortAsync {
    *  lock its async context holds, with the event loop free while it waits.
    *  Optional like the reads: a port without it is written through runPut. */
   runPut?(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): Promise<void>;
+  /** What a step was handed and started from, per run (FOL-126 phase 7, step
+   *  state): small JSON, one row per (run, kind, ref). Optional like the rest;
+   *  step-state.ts is the only caller. */
+  stepGet?(tenant: string, workspace: string, runId: string, kind: string, ref: string): Promise<unknown | undefined>;
+  stepPut?(tenant: string, workspace: string, runId: string, kind: string, ref: string, data: unknown): Promise<void>;
+  /** `ref` null: every ref of the kind. */
+  stepDrop?(tenant: string, workspace: string, runId: string, kind: string, ref: string | null): Promise<void>;
 }
 
 export interface RecordsPort {
   /** Async reads (see RecordsPortAsync). */
   async?: RecordsPortAsync;
+  /** The `runs.step_state_store` setting, read per call: while false, step
+   *  state is written to the run's folder as before (it is still READ from
+   *  rows first, so switching off mid-run loses nothing). */
+  stepStateOn?(): boolean;
   // ---- runs: the whole record, and the row a list reads
   /** Insert or replace one run. `live`: queued, running or parked at a gate. Last write wins. */
   runPut(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): void;
