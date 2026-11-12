@@ -45,6 +45,7 @@ import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentToo
 import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNames, localDelegateChannel, readCopyBack } from "./delegate-tools.ts";
 import type { DelegationResult } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
+import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
@@ -128,6 +129,7 @@ import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice
 import { trimChars } from "./paths.ts";
 import { earlierTurns, conversationBlock, type RunContext, type RunInput } from "./conversation.ts";
 import { inputsNote, type RunInputFile } from "./run-inputs.ts";
+import { textCandidates } from "./input-text.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 
 export { localDate } from "./clock.ts";
@@ -1772,6 +1774,7 @@ export function agentContext(
   let wantDesks = false;
   let wantAsk = false;
   let wantPeers = false;
+  let wantText = false;
 
   for (const ref of toolRefs(front)) {
     const toolName = ref.name;
@@ -1804,13 +1807,14 @@ export function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
-    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers") {
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
       if (toolName === "search") wantSearch = true;
       else if (toolName === "history") wantHistory = true;
       else if (toolName === "ask") wantAsk = true;
       else if (toolName === "peers") wantPeers = true;
+      else if (toolName === "text") wantText = true;
       else wantDesks = true;
       if (available[toolName]) shadowed.push(toolName);
     } else if (toolName === "install") {
@@ -1875,6 +1879,14 @@ export function agentContext(
   // prompt's line are the step's (runStep).
   const peers = wantPeers;
   if (peers) allowed.push(...PEER_TOOLS);
+  // tools: [text] — extract_text, through the extraction service behind the
+  // step's egress proxy. The server is the step's (it needs the step's roots
+  // and, in a pod, the lease address); here the grant and the prompt's line.
+  const textTool = wantText;
+  if (textTool) {
+    allowed.push(TEXT_TOOL);
+    parts.add("text", `# Files as text\n\n${textPromptLine()}`);
+  }
   if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
     parts.add("finding", `# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
   }
@@ -1896,6 +1908,7 @@ export function agentContext(
   }
   const denied: string[] = refNames(front.disallowedTools);
   if (denied.includes("install")) denied.push(INSTALL_TOOL);
+  if (denied.includes("text")) denied.push(TEXT_TOOL);
   const finalAllowed = allowed.filter((t) => !denied.includes(t));
   readsFiles = canReadBack(finalAllowed);
   const prompt = parts.assemble();
@@ -1945,6 +1958,7 @@ export function agentContext(
     deskTools,
     ask,
     peers,
+    textTool,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2439,6 +2453,7 @@ async function runStep(
       fallbackEnv, apiWarnings, searchRoots, historyDigest, deskDigest, searchTools, historyTools, deskTools,
       ask,
       peers,
+      textTool,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -2848,6 +2863,7 @@ async function runStep(
       ...(consults.length ? ["foldrun_agents"] : []),
       ...(ask ? ["foldrun_ask"] : []),
       ...(peers ? ["foldrun_peers"] : []),
+      ...(textTool ? [TEXT_SERVER] : []),
     ];
     if (peers) {
       // The colleagues' contract, in the prompt the step reads: who runs
@@ -3138,6 +3154,8 @@ async function runStep(
         ...(peers && stepIndex !== undefined && stepIndex >= 0 ? { agent: step.agent, peers: siblings } : {}),
         // sandbox: own sub-agents: the only names the delegate door takes.
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
+        // tools: [text] — the only leases the proxy serves the /text door on.
+        ...(textTool ? { text: true } : {}),
       });
       // foldrun's models need the proxy: it holds the platform's key and
       // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and
@@ -3395,7 +3413,7 @@ async function runStep(
           // Its file tools inside the sandbox get the same allowance (FOL-96).
           configWrites: step.approve === true && Boolean(step.approvedAt),
           // A snapshot step is told where its folder is, and what comes back.
-          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs)}` : ""}`,
+          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs, platform.extractText ? { textBeside: textCandidates(stepInputs).map((f) => f.path) } : undefined)}` : ""}`,
           model,
           effort,
           systemPrompt,
@@ -3412,6 +3430,7 @@ async function runStep(
           runtime: runtime.spec,
           consults,
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
+          ...(textTool ? { text: true } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -3865,6 +3884,11 @@ async function runStep(
       const peerChannel = peerBus && stepIndex !== undefined && stepIndex >= 0 ? peerBus.channelFor({ agent: step.agent, step: stepIndex }, siblings) : null;
       const peerTools = peers ? buildPeerTools({ channel: peerChannel, self: step.agent, siblings, emit: push }) : null;
       const localInbox = peerChannel ? inboxReader(peerChannel, push) : undefined;
+      // tools: [text] — no proxy in this process, so no extraction service:
+      // the tool is there and says so, rather than going missing.
+      const textTools = textTool
+        ? buildTextTools({ egress: null, agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), emit: (type, t) => push(type, t) })
+        : null;
       // sandbox: own sub-agents, here: no proxy between the step and this
       // process, so the job is handed to the drive loop directly.
       const delegateTools = delegates.length && delegateJob
@@ -3931,6 +3955,7 @@ async function runStep(
           ...(deskTools.server ? { foldrun_desks: deskTools.server } : {}),
           ...(askTools ? { foldrun_ask: askTools.server } : {}),
           ...(peerTools ? { foldrun_peers: peerTools.server } : {}),
+          ...(textTools ? { [TEXT_SERVER]: textTools.server } : {}),
           ...(delegateTools?.server ? { foldrun_delegate: delegateTools.server } : {}),
           ...(a2aTools?.server ? { foldrun_a2a: a2aTools.server } : {}),
           ...(installTools ? { foldrun_install: installTools.server } : {}),

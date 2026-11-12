@@ -93,7 +93,7 @@ test("a path maps to its schema", () => {
 
 test("values: what does nothing is reported, every alias and well-formed value is not", () => {
   const p = (kind: SchemaKind, data: Record<string, unknown>) => frontmatterProblems(kind, data, nearestField).map((x) => `${x.rule} ${x.key}`);
-  assert.deepEqual(p("agent", { effort: "quick", size: "heavy", permissionMode: "plan", tools: "web, read", budget: 5, ask: { timeout: "10m" } }), []);
+  assert.deepEqual(p("agent", { effort: "quick", size: "heavy", permissionMode: "plan", tools: "web, read, text", budget: 5, ask: { timeout: "10m" } }), []);
   assert.deepEqual(p("agent", { effort: "extreme", size: "giant", permissionMode: "yolo", ask: { timeout: "2d" } }), [
     "config/invalid-value effort", "config/invalid-value size", "config/invalid-value permissionMode", "config/invalid-value ask",
   ]);

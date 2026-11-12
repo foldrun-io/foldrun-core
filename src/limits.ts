@@ -66,6 +66,7 @@ const PLATFORM_SERVERS: Record<string, string> = {
   foldrun_desks: "desks",
   foldrun_ask: "ask",
   foldrun_peers: "peers",
+  foldrun_text: "text",
 };
 
 /** One spelling for comparing: `desk-email` and `desk_email` are the same
@@ -291,7 +292,7 @@ export function limitKeyProblems(
   ctx: { known: Iterable<string>; granted: Iterable<string> },
 ): { level: "error" | "warn"; message: string }[] {
   const out: { level: "error" | "warn"; message: string }[] = [];
-  const builtinKeys = ["read", "write", "code", ...Object.keys(BUILTIN_GROUP), "TodoWrite", "search", "history", "desks", "ask", "web", A2A_LIMIT_KEY];
+  const builtinKeys = ["read", "write", "code", ...Object.keys(BUILTIN_GROUP), "TodoWrite", "search", "history", "desks", "ask", "text", "web", A2A_LIMIT_KEY];
   const known = new Set([...builtinKeys, ...ctx.known].map(normKey));
   const granted = new Set([...ctx.granted].flatMap((g) => {
     const n = normKey(g);

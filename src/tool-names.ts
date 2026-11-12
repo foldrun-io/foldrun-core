@@ -51,8 +51,10 @@ export const BUILTIN_TOOLS = new Set([
 
 /** The platform's own groups, served in-process rather than by the SDK.
  *  `install` is granted to every agent anyway (install-tool.ts); naming it is
- *  accepted so a file that says so is not flagged. */
-export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install"]);
+ *  accepted so a file that says so is not flagged. `text` is extract_text
+ *  (text-tool.ts) — named `text`, not `extract`, because `extract` is
+ *  already one of the web tool's actions (`limits: {web.extract: 5}`). */
+export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install", "text"]);
 
 /** Would this name resolve to something the runtime provides? Built-ins win a
  *  clash, so a tool file of the same name is shadowed rather than granted. */
