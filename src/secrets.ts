@@ -128,7 +128,7 @@ interface StoredSecret {
   v?: 2;
 }
 
-type SecretsFile = Record<string, StoredSecret>;
+export type SecretsFile = Record<string, StoredSecret>;
 
 // ------------------------------------------------------------ binding
 //
@@ -251,8 +251,45 @@ function openRecord(tenant: string, workspace: string | undefined, name: string,
   return requireBound() ? null : decrypt(tenant, rec);
 }
 
+// ------------------------------------------------------------ where a vault lives
+//
+// A vault scope (an account's, or one workspace's) is its secrets.json — or,
+// on a platform that has registered a store and moved that scope, rows in its
+// database (FOL-126 phase 6: the last thing the egress pod needs the shared
+// volume for). The records are the same sealed records either way: the store
+// never sees a value. A scope is served from exactly one place — a store
+// that says `on` for it is the only thing read and written, so a secret
+// deleted there cannot come back from a file left behind.
+
+export interface VaultStore {
+  /** Is this scope (workspace undefined: the account's) served from the store? */
+  on(tenant: string, workspace?: string): boolean;
+  read(tenant: string, workspace?: string): SecretsFile;
+  /** mutateVaultFile's contract: `change` gets what is stored now and returns
+   *  the new contents, or null to leave them; one writer at a time per scope
+   *  (the callback may run again if another writer got in first), all or
+   *  nothing; returns what is stored after. Throws the same "busy" error. */
+  mutate(tenant: string, workspace: string | undefined, change: (all: SecretsFile) => SecretsFile | null): SecretsFile;
+  /** The workspaces of this account whose scope is in the store. */
+  workspaces(tenant: string): string[];
+}
+
+let vaultStore: VaultStore | null = null;
+/** Register (or, with null, remove) the platform's vault store. None: files. */
+export function setVaultStore(store: VaultStore | null): void {
+  vaultStore = store;
+}
+const inStore = (tenant: string, workspace?: string): VaultStore | null => (vaultStore?.on(tenant, workspace) ? vaultStore : null);
+
 function read(tenant: string, workspace?: string): SecretsFile {
-  return readFile(secretsFile(tenant, workspace));
+  const store = inStore(tenant, workspace);
+  return store ? store.read(tenant, workspace) : readFile(secretsFile(tenant, workspace));
+}
+
+/** Change one vault scope safely, wherever it lives (see mutateVaultFile). */
+function mutateVault(tenant: string, workspace: string | undefined, change: (all: SecretsFile) => SecretsFile | null): SecretsFile {
+  const store = inStore(tenant, workspace);
+  return store ? store.mutate(tenant, workspace, change) : mutateVaultFile(secretsFile(tenant, workspace), change);
 }
 
 // ------------------------------------------------------------ safe writes
@@ -401,7 +438,7 @@ export function setSecret(
   }
   if (value.length > 8192) throw new Error("secret too long");
   const wanted = limitFor(workspace, limit);
-  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+  mutateVault(tenant, workspace, (all) => {
     // A new value keeps the sites the old one was bound to: binding is a
     // property of the credential's use, not of its current value, and a
     // rotation that silently unbound it would put the new value in pods.
@@ -441,7 +478,7 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
     if (!SITE.test(site)) throw new Error(`"${site}" is not a site — a domain like api.example.com or *.example.com, no scheme, path or port`);
   }
   let found = false;
-  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+  mutateVault(tenant, workspace, (all) => {
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -630,7 +667,7 @@ export function setSecretWorkspaces(
   const clean = cleanWorkspaceList(workspaces);
   const expected = opts.ifWorkspaces === undefined ? undefined : cleanWorkspaceList(opts.ifWorkspaces);
   let found = false;
-  mutateVaultFile(secretsFile(tenant), (all) => {
+  mutateVault(tenant, undefined, (all) => {
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -676,9 +713,8 @@ function withWorkspaces(tenant: string, name: string, rec: StoredSecret, workspa
 export function retargetSecretWorkspaces(tenant: string, from: string, to: string | null): { changed: string[]; failed: string[] } {
   const changed: string[] = [];
   const failed: string[] = [];
-  const file = secretsFile(tenant);
-  if (!fs.existsSync(file)) return { changed, failed };
-  mutateVaultFile(file, (all) => {
+  if (!inStore(tenant) && !fs.existsSync(secretsFile(tenant))) return { changed, failed };
+  mutateVault(tenant, undefined, (all) => {
     changed.length = 0;
     failed.length = 0;
     const staged: typeof all = {};
@@ -714,7 +750,7 @@ export function retargetSecretWorkspaces(tenant: string, from: string, to: strin
 }
 
 export function deleteSecret(tenant: string, name: string, workspace?: string) {
-  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+  mutateVault(tenant, workspace, (all) => {
     if (!(name in all)) return null;
     delete all[name];
     return all;
@@ -817,6 +853,11 @@ function secretFiles(tenant: string): { file: string; workspace?: string }[] {
       if (fs.existsSync(f)) out.push({ file: f, workspace: entry.name });
     }
   }
+  // Scopes in the platform's store have no file; they are named by where
+  // the file would be (the result's `file` is a label, never opened).
+  for (const workspace of vaultStore?.workspaces(tenant) ?? []) {
+    if (!out.some((x) => x.workspace === workspace)) out.push({ file: secretsFile(tenant, workspace), workspace });
+  }
   return out;
 }
 
@@ -856,7 +897,7 @@ export function rotateMasterKey(
 
   for (const { file, workspace } of secretFiles(tenant)) {
     let count = 0;
-    mutateVaultFile(file, (all) => {
+    mutateVault(tenant, workspace, (all) => {
       const next: SecretsFile = {};
       for (const [name, rec] of Object.entries(all)) {
         // A record under the ACCOUNT's key is not under the install key, so
@@ -1043,7 +1084,7 @@ export function replaceOAuth2RefreshToken(tenant: string, name: string, workspac
   const next = OAUTH2_PREFIX + JSON.stringify({ ...config, refresh_token: refreshToken });
   for (const scope of workspace ? [workspace, undefined] : [undefined]) {
     let replaced = false;
-    mutateVaultFile(secretsFile(tenant, scope), (all) => {
+    mutateVault(tenant, scope, (all) => {
       const rec = all[name];
       if (rec && openRecord(tenant, scope, name, rec) === usedValue) {
         // Built whole, not spread over the old record: a spread kept a stale
@@ -1192,6 +1233,7 @@ function workspacesWithSecrets(tenant: string): string[] {
     }
     for (const n of names) if (fs.existsSync(path.join(base, n, "secrets.json"))) out.add(n);
   }
+  for (const n of vaultStore?.workspaces(tenant) ?? []) out.add(n);
   return [...out];
 }
 
@@ -1641,7 +1683,7 @@ export function setClientCertSecret(tenant: string, name: string, config: Client
   // step: a value set over a secret keeps its site binding, and a wildcard
   // one would present the certificate to a whole domain.
   const wanted = limitFor(workspace, limit);
-  mutateVaultFile(secretsFile(tenant, workspace), (all) => {
+  mutateVault(tenant, workspace, (all) => {
     const sites = all[name]?.sites;
     if (wanted !== undefined) assertWorkspacesExist(wanted, limit.exists);
     const workspaces = wanted !== undefined ? (wanted ?? undefined) : all[name]?.workspaces;
@@ -1895,8 +1937,8 @@ export function sealVaultBindings(tenant: string): { sealed: number; unreadable:
   assertSafeName(tenant, "tenant");
   let sealed = 0;
   const unreadable: string[] = [];
-  for (const { file, workspace } of secretFiles(tenant)) {
-    mutateVaultFile(file, (all) => {
+  for (const { workspace } of secretFiles(tenant)) {
+    mutateVault(tenant, workspace, (all) => {
       const plain = new Map<string, string>();
       const bad: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
@@ -1937,10 +1979,10 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
   let moved = 0;
   const unreadable: string[] = [];
 
-  for (const { file, workspace } of secretFiles(tenant)) {
+  for (const { workspace } of secretFiles(tenant)) {
     // Under the vault's lock: every pod runs this at boot, and a save made
     // between our read and our write must not be lost.
-    mutateVaultFile(file, (all) => {
+    mutateVault(tenant, workspace, (all) => {
       const plain = new Map<string, string>();
       const unreadableHere: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
