@@ -138,6 +138,18 @@ test("inside the boundary, no way of printing gets the marker onto stdout or std
   assert.ok(events.includes("canary.done"), "the process got to the end");
 });
 
+test("a second copy of the module (a bundler's) writes through the boundary the first installed — never as a bare console line", async () => {
+  const { code, out, err } = await runChild("second-copy");
+  const all = Buffer.concat([out, err]).toString("utf8");
+  assert.equal(code, 0, all);
+  const parsed = [...lines(out), ...lines(err)].map((l) => JSON.parse(l) as Record<string, unknown>);
+  const line = parsed.find((p) => p.event === "canary.second_copy");
+  assert.ok(line, all);
+  assert.equal(line!.tenant, "acme");
+  assert.equal(line!.reason, "key_revoked");
+  assert.ok(!parsed.some((p) => p.event === "console"), "no line turned into a bare console event");
+});
+
 for (const mode of ["rejection", "throw"]) {
   test(`inside the boundary, an uncaught ${mode} exits 1 and says only its class`, async () => {
     const { code, out, err } = await runChild(mode);
