@@ -61,7 +61,7 @@ import {
   type Manifest,
   type ManifestEntry,
 } from "./manifest.ts";
-import { mirrorOn, localDisk, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, type MirrorBase } from "./mirror-base.ts";
+import { mirrorOn, localDisk, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, headsSeen, noteHeadsSeen, dropHeadsSeen, type MirrorBase } from "./mirror-base.ts";
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, stateOpId, BlobMissing, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
@@ -665,6 +665,7 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
     await dropWorkspaceOutputs(tenant, workspace);
     marked.delete(k);
     verified.delete(k);
+    dropHeadsSeen(tenant, workspace); // a new workspace of this name starts unseen
   } finally {
     lifecycleBusy.delete(k);
     release();
@@ -735,6 +736,7 @@ export async function moveWorkspaceRevisions(tenant: string, from: string, to: s
       }
     }
     rekeyQueue(tenant, from, to);
+    dropHeadsSeen(tenant, from);
     if (rename) {
       // A commit on another pod that passed its guard between the move and the
       // folder rename left rows under the OLD name; its content is in the
@@ -1235,6 +1237,24 @@ async function baseManifests(deps: Deps, tenant: string, workspace: string, base
   return out;
 }
 
+/** On a pod's own disk (the mirror, or FOLDRUN_DATA_LOCAL) a folder with no
+ *  heads is either a workspace made here (no first revision yet) or the stale
+ *  copy of one deleted elsewhere. The marker tells them apart: once this pod
+ *  has seen heads for the name, their absence is a delete, and the folder is
+ *  not published as a first revision. The sync removes it, as it always did. */
+function isStale(tenant: string, workspace: string): boolean {
+  return (mirrorOn() || localDisk()) && headsSeen(tenant, workspace);
+}
+function noteHeads(tenant: string, workspace: string, heads: Heads): void {
+  if (heads.workspace || heads.state) noteHeadsSeen(tenant, workspace);
+}
+function staleFolder(tenant: string, workspace: string, heads: Heads): void {
+  if (!heads.workspace && !heads.state && isStale(tenant, workspace)) {
+    throw new PublishError(`${workspace} was deleted elsewhere; this pod's folder is a stale copy`, "gone");
+  }
+  noteHeads(tenant, workspace, heads);
+}
+
 /** One journal entry → one publish. The first commit of a workspace is its
  *  whole tree. */
 async function commitEntry(deps: Deps, tenant: string, workspace: string, entry: Entry): Promise<PublishResult | null> {
@@ -1246,6 +1266,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   let releaseLarge: () => Promise<void> = async () => {};
   const changes: Changes = {};
   const baseline: { authored: boolean; state: boolean } = { authored: !heads.workspace, state: !heads.state };
+  staleFolder(tenant, workspace, heads);
 
   // A run's copy-back is pinned to the revisions its stage-in started from: a
   // path's base is what THAT revision held, so a head that moved since (another
@@ -1410,6 +1431,8 @@ async function reconcileNow(tenant: string, workspace: string, by = "reconcile")
     // would diff a stale copy against a newer head, and with that head as each
     // path's base the publish would undo the newer write without a conflict.
     const heads = await headsOf(deps, ws);
+    if (!heads.workspace && !heads.state && isStale(tenant, workspace)) return null;
+    noteHeads(tenant, workspace, heads);
     const scan = await scanFolder(tenant, workspace);
     if (!scan) return null;
     const head = await manifestsAt(deps, tenant, heads);
@@ -1471,6 +1494,7 @@ async function reconcileNow(tenant: string, workspace: string, by = "reconcile")
  *  conflict copy beside it), so this pod takes the head's version too — unless
  *  the file changed here again since. Returns the result unchanged. */
 async function afterPublish(deps: Deps, ws: WorkspaceRef, changes: Changes, r: PublishResult): Promise<PublishResult> {
+  noteHeadsSeen(ws.tenant, ws.workspace); // it has heads now, whether or not the mirror is on
   if (!mirrorOn()) return r;
   try {
     const { tenant, workspace } = ws;
@@ -1600,6 +1624,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
     if (workspace !== "@library") notifyWorkspaceChanged(tenant, workspace, "delete");
     return "removed";
   }
+  noteHeadsSeen(tenant, workspace);
   const ids = { workspaceHead: heads.workspace?.id ?? null, stateHead: heads.state?.id ?? null };
   if (base && base.workspaceHead === ids.workspaceHead && base.stateHead === ids.stateHead && fs.existsSync(dir)) return "unchanged";
   const m = await manifestsAt(deps, tenant, heads);
