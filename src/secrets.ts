@@ -503,6 +503,7 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
   }
   let found = false;
   mutateVault(tenant, workspace, (all) => {
+    found = false; // a store may run this again against a newer read
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -692,6 +693,7 @@ export function setSecretWorkspaces(
   const expected = opts.ifWorkspaces === undefined ? undefined : cleanWorkspaceList(opts.ifWorkspaces);
   let found = false;
   mutateVault(tenant, undefined, (all) => {
+    found = false; // a store may run this again against a newer read
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -921,7 +923,10 @@ export function rotateMasterKey(
 
   for (const { file, workspace } of secretFiles(tenant)) {
     let count = 0;
+    const seen = unreadable.length;
     mutateVault(tenant, workspace, (all) => {
+      count = 0; // a store may run this again against a newer read
+      unreadable.length = seen;
       const next: SecretsFile = {};
       for (const [name, rec] of Object.entries(all)) {
         // A record under the ACCOUNT's key is not under the install key, so
@@ -1109,6 +1114,7 @@ export function replaceOAuth2RefreshToken(tenant: string, name: string, workspac
   for (const scope of workspace ? [workspace, undefined] : [undefined]) {
     let replaced = false;
     mutateVault(tenant, scope, (all) => {
+      replaced = false; // a store may run this again against a newer read
       const rec = all[name];
       if (rec && openRecord(tenant, scope, name, rec) === usedValue) {
         // Built whole, not spread over the old record: a spread kept a stale
@@ -1962,7 +1968,11 @@ export function sealVaultBindings(tenant: string): { sealed: number; unreadable:
   let sealed = 0;
   const unreadable: string[] = [];
   for (const { workspace } of secretFiles(tenant)) {
+    const [sealedBefore, seen] = [sealed, unreadable.length];
     mutateVault(tenant, workspace, (all) => {
+      // a store may run this again against a newer read: count it once
+      sealed = sealedBefore;
+      unreadable.length = seen;
       const plain = new Map<string, string>();
       const bad: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
@@ -2006,7 +2016,11 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
   for (const { workspace } of secretFiles(tenant)) {
     // Under the vault's lock: every pod runs this at boot, and a save made
     // between our read and our write must not be lost.
+    const [movedBefore, seen] = [moved, unreadable.length];
     mutateVault(tenant, workspace, (all) => {
+      // a store may run this again against a newer read: count it once
+      moved = movedBefore;
+      unreadable.length = seen;
       const plain = new Map<string, string>();
       const unreadableHere: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
