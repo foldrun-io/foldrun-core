@@ -1838,6 +1838,24 @@ export async function syncAllFromHeads(): Promise<{ synced: number; removed: num
   return out;
 }
 
+/** Every account that still has revision state: a head in the store, a journal
+ *  entry in any journal store, or changes queued in this process. A pod that is
+ *  about to remove an account's folder asks first — such an account has work
+ *  not yet in a head, or a history somebody can still read. Throws when a store
+ *  cannot be read: the caller must then remove nothing. */
+export async function tenantsWithRevisionState(): Promise<Set<string>> {
+  const out = new Set<string>();
+  const deps = S.backend;
+  if (deps) {
+    if (!deps.revisions.allHeads) throw new Error("revisions: the store cannot list its heads");
+    for (const h of await deps.revisions.allHeads()) out.add(h.tenant);
+  }
+  for (const st of journalStores()) for (const w of st.workspaces()) out.add(w.tenant);
+  for (const [k, q] of queues) if (q.length) out.add(k.split("\0")[0]);
+  for (const k of marked) out.add(k.split("\0")[0]);
+  return out;
+}
+
 // ------------------------------------------------------------- reading
 
 async function blobBytes(deps: Deps, tenant: string, sha: string): Promise<Buffer | null> {
