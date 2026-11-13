@@ -2,7 +2,7 @@
 // account's content (FOL-121).
 //
 // A hosted pod's stdout and stderr leave the cluster: they are our
-// operations log (Grafana Cloud, through Alloy), read by us, not by the
+// operations log (CloudWatch Logs on the hosted platform), read by us, not by the
 // account whose run it was. An account's prompts, replies, files, tool
 // arguments and the words of its errors belong in that account's own run
 // trace — never here.

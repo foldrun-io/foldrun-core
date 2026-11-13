@@ -397,8 +397,8 @@ export function funnelSecs(ev: Pick<RunWideEvent, "at">, from: FunnelMark, to: F
 // fixed. No status message, no events, no links: a failure is its class
 // (`error.type`, one of ERROR_CLASSES).
 
-/** The ops-log fields an ops span may carry — the collector's allowlist
- *  (foldrun-infra alloy-config.yaml) is held to this list by its test. */
+/** The ops-log fields an ops span may carry: the whole list, so whatever
+ *  collects the ops trace can be held to it. */
 export const OPS_SPAN_FIELDS = [
   "runId", "tenant", "workspace", "flow", "agent", "kind", "outcome", "errorClass", "verdict",
   "reason", "image", "size", "model", "usd", "step", "attempt", "phase", "ms",
