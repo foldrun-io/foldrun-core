@@ -867,8 +867,9 @@ export function masterKeySource(): { source: "env" | "file"; path: string | null
     : { source: "file", path: keyFile() };
 }
 
-/** Every secrets.json under an account: the account's, then each workspace's. */
-function secretFiles(tenant: string): { file: string; workspace?: string }[] {
+/** The secrets.json files that exist under an account: the account's (named
+ *  even where there is none), then each workspace's. */
+function diskSecretFiles(tenant: string): { file: string; workspace?: string }[] {
   const out: { file: string; workspace?: string }[] = [{ file: secretsFile(tenant) }];
   for (const dirName of ["workspaces", "projects"]) {
     const dir = path.join(dataRoot(), tenant, dirName);
@@ -879,6 +880,35 @@ function secretFiles(tenant: string): { file: string; workspace?: string }[] {
       if (fs.existsSync(f)) out.push({ file: f, workspace: entry.name });
     }
   }
+  return out;
+}
+
+/** Every vault scope that has a FILE on this volume, across all accounts:
+ *  what a fleet check or a move to a store starts from. Never opens one. */
+export function vaultFileScopes(): { tenant: string; workspace?: string }[] {
+  const out: { tenant: string; workspace?: string }[] = [];
+  if (!fs.existsSync(dataRoot())) return out;
+  for (const e of fs.readdirSync(dataRoot(), { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    try {
+      assertSafeName(e.name, "tenant");
+    } catch {
+      continue; // not an account's folder
+    }
+    for (const { file, workspace } of diskSecretFiles(e.name)) if (fs.existsSync(file)) out.push({ tenant: e.name, ...(workspace ? { workspace } : {}) });
+  }
+  return out;
+}
+
+/** Does this stored record open for its place with this process's keys? True
+ *  or false: the value is never handed out. */
+export function vaultRecordOpens(tenant: string, workspace: string | undefined, name: string, rec: SecretsFile[string]): boolean {
+  return openRecord(tenant, workspace, name, rec) !== null;
+}
+
+/** Every secrets.json under an account: the account's, then each workspace's. */
+function secretFiles(tenant: string): { file: string; workspace?: string }[] {
+  const out = diskSecretFiles(tenant);
   // Scopes in the platform's store have no file; they are named by where
   // the file would be (the result's `file` is a label, never opened).
   for (const workspace of VAULT.store?.workspaces(tenant) ?? []) {
