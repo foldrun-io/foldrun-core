@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.0.3] — 2026-11-13
+
+- fix(revisions, capture): a pod's own disk is not the truth; secrets masked when printed encoded ([86f4682](https://github.com/foldrun-io/foldrun-core/commit/86f4682))
+
 ## [23.0.2] — 2026-11-13
 
 - test(revisions): the shared contract covers the account shelf's scope "@library" on every store ([fa7c37b](https://github.com/foldrun-io/foldrun-core/commit/fa7c37b))
