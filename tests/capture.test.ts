@@ -148,6 +148,33 @@ test("the scrub's values: an @file secret by its content and line by line, every
   assert.ok(!json.includes("cd\\\\ef"), json);
 });
 
+test("a secret printed encoded is masked too: hex, URL-encoded, base64 at every alignment, URL-safe base64 (Kousha's review)", async () => {
+  const { redactionsFor, maskCall } = await import("../src/capture.ts");
+  const secret = "sk-live/9f8e7d6c5b4a+3210?&=";
+  const pairs = redactionsFor({ TOKEN: secret });
+  const redact = (t: string) => pairs.reduce((out, [v, n]) => out.split(v).join(`[redacted:${n}]`), t);
+  const b = Buffer.from(secret);
+  const shown = [
+    b.toString("hex"),
+    b.toString("hex").toUpperCase(),
+    encodeURIComponent(secret),
+    b.toString("base64"),
+    b.toString("base64url"),
+    // inside a longer encoding, at each of the three alignments
+    Buffer.concat([Buffer.from("user:"), b]).toString("base64"),
+    Buffer.concat([Buffer.from("ab:"), b, Buffer.from(":tail")]).toString("base64"),
+    Buffer.concat([Buffer.from("a"), b]).toString("base64url"),
+  ];
+  for (const form of shown) {
+    const out = maskCall(`printed: ${form} done`, redact).text;
+    assert.ok(out.includes("[redacted:TOKEN]"), `masked: ${form} → ${out}`);
+    // at most the few characters that also depend on a neighbouring byte survive
+    const left = out.replace(/^printed: /, "").replace(/ done$/, "").replace("[redacted:TOKEN]", "");
+    assert.ok(left.length <= 12, `little left of ${form}: ${left}`);
+  }
+  assert.ok(!pairs.some(([v]) => v.length < 8));
+});
+
 test("masked first, cut second: a secret on the cap's edge is masked whole; a private key found anywhere is masked", async () => {
   const { maskCall } = await import("../src/capture.ts");
   const secret = "edge-secret-value-0123456789";

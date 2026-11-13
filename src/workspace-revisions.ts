@@ -61,7 +61,7 @@ import {
   type Manifest,
   type ManifestEntry,
 } from "./manifest.ts";
-import { mirrorOn, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, type MirrorBase } from "./mirror-base.ts";
+import { mirrorOn, localDisk, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, type MirrorBase } from "./mirror-base.ts";
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, stateOpId, BlobMissing, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
@@ -437,10 +437,14 @@ async function drainOne(k: string): Promise<void> {
   while (q && q.length && S.backend) {
     const entry = q[0];
     // The workspace was deleted while this waited (or retried): nothing to
-    // publish, and nothing for a later boot to replay.
+    // publish, and nothing for a later boot to replay. On this pod's own disk
+    // (FOLDRUN_DATA_LOCAL=1) a missing folder is only one not synced here: the
+    // entry leaves this pod's queue but stays in the shared store, for a pod
+    // that has the folder (Kousha's review, 14 Nov 2026). A real delete takes
+    // the store's entries with it (dropJournal).
     if (!fs.existsSync(folderOf(tenant, workspace))) {
       q.shift();
-      forget(tenant, workspace, entry);
+      if (!localDisk()) forget(tenant, workspace, entry);
       continue;
     }
     try {
@@ -453,8 +457,9 @@ async function drainOne(k: string): Promise<void> {
       if (err instanceof PublishError && err.code === "gone") {
         // The folder is gone (deleted or renamed, here or on another pod): the
         // change has nowhere to go, and nothing should be recorded under the name.
+        // On this pod's own disk, kept in the store as above.
         q.shift();
-        forget(tenant, workspace, entry);
+        if (!localDisk()) forget(tenant, workspace, entry);
         continue;
       }
       if (permanent(err)) {
@@ -905,9 +910,12 @@ export async function cleanOrphanedHistory(
   const out = { checked: 0, orphans: 0, marked: 0, dropped: 0, skipped: 0 };
   const deps = S.backend;
   if (!deps) return out;
-  // Folders are a copy of the heads (revisions.mirror): a missing one says
-  // nothing about the workspace, so nothing is taken for orphaned.
-  if (mirrorOn()) return out;
+  // Folders are a copy of the heads (revisions.mirror), or this pod's own
+  // disk (FOLDRUN_DATA_LOCAL=1, with the mirror on or off): a missing one says
+  // nothing about the workspace, so nothing is taken for orphaned. Until
+  // 14 Nov 2026 only the mirror was asked, so turning it off on a pod with its
+  // own empty disk would have dropped every workspace's history (Kousha's review).
+  if (mirrorOn() || localDisk()) return out;
   const root = dataRoot();
   let rootEntries = 0;
   try {
@@ -983,7 +991,11 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
       const k = key(tenant, workspace);
       const q = queues.get(k) ?? [];
       const held = new Set(q.filter((e) => e.store === store).map((e) => e.handle));
-      const gone = !fs.existsSync(folderOf(tenant, workspace));
+      // A folder missing from this pod's own disk (FOLDRUN_DATA_LOCAL=1) is
+      // one not synced here yet, not a deleted workspace: the database store
+      // is shared, and those entries may be another live pod's (Kousha's
+      // review, 14 Nov 2026). Only a shared volume's absence is believed.
+      const gone = !localDisk() && !fs.existsSync(folderOf(tenant, workspace));
       const found: Entry[] = [];
       let names: { handle: string; ageMs: number }[] = [];
       try {
@@ -995,12 +1007,15 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
       }
       for (const { handle, ageMs } of names) {
         if (held.has(handle)) continue;
+        // Young entries are a live process's, whatever the folder says: the
+        // age is asked before anything is removed (until 14 Nov 2026 a missing
+        // folder removed even a fresh entry).
+        if (minAge > 0 && ageMs < minAge) continue;
         try {
           if (gone) {
             store.remove(tenant, workspace, handle);
             continue;
           }
-          if (minAge > 0 && ageMs < minAge) continue;
           const e = store.read(tenant, workspace, handle);
           if ((e.v !== 1 && e.v !== 2) || !Array.isArray(e.files)) throw new Error("not a journal entry");
           found.push({ id: e.id, files: e.files, by: e.by, message: e.message, at: e.at, restoredFrom: e.restoredFrom, baseRev: e.baseRev, store, handle });
@@ -1375,6 +1390,13 @@ async function reconcileNow(tenant: string, workspace: string, by = "reconcile")
   // own writes reach the head through the journal; the reconcile waits for a
   // sync to say what "changed here" means.
   if (mirrorOn() && !readMirrorBase(tenant, workspace)) return null;
+  // This pod's own disk with the mirror off: nothing brings the folder to the
+  // heads, so it is not the truth about anything either — an emptyDir after a
+  // restart would publish every file as deleted (Kousha's review, 14 Nov 2026).
+  if (!mirrorOn() && localDisk()) {
+    opsLog("warn", "revisions.reconcile_skipped", { tenant, workspace, reason: "local_disk_without_mirror" });
+    return null;
+  }
   const ws: WorkspaceRef = { tenant, workspace };
   const k = key(tenant, workspace);
   // The mark goes BEFORE the folder is read, so one set after the read (a run

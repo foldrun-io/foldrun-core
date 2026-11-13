@@ -39,6 +39,25 @@ export function mirrorOn(): boolean {
   }
 }
 
+const LOCAL = processState("local-disk-gate", () => ({ on: (() => false) as () => boolean }));
+
+/** The platform says whether this pod's data root is its own disk
+ *  (FOLDRUN_DATA_LOCAL=1, an emptyDir) rather than a volume every pod shares.
+ *  On such a disk a folder that is missing or older than the heads says
+ *  nothing about the workspace: it may simply not be synced here, or (mirror
+ *  off) never will be. Off on a laptop, in the CLI and on the shared volume. */
+export function setLocalDiskGate(fn: (() => boolean) | null): void {
+  LOCAL.on = fn ?? (() => false);
+}
+
+export function localDisk(): boolean {
+  try {
+    return LOCAL.on();
+  } catch {
+    return false;
+  }
+}
+
 const SAFE = /^(?:@library|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
 export const mirrorBaseFile = (tenant: string, workspace: string): string | null =>
   SAFE.test(tenant) && SAFE.test(workspace) ? path.join(dataRoot(), ".mirror", tenant, `${workspace}.json`) : null;

@@ -27,8 +27,17 @@ export const CAPTURE_SLACK = 4096;
  */
 export function redactionsFor(secrets: Record<string, string | undefined>): [string, string][] {
   const out = new Map<string, string>();
-  const add = (v: string, name: string) => {
+  const put = (v: string, name: string) => {
     if (v.length >= 8 && !out.has(v)) out.set(v, name);
+  };
+  // Every value also as a tool prints it encoded (Kousha's review, 14 Nov
+  // 2026): hex, URL-encoded, and base64 — standard and URL-safe, at each of
+  // the three byte alignments it can take inside a longer encoded text
+  // (`base64 <<< "user:$TOKEN"`, a JWT segment, a Basic header the agent built).
+  const add = (v: string, name: string) => {
+    if (v.length < 8) return;
+    put(v, name);
+    for (const e of encodedForms(v)) put(e, name);
   };
   for (const [name, raw] of Object.entries(secrets)) {
     if (typeof raw !== "string") continue;
@@ -78,6 +87,31 @@ export function redactionsFor(secrets: Record<string, string | undefined>): [str
     }
   }
   return [...out.entries()].sort((a, b) => b[0].length - a[0].length);
+}
+
+/** A value's encoded forms, each long enough to be its own and nothing else's
+ *  (12 characters or more). Base64: the characters that come from the value's
+ *  bytes alone at each alignment, so the form matches inside a longer
+ *  encoding whatever came before or after the value. */
+export function encodedForms(v: string): string[] {
+  const bytes = Buffer.from(v, "utf8");
+  const forms = new Set<string>([bytes.toString("hex"), bytes.toString("hex").toUpperCase()]);
+  try {
+    forms.add(encodeURIComponent(v));
+  } catch {
+    // a lone surrogate: no URL form
+  }
+  for (let pad = 0; pad < 3; pad++) {
+    const b64 = Buffer.concat([Buffer.alloc(pad), bytes]).toString("base64").replace(/=+$/, "");
+    // character i holds bits [6i, 6i + 6); the value's are [8·pad, 8·(pad + n))
+    const first = Math.ceil((8 * pad) / 6);
+    const last = Math.floor((8 * (pad + bytes.length)) / 6); // exclusive
+    const part = b64.slice(first, last);
+    forms.add(part);
+    forms.add(part.replace(/\+/g, "-").replace(/\//g, "_"));
+  }
+  forms.delete(v);
+  return [...forms].filter((f) => f.length >= 12);
 }
 
 // A private key's whole block — scan.ts names a key header and leaves the
