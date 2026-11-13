@@ -77,26 +77,29 @@ test("the lock holds across processes: a second process waits for the first", as
     child,
     `import { withFileStoreLock } from ${JSON.stringify(mod)};
      const t0 = Date.now();
-     await withFileStoreLock("${T}", "${W}", async () => { process.stdout.write("in " + (Date.now()-t0) + "\\n"); await new Promise(r => setTimeout(r, 400)); });
+     await withFileStoreLock("${T}", "${W}", async () => { process.stdout.write("in " + (Date.now()-t0) + " at " + Date.now() + "\\n"); await new Promise(r => setTimeout(r, 400)); });
      process.stdout.write("out\\n");`,
   );
   let out = "";
   let closed!: Promise<void>;
   // The parent holds the lock for 600ms; the child is started inside it and
   // must not get in until the parent lets go.
-  const started = Date.now();
+  let released = 0;
   await withFileStoreLock(T, W, async () => {
     const c = spawn(process.execPath, [child], { env: { ...process.env } });
     c.stdout.on("data", (d) => (out += d));
     c.stderr.on("data", (d) => (out += d));
     closed = new Promise<void>((resolve) => c.on("close", () => resolve()));
     await new Promise((r) => setTimeout(r, 600));
+    released = Date.now();
   });
   await closed;
   const o = out;
-  void started;
-  const entered = Number(/in (\d+)/.exec(o)?.[1]);
-  assert.ok(entered >= 300, `the child entered only after the parent let go (waited ${entered}ms): ${o}`);
+  // When the child got in, by the clock, against when the parent let go —
+  // not how long it waited after it had booted: on a loaded machine a child
+  // can take most of the 600 ms to start (CI, 13 Nov 2026).
+  const at = Number(/in \d+ at (\d+)/.exec(o)?.[1]);
+  assert.ok(at >= released, `the child entered only after the parent let go (entered ${at - released}ms after the release): ${o}`);
   assert.match(o, /out/);
 });
 

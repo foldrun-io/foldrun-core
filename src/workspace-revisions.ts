@@ -93,6 +93,9 @@ const S = processState("workspace-revisions", () => ({
   unjournalled: new Set<string>(),
   repairing: new Set<string>(),
   retryAt: new Map<string, number>(),
+  /** Retry timers not yet fired, and the reset generation (tests only move it). */
+  retryTimers: new Set<ReturnType<typeof setTimeout>>(),
+  generation: 0,
   wantPrune: new Set<string>(),
   prunedAt: new Map<string, number>(),
   frozen: new Map<string, Promise<void>>(),
@@ -416,10 +419,14 @@ function drain(k: string): Promise<void> {
   // until it is done (the gate is read now, so a drain started BEFORE it is
   // never behind it — that is what lets the lifecycle wait for those).
   const gate = frozen.get(k);
+  const gen = S.generation;
   const next = (chains.get(k) ?? Promise.resolve())
     .catch(() => {})
     .then(() => gate)
-    .then(() => drainOne(k));
+    // A link queued before resetJournalForTests belongs to the "process" that
+    // reset ended: it must not drain beside the new one (the replay test saw
+    // two loops share one queue under load and publish out of order).
+    .then(() => (gen === S.generation ? drainOne(k) : undefined));
   chains.set(k, next);
   return next;
 }
@@ -465,8 +472,12 @@ async function drainOne(k: string): Promise<void> {
       const attempts = (retryAt.get(k) ?? 0) + 1;
       retryAt.set(k, attempts);
       const wait = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempts - 1));
-      const t = setTimeout(() => void drain(k), wait);
+      const t = setTimeout(() => {
+        S.retryTimers.delete(t);
+        void drain(k);
+      }, wait);
       t.unref?.();
+      S.retryTimers.add(t);
       return;
     }
   }
@@ -508,6 +519,10 @@ export async function flushRevisions(only?: { tenant: string; workspace: string 
 /** Tests: forget every queued change and pending retry (journal FILES stay:
  *  that is what a crash leaves). */
 export function resetJournalForTests(): void {
+  // As a crash would: no retry of the old process fires, no link of it drains.
+  for (const t of S.retryTimers) clearTimeout(t);
+  S.retryTimers.clear();
+  S.generation++;
   queues.clear();
   chains.clear();
   marked.clear();
