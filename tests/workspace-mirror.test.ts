@@ -16,7 +16,7 @@ import { writeWorkspaceFile, deleteWorkspacePath, workspaceDir } from "../src/st
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRevisionStore } from "../src/revision-store.ts";
 import {
-  setRevisionBackend, resetJournalForTests, flushRevisions, readAtHead, reconcileWorkspace, syncFromHeads, syncAllFromHeads, dropWorkspaceRevisions,
+  setRevisionBackend, resetJournalForTests, flushRevisions, readAtHead, reconcileWorkspace, syncFromHeads, syncAllFromHeads, syncTenantFromHeads, dropWorkspaceRevisions,
 } from "../src/workspace-revisions.ts";
 import { setMirrorGate, readMirrorBase } from "../src/mirror-base.ts";
 import type { Deps } from "../src/publish.ts";
@@ -392,4 +392,24 @@ test("store registered but not serving reads: the pod keeps its local history (C
   writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
   await flushRevisions();
   assert.ok(fs.existsSync(path.join(podA, T, ".history")) || fs.readdirSync(podA, { recursive: true }).map(String).some((n) => n.includes(".history")));
+});
+
+test("read-your-writes: one account synced on demand — its new workspace here, its deleted one gone, other accounts untouched", async () => {
+  // 14 Nov 2026: a workspace made on one web pod answered 404 on the other
+  // until the poll came round; a request now syncs its account first.
+  writeWorkspaceFile(T, W, "memory/notes.md", "made on A\n", { by: "user:a" });
+  fs.mkdirSync(workspaceDir("other", "theirs"), { recursive: true });
+  writeWorkspaceFile("other", "theirs", "AGENTS.md", "---\nname: theirs\n---\n", { by: "user:o" });
+  await flushRevisions();
+  on(podB);
+  assert.deepEqual(await syncTenantFromHeads(T), { synced: 1, removed: 0, failed: 0 });
+  assert.equal(read("memory/notes.md"), "made on A\n", "the account's new workspace is here at once");
+  assert.equal(fs.existsSync(workspaceDir("other", "theirs")), false, "another account is not synced by this one's request");
+  on(podA);
+  await dropWorkspaceRevisions(T, W, () => fs.rmSync(workspaceDir(T, W), { recursive: true, force: true }));
+  on(podB);
+  assert.deepEqual(await syncTenantFromHeads(T), { synced: 0, removed: 1, failed: 0 });
+  assert.equal(fs.existsSync(workspaceDir(T, W)), false, "deleted on A, gone here before any poll");
+  setMirrorGate(() => false);
+  assert.deepEqual(await syncTenantFromHeads(T), { synced: 0, removed: 0, failed: 0 }, "mirror off: nothing");
 });

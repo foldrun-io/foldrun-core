@@ -1756,6 +1756,43 @@ function throughLink(dir: string, rel: string): boolean {
 
 /** Every workspace with heads, and every copy here whose heads are gone. One
  *  failure does not stop the rest. */
+/**
+ * One account's folders brought level with the heads, now — for a request
+ * that must see what another pod just wrote (14 Nov 2026: a workspace made
+ * on one web pod answered 404 on the other for up to the mirror's poll; a
+ * deleted one stayed listed ~10 s). The same per-workspace sync the loop
+ * runs, for this tenant only: its heads, and its mirrored folders with no
+ * head (deleted elsewhere). A failure is logged and counted, never thrown —
+ * the caller answers from the copy it has.
+ */
+export async function syncTenantFromHeads(tenant: string): Promise<{ synced: number; removed: number; failed: number }> {
+  const deps = S.backend;
+  const out = { synced: 0, removed: 0, failed: 0 };
+  if (!deps?.revisions.allHeads || !mirrorOn()) return out;
+  let mine: { tenant: string; workspace: string }[];
+  try {
+    mine = (await deps.revisions.allHeads()).filter((h) => h.tenant === tenant);
+  } catch (err) {
+    // Fail open, as documented: the caller answers from the copy it has (Codex).
+    opsError("revisions.mirror_sync_failed", err, { tenant }, "warn");
+    out.failed++;
+    return out;
+  }
+  const seen = new Set(mine.map((h) => h.workspace));
+  const todo = [...mine.map((h) => h.workspace), ...mirroredWorkspaces().filter((w) => w.tenant === tenant && !seen.has(w.workspace)).map((w) => w.workspace)];
+  for (const workspace of todo) {
+    try {
+      const r = await syncFromHeads(tenant, workspace);
+      if (r === "synced") out.synced++;
+      else if (r === "removed") out.removed++;
+    } catch (err) {
+      out.failed++;
+      opsError("revisions.mirror_sync_failed", err, { tenant, workspace }, "warn");
+    }
+  }
+  return out;
+}
+
 export async function syncAllFromHeads(): Promise<{ synced: number; removed: number; failed: number }> {
   const deps = S.backend;
   const out = { synced: 0, removed: 0, failed: 0 };
