@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { startFlowRun, waitForRun } from "../src/runner.ts";
 import { workspaceDir, deleteRun } from "../src/store.ts";
+import { setLocalDiskGate } from "../src/mirror-base.ts";
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRunOutputStore, listRunOutputs, readRunOutput, setRunOutputsBackend, settleRunOutputs, type RunOutputsBackend } from "../src/run-outputs.ts";
 import { memoryPins } from "./run-outputs-contract.ts";
@@ -97,6 +98,20 @@ test("TEMPORARY fallback: a store that fails the publish still keeps the outputs
     assert.equal(run.status, "completed");
     assert.equal(fs.readFileSync(path.join(workspaceDir("acme", "desk"), "runs", run.id, "outputs", "writer", "report.md"), "utf8"), "# done");
   });
+});
+
+test("on a pod's own disk (localDisk) a failed publish does NOT fall back to the volume, and the trail says so", async () => {
+  const dead = (root: string): RunOutputsBackend => ({ ...backendOf()(root), blobs: { ...bounded(fsBlobStore(path.join(root, ".objects"))), putIfAbsent: async () => Promise.reject(new Error("bucket unreachable")) } as never });
+  setLocalDiskGate(() => true);
+  try {
+    await inWorkspace("write: report.md => # done\nfinished", dead, async ({ run }) => {
+      assert.equal(run.status, "completed", "bookkeeping does not fail a finished run");
+      assert.equal(fs.existsSync(path.join(workspaceDir("acme", "desk"), "runs", run.id, "outputs")), false, "nothing copied to the volume");
+      assert.ok(run.steps[0].events.some((e) => e.type === "error" && /outputs: writer's outputs were not kept/.test(e.text)));
+    });
+  } finally {
+    setLocalDiskGate(null);
+  }
 });
 
 test("deleting the run removes its published outputs", async () => {

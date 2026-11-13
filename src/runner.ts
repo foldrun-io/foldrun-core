@@ -5022,7 +5022,15 @@ function driveRunInner(
     for (const agent of new Set(run.steps.map((s) => s.agent))) {
       const from = path.join(runRoot, "agents", agent, "outputs");
       if (!fs.existsSync(from) || fs.readdirSync(from).length === 0) continue;
-      const done = await archiveRunOutputs(tenant, workspace, run.id, agent, from);
+      let done: Awaited<ReturnType<typeof archiveRunOutputs>>;
+      try {
+        done = await archiveRunOutputs(tenant, workspace, run.id, agent, from);
+      } catch {
+        // Only on a pod's own disk (localDisk()), where there is no volume to keep them on.
+        const last = run.steps.findLast((s) => s.status !== "pending") ?? run.steps[0];
+        last?.events.push({ t: new Date().toISOString(), type: "error", text: `outputs: ${agent}'s outputs were not kept: the store refused them` });
+        continue;
+      }
       if (done.where === "store") noteRefused(run, done.refused);
       else copyTreeBytes(from, path.join(runRoot, "runs", run.id, "outputs", agent));
     }

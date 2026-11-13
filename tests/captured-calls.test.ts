@@ -17,6 +17,7 @@ import { recordCallIo } from "../src/capture.ts";
 import { readCapturedCall, deleteRun, workspaceDir, type RunRecord } from "../src/store.ts";
 import { blobObjectKey } from "../src/manifest.ts";
 import { fakeRecords } from "./fake-records.ts";
+import { setLocalDiskGate } from "../src/mirror-base.ts";
 import { localRunOutputStore, archiveRunOutputs, setRunOutputsBackend, settleRunOutputs } from "../src/run-outputs.ts";
 
 const T = "acme";
@@ -168,6 +169,21 @@ test("TEMPORARY: a store that refuses the write falls back to the volume", async
   await flushCalls(step);
   assert.equal(readCapturedCall(T, W, "run-1", "c1")!.output, "o");
   assert.equal((await readCapturedCallAsync(T, W, "run-1", "c1"))!.output, "o");
+});
+
+test("on a pod's own disk (localDisk) a store that refuses the write does NOT fall back to the volume; the call is not recorded", async () => {
+  const bad = { ...blobs, putIfAbsent: async () => { throw new Error("the store is down"); } } as unknown as typeof blobs;
+  setRevisionBackend({ blobs: bad, revisions: localRevisionStore(path.join(root, ".revisions")), pins }, { journal: () => false, read: () => false });
+  setLocalDiskGate(() => true);
+  try {
+    const step = {};
+    recordCallIo(ws, "run-1", "c1", "Bash", { input: "i", output: "o" }, redact, sink(step, "run-1"));
+    await flushCalls(step);
+    assert.equal(readCapturedCall(T, W, "run-1", "c1"), null, "nothing on the volume");
+    assert.equal(await readCapturedCallAsync(T, W, "run-1", "c1"), null);
+  } finally {
+    setLocalDiskGate(null);
+  }
 });
 
 test("deleting a run releases its pin and its rows; the other run keeps its own", async () => {
