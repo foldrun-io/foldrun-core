@@ -150,6 +150,18 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
     assert.deepEqual(of(b), { tenant: b.tenant, workspace: b.workspace, workspaceHead: rb.revision.id, stateHead: null });
   });
 
+  t("the account shelf's scope \"@library\" is a workspace like any other: commit, head, history, allHeads, drop (13 Nov 2026)", async ({ revisions }) => {
+    // Until 13 Nov 2026 the Postgres store refused the name, so no install on
+    // Postgres ever kept an account's AGENTS.md and library/ as revisions.
+    const ws = { tenant: fresh().tenant, workspace: "@library" };
+    const r = (await revisions.commit(ws, { base: null, authored: "a".repeat(64), state: "b".repeat(64), opId: op(), digest: "d", by: "u", message: "shelf" })) as { revision: Revision };
+    assert.equal((await revisions.head(ws))?.id, r.revision.id);
+    assert.deepEqual((await revisions.revisions(ws)).map((x) => x.message), ["shelf"]);
+    if (revisions.allHeads) assert.ok((await revisions.allHeads()).some((h) => h.tenant === ws.tenant && h.workspace === "@library"));
+    await revisions.drop(ws);
+    assert.equal(await revisions.head(ws), null);
+  });
+
   t("commit: the same op id twice is a duplicate of the first, never a second revision", async ({ revisions }) => {
     const ws = fresh();
     const id = op();
