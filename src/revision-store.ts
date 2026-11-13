@@ -249,7 +249,7 @@ export function newRevisionId(): string {
 export function localRevisionStore(root: string = path.join(dataRoot(), ".revisions")): RevisionStore {
   const dirOf = (ws: WorkspaceRef) => {
     assertSafeName(ws.tenant, "tenant");
-    assertSafeName(ws.workspace, "workspace");
+    if (ws.workspace !== "@library") assertSafeName(ws.workspace, "workspace"); // the account shelf's scope
     // The state head is a separate history in a subfolder of its own; the
     // workspace head's folder never lists it (seqs reads revs/ only).
     return scopeOf(ws) === "state" ? path.join(root, ws.tenant, ws.workspace, "state-head") : path.join(root, ws.tenant, ws.workspace);

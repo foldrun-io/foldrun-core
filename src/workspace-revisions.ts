@@ -37,7 +37,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
-import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath, notifyWorkspaceChanged } from "./store.ts";
+import { workspaceDir, accountDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath, notifyWorkspaceChanged } from "./store.ts";
 import { dataRoot } from "./paths.ts";
 import { processState } from "./process-state.ts";
 import { opsError, opsLog } from "./ops-log.ts";
@@ -134,7 +134,7 @@ const entryStore = (): JournalStore => S.primary ?? legacyFiles;
 export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {}): void {
   // Every commit asks, inside the store's workspace lock, whether the folder is
   // still there: a delete or rename on another pod removes it under that lock.
-  S.backend = deps ? { ...deps, workspaceExists: deps.workspaceExists ?? ((ws) => fs.existsSync(workspaceDir(ws.tenant, ws.workspace))) } : null;
+  S.backend = deps ? { ...deps, workspaceExists: deps.workspaceExists ?? ((ws) => fs.existsSync(folderOf(ws.tenant, ws.workspace))) } : null;
   S.gate = { journal: opts.journal ?? (() => false), read: opts.read ?? (() => false) };
   S.primary = opts.journalStore ?? null;
   S.retention = opts.stateRetention ?? null;
@@ -237,6 +237,18 @@ const split = (k: string): [string, string] => k.split("\0") as [string, string]
 
 const journalRoot = () => path.join(dataRoot(), ".revision-journal");
 
+/** Where a scope's files are: a workspace's folder, or for the account shelf
+ *  ("@library") the account's own — its AGENTS.md and library/ (FOL-126). */
+function folderOf(tenant: string, workspace: string): string {
+  return workspace === "@library" ? accountDir(tenant) : workspaceDir(tenant, workspace);
+}
+
+/** The account's AGENTS.md or library changed outside the journal (a route
+ *  that writes the file itself): publish it, as any other change of a scope. */
+export function noteAccountFilesChanged(tenant: string): void {
+  if (S.backend && journalOn()) requestReconcile(tenant, "@library");
+}
+
 /** Write the entry down, atomically. A store that refuses leaves the entry in
  *  memory only (said once per failure), as the journal always was. */
 function persist(tenant: string, workspace: string, e: Entry): void {
@@ -261,7 +273,7 @@ function forget(tenant: string, workspace: string, e: Entry): void {
 /** Called by history.recordRevision for every change set. Synchronous and
  *  cheap; the commit happens in the background (flushRevisions waits for it). */
 function journalChange(tenant: string, scope: string, files: RevisionFile[], meta: { by: string; message: string; at: string }): void {
-  if (!S.backend || scope === "@library") return; // the account shelf is not a workspace
+  if (!S.backend) return;
   const k = key(tenant, scope);
   if (!safe(S.gate.journal)) {
     verified.delete(k); // a change the head will not see: reconcile before trusting it again
@@ -270,7 +282,9 @@ function journalChange(tenant: string, scope: string, files: RevisionFile[], met
   }
   // Only what the head needs: the new content. The old text is the writer's
   // history record, not the journal's (it can be a quarter megabyte a file).
-  const slim = files.map((f) => ({ path: f.path, before: null, after: f.after }));
+  // The account shelf's paths are `<kind>/<file>` in its own history and
+  // `library/<kind>/<file>` in its revisions (its folder is the account's).
+  const slim = files.map((f) => ({ path: scope === "@library" ? `library/${f.path}` : f.path, before: null, after: f.after }));
   enqueue(tenant, scope, { id: crypto.randomBytes(12).toString("hex"), files: slim, by: meta.by, message: meta.message, at: meta.at, restoredFrom: restoring.get(k) });
 }
 
@@ -417,7 +431,7 @@ async function drainOne(k: string): Promise<void> {
     const entry = q[0];
     // The workspace was deleted while this waited (or retried): nothing to
     // publish, and nothing for a later boot to replay.
-    if (!fs.existsSync(workspaceDir(tenant, workspace))) {
+    if (!fs.existsSync(folderOf(tenant, workspace))) {
       q.shift();
       forget(tenant, workspace, entry);
       continue;
@@ -463,7 +477,7 @@ async function drainOne(k: string): Promise<void> {
   // journal was off for a while, a run wrote the folder directly) is brought
   // to it. After the entries, never before: replaying an older change over a
   // reconciled head would write it backwards.
-  if (S.backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(workspaceDir(tenant, workspace))) {
+  if (S.backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(folderOf(tenant, workspace))) {
     verified.add(k);
     try {
       await reconcileNow(tenant, workspace, "reconcile");
@@ -954,7 +968,7 @@ export async function recoverJournal(opts: { minAgeMs?: number } = {}): Promise<
       const k = key(tenant, workspace);
       const q = queues.get(k) ?? [];
       const held = new Set(q.filter((e) => e.store === store).map((e) => e.handle));
-      const gone = !fs.existsSync(workspaceDir(tenant, workspace));
+      const gone = !fs.existsSync(folderOf(tenant, workspace));
       const found: Entry[] = [];
       let names: { handle: string; ageMs: number }[] = [];
       try {
@@ -1006,7 +1020,9 @@ export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {
   // workspace of the same name.
   if (S.orphanMarks) await cleanOrphanedHistory(S.orphanMarks, { graceMs: S.orphanGrace }).catch((err) => opsError("revisions.orphans_failed", err, {}, "warn"));
   for (const tenant of opts.tenants ?? listTenants()) {
-    for (const w of listWorkspaces(tenant)) {
+    // The account shelf too (account AGENTS.md + library/), as a scope of its own.
+    const shelf = ["AGENTS.md", "library"].some((n) => fs.existsSync(path.join(accountDir(tenant), n)));
+    for (const w of [...listWorkspaces(tenant), ...(shelf ? [{ name: "@library" }] : [])]) {
       const k = key(tenant, w.name);
       try {
         verified.add(k); // reconciled explicitly below, and counted
@@ -1066,7 +1082,7 @@ async function hashOf(abs: string, size: number): Promise<string> {
  * not be read. Null when the folder is not there.
  */
 async function scanFolder(tenant: string, workspace: string): Promise<{ files: Map<string, FolderFile>; left: Set<string> } | null> {
-  const dir = workspaceDir(tenant, workspace);
+  const dir = folderOf(tenant, workspace);
   if (!fs.existsSync(dir)) return null;
   const found: { rel: string; abs: string; st: fs.Stats }[] = [];
   const left = new Set<string>();
@@ -1151,7 +1167,7 @@ async function uploadLarge(deps: Deps, tenant: string, changes: Changes, onDisk:
 
 function modeOf(tenant: string, workspace: string, rel: string): number {
   try {
-    return fs.statSync(path.join(workspaceDir(tenant, workspace), rel)).mode & 0o111 ? MODE_EXEC : MODE_FILE;
+    return fs.statSync(path.join(folderOf(tenant, workspace), rel)).mode & 0o111 ? MODE_EXEC : MODE_FILE;
   } catch {
     return MODE_FILE;
   }
@@ -1371,7 +1387,7 @@ async function reconcileNow(tenant: string, workspace: string, by = "reconcile")
     // differs from the last sync is this pod's change. A difference from the
     // head alone is someone else's change not copied here yet, never undone.
     const base = mirrorOn() ? readMirrorBase(tenant, workspace) : null;
-    if (base) ({ have, want } = threeWay(have, scan, base, workspaceDir(tenant, workspace)));
+    if (base) ({ have, want } = threeWay(have, scan, base, folderOf(tenant, workspace)));
     // A path the scan could not take (unreadable now, a name the manifest
     // refuses) but the folder still holds is neither added nor removed here;
     // one that is gone from the folder is gone from the head.
@@ -1423,7 +1439,7 @@ async function afterPublish(deps: Deps, ws: WorkspaceRef, changes: Changes, r: P
     const { tenant, workspace } = ws;
     const base: MirrorBase = readMirrorBase(tenant, workspace) ?? { workspaceHead: null, stateHead: null, files: {}, at: new Date().toISOString() };
     const conflicted = new Set(r.conflicts.map((c) => c.path));
-    const dir = workspaceDir(tenant, workspace);
+    const dir = folderOf(tenant, workspace);
     let head: Record<string, ManifestEntry> | null = null;
     for (const [p, c] of Object.entries(changes)) {
       if (!conflicted.has(p)) {
@@ -1524,7 +1540,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
   const k = key(tenant, workspace);
   const busy = () => (queues.get(k)?.length ?? 0) > 0 || repairing.has(k) || frozen.has(k);
   if (busy()) return "skipped";
-  const dir = workspaceDir(tenant, workspace);
+  const dir = folderOf(tenant, workspace);
   // A copy whose folder is gone (the disk was cleared, a hand rm) starts again
   // from the heads: with the old record kept, every file would read as deleted
   // here and the reconcile would publish those deletes (Codex review).
@@ -1537,9 +1553,14 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
   if (!heads.workspace && !heads.state) {
     if (!base) return "absent";
     if (busy()) return "skipped";
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (workspace === "@library") {
+      // The shelf's folder is the ACCOUNT's: only what the shelf owns goes —
+      // never the account folder with every workspace in it (Codex review).
+      fs.rmSync(path.join(dir, "AGENTS.md"), { force: true });
+      fs.rmSync(path.join(dir, "library"), { recursive: true, force: true });
+    } else fs.rmSync(dir, { recursive: true, force: true });
     dropMirrorBase(tenant, workspace);
-    notifyWorkspaceChanged(tenant, workspace, "delete");
+    if (workspace !== "@library") notifyWorkspaceChanged(tenant, workspace, "delete");
     return "removed";
   }
   const ids = { workspaceHead: heads.workspace?.id ?? null, stateHead: heads.state?.id ?? null };
@@ -1666,7 +1687,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
   writeMirrorBase(tenant, workspace, { ...(blocked ? { workspaceHead: base?.workspaceHead ?? null, stateHead: base?.stateHead ?? null } : ids), files: next, at: new Date().toISOString() });
   finished = true;
   if (ownChanges) requestReconcile(tenant, workspace);
-  if (wrote) notifyWorkspaceChanged(tenant, workspace, "write");
+  if (wrote && workspace !== "@library") notifyWorkspaceChanged(tenant, workspace, "write");
   return "synced";
   } finally {
     if (!finished && touched) writeMirrorBase(tenant, workspace, { workspaceHead: base?.workspaceHead ?? null, stateHead: base?.stateHead ?? null, files: progress, at: new Date().toISOString() });

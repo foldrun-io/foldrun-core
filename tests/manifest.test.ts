@@ -78,7 +78,10 @@ test("object keys are tenant-first and refuse anything that is not a hash or a s
 });
 
 test("manifest v1's roots are frozen: if WORKSPACE_DIRS changes, this fails and someone decides", () => {
-  assert.deepEqual([...AUTHORED_DIRS, ...STATE_DIRS].sort(), [...WORKSPACE_DIRS].sort());
+  // Decided 13 Nov 2026 (FOL-126): "library" is a root too — the account
+  // shelf's scope ("@library") keeps the account's library/ beside its
+  // AGENTS.md. No workspace has a library/ folder.
+  assert.deepEqual([...AUTHORED_DIRS, ...STATE_DIRS].sort(), [...WORKSPACE_DIRS, "library"].sort());
 });
 
 test("a mode-only change is a change: the identity is sha AND mode", () => {

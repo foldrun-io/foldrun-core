@@ -89,7 +89,9 @@ export type ManifestId = string;
 // tests/manifest.test.ts compares this list with WORKSPACE_DIRS and fails when
 // they differ — the failure is the prompt to decide which side the new folder
 // is on, and whether that needs manifest v2.
-export const AUTHORED_DIRS: readonly string[] = ["agents", "flows", "evals", "skills", "memory", "knowledge", "tools", "scripts", "hooks"];
+// "library": the account's shelf, kept as the scope "@library" whose folder is
+// the account's (account AGENTS.md + library/**, FOL-126); no workspace has one.
+export const AUTHORED_DIRS: readonly string[] = ["agents", "flows", "evals", "skills", "memory", "knowledge", "tools", "scripts", "hooks", "library"];
 export const STATE_DIRS: readonly string[] = ["state"];
 export const AUTHORED_ROOT_FILES: readonly string[] = ["AGENTS.md", "project.md"];
 /** A conflict copy of a root file (conflictPath) is a root file too. */

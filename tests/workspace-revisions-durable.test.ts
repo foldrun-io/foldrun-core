@@ -253,11 +253,14 @@ test("the editable-file read: the head when it has the file, the folder (same er
   assert.equal(await readWorkspaceFileVia(T, W, "memory/b.md"), "b-edited-behind\n", "reads off: the folder");
 });
 
-test("recordRevision stays quiet toward the journal for the account shelf", async () => {
+test("the account shelf is journalled as its own scope, its paths under library/ (FOL-126, 13 Nov 2026)", async () => {
   setRevisionBackend(deps, ON);
+  fs.mkdirSync(path.join(root, T, "library", "tools"), { recursive: true });
+  fs.writeFileSync(path.join(root, T, "library", "tools", "x.md"), "x");
   recordRevision(T, "@library", [{ path: "tools/x.md", before: null, after: "x" }], { by: "user:a", message: "lib" });
+  await flushRevisions();
   assert.equal(pendingRevisions(), 0);
-  assert.equal(fs.existsSync(path.join(root, ".revision-journal", T, "@library")), false);
+  assert.equal((await readAtHead(T, "@library", "library/tools/x.md"))?.toString(), "x");
 });
 
 test("the journal file holds the new content only, not the old text", async () => {

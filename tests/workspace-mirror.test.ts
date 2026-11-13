@@ -292,3 +292,31 @@ test("a save through the journal on a pod that has not seen another pod's change
   const copy = fs.readdirSync(path.join(workspaceDir(T, W), "memory")).find((n) => n.includes(".conflict-"));
   assert.ok(copy && read(`memory/${copy}`) === "B saved\n", "B's save kept beside it");
 });
+
+test("the account shelf (account AGENTS.md + library/) is a scope of its own: a library write on one pod reaches the other (FOL-126)", async () => {
+  const { writeLibraryFile } = await import("../src/library.ts");
+  const { accountDir } = await import("../src/store.ts");
+  fs.writeFileSync(path.join(accountDir(T), "AGENTS.md"), "---\nname: acme\n---\naccount rules\n");
+  writeLibraryFile(T, "skills", "house-style/SKILL.md", "---\nname: house-style\ndescription: d\n---\nbe brief\n", { by: "user:a" });
+  await flushRevisions();
+  on(podB);
+  await syncAllFromHeads();
+  assert.equal(fs.readFileSync(path.join(accountDir(T), "library", "skills", "house-style", "SKILL.md"), "utf8"), "---\nname: house-style\ndescription: d\n---\nbe brief\n");
+  assert.equal(fs.readFileSync(path.join(accountDir(T), "AGENTS.md"), "utf8"), "---\nname: acme\n---\naccount rules\n");
+});
+
+test("the account shelf's heads gone: only the shelf's files go, never the account folder (Codex review)", async () => {
+  const { writeLibraryFile } = await import("../src/library.ts");
+  const { accountDir } = await import("../src/store.ts");
+  writeLibraryFile(T, "skills", "s/SKILL.md", "---\nname: s\ndescription: d\n---\nx\n", { by: "user:a" });
+  writeWorkspaceFile(T, W, "memory/notes.md", "x\n", { by: "user:a" });
+  await flushRevisions();
+  on(podB);
+  await syncAllFromHeads();
+  const { setRevisionBackend: _ } = await import("../src/workspace-revisions.ts");
+  // The shelf's history dropped in the store (by hand: no lifecycle drops it).
+  fs.rmSync(path.join(shared, ".revisions", T, "@library"), { recursive: true, force: true });
+  await syncAllFromHeads();
+  assert.equal(fs.existsSync(path.join(accountDir(T), "library")), false, "the shelf went");
+  assert.equal(read("memory/notes.md"), "x\n", "the workspace stays");
+});

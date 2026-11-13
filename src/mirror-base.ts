@@ -39,7 +39,7 @@ export function mirrorOn(): boolean {
   }
 }
 
-const SAFE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const SAFE = /^(?:@library|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
 export const mirrorBaseFile = (tenant: string, workspace: string): string | null =>
   SAFE.test(tenant) && SAFE.test(workspace) ? path.join(dataRoot(), ".mirror", tenant, `${workspace}.json`) : null;
 

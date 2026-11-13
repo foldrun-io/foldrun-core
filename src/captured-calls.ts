@@ -189,6 +189,28 @@ export async function readCapturedCallAsync(tenant: string, workspace: string, r
   return readCapturedCall(tenant, workspace, runId, callId);
 }
 
+/**
+ * One call from a run's folder into the store, whatever the switch says
+ * (FOL-126: the one-time copy of the runs written before calls went to the
+ * store, before the shared volume goes). "stored", "present" (already in the
+ * store), or "unavailable": the store is not set up here — never mistaken for
+ * present (Codex review).
+ */
+export async function backfillCall(tenant: string, workspace: string, runId: string, call: CapturedCall, opts: { dryRun?: boolean } = {}): Promise<"stored" | "present" | "unavailable"> {
+  const deps = CALLS.backend;
+  const port = portFor(tenant, workspace);
+  if (!deps || !port) return "unavailable";
+  if (!SAFE.test(runId) || !SAFE.test(call.id)) throw new Error(`not a call id: ${call.id}`);
+  if (await port.async!.stepGet!(tenant, workspace, runId, KIND, call.id)) return "present";
+  if (opts.dryRun) return "stored"; // would be
+  const bytes = Buffer.from(JSON.stringify(call));
+  const sha = sha256Hex(bytes);
+  await deps.pins?.pinBlobs(tenant, [sha], holderOf(runId));
+  await deps.blobs.putIfAbsent(blobObjectKey(tenant, sha), bytes, { contentType: "application/json" });
+  await port.async!.stepPut!(tenant, workspace, runId, KIND, call.id, { sha, size: bytes.length });
+  return "stored";
+}
+
 // ---------------------------------------------------------------- lifecycle
 
 /** What the run-delete hook started and has not finished (tests, a process that is ending). */
