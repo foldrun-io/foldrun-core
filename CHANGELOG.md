@@ -13,6 +13,23 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.0.0] — 2026-11-13
+
+### Breaking changes
+
+- a step that makes more than 1,000 tool calls, or the same (4287dc2)
+
+### New in the public API
+
+- `DEFAULT_STEP_LIMITS` from `@foldrun/core/limits`
+- `REFUSALS_BEFORE_STOP` from `@foldrun/core/limits`
+
+- feat(limits)!: every step has default call limits, and a step refused 20 times is stopped ([4287dc2](https://github.com/foldrun-io/foldrun-core/commit/4287dc2))
+
+### test
+
+- two flaky core tests fixed at their cause (red CI) ([9b5b6f2](https://github.com/foldrun-io/foldrun-core/commit/9b5b6f2))
+
 ## [22.4.0] — 2026-11-13
 
 ### Widened in the public API
