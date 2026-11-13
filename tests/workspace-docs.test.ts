@@ -14,7 +14,7 @@ import { hookGeneration, rotateWebhook, recordDelivery, readDeliveries } from ".
 import { writeEvalResult, readEvalResult, readEvalHistory, type EvalResult } from "../src/evals.ts";
 import { recordGrade, readGrades, graderSince, pruneGrades, type Grade } from "../src/grades.ts";
 import { writeDeployedCommit, deployedCommit } from "../src/deploy.ts";
-import { writeCapturedCall, readCapturedCall, deleteRun, workspaceDir } from "../src/store.ts";
+import { workspaceDir } from "../src/store.ts";
 
 const T = "docs-acct";
 let on = true;
@@ -119,42 +119,6 @@ test("the deployed commit is a row; the later of row and file answers", (t) => {
   assert.equal(fs.existsSync(path.join(workspaceDir(T, ws), "..", `.${ws}.deployed`)), false);
 });
 
-test("a captured call's two parts merge in its row, and go with the run", (t) => {
-  t.after(resetPlatform);
-  const ws = "calls";
-  const mem = setup(ws);
-  const root = workspaceDir(T, ws);
-  const scope = { tenant: T, workspace: ws };
-  writeCapturedCall(root, "run-1", { id: "c1", tool: "web", input: "in", truncated: true }, scope);
-  writeCapturedCall(root, "run-1", { id: "c1", tool: "web", output: "out" }, scope);
-  writeCapturedCall(root, "run-10", { id: "c1", tool: "web", input: "other run" }, scope);
-  assert.deepEqual(readCapturedCall(T, ws, "run-1", "c1"), { id: "c1", tool: "web", input: "in", output: "out", truncated: true });
-  assert.equal(fs.existsSync(path.join(root, "runs")), false, "no file beside the run");
-  // A call written as a file (the switch was off) still reads.
-  on = false;
-  writeCapturedCall(root, "run-2", { id: "c9", tool: "web", input: "file" }, scope);
-  assert.equal(readCapturedCall(T, ws, "run-2", "c9")?.input, "file");
-  // Deleting run-1 takes its calls, and only its own.
-  fs.mkdirSync(path.join(root, "runs", "run-1"), { recursive: true });
-  deleteRun(T, ws, "run-1");
-  assert.equal(readCapturedCall(T, ws, "run-1", "c1"), null);
-  assert.equal(readCapturedCall(T, ws, "run-10", "c1")?.input, "other run");
-  assert.deepEqual(mem.port.list(T, ws, "call").map((c) => c.key), ["run-10/c1"]);
-});
-
-test("a call whose two parts straddle a switch reads whole (Codex review)", (t) => {
-  t.after(resetPlatform);
-  const ws = "calls-split";
-  setup(ws);
-  const root = workspaceDir(T, ws);
-  const scope = { tenant: T, workspace: ws };
-  on = false;
-  writeCapturedCall(root, "run-1", { id: "c1", tool: "web", input: "in" }, scope);
-  on = true;
-  writeCapturedCall(root, "run-1", { id: "c1", tool: "web", output: "out", truncated: true }, scope);
-  assert.deepEqual(readCapturedCall(T, ws, "run-1", "c1"), { id: "c1", tool: "web", input: "in", output: "out", truncated: true });
-});
-
 test("a deploy's eval lock taken in one place holds after the switch moves (Codex review)", async (t) => {
   t.after(resetPlatform);
   const { evaluateDeployed } = await import("../src/evals.ts");
@@ -172,4 +136,18 @@ test("a deploy's eval lock taken in one place holds after the switch moves (Code
   mem.port.put(T, ws, "eval-lock", "deploy", { stamp: "c2", at: new Date().toISOString() });
   on = false;
   assert.equal((await evaluateDeployed(T, ws, "c3")).skipped, "evals already running for an earlier deploy");
+});
+
+test("a captured call kept as a row before calls went to the blob store still reads, and goes with its run (Codex review)", async (t) => {
+  t.after(resetPlatform);
+  const { readCapturedCall, deleteRun } = await import("../src/store.ts");
+  const ws = "legacy-calls";
+  const mem = setup(ws);
+  mem.port.put(T, ws, "call", "run-1/c1", { id: "c1", tool: "web", input: "in", output: "out" });
+  mem.port.put(T, ws, "call", "run-10/c1", { id: "c1", tool: "web", input: "other" });
+  assert.equal(readCapturedCall(T, ws, "run-1", "c1")?.output, "out");
+  fs.mkdirSync(path.join(workspaceDir(T, ws), "runs", "run-1"), { recursive: true });
+  deleteRun(T, ws, "run-1");
+  assert.equal(readCapturedCall(T, ws, "run-1", "c1"), null);
+  assert.equal(readCapturedCall(T, ws, "run-10", "c1")?.input, "other");
 });

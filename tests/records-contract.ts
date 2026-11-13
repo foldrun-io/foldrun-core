@@ -310,6 +310,24 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-b", T), { b: "file" });
   });
 
+  test(t("stepRuns lists the runs that have rows of a kind, and a run's delete and a workspace's drop empty it"), async () => {
+    withSteps();
+    const a = subject.port.async!;
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    writeRun(T, W, run("r2", "2026-11-01T02:00:00.000Z"));
+    await a.stepPut!(T, W, "r1", "call", "c1", { sha: "a" });
+    await a.stepPut!(T, W, "r1", "call", "c2", { sha: "b" });
+    await a.stepPut!(T, W, "r2", "call", "c1", { sha: "c" });
+    await a.stepPut!(T, W, "r2", "base", "pod", { x: 1 });
+    assert.deepEqual((await a.stepRuns!(T, W, "call")).sort(), ["r1", "r2"], "one entry per run, whatever the number of calls");
+    assert.deepEqual(await a.stepRuns!(T, W, "storage"), []);
+    assert.deepEqual(await a.stepRuns!(T, "elsewhere", "call"), []);
+    deleteRun(T, W, "r1");
+    assert.deepEqual(await a.stepRuns!(T, W, "call"), ["r2"]);
+    deleteWorkspace(T, W);
+    assert.deepEqual(await a.stepRuns!(T, W, "call"), []);
+  });
+
   // A workspace's small state (FOL-126, the last files on the volume): the
   // DocsPort itself. What core does with it is in workspace-docs.test.ts.
   test(t("documents: put replaces, merge keeps what the patch does not name, drop by key, by prefix and by kind"), () => {

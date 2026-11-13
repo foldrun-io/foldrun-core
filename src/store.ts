@@ -20,6 +20,7 @@
 //
 // An account is a named directory (per OKF: tenancy is a hosting concern).
 
+import { opsError } from "./ops-log.ts";
 import { readCompute } from "./resources.ts";
 import { expandPlatformVars } from "./host-env.ts";
 import { EFFORT_LEVELS, FLOW_TRIGGERS } from "./frontmatter-fields.ts";
@@ -31,7 +32,7 @@ import { processState } from "./process-state.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
-import { docRows, docStore, quietly } from "./workspace-docs.ts";
+import { docRows, quietly } from "./workspace-docs.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
@@ -4066,7 +4067,9 @@ export interface RunRecord {
 // runs/<run>/). The runner writes them, secrets already masked.
 
 const SAFE_ID = /^[A-Za-z0-9_.-]{1,128}$/;
-const CALL_KIND = "call";
+/** Captured calls kept as rows for one day on dev (13 Nov 2026); read and
+ *  dropped with their run, never written again. */
+const LEGACY_CALL_KIND = "call";
 
 function capturedCallFile(workspaceRoot: string, runId: string, callId: string): string | null {
   if (!SAFE_ID.test(runId) || !SAFE_ID.test(callId) || callId.startsWith(".") || runId.startsWith(".")) return null;
@@ -4075,14 +4078,9 @@ function capturedCallFile(workspaceRoot: string, runId: string, callId: string):
 
 /** Merge one part (the input, on the call; the output, on its completion)
  *  into the call's file. */
-export function writeCapturedCall(workspaceRoot: string, runId: string, part: CapturedCall, scope?: { tenant: string; workspace: string }): void {
+export function writeCapturedCall(workspaceRoot: string, runId: string, part: CapturedCall): void {
   const file = capturedCallFile(workspaceRoot, runId, part.id);
   if (!file) return;
-  // A row when the platform keeps them (FOL-126): the two parts of a call
-  // merge in one statement, and the web's copies read it wherever they run.
-  // `truncated` is only ever sent true, so a merge keeps it once set.
-  const store = scope ? docStore(scope.tenant, scope.workspace) : null;
-  if (store && scope) return store.merge(scope.tenant, scope.workspace, CALL_KIND, `${runId}/${part.id}`, part as unknown as Record<string, unknown>);
   let prev: Partial<CapturedCall> = {};
   try {
     prev = JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
@@ -4101,20 +4099,15 @@ export function writeCapturedCall(workspaceRoot: string, runId: string, part: Ca
 export function readCapturedCall(tenant: string, workspace: string, runId: string, callId: string): CapturedCall | null {
   const file = capturedCallFile(workspaceDir(tenant, workspace), runId, callId);
   if (!file) return null;
-  const row = quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, CALL_KIND, `${runId}/${callId}`), undefined) as CapturedCall | undefined;
-  let onFile: CapturedCall | undefined;
+  // A call kept as a workspace_docs row (records.docs_store, 13 Nov 2026,
+  // before calls went to the blob store): still read until its run goes.
+  const legacy = quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, LEGACY_CALL_KIND, `${runId}/${callId}`), undefined) as CapturedCall | undefined;
+  if (legacy) return legacy;
   try {
-    onFile = JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
+    return JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
   } catch {
-    /* none */
+    return null;
   }
-  // A switch between a call's two parts leaves one part in each place: both, merged.
-  if (row && onFile) {
-    const merged: CapturedCall = { ...onFile, ...row, truncated: Boolean(onFile.truncated || row.truncated) || undefined };
-    if (!merged.truncated) delete merged.truncated;
-    return merged;
-  }
-  return row ?? onFile ?? null;
 }
 
 export function runFilePath(tenant: string, workspace: string, runId: string) {
@@ -4154,8 +4147,7 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   // and finishes — the other order left the content with nothing pointing
   // at it (Codex review, FOL-124).
   fs.rmSync(dir, { recursive: true, force: true });
-  // Its captured calls kept as rows go the same way, before the record.
-  if (SAFE_ID.test(runId)) docRows(tenant, workspace)?.dropPrefix(tenant, workspace, CALL_KIND, `${runId}/`);
+  if (SAFE_ID.test(runId)) quietly(() => docRows(tenant, workspace)?.dropPrefix(tenant, workspace, LEGACY_CALL_KIND, `${runId}/`), undefined);
   if (port) port.runDelete(tenant, workspace, runId);
   else {
     fs.rmSync(file, { force: true });
@@ -4167,9 +4159,17 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   if (prior?.inputs?.length) {
     void import("./storage.ts").then((m) => m.releaseRunInputs(tenant, workspace, runId)).catch(() => {});
   }
-  // Outputs published to the blob store (run-outputs.ts) are records and pins,
-  // not files under dir: they go in the background, retried.
-  RUN_HOOKS.removed?.(tenant, workspace, runId);
+  // Outputs and captured calls published to the blob store (run-outputs.ts,
+  // captured-calls.ts) are records and pins, not files under dir: they go in
+  // the background, retried.
+  for (const [name, hook] of RUN_HOOKS.removed) {
+    try {
+      hook(tenant, workspace, runId);
+    } catch (err) {
+      // One store's clean-up failing must not stop the next one's.
+      opsError("run_removed_hook.failed", err, { hook: name, tenant, runId });
+    }
+  }
   if (!had) return true;
   // The retention window's prune (`pruned`) is policy, not a person erasing
   // history: no per-run ledger note. The charge stands either way.
@@ -4177,13 +4177,16 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   return true;
 }
 
-/** run-outputs.ts registers here (it imports this module). */
+/** run-outputs.ts and captured-calls.ts register here (they import this module). */
 type RunHook = (tenant: string, workspace: string, runId: string) => void;
 /** One per process (process-state.ts): a run deleted from a route handler must
  *  reach the hooks the boot registered. */
-const RUN_HOOKS = processState("run-hooks", () => ({ removed: null as RunHook | null, deleted: undefined as RunHook | undefined }));
-export function registerRunRemovedHook(fn: RunHook | null) {
-  RUN_HOOKS.removed = fn;
+const RUN_HOOKS = processState("run-hooks", () => ({ removed: new Map<string, RunHook>(), deleted: undefined as RunHook | undefined }));
+/** A run's content lives somewhere other than its folder: `name` says whose hook
+ *  this is, so one registering (or clearing, with null) never replaces another's. */
+export function registerRunRemovedHook(fn: RunHook | null, name = "run-outputs") {
+  if (fn) RUN_HOOKS.removed.set(name, fn);
+  else RUN_HOOKS.removed.delete(name);
 }
 
 /** ledger.ts registers here — store cannot import it without a cycle, and

@@ -64,6 +64,7 @@ import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requ
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 import type { SweepMarks } from "./blob-sweeper.ts";
+import { setCallsBackend, dropWorkspaceCalls, settleCalls } from "./captured-calls.ts";
 import { dropTenantOutputs, dropWorkspaceOutputs, moveWorkspaceOutputs, settleRunOutputs } from "./run-outputs.ts";
 
 // ------------------------------------------------------------- the backend
@@ -138,6 +139,7 @@ export function setRevisionBackend(deps: Deps | null, opts: BackendOptions = {})
   S.retentionEvery = opts.retentionEveryMs ?? 10 * 60_000;
   S.orphanMarks = opts.sweepMarks ?? null;
   S.orphanGrace = opts.orphanGraceMs ?? 3_600_000;
+  setCallsBackend(deps);
   registerJournal(deps ? journalChange : null);
   registerWorkspaceGone(deps ? (t, w) => goneNow(t, w) : null);
   registerWorkspaceLifecycle(deps ? { drop: dropWorkspaceRevisions, move: moveWorkspaceRevisions, moved: movedNow } : null);
@@ -557,6 +559,7 @@ const background = S.background;
 export async function settleLifecycle(): Promise<void> {
   while (background.size) await Promise.allSettled([...background]);
   await settleRunOutputs();
+  await settleCalls();
 }
 function inBackground(p: Promise<unknown>): void {
   const q = p.finally(() => background.delete(q));
@@ -608,6 +611,8 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
     dropJournal(tenant, workspace);
     await before?.catch(() => {});
     try {
+      // Its captured calls' pins, while the rows that name the runs are still there.
+      await dropWorkspaceCalls(tenant, workspace);
       await deps.revisions.drop({ tenant, workspace });
       // The run outputs published to the blob store (run-outputs.ts) are this workspace's too.
       await dropWorkspaceOutputs(tenant, workspace);
@@ -619,6 +624,7 @@ export async function dropWorkspaceRevisions(tenant: string, workspace: string, 
     }
     remove?.();
     dropJournal(tenant, workspace);
+    await dropWorkspaceCalls(tenant, workspace);
     await deps.revisions.drop({ tenant, workspace });
     await dropWorkspaceOutputs(tenant, workspace);
     marked.delete(k);

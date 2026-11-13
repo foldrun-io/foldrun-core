@@ -7,7 +7,7 @@
 
 import { opsError } from "./ops-log.ts";
 import { redactText } from "./scan.ts";
-import { writeCapturedCall, CAPTURE_CAP } from "./store.ts";
+import { writeCapturedCall, CAPTURE_CAP, type CapturedCall } from "./store.ts";
 import { isFileValue, fileContent, isApiValue, apiConfigOf, isClientCertValue, clientCertOf } from "./secrets.ts";
 import type { CallIo } from "./step-exec.ts";
 
@@ -100,14 +100,13 @@ export function recordCallIo(
   io: CallIo,
   /** The step's own scrub: its resolved secret values → `[redacted:NAME]`. */
   redactSecrets: (text: string) => string,
-  /** Whose run it is: with it the call is kept where the platform keeps a
-   *  workspace's small state (rows), without it beside the run as a file. */
-  scope?: { tenant: string; workspace: string },
+  /** Where the part goes instead of the file beside the run (captured-calls.ts). */
+  sink?: (part: CapturedCall) => boolean,
 ): boolean {
   try {
     const input = io.input === undefined ? null : maskCall(io.input, redactSecrets);
     const output = io.output === undefined ? null : maskCall(io.output, redactSecrets);
-    writeCapturedCall(workspaceRoot, runId, {
+    const part: CapturedCall = {
       id: callId,
       tool,
       // Which part was cut, each on its own: in the sandbox (the whole was
@@ -115,7 +114,9 @@ export function recordCallIo(
       ...(input ? { input: input.text, ...(io.inputChars !== undefined ? { inputChars: io.inputChars } : {}), ...(input.cut || (io.inputChars ?? 0) > io.input!.length ? { inputCut: true } : {}) } : {}),
       ...(output ? { output: output.text, ...(io.outputChars !== undefined ? { outputChars: io.outputChars } : {}), ...(output.cut || (io.outputChars ?? 0) > io.output!.length ? { outputCut: true } : {}) } : {}),
       ...(io.truncated || input?.cut || output?.cut ? { truncated: true } : {}),
-    }, scope);
+    };
+    if (sink) return sink(part);
+    writeCapturedCall(workspaceRoot, runId, part);
     return true;
   } catch (err) {
     opsError("capture.write_failed", err, { tool, runId });

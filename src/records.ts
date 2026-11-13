@@ -41,12 +41,14 @@ export interface RecordsPortAsync {
   stepPut?(tenant: string, workspace: string, runId: string, kind: string, ref: string, data: unknown): Promise<void>;
   /** `ref` null: every ref of the kind. */
   stepDrop?(tenant: string, workspace: string, runId: string, kind: string, ref: string | null): Promise<void>;
+  /** The ids of the runs that have rows of this kind in the workspace. */
+  stepRuns?(tenant: string, workspace: string, kind: string): Promise<string[]>;
 }
 
 /** Small per-workspace state that used to be files in the workspace's folder
  *  (FOL-126, the last files on the volume): webhook generations and the
  *  delivery log, eval results and their history, grades and grader cursors,
- *  the deployed commit, captured tool calls. Two shapes: a DOCUMENT per
+ *  the deployed commit. Two shapes: a DOCUMENT per
  *  (kind, key), and an append-only LOG per kind. Synchronous like the rest of
  *  the port; workspace-docs.ts is the only caller. */
 export interface DocsPort {
@@ -86,6 +88,9 @@ export interface RecordsPort {
    *  state is written to the run's folder as before (it is still READ from
    *  rows first, so switching off mid-run loses nothing). */
   stepStateOn?(): boolean;
+  /** The `runs.calls_store` setting, read per call: while false, a captured
+   *  call is written to the run's folder as before (captured-calls.ts). */
+  callsStoreOn?(): boolean;
   // ---- runs: the whole record, and the row a list reads
   /** Insert or replace one run. `live`: queued, running or parked at a gate. Last write wins. */
   runPut(tenant: string, workspace: string, run: RunRecord, summary: RunSummary, live: boolean): void;
