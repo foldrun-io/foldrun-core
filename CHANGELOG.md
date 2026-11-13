@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [22.3.0] — 2026-11-13
+
+- feat(runs): a test run's diverted writes kept off the worker's disk (FOL-126) ([9d07118](https://github.com/foldrun-io/foldrun-core/commit/9d07118))
+- fix(revisions): a blob that does not hash to its name is refused on every read; no file path in ops lines (FOL-126 security review) ([2761fed](https://github.com/foldrun-io/foldrun-core/commit/2761fed))
+
 ## [22.2.0] — 2026-11-13
 
 - feat(revisions): the account shelf (account AGENTS.md + library/) as a scope of its own; backfillCall (FOL-126) ([1eb441e](https://github.com/foldrun-io/foldrun-core/commit/1eb441e))
