@@ -32,6 +32,13 @@ export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort
   const steps = new Map<string, unknown>();
   const sk = (t: string, w: string, run: string, kind: string, ref: string) => `${k(t, w, run)}\0${kind}\0${ref}`;
   const fenced: string[] = [];
+  // A workspace's small state (DocsPort): documents by kind and key, logs by kind.
+  const docs = new Map<string, { data: unknown; at: number }>();
+  const logs = new Map<string, { id: string; data: unknown }[]>();
+  let logSeq = 0;
+  const dk = (t: string, w: string, kind: string, key = "") => `${k(t, w)}${kind}\0${key}`;
+  const lk = (t: string, w: string, kind: string) => `${k(t, w)}${kind}`;
+  const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
   const syncPort = {
     runGet: (t: string, w: string, id: string) => (runs.has(k(t, w, id)) ? structuredClone(runs.get(k(t, w, id))!.run) : null),
     runSummaries: (t: string, w: string) => inWs(t, w).sort(newest).map((r) => structuredClone(r.summary)),
@@ -41,6 +48,50 @@ export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort
     fenced,
     stepStateOn: () => true,
     callsStoreOn: opts.callsOn ?? (() => false),
+    docsOn: () => true,
+    docs: {
+      get: (t, w, kind, key) => (docs.has(dk(t, w, kind, key)) ? structuredClone(docs.get(dk(t, w, kind, key))!.data) : undefined),
+      put: (t, w, kind, key, data) => void docs.set(dk(t, w, kind, key), { data: structuredClone(data), at: Date.now() }),
+      merge(t, w, kind, key, patch) {
+        docs.set(dk(t, w, kind, key), { data: { ...obj(docs.get(dk(t, w, kind, key))?.data), ...structuredClone(patch) }, at: Date.now() });
+      },
+      raise(t, w, kind, key, field, atLeast, patch) {
+        const prev = obj(docs.get(dk(t, w, kind, key))?.data);
+        const next = Math.max(Number(prev[field] ?? 0) + 1, atLeast, 1);
+        docs.set(dk(t, w, kind, key), { data: { ...prev, ...structuredClone(patch), [field]: next }, at: Date.now() });
+        return next;
+      },
+      claim(t, w, kind, key, data, staleMs) {
+        const prev = docs.get(dk(t, w, kind, key));
+        if (prev && Date.now() - prev.at < staleMs) return false;
+        docs.set(dk(t, w, kind, key), { data: structuredClone(data), at: Date.now() });
+        return true;
+      },
+      drop(t, w, kind, key) {
+        for (const id of [...docs.keys()]) if (key === null ? id.startsWith(dk(t, w, kind)) : id === dk(t, w, kind, key)) docs.delete(id);
+      },
+      dropPrefix(t, w, kind, prefix) {
+        for (const id of [...docs.keys()]) if (id.startsWith(dk(t, w, kind, prefix))) docs.delete(id);
+      },
+      list: (t, w, kind) =>
+        [...docs.entries()]
+          .filter(([id]) => id.startsWith(dk(t, w, kind)))
+          .map(([id, v]) => ({ key: id.slice(dk(t, w, kind).length), data: structuredClone(v.data) }))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+      append(t, w, kind, data, keep) {
+        const log = logs.get(lk(t, w, kind)) ?? [];
+        log.push({ id: String(++logSeq), data: structuredClone(data) });
+        logs.set(lk(t, w, kind), keep > 0 ? log.slice(-keep) : log);
+      },
+      tail: (t, w, kind, limit) => structuredClone([...(logs.get(lk(t, w, kind)) ?? [])].reverse().slice(0, limit)),
+      replace(t, w, kind, id, data) {
+        const row = (logs.get(lk(t, w, kind)) ?? []).find((r) => r.id === id);
+        if (row) row.data = structuredClone(data);
+      },
+      prune(t, w, kind, ids) {
+        logs.set(lk(t, w, kind), (logs.get(lk(t, w, kind)) ?? []).filter((r) => !ids.includes(r.id)));
+      },
+    },
     async: {
       stepGet: async (t, w, run, kind, ref) => (steps.has(sk(t, w, run, kind, ref)) ? structuredClone(steps.get(sk(t, w, run, kind, ref))) : undefined),
       stepPut: async (t, w, run, kind, ref, data) => void steps.set(sk(t, w, run, kind, ref), structuredClone(data)),
@@ -100,11 +151,15 @@ export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort
       triggers.delete(k(t, w));
       files.delete(k(t, w));
       for (const key of [...steps.keys()]) if (key.startsWith(k(t, w))) steps.delete(key);
+      for (const key of [...docs.keys()]) if (key.startsWith(k(t, w))) docs.delete(key);
+      for (const key of [...logs.keys()]) if (key.startsWith(k(t, w))) logs.delete(key);
     },
     workspaceMove(t, from, to) {
       move(runs, t, from, to);
       move(triggers, t, from, to);
       move(steps, t, from, to);
+      move(docs, t, from, to);
+      move(logs, t, from, to);
     },
     fileMove(t, from, to) {
       move(files, t, from, to);

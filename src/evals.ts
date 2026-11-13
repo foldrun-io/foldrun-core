@@ -39,6 +39,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { deployedCommit } from "./deploy.ts";
+import { docRows, docStore, quietly } from "./workspace-docs.ts";
 import { latestRevisionIdLocal as latestRevisionId } from "./history.ts";
 import matter from "./matter.ts";
 import { spawn } from "node:child_process";
@@ -922,9 +923,6 @@ export function writeEvalResult(
   // series with ids in it, and the "this change made it worse" table works.
   commit: string | null = deployedCommit(tenant, workspace)?.commit ?? latestRevisionId(tenant, workspace),
 ) {
-  const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, `${result.eval}.json`), JSON.stringify(result, null, 2));
   const line: EvalHistoryEntry = {
     eval: result.eval,
     at: result.finishedAt,
@@ -933,8 +931,23 @@ export function writeEvalResult(
     failed: result.failed,
     costUsd: result.costUsd,
   };
+  const store = docStore(tenant, workspace);
+  if (store) {
+    store.put(tenant, workspace, EVAL_RESULT_KIND, result.eval, result);
+    store.append(tenant, workspace, EVAL_HISTORY_KIND, line, KEEP_EVAL_HISTORY);
+    return;
+  }
+  const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${result.eval}.json`), JSON.stringify(result, null, 2));
   fs.appendFileSync(path.join(dir, "history.jsonl"), `${JSON.stringify(line)}\n`);
 }
+
+const EVAL_RESULT_KIND = "eval-result";
+const EVAL_HISTORY_KIND = "eval-history";
+const EVAL_LOCK_KIND = "eval-lock";
+/** Rows of history kept per workspace: years of deploys, and bounded. */
+const KEEP_EVAL_HISTORY = 5000;
 
 export interface EvalHistoryEntry {
   eval: string;
@@ -947,7 +960,15 @@ export interface EvalHistoryEntry {
   costUsd: number;
 }
 
+/** Oldest first. Rows and the file both: the series may have been written either way. */
 export function readEvalHistory(tenant: string, workspace: string): EvalHistoryEntry[] {
+  const rows = quietly(() => docRows(tenant, workspace)?.tail(tenant, workspace, EVAL_HISTORY_KIND, KEEP_EVAL_HISTORY) ?? [], []).map((r) => r.data as EvalHistoryEntry);
+  const lines = readEvalHistoryFile(tenant, workspace);
+  if (!rows.length) return lines;
+  return [...lines, ...rows.reverse()].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+}
+
+function readEvalHistoryFile(tenant: string, workspace: string): EvalHistoryEntry[] {
   const file = path.join(workspaceDir(tenant, workspace), "evals", ".results", "history.jsonl");
   if (!fs.existsSync(file)) return [];
   return fs
@@ -1028,18 +1049,33 @@ export async function evaluateDeployed(
   // `trigger: runs` one grades real runs and has no cases to run.
   const evals = listEvals(tenant, workspace).filter((e) => e.trigger === "deploy" && !e.inputs);
   if (evals.length === 0) return { ran: 0, skipped: "no evals" };
-  const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
-  fs.mkdirSync(dir, { recursive: true });
-  const lock = path.join(dir, ".evaluating");
   // A lock older than an hour is a crash, not a run.
-  try {
-    if (Date.now() - fs.statSync(lock).mtimeMs < 60 * 60_000) {
-      return { ran: 0, skipped: "evals already running for an earlier deploy" };
+  const store = docStore(tenant, workspace);
+  const dir = path.join(workspaceDir(tenant, workspace), "evals", ".results");
+  const lock = path.join(dir, ".evaluating");
+  const HOUR = 60 * 60_000;
+  const busy = { ran: 0, skipped: "evals already running for an earlier deploy" };
+  // A lock taken in the OTHER place (the switch moved while evals ran) still holds.
+  const fileHeld = () => {
+    try {
+      return Date.now() - fs.statSync(lock).mtimeMs < HOUR;
+    } catch {
+      return false;
     }
-  } catch {
-    // no lock
+  };
+  const rowHeld = () => {
+    const at = Date.parse((quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, EVAL_LOCK_KIND, "deploy"), undefined) as { at?: string } | undefined)?.at ?? "");
+    return Number.isFinite(at) && Date.now() - at < HOUR;
+  };
+  if (store) {
+    if (fileHeld()) return busy;
+    // One row, taken by exactly one caller however many pods race.
+    if (!store.claim(tenant, workspace, EVAL_LOCK_KIND, "deploy", { stamp, at: new Date().toISOString() }, HOUR)) return busy;
+  } else {
+    if (rowHeld() || fileHeld()) return busy;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(lock, stamp);
   }
-  fs.writeFileSync(lock, stamp);
   let ran = 0;
   try {
     for (const info of evals) {
@@ -1070,7 +1106,8 @@ export async function evaluateDeployed(
       }
     }
   } finally {
-    fs.rmSync(lock, { force: true });
+    if (store) quietly(() => store.drop(tenant, workspace, EVAL_LOCK_KIND, "deploy"), undefined);
+    else fs.rmSync(lock, { force: true });
   }
   return { ran, skipped: null };
 }
@@ -1079,7 +1116,11 @@ export function readEvalResult(tenant: string, workspace: string, name: string):
   try {
     assertSafeName(name, "eval");
     const file = path.join(workspaceDir(tenant, workspace), "evals", ".results", `${name}.json`);
-    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as EvalResult) : null;
+    const onFile = fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, "utf8")) as EvalResult) : null;
+    const row = (quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, EVAL_RESULT_KIND, name), undefined) as EvalResult | undefined) ?? null;
+    // Written either way over time: the later run is the result.
+    if (row && onFile) return String(row.finishedAt) >= String(onFile.finishedAt) ? row : onFile;
+    return row ?? onFile;
   } catch {
     return null;
   }

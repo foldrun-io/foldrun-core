@@ -503,6 +503,7 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
   }
   let found = false;
   mutateVault(tenant, workspace, (all) => {
+    found = false; // a store may run this again against a newer read
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -692,6 +693,7 @@ export function setSecretWorkspaces(
   const expected = opts.ifWorkspaces === undefined ? undefined : cleanWorkspaceList(opts.ifWorkspaces);
   let found = false;
   mutateVault(tenant, undefined, (all) => {
+    found = false; // a store may run this again against a newer read
     const rec = all[name];
     if (!rec) return null;
     found = true;
@@ -865,8 +867,9 @@ export function masterKeySource(): { source: "env" | "file"; path: string | null
     : { source: "file", path: keyFile() };
 }
 
-/** Every secrets.json under an account: the account's, then each workspace's. */
-function secretFiles(tenant: string): { file: string; workspace?: string }[] {
+/** The secrets.json files that exist under an account: the account's (named
+ *  even where there is none), then each workspace's. */
+function diskSecretFiles(tenant: string): { file: string; workspace?: string }[] {
   const out: { file: string; workspace?: string }[] = [{ file: secretsFile(tenant) }];
   for (const dirName of ["workspaces", "projects"]) {
     const dir = path.join(dataRoot(), tenant, dirName);
@@ -877,6 +880,35 @@ function secretFiles(tenant: string): { file: string; workspace?: string }[] {
       if (fs.existsSync(f)) out.push({ file: f, workspace: entry.name });
     }
   }
+  return out;
+}
+
+/** Every vault scope that has a FILE on this volume, across all accounts:
+ *  what a fleet check or a move to a store starts from. Never opens one. */
+export function vaultFileScopes(): { tenant: string; workspace?: string }[] {
+  const out: { tenant: string; workspace?: string }[] = [];
+  if (!fs.existsSync(dataRoot())) return out;
+  for (const e of fs.readdirSync(dataRoot(), { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    try {
+      assertSafeName(e.name, "tenant");
+    } catch {
+      continue; // not an account's folder
+    }
+    for (const { file, workspace } of diskSecretFiles(e.name)) if (fs.existsSync(file)) out.push({ tenant: e.name, ...(workspace ? { workspace } : {}) });
+  }
+  return out;
+}
+
+/** Does this stored record open for its place with this process's keys? True
+ *  or false: the value is never handed out. */
+export function vaultRecordOpens(tenant: string, workspace: string | undefined, name: string, rec: SecretsFile[string]): boolean {
+  return openRecord(tenant, workspace, name, rec) !== null;
+}
+
+/** Every secrets.json under an account: the account's, then each workspace's. */
+function secretFiles(tenant: string): { file: string; workspace?: string }[] {
+  const out = diskSecretFiles(tenant);
   // Scopes in the platform's store have no file; they are named by where
   // the file would be (the result's `file` is a label, never opened).
   for (const workspace of VAULT.store?.workspaces(tenant) ?? []) {
@@ -921,7 +953,10 @@ export function rotateMasterKey(
 
   for (const { file, workspace } of secretFiles(tenant)) {
     let count = 0;
+    const seen = unreadable.length;
     mutateVault(tenant, workspace, (all) => {
+      count = 0; // a store may run this again against a newer read
+      unreadable.length = seen;
       const next: SecretsFile = {};
       for (const [name, rec] of Object.entries(all)) {
         // A record under the ACCOUNT's key is not under the install key, so
@@ -1109,6 +1144,7 @@ export function replaceOAuth2RefreshToken(tenant: string, name: string, workspac
   for (const scope of workspace ? [workspace, undefined] : [undefined]) {
     let replaced = false;
     mutateVault(tenant, scope, (all) => {
+      replaced = false; // a store may run this again against a newer read
       const rec = all[name];
       if (rec && openRecord(tenant, scope, name, rec) === usedValue) {
         // Built whole, not spread over the old record: a spread kept a stale
@@ -1962,7 +1998,11 @@ export function sealVaultBindings(tenant: string): { sealed: number; unreadable:
   let sealed = 0;
   const unreadable: string[] = [];
   for (const { workspace } of secretFiles(tenant)) {
+    const [sealedBefore, seen] = [sealed, unreadable.length];
     mutateVault(tenant, workspace, (all) => {
+      // a store may run this again against a newer read: count it once
+      sealed = sealedBefore;
+      unreadable.length = seen;
       const plain = new Map<string, string>();
       const bad: string[] = [];
       for (const [name, rec] of Object.entries(all)) {
@@ -2006,7 +2046,11 @@ export function rewrapTenantSecrets(tenant: string): { moved: number; unreadable
   for (const { workspace } of secretFiles(tenant)) {
     // Under the vault's lock: every pod runs this at boot, and a save made
     // between our read and our write must not be lost.
+    const [movedBefore, seen] = [moved, unreadable.length];
     mutateVault(tenant, workspace, (all) => {
+      // a store may run this again against a newer read: count it once
+      moved = movedBefore;
+      unreadable.length = seen;
       const plain = new Map<string, string>();
       const unreadableHere: string[] = [];
       for (const [name, rec] of Object.entries(all)) {

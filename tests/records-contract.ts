@@ -328,6 +328,83 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.deepEqual(await a.stepRuns!(T, W, "call"), []);
   });
 
+  // A workspace's small state (FOL-126, the last files on the volume): the
+  // DocsPort itself. What core does with it is in workspace-docs.test.ts.
+  test(t("documents: put replaces, merge keeps what the patch does not name, drop by key, by prefix and by kind"), () => {
+    const d = subject.port.docs!;
+    d.put(T, W, "call", "r1/a", { tool: "web", input: "in" });
+    d.merge(T, W, "call", "r1/a", { output: "out", truncated: true });
+    d.merge(T, W, "call", "r1/a", { tool: "web" });
+    assert.deepEqual(d.get(T, W, "call", "r1/a"), { tool: "web", input: "in", output: "out", truncated: true });
+    d.merge(T, W, "call", "r1/b", { made: "by a merge" });
+    d.put(T, W, "call", "r10/a", { other: "run" });
+    d.put(T, W, "call", "r1%/a", { not: "a pattern" });
+    d.put(T, "elsewhere", "call", "r1/a", { other: "workspace" });
+    d.put(T, W, "call", "r1/a", { replaced: true });
+    assert.deepEqual(d.get(T, W, "call", "r1/a"), { replaced: true });
+    assert.deepEqual(d.list(T, W, "call").map((x) => x.key), ["r1%/a", "r1/a", "r1/b", "r10/a"]);
+    d.dropPrefix(T, W, "call", "r1/");
+    assert.deepEqual(d.list(T, W, "call").map((x) => x.key), ["r1%/a", "r10/a"], "the prefix is literal and ends at the slash");
+    d.drop(T, W, "call", "r10/a");
+    assert.equal(d.get(T, W, "call", "r10/a"), undefined);
+    d.put(T, W, "other", "k", 1);
+    d.drop(T, W, "call", null);
+    assert.deepEqual(d.list(T, W, "call"), []);
+    assert.equal(d.get(T, W, "other", "k"), 1, "another kind is untouched");
+    assert.deepEqual(d.get(T, "elsewhere", "call", "r1/a"), { other: "workspace" });
+    d.drop(T, "elsewhere", "call", null);
+  });
+
+  test(t("documents: a counter only moves forward, past a floor, and keeps the rest of the document"), () => {
+    const d = subject.port.docs!;
+    assert.equal(d.raise(T, W, "hook", "f", "gen", 1, { rotatedAt: "a" }), 1);
+    assert.equal(d.raise(T, W, "hook", "f", "gen", 1, { rotatedAt: "b" }), 2);
+    assert.equal(d.raise(T, W, "hook", "f", "gen", 7, { rotatedAt: "c" }), 7, "the floor: a file held a later generation");
+    assert.equal(d.raise(T, W, "hook", "f", "gen", 3, { rotatedAt: "d" }), 8);
+    assert.deepEqual(d.get(T, W, "hook", "f"), { gen: 8, rotatedAt: "d" });
+  });
+
+  test(t("documents: a claim is taken once, and again only when it has gone stale"), async () => {
+    const d = subject.port.docs!;
+    assert.equal(d.claim(T, W, "lock", "x", { by: 1 }, 60_000), true);
+    assert.equal(d.claim(T, W, "lock", "x", { by: 2 }, 60_000), false);
+    assert.deepEqual(d.get(T, W, "lock", "x"), { by: 1 });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(d.claim(T, W, "lock", "x", { by: 3 }, 10), true, "older than the stale window");
+    assert.deepEqual(d.get(T, W, "lock", "x"), { by: 3 });
+    d.drop(T, W, "lock", "x");
+    assert.equal(d.claim(T, W, "lock", "x", { by: 4 }, 60_000), true);
+  });
+
+  test(t("logs: newest first, bounded by keep, an entry replaced in place, entries pruned by id"), () => {
+    const d = subject.port.docs!;
+    for (let i = 1; i <= 6; i++) d.append(T, W, "log", { n: i }, 4);
+    d.append(T, W, "unbounded", { n: 1 }, 0);
+    let rows = d.tail(T, W, "log", 10);
+    assert.deepEqual(rows.map((r) => (r.data as { n: number }).n), [6, 5, 4, 3]);
+    assert.deepEqual(d.tail(T, W, "log", 2).map((r) => (r.data as { n: number }).n), [6, 5]);
+    d.replace(T, W, "log", rows[0].id, { n: 60 });
+    d.prune(T, W, "log", [rows[1].id, rows[3].id]);
+    d.prune(T, W, "log", []);
+    rows = d.tail(T, W, "log", 10);
+    assert.deepEqual(rows.map((r) => (r.data as { n: number }).n), [60, 4]);
+    assert.equal(d.tail(T, W, "unbounded", 10).length, 1, "another kind's log is its own");
+  });
+
+  test(t("documents and logs follow a renamed workspace and are dropped with a deleted one"), () => {
+    const d = subject.port.docs!;
+    d.put(T, W, "hook", "f", { gen: 2 });
+    d.append(T, W, "log", { n: 1 }, 0);
+    renameWorkspace(T, W, "moved");
+    assert.deepEqual(d.get(T, "moved", "hook", "f"), { gen: 2 });
+    assert.equal(d.tail(T, "moved", "log", 5).length, 1);
+    assert.equal(d.get(T, W, "hook", "f"), undefined);
+    assert.equal(d.tail(T, W, "log", 5).length, 0);
+    deleteWorkspace(T, "moved");
+    assert.equal(d.get(T, "moved", "hook", "f"), undefined);
+    assert.equal(d.tail(T, "moved", "log", 5).length, 0);
+  });
+
   test(t("the trigger log answers newest first, keeps the newest 500, and feeds the summary"), () => {
     for (let i = 0; i < 520; i++) {
       recordTriggerEvent(T, W, { t: new Date(Date.UTC(2026, 10, 1, 0, 0, i)).toISOString(), flow: i % 2 ? "a" : "b", trigger: "webhook", outcome: i % 5 === 0 ? "duplicate" : "started", detail: `n${i}`, ...(i === 519 ? { runId: "run-x" } : {}) });

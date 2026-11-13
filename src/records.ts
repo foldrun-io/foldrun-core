@@ -45,7 +45,43 @@ export interface RecordsPortAsync {
   stepRuns?(tenant: string, workspace: string, kind: string): Promise<string[]>;
 }
 
+/** Small per-workspace state that used to be files in the workspace's folder
+ *  (FOL-126, the last files on the volume): webhook generations and the
+ *  delivery log, eval results and their history, grades and grader cursors,
+ *  the deployed commit. Two shapes: a DOCUMENT per
+ *  (kind, key), and an append-only LOG per kind. Synchronous like the rest of
+ *  the port; workspace-docs.ts is the only caller. */
+export interface DocsPort {
+  get(tenant: string, workspace: string, kind: string, key: string): unknown | undefined;
+  put(tenant: string, workspace: string, kind: string, key: string, data: unknown): void;
+  /** Shallow-merge `patch` into the document, making it when absent — one statement, so two parts of one call never lose each other. */
+  merge(tenant: string, workspace: string, kind: string, key: string, patch: Record<string, unknown>): void;
+  /** Move a counter forward atomically: `field` becomes the greater of its
+   *  value + 1 and `atLeast`, `patch` is merged in, and the new value comes back. */
+  raise(tenant: string, workspace: string, kind: string, key: string, field: string, atLeast: number, patch: Record<string, unknown>): number;
+  /** Take the key unless a document younger than `staleMs` holds it. True for the one caller that took it. */
+  claim(tenant: string, workspace: string, kind: string, key: string, data: unknown, staleMs: number): boolean;
+  /** `key` null: every document of the kind. */
+  drop(tenant: string, workspace: string, kind: string, key: string | null): void;
+  /** Every document of the kind whose key starts with `prefix`. */
+  dropPrefix(tenant: string, workspace: string, kind: string, prefix: string): void;
+  list(tenant: string, workspace: string, kind: string): { key: string; data: unknown }[];
+  /** Add one entry; `keep` > 0 drops all but the newest `keep`. */
+  append(tenant: string, workspace: string, kind: string, data: unknown, keep: number): void;
+  /** Newest first. */
+  tail(tenant: string, workspace: string, kind: string, limit: number): { id: string; data: unknown }[];
+  replace(tenant: string, workspace: string, kind: string, id: string, data: unknown): void;
+  prune(tenant: string, workspace: string, kind: string, ids: string[]): void;
+}
+
 export interface RecordsPort {
+  /** The small per-workspace state (see DocsPort). Optional: a port without
+   *  it keeps that state in the workspace's folder. */
+  docs?: DocsPort;
+  /** The `records.docs_store` setting, read per call: while false, that state
+   *  is WRITTEN to the folder as before. It is read from both, so switching
+   *  either way mid-flight loses nothing already written. */
+  docsOn?(): boolean;
   /** Async reads (see RecordsPortAsync). */
   async?: RecordsPortAsync;
   /** The `runs.step_state_store` setting, read per call: while false, step

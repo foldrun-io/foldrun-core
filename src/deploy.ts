@@ -36,6 +36,7 @@ import {
   frontmatterErrorText,
 } from "./store.ts";
 import { readAgentsMdKeys } from "./agents-md.ts";
+import { docRows, docStore, quietly } from "./workspace-docs.ts";
 import { libraryTools } from "./library.ts";
 import { lintFlow, regexProblem } from "./flow-lint.ts";
 import { parseEval } from "./evals.ts";
@@ -819,6 +820,8 @@ const commitFile = (tenant: string, workspace: string) =>
   path.join(workspaceDir(tenant, workspace), "..", `.${workspace}.deployed`);
 
 export function writeDeployedCommit(tenant: string, workspace: string, commit: string) {
+  const store = docStore(tenant, workspace);
+  if (store) return store.put(tenant, workspace, "deployed", "commit", { commit, at: new Date().toISOString() });
   const f = commitFile(tenant, workspace);
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.writeFileSync(f, `${JSON.stringify({ commit, at: new Date().toISOString() })}\n`);
@@ -828,9 +831,14 @@ export function deployedCommit(
   tenant: string,
   workspace: string,
 ): { commit: string; at: string } | null {
+  let onFile: { commit: string; at: string } | null = null;
   try {
-    return JSON.parse(fs.readFileSync(commitFile(tenant, workspace), "utf8"));
+    onFile = JSON.parse(fs.readFileSync(commitFile(tenant, workspace), "utf8"));
   } catch {
-    return null;
+    /* none */
   }
+  const row = (quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, "deployed", "commit"), undefined) as { commit: string; at: string } | undefined) ?? null;
+  // Written either way over time: the later deploy is the one running.
+  if (row && onFile) return String(row.at) >= String(onFile.at) ? row : onFile;
+  return row ?? onFile;
 }

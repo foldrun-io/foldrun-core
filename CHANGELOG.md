@@ -13,6 +13,33 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [21.1.0] — 2026-11-12
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `writeCapturedCall` from `@foldrun/core`
+
+- feat(records): a workspace's small state as rows, not files on the volume (FOL-126) ([c64ff9c](https://github.com/foldrun-io/foldrun-core/commit/c64ff9c))
+
+## [21.0.0] — 2026-11-12
+
+### Breaking changes
+
+- `registerRunRemovedHook` from `@foldrun/core` — parameter 1 changed
+- `registerRunDeletionListener` from `@foldrun/core` — parameter 1 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `registerTreeReader` from `@foldrun/core`
+- `registerTreeReader` from `@foldrun/core/history`
+
+- fix(platform): what the boot registers is one per process, not one per module copy (FOL-126) ([aee212d](https://github.com/foldrun-io/foldrun-core/commit/aee212d))
+- fix(revisions): a head holds every file of the workspace, binaries too (FOL-126) ([da213d5](https://github.com/foldrun-io/foldrun-core/commit/da213d5))
+
 ## [20.3.0] — 2026-11-12
 
 - feat(runtime): a marker for entries unpacked from a store, and the snapshot key in the system-install status (FOL-126) ([abd4aa7](https://github.com/foldrun-io/foldrun-core/commit/abd4aa7))
