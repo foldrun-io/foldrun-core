@@ -13,6 +13,18 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.0.4] — 2026-11-13
+
+- fix(revisions): the mirror's .mirror-tmp files are platform files, never published or listed (FOL-126) ([e761dd5](https://github.com/foldrun-io/foldrun-core/commit/e761dd5))
+- fix(revisions): syncTenantFromHeads — one account's folders level with the heads, on demand ([df6dd5f](https://github.com/foldrun-io/foldrun-core/commit/df6dd5f))
+
+### fix
+
+- mask a secret's form-encoded and lower-case percent spellings in captured calls ([2a96535](https://github.com/foldrun-io/foldrun-core/commit/2a96535))
+- on a pod's own disk a failed outputs publish or call write no longer falls back to the volume ([76e4afb](https://github.com/foldrun-io/foldrun-core/commit/76e4afb))
+- tenantsWithRevisionState, for sweeps that must not remove an account with revision state (FOL-126) ([4bc58d8](https://github.com/foldrun-io/foldrun-core/commit/4bc58d8))
+- do not publish a stale folder as the first revision of a workspace deleted on another pod ([fa92000](https://github.com/foldrun-io/foldrun-core/commit/fa92000))
+
 ## [23.0.3] — 2026-11-13
 
 - fix(revisions, capture): a pod's own disk is not the truth; secrets masked when printed encoded ([86f4682](https://github.com/foldrun-io/foldrun-core/commit/86f4682))
