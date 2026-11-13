@@ -392,6 +392,9 @@ export interface DiscoveredSkill {
   /** The rest of the Agent Skills layout: references/ and assets/. */
   hasReferences: boolean;
   hasAssets: boolean;
+  /** From the platform's gallery, not the account's files: offered only to
+   *  an agent whose `skills:` names it (applicableSkills). */
+  gallery?: boolean;
 }
 
 const toTags = (v: unknown): string[] =>
@@ -817,8 +820,11 @@ export function applicableSkills<T extends { name: string; when: string[] }>(
   only: string[],
   tags: string[],
 ): T[] {
+  // A gallery skill is the platform's, in every account: it reaches an agent
+  // only when its `skills:` names it, the way a gallery tool is granted only
+  // by `tools:` — so shipping one never grows every other agent's prompt.
   return skills
-    .filter((s) => only.length === 0 || only.includes(s.name))
+    .filter((s) => (only.length === 0 ? !(s as { gallery?: boolean }).gallery : only.includes(s.name)))
     .filter((s) => s.when.length === 0 || s.when.some((t) => tags.includes(t)));
 }
 
@@ -1078,7 +1084,9 @@ export function agentContext(
   // it's an allowlist, which is how you keep a focused agent focused.
   const only: string[] = refNames(front.skills);
   const applicable = applicableSkills(skills, only, tags);
-  const withheld = skills.length - applicable.length;
+  // The gallery's skills an agent did not name are not "withheld" from it —
+  // they were never its to have — so they are not counted in the note.
+  const withheld = skills.filter((s) => !s.gallery || only.includes(s.name)).length - applicable.length;
 
   if (applicable.length) {
     const lines = applicable.map((s) => {
@@ -3140,6 +3148,9 @@ async function runStepBody(
           ...Object.values(boundSites).flat(),
           // remotes: each card's own host — never one its card names.
           ...remoteNetworkHosts(stepRemotes),
+          // A granted script tool's own `network:` — the sites its program
+          // reaches (a gallery `docs` tool reaching context7.com).
+          ...scriptSpecs.flatMap((sc) => sc.network ?? []),
         ],
       });
       grant.network = { level: network.level, hosts: network.hosts };
@@ -6837,6 +6848,23 @@ export function skillsInScope(agentDir: string, tenant: string): DiscoveredSkill
   // The account library keeps its relative path: `account/` is expanded by
   // the file tools only, and a skill's bundled scripts are run from the shell.
   add(path.join(libraryDir(tenant)), "../../../../library/");
+  // Then the platform's gallery: the skills foldrun ships to every account,
+  // under the account library's path, because that is where a sandbox has
+  // them (the staging step lays the gallery down beneath the library) and,
+  // with no sandbox, the file tools serve that path from the shelf
+  // (confine.ts gallerySkillFile). The account's own copy of a name wins.
+  // The prefix is the library's place relative to this agent: the same
+  // `../../../../library/` a sandbox stages in an account folder, and
+  // `../../library/` in a flat single-workspace folder (Codex review).
+  const gallery = platform.galleryDir();
+  if (gallery) {
+    const lib = `${path.relative(agentDir, libraryDir(tenant)).split(path.sep).join("/")}/`;
+    for (const skill of discoverSkills(gallery, "skills")) {
+      if (seen.has(skill.name)) continue;
+      seen.add(skill.name);
+      skills.push({ ...skill, gallery: true, path: `${lib}${skill.path}`, dir: skill.dir ? `${lib}${skill.dir}` : null });
+    }
+  }
   return skills;
 }
 

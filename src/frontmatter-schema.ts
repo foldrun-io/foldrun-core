@@ -12,6 +12,7 @@ import { modelSecretCollision } from "./model-credential.ts";
 import { resourcesProblem, computeProblem } from "./resources.ts";
 import { remotesProblem } from "./a2a-remotes.ts";
 import { a2aPublishProblem } from "./a2a-publish.ts";
+import { toolSiteProblems } from "./network.ts";
 
 export { FRONTMATTER, schemaKindOf, type FieldSpec, type FieldType, type SchemaKind } from "./frontmatter-fields.ts";
 
@@ -74,6 +75,7 @@ const CHECKS: Partial<Record<SchemaKind, Record<string, (value: unknown) => stri
     methods: methodsProblem,
     rate: (v) => (parseRate(v) ? null : `"${shown(v)}" is not a rate — N/s, N/minute, N/hour, or a number per second, above 0`),
     secrets: modelSecretCollision,
+    network: (v) => toolSiteProblems(v)[0] ?? null,
   },
   "eval": {
     effort: (v) => (resolveEffort(v) ? null : `"${String(v)}" is not an effort — low, medium, high, xhigh or max; the judge runs at none`),

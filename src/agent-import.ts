@@ -29,6 +29,7 @@ import { libraryDir, libraryTools } from "./library.ts";
 import { isRuntimeTool, toolEntryName } from "./tool-names.ts";
 import { discoverSkills } from "./runner.ts";
 import { listSecrets } from "./secrets.ts";
+import { platform } from "./platform.ts";
 
 export interface AgentImportResult {
   /** The name the agent has in the target workspace. */
@@ -127,6 +128,8 @@ function missingFor(tenant: string, to: string, name: string, front: Record<stri
     [ws, "skills"],
     [ws, ".agents/skills"],
     [libraryDir(tenant), "skills"],
+    // The platform's gallery skills are in every account.
+    ...(platform.galleryDir() ? [[platform.galleryDir()!, "skills"] as const] : []),
   ] as const) {
     for (const s of discoverSkills(base, sub)) skills.add(s.name);
   }

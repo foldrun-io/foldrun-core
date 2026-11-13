@@ -76,6 +76,8 @@ const TOOL_GROUPS: Completion[] = [
   { label: "write", hint: "Read, Write, Edit, Glob, Grep" },
   { label: "code", hint: "Bash — runs anything in the sandbox" },
   { label: "web", hint: "search, fetch, browse, crawl, map, extract, answer, monitor — providers under web:" },
+  { label: "docs", hint: "a library's current docs and code examples, pinned to a version (Context7) — gallery" },
+  { label: "video", hint: "motion graphics and video from React code: new, compositions, still, render (Remotion) — gallery" },
   { label: "ask", hint: "ask_person — ask the person running the desk mid-step, and wait for the answer" },
   { label: "peers", hint: "peers_list + peers_message — the colleagues running beside it in its parallel group, and a message to one of them" },
   { label: "text", hint: "extract_text — an image, scanned PDF, office file, audio or video as text (Persian + English OCR, speech)" },

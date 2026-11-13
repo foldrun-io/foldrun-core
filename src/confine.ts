@@ -31,6 +31,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { refusedBack } from "./copy-back.ts";
+import { platform } from "./platform.ts";
 
 /**
  * A path with its symlinks resolved, as far as it exists.
@@ -226,6 +227,24 @@ function linkedWorkspace(roots: Roots): boolean {
   }
 }
 
+/**
+ * The platform shelf's copy of a library skill file the account does not
+ * have: `<library>/skills/<rest>` missing on disk, `<gallery>/skills/<rest>`
+ * there. Null otherwise — the account's own copy always wins.
+ */
+export function gallerySkillFile(abs: string, library: string): string | null {
+  const gallery = platform.galleryDir();
+  if (!gallery) return null;
+  const rel = path.relative(library, abs);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts[0] !== "skills" || parts.length < 2 || fs.existsSync(abs)) return null;
+  const shelfSkills = real(path.resolve(gallery, "skills"));
+  const candidate = real(path.resolve(shelfSkills, ...parts.slice(1)));
+  if (path.relative(shelfSkills, candidate).startsWith("..")) return null;
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
 export function checkPaths(
   toolName: string,
   input: Record<string, unknown>,
@@ -252,6 +271,18 @@ export function checkPaths(
 
     const virtual = expandVirtual(raw, roots);
     const abs = real(virtual ? virtual.abs : path.resolve(roots.agentDir, raw));
+
+    // A gallery skill on a step with no sandbox. The prompt names every
+    // gallery skill under the account library (`../../../../library/skills/
+    // <name>/…`), because a sandbox has the gallery laid down there; on this
+    // host the library holds only the account's own files, so a read that
+    // finds nothing there is served from the platform's shelf. Reads only:
+    // the shelf is the platform's.
+    const shelf = !isWrite ? gallerySkillFile(abs, library) : null;
+    if (shelf) {
+      rewritten = { ...(rewritten ?? input), [key]: shelf };
+      continue;
+    }
 
     // Knowledge is given, not learned: an agent that rewrites the price list
     // it was handed has corrupted its own source of truth. What it discovers

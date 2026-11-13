@@ -176,6 +176,34 @@ function siteList(v: unknown): string[] | null {
 }
 
 /**
+ * The sites a tool's own definition says its program reaches — `network:
+ * [context7.com]` in a script tool's tool.md (13 Nov 2026). Granting the tool
+ * adds them to the step's list, the way an `apis:` base or a bound secret's
+ * site always was: the capability travels with what it needs, and an agent
+ * on `trusted` need not learn which hosts a gallery tool calls. A list or
+ * one comma-separated line of domains; what is not a site is dropped here
+ * and reported by `toolSiteProblems`.
+ */
+export function toolSites(raw: unknown): string[] {
+  const list = siteList(raw) ?? [];
+  return [...new Set(list.map(normalHost).filter((h) => SITE.test(h) && !NETWORK_LEVELS.includes(h as NetworkLevel)))];
+}
+
+/** What is wrong with a tool's `network:` — for check and deploy. A tool
+ *  names sites only: the level (open, trusted, none) is the agent's to set. */
+export function toolSiteProblems(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  const list = siteList(raw);
+  if (!list) return ["a tool's network: is a list of sites, e.g. [api.example.com]"];
+  return list.flatMap((x) =>
+    NETWORK_LEVELS.includes(normalHost(x) as NetworkLevel)
+      ? [`a tool's network: names sites, not a level — "${x}" is the agent's to set`]
+      : SITE.test(normalHost(x))
+        ? []
+        : [`"${x}" is not a site — a domain or *.domain, no scheme, path or port`]);
+}
+
+/**
  * One `network:` value, read. Never throws: what cannot be read is a
  * problem `check` and deploy report, and the run treats that level as
  * saying nothing — the next level up, or the default, decides.

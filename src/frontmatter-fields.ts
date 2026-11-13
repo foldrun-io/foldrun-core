@@ -200,6 +200,7 @@ const TOOL: FieldSpec[] = [
   { key: "test_mode", type: "string", values: ["allow"], help: "script: allow — it may run in a test run" },
   { key: "secrets", type: ["list", "string"], help: "script: secret names, or proxied | materialised" },
   { key: "runtime", type: "object", help: "script: packages it needs" },
+  { key: "network", type: ["list", "string"], help: "script: the sites its program reaches, added to the granting step's network: list — [api.example.com]" },
   { key: "code", type: "string", help: "script: the program inline" },
   { key: "command", type: "string", help: "mcp: the server's command" },
   { key: "env", type: "object", help: "mcp: its environment" },

@@ -60,7 +60,7 @@ import { parseBudget, budgetProblem } from "./budget.ts";
 import { explainFailure, failureFactsOf, type FailureExplained, type FailureFacts } from "./failure.ts";
 import { timezoneProblem } from "./clock.ts";
 import { parseStepLimits, readLimits } from "./limits.ts";
-import { networkEnforceWanted, networkProblems, resolveNetwork, type NetworkPolicy } from "./network.ts";
+import { networkEnforceWanted, networkProblems, resolveNetwork, toolSites, type NetworkPolicy } from "./network.ts";
 import { browseVendorOf } from "./browse-egress.ts";
 import { searchProvided, type SearchingAction } from "./search-egress.ts";
 import { webProblems, webWarnings, runnerEngines, webConfig } from "./providers.ts";
@@ -1664,6 +1664,22 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
   };
   const accountFront = frontOf(path.join(accountDir(tenant), "AGENTS.md"));
   const workspaceFront = frontOf(path.join(workspaceDir(tenant, workspace), "AGENTS.md"));
+  // The sites each tool's own definition names (`network:` in its tool.md),
+  // nearest copy wins — the gallery's, the account library's, the
+  // workspace's — read once for every agent below, as the runner reads them.
+  let toolSiteMap: Record<string, string[]> | null = null;
+  const sitesOfTools = (names: string[]): string[] => {
+    if (!toolSiteMap) {
+      const gallery = platform.galleryDir();
+      const defs = {
+        ...(gallery ? readToolDir(path.join(gallery, "tools"), "account") : {}),
+        ...readToolDir(path.join(dataRoot(), tenant, "library", "tools"), "account"),
+        ...workspaceTools(tenant, workspace),
+      };
+      toolSiteMap = Object.fromEntries(Object.entries(defs).map(([n, d]) => [n, d.kind === "script" ? toolSites((d.spec as { network?: unknown }).network) : []]));
+    }
+    return names.flatMap((n) => toolSiteMap![n] ?? []);
+  };
   return fs
     .readdirSync(dir)
     .filter((n) => fs.existsSync(path.join(dir, n, "agent.md")))
@@ -1693,6 +1709,8 @@ export function listAgents(tenant: string, workspace: string): AgentInfo[] {
             ...parseApis(data.apis).map((a) => { try { return new URL(a.base).host; } catch { return ""; } }),
             // remotes: — each card's own host, and nothing its card says.
             ...remoteNetworkHosts(parseRemotes(data.remotes)),
+            // Each granted script tool's own network: list.
+            ...sitesOfTools(ownToolNames(data)),
           ],
         }),
         readsWeb,

@@ -502,9 +502,9 @@ model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
 resources: { memory: 4Gi }  # optional: cpu, memory, disk in numbers, over the size class
-tools: [web, read, ask, peers, text, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it, \`text\` reads images, PDFs, office files and recordings as text
+tools: [web, read, ask, peers, text, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it, \`text\` reads images, PDFs, office files and recordings as text, \`docs\` reads a library's current docs, \`video\` renders Remotion video
 disallowedTools: [Bash]     # subtract from what it would otherwise have
-skills: [house-style]       # from skills/
+skills: [house-style]       # from skills/, the library, or the platform's gallery (modern-website, motion-video, cloudhost-deploy — by name only)
 hooks: [no-force-push]      # from hooks/ or the library: code at every tool call
 scripts: [summarise.py]     # from scripts/, each becomes a callable tool
 apis: [{ name: crm }]       # an HTTP API, as a tool

@@ -24,6 +24,7 @@ import { hostSafeEnv } from "./host-env.ts";
 import { workspaceLinkEnv } from "./confine.ts";
 import { platform } from "./platform.ts";
 import { previewOrKeep, RESULT_KEEP_CHARS } from "./tool-output.ts";
+import { toolSites } from "./network.ts";
 
 // A script's only clock is the `timeout:` its own tool.md declares. There
 // was a two-minute default and a ten-minute cap here; both were the
@@ -72,6 +73,10 @@ export interface ScriptSpec {
    *  secret's name (a GBP reader on a GBP token): on a test run the step
    *  still gets the real values. An `outward` tool in the same step wins. */
   testMode?: "allow";
+  /** `network: [api.example.com]` in the tool's definition — the sites its
+   *  program reaches, added to the step's list when the tool is granted
+   *  (network.ts toolSites). */
+  network?: string[];
 }
 
 export function parseScripts(raw: unknown): ScriptSpec[] {
@@ -102,6 +107,7 @@ export function parseScripts(raw: unknown): ScriptSpec[] {
       secrets: e.secrets === "proxied" ? "proxied" : undefined,
       outward: e.outward === true ? true : undefined,
       testMode: e.test_mode === "allow" ? "allow" : undefined,
+      ...(toolSites(e.network).length ? { network: toolSites(e.network) } : {}),
       timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : undefined,
     });
   }
