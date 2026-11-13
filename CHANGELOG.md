@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [22.2.0] — 2026-11-13
+
+- feat(revisions): the account shelf (account AGENTS.md + library/) as a scope of its own; backfillCall (FOL-126) ([1eb441e](https://github.com/foldrun-io/foldrun-core/commit/1eb441e))
+
 ## [22.1.0] — 2026-11-13
 
 ### Widened in the public API
