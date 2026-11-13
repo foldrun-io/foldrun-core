@@ -12,6 +12,7 @@ import path from "node:path";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
   CallCounter, cascadeLimits, limitKeyProblems, limitKeysFor, callKeysFor, parseStepLimits, readLimits, toolOwners,
+  DEFAULT_STEP_LIMITS, REFUSALS_BEFORE_STOP,
 } from "../src/limits.ts";
 import { executeStep, type QueryFn } from "../src/step-exec.ts";
 import { buildApiTools } from "../src/api-tools.ts";
@@ -253,3 +254,35 @@ test("repeat: the same tool with the same input is refused past the cap; another
   assert.deepEqual(readLimits({ repeat: 5 }).limits, { repeat: 5 });
   assert.deepEqual(limitKeyProblems({ repeat: 5 }, { known: [], granted: [] }), [], "repeat is a word, not a tool");
 });
+
+test("every step has default limits, and any level may raise them (13 Nov 2026)", () => {
+  assert.deepEqual(cascadeLimits([DEFAULT_STEP_LIMITS]), { calls: 1000, repeat: 25 });
+  assert.deepEqual(cascadeLimits([DEFAULT_STEP_LIMITS, undefined, { calls: 5000 }, undefined, { repeat: 100 }]), { calls: 5000, repeat: 100 });
+});
+
+test("a model that keeps calling past its limits is stopped, and the step fails saying why (prod, 13 Nov 2026)", () =>
+  withAgent(async (agentDir) => {
+    let asked = 0;
+    let interrupted = false;
+    // A stuck model: the same call, forever, whatever it is told.
+    const query: QueryFn = ({ options }) => {
+      const pre = (options as { hooks: { PreToolUse: { hooks: Pre[] }[] } }).hooks.PreToolUse[0].hooks[0];
+      return Object.assign((async function* () {
+        while (!interrupted && asked < 10_000) {
+          asked++;
+          await pre({ hook_event_name: "PreToolUse", tool_name: "mcp__foldrun_scripts__lookup", tool_input: { q: "same" } });
+          yield { type: "assistant", message: { content: [] } };
+        }
+      })(), { async interrupt() { interrupted = true; } });
+    };
+    const events: { type: string; text: string }[] = [];
+    const out = await executeStep({
+      agentDir, workspaceRoot: path.dirname(path.dirname(agentDir)), libraryRoot: "/nonexistent",
+      prompt: "p", model: "haiku", systemPrompt: "s", allowed: ["mcp__foldrun_scripts__lookup"], mcpNames: [], mcpServers: {}, env: {},
+      limits: cascadeLimits([DEFAULT_STEP_LIMITS]), toolOwners: { mcp__foldrun_scripts__lookup: "lookup" },
+      emit: (type, text) => events.push({ type, text }),
+    }, query);
+    assert.equal(out.status, "failed");
+    assert.equal(asked, DEFAULT_STEP_LIMITS.repeat + REFUSALS_BEFORE_STOP, "25 allowed, 20 refused, then stopped");
+    assert.ok(events.some((e) => e.type === "error" && /^stopped: 20 calls were refused by this step's limits/.test(e.text)), JSON.stringify(events.slice(-3)));
+  }));

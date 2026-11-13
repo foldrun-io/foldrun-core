@@ -17,7 +17,7 @@ import path from "node:path";
 import matter, { parseLenient, configMatter } from "./matter.ts";
 import {
   knownPrice, executeStep, extractJson, stepCeiling, stepCeilingFor, type EventExtra } from "./step-exec.ts";
-import { cascadeLimits, toolOwners } from "./limits.ts";
+import { cascadeLimits, toolOwners, DEFAULT_STEP_LIMITS } from "./limits.ts";
 import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
@@ -3004,10 +3004,12 @@ async function runStepBody(
       throw new Error(`schema: ${step.schemaPath} — not a readable JSON or YAML schema under the workspace`);
     }
     if (step.maxTurns) push("info", `max_turns: ${step.maxTurns}`);
-    // `limits:` — account, workspace, agent, then this step's option;
-    // nearest wins per key. Enforced in the model loop's hook, on either
+    // `limits:` — the platform's defaults (limits.ts DEFAULT_STEP_LIMITS),
+    // then account, workspace, agent, then this step's option; nearest wins
+    // per key. Enforced in the model loop's hook, on either
     // path (step-exec.ts), so it is resolved here as plain values.
     const stepLimits = cascadeLimits([
+      DEFAULT_STEP_LIMITS,
       readAgentsMd(accountDir(tenant))?.data?.limits,
       readAgentsMd(workspaceRootOf(agentDir))?.data?.limits,
       front.limits,

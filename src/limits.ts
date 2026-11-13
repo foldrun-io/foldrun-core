@@ -28,6 +28,16 @@ import { A2A_SERVER, A2A_LIMIT_KEY, A2A_LIMIT_ACTIONS } from "./a2a-remotes.ts";
 
 export type Limits = Record<string, number>;
 
+/** Every step's limits unless the account, workspace, agent or step sets the
+ *  key itself (13 Nov 2026, owner): a model that keeps calling — the same
+ *  call, or anything at all — is stopped, not paid for until its timeout.
+ *  Seen on prod: one stuck step made 2,008 calls in 3.5 minutes. */
+export const DEFAULT_STEP_LIMITS: Limits = { calls: 1000, repeat: 25 };
+
+/** Refused calls after which the step is ended as failed: a model that is
+ *  told "no" this often is not going to stop by itself. */
+export const REFUSALS_BEFORE_STOP = 20;
+
 /** The key that caps every call in the step. */
 export const TOTAL_KEY = "calls";
 

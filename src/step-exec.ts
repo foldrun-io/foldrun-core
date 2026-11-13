@@ -25,7 +25,7 @@ import { checkPaths, checkBash, isFilesystemTool, linkWorkspace, workspaceLinkEn
 import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
-import { CallCounter, callKeysFor, type Limits } from "./limits.ts";
+import { CallCounter, callKeysFor, REFUSALS_BEFORE_STOP, type Limits } from "./limits.ts";
 import { classifyCall, podAt, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
 
 export interface ExecUsage {
@@ -539,6 +539,9 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
               const refusal = counter.take(callKeysFor(hookInput.tool_name, hookInput.tool_input as Record<string, unknown>, opts.toolOwners));
               if (refusal) {
                 emit("info", `${refusal.message} (${hookInput.tool_name} refused)`, via ? { subagent: via } : undefined);
+                // A model that keeps calling past its limits is stuck: end the
+                // step rather than let it loop on refusals until its timeout.
+                if (counter.refused >= REFUSALS_BEFORE_STOP) endWith("limits");
                 return { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: refusal.message } };
               }
             }
@@ -649,10 +652,10 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
   // call — a crawl, a build — sailed past its timeout: with no message there
   // was nothing to check it against. The backstop timer fires regardless,
   // and a stop is read on a clock rather than between groups.
-  let ended: "timeout" | "stopped" | "pod-lost" | null = null;
+  let ended: "timeout" | "stopped" | "pod-lost" | "limits" | null = null;
   const startedAt = Date.now();
   const timers: NodeJS.Timeout[] = [];
-  const endWith = (why: "timeout" | "stopped" | "pod-lost") => {
+  const endWith = (why: "timeout" | "stopped" | "pod-lost" | "limits") => {
     if (ended) return;
     ended = why;
     void q.interrupt().catch(() => {});
@@ -971,6 +974,9 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     status = "failed";
   } else if (ended === "stopped") {
     emit("error", "stopped by a person mid-step");
+    status = "failed";
+  } else if (ended === "limits") {
+    emit("error", `stopped: ${counter.refused} calls were refused by this step's limits and the model kept calling — it is stuck (raise them with \`limits:\` if the work really needs more calls)`);
     status = "failed";
   } else if (ended === "pod-lost") {
     // The runner says what happens next — a re-run on the full image, or a
