@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { records } from "./records.ts";
 
-export type StepStateKind = "handed-in" | "base" | "storage";
+export type StepStateKind = "handed-in" | "base" | "storage" | "test-writes";
 
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/;
 const okIds = (runId: string, ref: string) => SAFE.test(runId) && (ref === "" || SAFE.test(ref));

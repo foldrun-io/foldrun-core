@@ -95,6 +95,11 @@ export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort
     async: {
       stepGet: async (t, w, run, kind, ref) => (steps.has(sk(t, w, run, kind, ref)) ? structuredClone(steps.get(sk(t, w, run, kind, ref))) : undefined),
       stepPut: async (t, w, run, kind, ref, data) => void steps.set(sk(t, w, run, kind, ref), structuredClone(data)),
+      stepList: async (t, w, run, kind) =>
+        [...steps.entries()]
+          .filter(([k]) => k.startsWith(`${sk(t, w, run, kind, "")}`))
+          .map(([k, v]) => ({ ref: k.slice(sk(t, w, run, kind, "").length), data: structuredClone(v) }))
+          .sort((x, y) => (x.ref < y.ref ? -1 : x.ref > y.ref ? 1 : 0)),
       stepDrop: async (t, w, run, kind, ref) => {
         const p = `${k(t, w, run)}\0${kind}\0`;
         for (const key of [...steps.keys()]) if (key.startsWith(p) && (ref === null || key === p + ref)) steps.delete(key);

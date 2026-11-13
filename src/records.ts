@@ -39,6 +39,8 @@ export interface RecordsPortAsync {
    *  step-state.ts is the only caller. */
   stepGet?(tenant: string, workspace: string, runId: string, kind: string, ref: string): Promise<unknown | undefined>;
   stepPut?(tenant: string, workspace: string, runId: string, kind: string, ref: string, data: unknown): Promise<void>;
+  /** Every row of one kind for a run (test writes: one row per file). Optional. */
+  stepList?(tenant: string, workspace: string, runId: string, kind: string): Promise<{ ref: string; data: unknown }[]>;
   /** `ref` null: every ref of the kind. */
   stepDrop?(tenant: string, workspace: string, runId: string, kind: string, ref: string | null): Promise<void>;
   /** The ids of the runs that have rows of this kind in the workspace. */

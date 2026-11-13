@@ -134,6 +134,7 @@ import { earlierTurns, conversationBlock, type RunContext, type RunInput } from 
 import { inputsNote, type RunInputFile } from "./run-inputs.ts";
 import { textCandidates } from "./input-text.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
+import { restoreTestWrites, saveTestWrites } from "./test-writes-store.ts";
 
 export { localDate } from "./clock.ts";
 
@@ -2823,6 +2824,7 @@ async function runStepBody(
     // The confinement boundary: agents in a workspace are one team, but the
     // workspace is where isolation is enforced.
     const workspaceRoot = path.resolve(agentDir, "..", "..");
+    const workspaceName = path.basename(workspaceRoot);
     // Where a test run's state/ and storage/ writes go, and the line each
     // one leaves: under the run, beside its archived outputs.
     const divertFor = (id: string) => ({
@@ -3619,6 +3621,11 @@ async function runStepBody(
           save();
         }
         let out: Awaited<ReturnType<typeof runIsolated>> | undefined;
+        // A test run's earlier diverted writes, brought back if this worker
+        // does not have them (another worker, a restart: FOL-126).
+        // Not caught: a step must not run without what earlier steps wrote, nor
+        // save an index short of it (Codex review).
+        const twStart = testRun && runId && tenant ? (await restoreTestWrites(tenant, workspaceName, runId, divertFor(runId).to)).start : undefined;
         try {
           out = await runIsolated(a);
           return out;
@@ -3630,6 +3637,9 @@ async function runStepBody(
           // back to the queue keeps its place in line.
           if (!out?.deferred) step.roomWait = null;
           save();
+          // Last, after the bookkeeping: not caught — a step whose writes were
+          // not kept fails (Codex review).
+          if (testRun && runId && tenant) await saveTestWrites(tenant, workspaceName, runId, divertFor(runId).to, twStart);
         }
       };
       let attemptFrom = step.events.length;
@@ -4037,6 +4047,7 @@ async function runStepBody(
       // sandbox to write instead, and afterwards what changed is moved
       // under the run and the originals come back.
       const attemptThrough = async (modelEnv: Record<string, string | undefined>, spec: TranslatorSpec | null) => {
+        const twStart = testRun && runId && tenant ? (await restoreTestWrites(tenant, workspaceName, runId, divertFor(runId).to)).start : undefined;
         const before = testRun ? snapshotDivertedDirs(workspaceRoot) : null;
         // What earlier steps of this test run wrote, laid over the real files
         // for this attempt; restoreDivertedDirs puts the originals back.
@@ -4053,6 +4064,7 @@ async function runStepBody(
           if (before && runId) {
             const d = divertFor(runId);
             restoreDivertedDirs(workspaceRoot, before, d.to, d.note, handed ?? before);
+            if (tenant) await saveTestWrites(tenant, workspaceName, runId, d.to, twStart);
           }
         }
       };

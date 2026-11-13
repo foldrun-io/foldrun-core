@@ -310,6 +310,19 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.deepEqual(await readHandedIn(wsRoot(W), "r1", "pod-b", T), { b: "file" });
   });
 
+  test(t("stepList lists one run's rows of one kind, by ref (FOL-126 test writes)"), async () => {
+    withSteps();
+    const a = subject.port.async!;
+    if (!a.stepList) return;
+    writeRun(T, W, run("r1", "2026-11-01T01:00:00.000Z"));
+    await a.stepPut!(T, W, "r1", "test-writes", "bbb", { path: "state/b" });
+    await a.stepPut!(T, W, "r1", "test-writes", "aaa", { path: "state/a" });
+    await a.stepPut!(T, W, "r1", "call", "c1", { sha: "x" });
+    await a.stepPut!(T, W, "r2", "test-writes", "zzz", { path: "other run" });
+    assert.deepEqual(await a.stepList(T, W, "r1", "test-writes"), [{ ref: "aaa", data: { path: "state/a" } }, { ref: "bbb", data: { path: "state/b" } }]);
+    assert.deepEqual(await a.stepList(T, W, "r1", "nothing"), []);
+  });
+
   test(t("stepRuns lists the runs that have rows of a kind, and a run's delete and a workspace's drop empty it"), async () => {
     withSteps();
     const a = subject.port.async!;
