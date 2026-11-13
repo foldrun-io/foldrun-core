@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [22.4.0] — 2026-11-13
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RevisionView` from `@foldrun/core`
+- `RevisionView` from `@foldrun/core/history`
+
+- feat(history): mirrored pods keep no local history; the account shelf's history is read from the store (FOL-126) ([eb0cbfb](https://github.com/foldrun-io/foldrun-core/commit/eb0cbfb))
+
 ## [22.3.0] — 2026-11-13
 
 - feat(runs): a test run's diverted writes kept off the worker's disk (FOL-126) ([9d07118](https://github.com/foldrun-io/foldrun-core/commit/9d07118))
