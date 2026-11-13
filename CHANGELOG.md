@@ -13,6 +13,23 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [22.0.0] — 2026-11-13
+
+### Breaking changes
+
+- `writeCapturedCall` from `@foldrun/core` — it takes fewer parameters
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `registerRunRemovedHook` from `@foldrun/core`
+
+- fix(calls): calls kept as rows on dev still read and go with their run; the blob path needs stepRuns (FOL-126) ([7e3ae10](https://github.com/foldrun-io/foldrun-core/commit/7e3ae10))
+- Write a call once, at completion; release its pin with the run and the workspace ([1cd8d9d](https://github.com/foldrun-io/foldrun-core/commit/1cd8d9d))
+- Keep captured tool calls in the blob store ([17c93cf](https://github.com/foldrun-io/foldrun-core/commit/17c93cf))
+- Let more than one store hook on a deleted run: a named registry, each failure isolated ([078f1a2](https://github.com/foldrun-io/foldrun-core/commit/078f1a2))
+
 ## [21.2.0] — 2026-11-13
 
 ### New in the public API
