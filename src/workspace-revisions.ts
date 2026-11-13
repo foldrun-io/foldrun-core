@@ -1642,7 +1642,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
     }
     if (busy()) return "skipped"; // a write landed meanwhile: next round
     const bytes = await blobBytes(deps, tenant, e.sha);
-    if (!bytes) throw new Error(`revisions: blob ${e.sha.slice(0, 12)} of ${tenant}/${workspace}/${p} is missing`);
+    if (!bytes) throw new Error(`revisions: blob ${e.sha.slice(0, 12)} is missing`); // no file path: ops lines carry no customer content
     const abs = path.join(dir, p);
     // Never through a link: a folder on the way that is a symlink could lead
     // outside the workspace (Codex review). Such a path is left as it is.
@@ -1742,10 +1742,20 @@ export async function syncAllFromHeads(): Promise<{ synced: number; removed: num
 // ------------------------------------------------------------- reading
 
 async function blobBytes(deps: Deps, tenant: string, sha: string): Promise<Buffer | null> {
+  // An object is named by its content: bytes that do not hash to the name
+  // (corruption, or a store someone wrote to) are refused — never written into
+  // a pod's copy, staged into a run or served (FOL-126 security review).
+  const checked = (b: Buffer, from: string): Buffer => {
+    if (sha256Hex(b) !== sha) {
+      opsError("revisions.blob_mismatch", new Error(`blob ${sha.slice(0, 12)} does not hash to its name`), { tenant, surface: from });
+      throw new Error(`revisions: blob ${sha.slice(0, 12)}… does not hash to its name — refused`);
+    }
+    return b;
+  };
   const hit = await S.cache?.get(tenant, sha);
-  if (hit) return hit;
+  if (hit) return checked(hit, "cache");
   try {
-    const b = await readAll(deps.blobs, blobObjectKey(tenant, sha));
+    const b = checked(await readAll(deps.blobs, blobObjectKey(tenant, sha)), "store");
     void S.cache?.put(tenant, sha, b).catch(() => {});
     return b;
   } catch (err) {

@@ -320,3 +320,18 @@ test("the account shelf's heads gone: only the shelf's files go, never the accou
   assert.equal(fs.existsSync(path.join(accountDir(T), "library")), false, "the shelf went");
   assert.equal(read("memory/notes.md"), "x\n", "the workspace stays");
 });
+
+test("a blob whose bytes do not hash to its name is refused: never written into a pod's copy (security review)", async () => {
+  writeWorkspaceFile(T, W, "memory/notes.md", "genuine\n", { by: "user:a" });
+  await flushRevisions();
+  const { sha256Hex } = await import("../src/manifest.ts");
+  const sha = sha256Hex(Buffer.from("genuine\n"));
+  const objects = fs.readdirSync(path.join(shared, ".objects"), { recursive: true }).map(String);
+  const hit = objects.find((n) => n.endsWith(sha));
+  assert.ok(hit);
+  fs.writeFileSync(path.join(shared, ".objects", hit!), "tampered\n");
+  on(podB);
+  const r = await syncAllFromHeads();
+  assert.equal(r.failed, 1);
+  assert.notEqual(read("memory/notes.md"), "tampered\n");
+});
