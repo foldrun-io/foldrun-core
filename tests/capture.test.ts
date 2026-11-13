@@ -175,6 +175,26 @@ test("a secret printed encoded is masked too: hex, URL-encoded, base64 at every 
   assert.ok(!pairs.some(([v]) => v.length < 8));
 });
 
+test("a secret with a space or a slash is masked in form-encoded and lower-case percent forms too", async () => {
+  const { redactionsFor, maskCall } = await import("../src/capture.ts");
+  const secret = "sk-live Zx9/Qw+7?kLmN 42";
+  const pairs = redactionsFor({ TOKEN: secret });
+  const redact = (t: string) => pairs.reduce((out, [v, n]) => out.split(v).join(`[redacted:${n}]`), t);
+  const pct = encodeURIComponent(secret);
+  const shown = [
+    pct.replace(/%20/g, "+"), // application/x-www-form-urlencoded
+    pct.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()), // %2f, not %2F
+    pct.replace(/%20/g, "+").replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+  ];
+  for (const form of shown) {
+    assert.notEqual(form, pct);
+    const out = maskCall(`body=${form}&x=1`, redact).text;
+    assert.equal(out, "body=[redacted:TOKEN]&x=1", `masked: ${form}`);
+  }
+  // the floor holds: a short value gains no encoded forms
+  assert.ok(!redactionsFor({ T: "a b/c" }).length);
+});
+
 test("masked first, cut second: a secret on the cap's edge is masked whole; a private key found anywhere is masked", async () => {
   const { maskCall } = await import("../src/capture.ts");
   const secret = "edge-secret-value-0123456789";

@@ -97,7 +97,15 @@ export function encodedForms(v: string): string[] {
   const bytes = Buffer.from(v, "utf8");
   const forms = new Set<string>([bytes.toString("hex"), bytes.toString("hex").toUpperCase()]);
   try {
-    forms.add(encodeURIComponent(v));
+    const pct = encodeURIComponent(v);
+    forms.add(pct);
+    // a form body writes a space as `+`, and some encoders write the escapes
+    // in lower case (`%2f`); all four spellings are the same secret
+    const plus = pct.replace(/%20/g, "+");
+    forms.add(plus);
+    const lower = (t: string) => t.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+    forms.add(lower(pct));
+    forms.add(lower(plus));
   } catch {
     // a lone surrogate: no URL form
   }
