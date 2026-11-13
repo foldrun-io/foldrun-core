@@ -145,9 +145,22 @@ export interface IndexedFile {
   by: string;
 }
 
+/** One workspace's head ids (RevisionStore.allHeads). */
+export interface HeadIds {
+  tenant: string;
+  workspace: string;
+  /** The workspace head's revision id; null when only the state head exists. */
+  workspaceHead: string | null;
+  stateHead: string | null;
+}
+
 export interface RevisionStore {
   readonly kind: "pg" | "local";
   head(ws: WorkspaceRef): Promise<Revision | null>;
+  /** Every workspace that has a head, with the ids of its two heads — what a
+   *  pod whose folders are a copy of the heads compares itself with
+   *  (workspace-mirror.ts). Optional: a store without it has no mirror. */
+  allHeads?(): Promise<HeadIds[]>;
   revision(ws: WorkspaceRef, id: string): Promise<Revision | null>;
   /** Newest first. `before` is a seq: pass the last page's lowest seq. */
   revisions(ws: WorkspaceRef, opts?: { limit?: number; before?: number }): Promise<Revision[]>;
@@ -294,6 +307,30 @@ export function localRevisionStore(root: string = path.join(dataRoot(), ".revisi
     kind: "local",
     async head(ws) {
       return headOf(ws);
+    },
+    async allHeads() {
+      const out: HeadIds[] = [];
+      let tenants: string[] = [];
+      try {
+        tenants = fs.readdirSync(root).filter((n) => !n.startsWith("."));
+      } catch {
+        return out;
+      }
+      for (const tenant of tenants.sort()) {
+        let names: string[] = [];
+        try {
+          names = fs.readdirSync(path.join(root, tenant)).filter((n) => !n.startsWith("."));
+        } catch {
+          continue;
+        }
+        for (const workspace of names.sort()) {
+          const ws = { tenant, workspace };
+          const w = headOf(ws);
+          const st = headOf({ ...ws, scope: "state" } as WorkspaceRef);
+          if (w || st) out.push({ tenant, workspace, workspaceHead: w?.id ?? null, stateHead: st?.id ?? null });
+        }
+      }
+      return out;
     },
     async revision(ws, id) {
       for (const seq of seqs(ws).reverse()) {

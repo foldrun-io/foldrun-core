@@ -37,7 +37,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { registerJournal, registerRevisionView, registerWorkspaceGone, registerWorkspaceLifecycle, type RevisionView, type RevisionFile, type RevisionSummary, type Revision as HistoryRevision } from "./history.ts";
-import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath } from "./store.ts";
+import { workspaceDir, listTenants, listWorkspaces, readWorkspaceFile, assertEditablePath, isPlatformPath, notifyWorkspaceChanged } from "./store.ts";
 import { dataRoot } from "./paths.ts";
 import { processState } from "./process-state.ts";
 import { opsError, opsLog } from "./ops-log.ts";
@@ -59,7 +59,9 @@ import {
   sideOf,
   type Changes,
   type Manifest,
+  type ManifestEntry,
 } from "./manifest.ts";
+import { mirrorOn, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, type MirrorBase } from "./mirror-base.ts";
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, stateOpId, BlobMissing, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
 import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
@@ -464,7 +466,7 @@ async function drainOne(k: string): Promise<void> {
   if (S.backend && (!q || !q.length) && (!verified.has(k) || marked.has(k)) && fs.existsSync(workspaceDir(tenant, workspace))) {
     verified.add(k);
     try {
-      await reconcileWorkspace(tenant, workspace, "reconcile");
+      await reconcileNow(tenant, workspace, "reconcile");
     } catch (err) {
       verified.delete(k);
       opsError("revisions.reconcile_failed", err, { tenant, workspace }, "warn");
@@ -874,6 +876,9 @@ export async function cleanOrphanedHistory(
   const out = { checked: 0, orphans: 0, marked: 0, dropped: 0, skipped: 0 };
   const deps = S.backend;
   if (!deps) return out;
+  // Folders are a copy of the heads (revisions.mirror): a missing one says
+  // nothing about the workspace, so nothing is taken for orphaned.
+  if (mirrorOn()) return out;
   const root = dataRoot();
   let rootEntries = 0;
   try {
@@ -1010,7 +1015,7 @@ export async function reconcileAll(opts: { by?: string; tenants?: string[] } = {
           verified.delete(k);
           continue; // the store is not taking writes: leave it
         }
-        const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => reconcileWorkspace(tenant, w.name, opts.by ?? "reconcile"));
+        const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => reconcileNow(tenant, w.name, opts.by ?? "reconcile"));
         chains.set(k, next);
         const res = await next;
         verified.add(k);
@@ -1201,6 +1206,14 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
   // run, a person) is a conflict on the path, and disjoint paths replay. Where
   // the revision cannot be read any more, the folder's sha stands in.
   const fromRev = await baseManifests(deps, tenant, workspace, entry.baseRev);
+  // A pod whose folder is a copy of the heads (revisions.mirror): a change
+  // written here was made against the version this pod last synced — its
+  // base, so one made meanwhile on another pod is a conflict (both kept),
+  // never overwritten (Codex review). Syncs wait while entries are queued, so
+  // the record still says what the writer saw.
+  const synced = mirrorOn() ? readMirrorBase(tenant, workspace) : null;
+  const plainBase = (rel: string, was: ManifestEntry | undefined): string | null =>
+    synced ? (synced.files[rel] ? entryId(synced.files[rel]) : null) : was ? entryId(was) : null;
 
   const put = (rel: string, buf: Buffer, side: "authored" | "state", pinned?: string | null, handed?: string | null) => {
     const sha = sha256Hex(buf);
@@ -1214,7 +1227,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     const atRev = fromRev[side]?.files[rel];
     const usable = fromRev[side] !== undefined && handed !== undefined && handed === (atRev ? atRev.sha : null);
     const pinnedTo = pinned === undefined ? undefined : usable ? (atRev ? entryId(atRev) : null) : pinnedBase(pinned, was);
-    changes[rel] = { op: "put", base: pinned === undefined ? (was ? entryId(was) : null) : pinnedTo!, sha, size: buf.length, mode };
+    changes[rel] = { op: "put", base: pinned === undefined ? plainBase(rel, was) : pinnedTo!, sha, size: buf.length, mode };
   };
 
   if (baseline.authored || baseline.state) {
@@ -1237,7 +1250,8 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
     if ((side === "authored" && baseline.authored) || (side === "state" && baseline.state)) continue; // in the baseline
     const was = head[side].files[f.path];
     if (f.after === null) {
-      if (was) changes[f.path] = { op: "delete", base: entryId(was) };
+      // A delete of a file this pod never synced deletes nothing elsewhere.
+      if (was && (!synced || synced.files[f.path])) changes[f.path] = { op: "delete", base: plainBase(f.path, was) ?? entryId(was) };
     } else {
       put(f.path, bytesOfEntry(f), side, f.base, f.handed);
     }
@@ -1261,7 +1275,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
       for (const [p, c] of Object.entries(changes)) if (!done[sideOf(p)!]) todo[p] = c;
       if (!Object.keys(todo).length) return null;
       try {
-        return await publish(deps, {
+        return await afterPublish(deps, ws, todo, await publish(deps, {
           ws,
           // The op id of a side that finished, when one did, so the other side's
           // conflict copies are named the way the first attempt would have.
@@ -1275,7 +1289,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
             if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
             return b;
           },
-        });
+        }));
       } catch (err) {
         // Never "done" by itself: a side that finished is found by sidesDone on
         // the next look. One that keeps answering OpIdReused without having
@@ -1312,9 +1326,24 @@ async function sidesDone(deps: Deps, ws: WorkspaceRef, id: string): Promise<{ au
  *  (until 13 Nov 2026: only the text files the editor lists, so a binary file
  *  never reached a head and one the importer had put there was never updated
  *  or removed — a run staged from the head was handed files deleted days ago). */
-export async function reconcileWorkspace(tenant: string, workspace: string, by = "reconcile"): Promise<PublishResult | null> {
+/** Bring the heads to this pod's folder (see reconcileNow), in turn with
+ *  everything else that commits this workspace here: two at once would diff
+ *  the same folder against the same head and race each other's publish. */
+export function reconcileWorkspace(tenant: string, workspace: string, by = "reconcile"): Promise<PublishResult | null> {
+  const k = key(tenant, workspace);
+  const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => reconcileNow(tenant, workspace, by));
+  chains.set(k, next);
+  return next;
+}
+
+async function reconcileNow(tenant: string, workspace: string, by = "reconcile"): Promise<PublishResult | null> {
   const deps = S.backend;
   if (!deps) return null;
+  // A copy this pod has not synced yet is not the truth about anything: an
+  // empty disk at start would otherwise publish every file as deleted. Its
+  // own writes reach the head through the journal; the reconcile waits for a
+  // sync to say what "changed here" means.
+  if (mirrorOn() && !readMirrorBase(tenant, workspace)) return null;
   const ws: WorkspaceRef = { tenant, workspace };
   const k = key(tenant, workspace);
   // The mark goes BEFORE the folder is read, so one set after the read (a run
@@ -1332,12 +1361,17 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
     if (!scan) return null;
     const head = await manifestsAt(deps, tenant, heads);
     const onDisk = new Map<string, string>();
-    const want: Manifest = emptyManifest();
-    const have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
+    let want: Manifest = emptyManifest();
+    let have: Manifest = { v: 1, files: { ...head.authored.files, ...head.state.files } };
     for (const [rel, f] of scan.files) {
       onDisk.set(f.sha, f.abs);
       want.files[rel] = { sha: f.sha, size: f.size, mode: f.mode };
     }
+    // A pod whose folder is a copy of the heads (revisions.mirror): only what
+    // differs from the last sync is this pod's change. A difference from the
+    // head alone is someone else's change not copied here yet, never undone.
+    const base = mirrorOn() ? readMirrorBase(tenant, workspace) : null;
+    if (base) ({ have, want } = threeWay(have, scan, base, workspaceDir(tenant, workspace)));
     // A path the scan could not take (unreadable now, a name the manifest
     // refuses) but the folder still holds is neither added nor removed here;
     // one that is gone from the folder is gone from the head.
@@ -1355,7 +1389,7 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
     const opId = opIdOf("jx", requestDigest("reconcile", { changes, heads: [heads.workspace?.id ?? null, heads.state?.id ?? null] }).slice(0, 40));
     const release = await uploadLarge(deps, tenant, changes, onDisk, opId);
     try {
-      return await publish(deps, {
+      return await afterPublish(deps, ws, changes, await publish(deps, {
       ws,
       opId,
       by,
@@ -1365,7 +1399,7 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
       // the sha, so a file that changed since the scan fails this repair (the
       // mark is put back and the next one sees the new bytes).
         bytesOf: async (sha) => fs.promises.readFile(onDisk.get(sha)!),
-      });
+      }));
     } finally {
       await release();
     }
@@ -1376,6 +1410,312 @@ export async function reconcileWorkspace(tenant: string, workspace: string, by =
   } finally {
     repairing.delete(k);
   }
+}
+
+/** After this pod published changes of its own (revisions.mirror): what it
+ *  published is now what the heads hold, so its copy is synced for those
+ *  paths. A path that conflicted kept the head's version (this pod's is the
+ *  conflict copy beside it), so this pod takes the head's version too — unless
+ *  the file changed here again since. Returns the result unchanged. */
+async function afterPublish(deps: Deps, ws: WorkspaceRef, changes: Changes, r: PublishResult): Promise<PublishResult> {
+  if (!mirrorOn()) return r;
+  try {
+    const { tenant, workspace } = ws;
+    const base: MirrorBase = readMirrorBase(tenant, workspace) ?? { workspaceHead: null, stateHead: null, files: {}, at: new Date().toISOString() };
+    const conflicted = new Set(r.conflicts.map((c) => c.path));
+    const dir = workspaceDir(tenant, workspace);
+    let head: Record<string, ManifestEntry> | null = null;
+    for (const [p, c] of Object.entries(changes)) {
+      if (!conflicted.has(p)) {
+        if (c.op === "delete") delete base.files[p];
+        else base.files[p] = { sha: c.sha, mode: c.mode };
+        continue;
+      }
+      head ??= await (async () => {
+        const m = await manifestsAt(deps, tenant, await headsOf(deps, ws));
+        return { ...m.authored.files, ...m.state.files };
+      })();
+      const winner = head[p];
+      const abs = path.join(dir, p);
+      // Never through a link, on any branch below (Codex review).
+      if (throughLink(dir, p) || (fs.existsSync(abs) && fs.lstatSync(abs).isSymbolicLink())) continue;
+      const local = fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null;
+      // Only while the file is still what this pod published (or gone, for a delete).
+      if (c.op === "delete" ? local !== null : local !== c.sha) continue;
+      if (winner) {
+        const b = await blobBytes(deps, tenant, winner.sha);
+        if (!b) continue;
+        // Again after the download: an edit made meanwhile is kept, and never
+        // through a link — the file or a folder on its way (Codex review).
+        if (throughLink(dir, p) || (fs.existsSync(abs) && fs.lstatSync(abs).isSymbolicLink())) continue;
+        if ((fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null) !== local) continue;
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        // A new file renamed over the old one: replaces it, follows nothing.
+        const tmp = `${abs}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.mirror-tmp`;
+        fs.writeFileSync(tmp, b, { mode: winner.mode === MODE_EXEC ? 0o755 : 0o644 });
+        fs.chmodSync(tmp, winner.mode === MODE_EXEC ? 0o755 : 0o644);
+        fs.renameSync(tmp, abs);
+        base.files[p] = { sha: winner.sha, mode: winner.mode };
+      } else {
+        // The head deleted it; this pod's version is the conflict copy. The
+        // original goes too, or the next reconcile would bring it back.
+        fs.rmSync(abs, { force: true });
+        delete base.files[p];
+      }
+    }
+    writeMirrorBase(tenant, workspace, { ...base, at: new Date().toISOString() });
+  } catch (err) {
+    opsError("revisions.mirror_note_failed", err, { tenant: ws.tenant, workspace: ws.workspace }, "warn");
+  }
+  return r;
+}
+
+/** The reconcile's diff for a mirrored folder: the head, with this pod's own
+ *  changes since its last sync on top — each path's base the version it was
+ *  synced at, so one someone else changed meanwhile is a conflict (both kept),
+ *  never a silent overwrite. */
+function threeWay(headM: Manifest, scan: { files: Map<string, FolderFile>; left: Set<string> }, base: MirrorBase, dir: string): { have: Manifest; want: Manifest } {
+  const have: Manifest = { v: 1, files: { ...headM.files } };
+  const want: Manifest = { v: 1, files: { ...headM.files } };
+  const same = (a: { sha: string; mode: number } | undefined, b: { sha: string; mode: number } | undefined) => !!a && !!b && a.sha === b.sha && a.mode === b.mode;
+  for (const [p, f] of scan.files) {
+    const synced = base.files[p];
+    if (same(f, synced) || same(f, headM.files[p])) continue; // not changed here, or already the head's
+    if (synced) have.files[p] = { sha: synced.sha, mode: synced.mode, size: headM.files[p]?.size ?? 0 };
+    else delete have.files[p];
+    want.files[p] = { sha: f.sha, size: f.size, mode: f.mode };
+  }
+  for (const [p, synced] of Object.entries(base.files)) {
+    if (scan.files.has(p) || scan.left.has(p)) continue;
+    if (throughLink(dir, p)) continue; // out of reach under a link, not deleted
+    // Deleted here since the sync: gone from the head too, from the version
+    // this pod had (a newer one elsewhere makes it a conflict).
+    if (!headM.files[p]) continue;
+    have.files[p] = { sha: synced.sha, mode: synced.mode, size: headM.files[p].size };
+    delete want.files[p];
+  }
+  return { have, want };
+}
+
+/**
+ * Bring this pod's copy of a workspace to its heads (FOL-126, the shared
+ * volume retired; revisions.mirror). What changed in the heads since the last
+ * sync is written or removed; what changed HERE since then is left as it is
+ * and handed to the reconcile, which publishes it against the version it was
+ * synced at. Never while this pod has changes of its own still to publish.
+ * A workspace whose heads are gone (deleted, renamed away) is removed here
+ * only if this pod's copy came from them.
+ */
+export function syncFromHeads(tenant: string, workspace: string): Promise<"unchanged" | "synced" | "skipped" | "removed" | "absent"> {
+  // In turn with this workspace's commits and reconciles here (the same
+  // chain): a reconcile must never scan a folder a sync is half way through,
+  // or the files it already brought would read as this pod's changes (Codex
+  // review).
+  if (!S.backend || !mirrorOn()) return Promise.resolve("skipped");
+  const k = key(tenant, workspace);
+  const next = (chains.get(k) ?? Promise.resolve()).catch(() => {}).then(() => syncNow(tenant, workspace));
+  chains.set(k, next);
+  return next;
+}
+
+async function syncNow(tenant: string, workspace: string): Promise<"unchanged" | "synced" | "skipped" | "removed" | "absent"> {
+  const deps = S.backend;
+  if (!deps || !mirrorOn()) return "skipped";
+  const k = key(tenant, workspace);
+  const busy = () => (queues.get(k)?.length ?? 0) > 0 || repairing.has(k) || frozen.has(k);
+  if (busy()) return "skipped";
+  const dir = workspaceDir(tenant, workspace);
+  // A copy whose folder is gone (the disk was cleared, a hand rm) starts again
+  // from the heads: with the old record kept, every file would read as deleted
+  // here and the reconcile would publish those deletes (Codex review).
+  let base = readMirrorBase(tenant, workspace);
+  if (base && !fs.existsSync(dir)) {
+    dropMirrorBase(tenant, workspace);
+    base = null;
+  }
+  const heads = await headsOf(deps, { tenant, workspace });
+  if (!heads.workspace && !heads.state) {
+    if (!base) return "absent";
+    if (busy()) return "skipped";
+    fs.rmSync(dir, { recursive: true, force: true });
+    dropMirrorBase(tenant, workspace);
+    notifyWorkspaceChanged(tenant, workspace, "delete");
+    return "removed";
+  }
+  const ids = { workspaceHead: heads.workspace?.id ?? null, stateHead: heads.state?.id ?? null };
+  if (base && base.workspaceHead === ids.workspaceHead && base.stateHead === ids.stateHead && fs.existsSync(dir)) return "unchanged";
+  const m = await manifestsAt(deps, tenant, heads);
+  const target: Record<string, ManifestEntry> = { ...m.authored.files, ...m.state.files };
+  fs.mkdirSync(dir, { recursive: true });
+  const scan = (await scanFolder(tenant, workspace)) ?? { files: new Map<string, FolderFile>(), left: new Set<string>() };
+  const synced = base?.files ?? {};
+  const next: MirrorBase["files"] = {};
+  // What this pass has done so far, over the old base: kept if it stops early
+  // (a download fails, a write lands), so what it wrote is not later taken for
+  // this pod's own change. The head ids stay the old ones, so the next pass
+  // runs again (Codex review).
+  const progress: MirrorBase["files"] = { ...synced };
+  let finished = false;
+  let touched = false;
+  let blocked = false; // a head file could not be put in place: not counted as synced
+  try {
+  let ownChanges = false;
+  let wrote = 0;
+  // A file here that differs from what the last sync brought is this pod's
+  // own: one the sync never brought (or the first sync of a folder that
+  // already had files) counts as made here — kept, never overwritten.
+  const mine = (p: string, f: FolderFile) => {
+    const s = synced[p];
+    return !s || f.sha !== s.sha || f.mode !== s.mode;
+  };
+  for (const [p, f] of scan.files) {
+    if (p in target) continue;
+    const s = synced[p];
+    if (s && s.sha === f.sha && s.mode === f.mode) {
+      if (busy()) return "skipped";
+      // Still untouched right now (a tool may have written it since the scan,
+      // and such a write queues nothing): only then removed (Codex review).
+      if (throughLink(dir, p) || (fs.existsSync(f.abs) && fs.lstatSync(f.abs).isSymbolicLink())) {
+        blocked = true; // a link appeared on the way since the scan: never followed (Codex review)
+        next[p] = s;
+        continue;
+      }
+      if (fs.existsSync(f.abs) && (sha256Hex(fs.readFileSync(f.abs)) !== f.sha || modeOfFile(f.abs) !== f.mode)) {
+        ownChanges = true;
+        next[p] = s;
+        continue;
+      }
+      fs.rmSync(f.abs, { force: true }); // removed in the heads, untouched here
+      delete progress[p];
+      touched = true;
+      wrote++;
+    } else {
+      // Made or changed here: the reconcile publishes it — against the version
+      // it was synced at, so a delete elsewhere stays a conflict (Codex review).
+      ownChanges = true;
+      if (s) next[p] = s;
+    }
+  }
+  for (const [p, e] of Object.entries(target)) {
+    const f = scan.files.get(p);
+    if (f && f.sha === e.sha && f.mode === e.mode) {
+      next[p] = { sha: e.sha, mode: e.mode };
+      continue;
+    }
+    // Under a folder that is now a link here, a file is out of reach — not
+    // deleted: left, and retried, never published as gone (Codex review).
+    if (!f && throughLink(dir, p)) {
+      blocked = true;
+      if (synced[p]) next[p] = synced[p];
+      continue;
+    }
+    if (scan.left.has(p) || (f ? mine(p, f) : !!synced[p])) {
+      // This pod's own change (or a path the scan could not take): kept, and
+      // its base stays what it was synced at. A path the scan could not take
+      // (a link at the file itself) is retried next pass, like one under a
+      // linked folder (Codex review).
+      ownChanges = true;
+      if (scan.left.has(p)) blocked = true;
+      if (synced[p]) next[p] = synced[p];
+      continue;
+    }
+    if (busy()) return "skipped"; // a write landed meanwhile: next round
+    const bytes = await blobBytes(deps, tenant, e.sha);
+    if (!bytes) throw new Error(`revisions: blob ${e.sha.slice(0, 12)} of ${tenant}/${workspace}/${p} is missing`);
+    const abs = path.join(dir, p);
+    // Never through a link: a folder on the way that is a symlink could lead
+    // outside the workspace (Codex review). Such a path is left as it is.
+    if (throughLink(dir, p)) {
+      blocked = true; // tried again next pass: the heads are not counted as reached
+      if (synced[p]) next[p] = synced[p];
+      continue;
+    }
+    // A folder where the file goes (the heads turned a folder into a file):
+    // its files were removed above if they were the heads'; an empty one goes.
+    if (fs.existsSync(abs) && fs.lstatSync(abs).isDirectory()) {
+      if (fs.readdirSync(abs, { recursive: true }).some((n) => !fs.statSync(path.join(abs, String(n))).isDirectory())) {
+        ownChanges = true;
+        blocked = true;
+        continue;
+      }
+      fs.rmSync(abs, { recursive: true, force: true });
+    }
+    // Again after the download: a writer may have queued a change or touched
+    // this very file while it ran (Codex review). The file must still be what
+    // the scan saw, or it is this pod's change now and is left alone.
+    if (busy()) return "skipped";
+    const nowSha = fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null;
+    if (nowSha !== (f?.sha ?? null) || (f && modeOfFile(abs) !== f.mode)) {
+      ownChanges = true;
+      if (synced[p]) next[p] = synced[p];
+      continue;
+    }
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    const tmp = `${abs}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.mirror-tmp`;
+    fs.writeFileSync(tmp, bytes, { mode: e.mode === MODE_EXEC ? 0o755 : 0o644 });
+    fs.chmodSync(tmp, e.mode === MODE_EXEC ? 0o755 : 0o644);
+    fs.renameSync(tmp, abs);
+    next[p] = { sha: e.sha, mode: e.mode };
+    progress[p] = next[p];
+    touched = true;
+    wrote++;
+  }
+  // A file the heads have that could not be put in place (a link, a folder in
+  // the way) keeps the old head ids, so every pass looks again rather than
+  // answering "unchanged" until the next commit (Codex review).
+  writeMirrorBase(tenant, workspace, { ...(blocked ? { workspaceHead: base?.workspaceHead ?? null, stateHead: base?.stateHead ?? null } : ids), files: next, at: new Date().toISOString() });
+  finished = true;
+  if (ownChanges) requestReconcile(tenant, workspace);
+  if (wrote) notifyWorkspaceChanged(tenant, workspace, "write");
+  return "synced";
+  } finally {
+    if (!finished && touched) writeMirrorBase(tenant, workspace, { workspaceHead: base?.workspaceHead ?? null, stateHead: base?.stateHead ?? null, files: progress, at: new Date().toISOString() });
+  }
+}
+
+/** A file's mode as a manifest holds it. */
+function modeOfFile(abs: string): number {
+  return fs.statSync(abs).mode & 0o111 ? MODE_EXEC : MODE_FILE;
+}
+
+/** Does any folder on the way to `rel` (inside `dir`) exist as a symlink? */
+function throughLink(dir: string, rel: string): boolean {
+  const parts = rel.split("/").slice(0, -1);
+  let at = dir;
+  for (const part of parts) {
+    at = path.join(at, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(at);
+    } catch {
+      return false; // not there yet: made below, as a real folder
+    }
+    if (st.isSymbolicLink()) return true;
+    if (!st.isDirectory()) return false; // a file in the way: removed above or reported
+  }
+  return false;
+}
+
+/** Every workspace with heads, and every copy here whose heads are gone. One
+ *  failure does not stop the rest. */
+export async function syncAllFromHeads(): Promise<{ synced: number; removed: number; failed: number }> {
+  const deps = S.backend;
+  const out = { synced: 0, removed: 0, failed: 0 };
+  if (!deps?.revisions.allHeads || !mirrorOn()) return out;
+  const all = await deps.revisions.allHeads();
+  const seen = new Set(all.map((h) => key(h.tenant, h.workspace)));
+  const todo = [...all.map((h) => ({ tenant: h.tenant, workspace: h.workspace })), ...mirroredWorkspaces().filter((w) => !seen.has(key(w.tenant, w.workspace)))];
+  for (const w of todo) {
+    try {
+      const r = await syncFromHeads(w.tenant, w.workspace);
+      if (r === "synced") out.synced++;
+      else if (r === "removed") out.removed++;
+    } catch (err) {
+      out.failed++;
+      opsError("revisions.mirror_sync_failed", err, { tenant: w.tenant, workspace: w.workspace }, "warn");
+    }
+  }
+  return out;
 }
 
 // ------------------------------------------------------------- reading

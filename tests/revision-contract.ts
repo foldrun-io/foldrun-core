@@ -137,6 +137,19 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
     assert.equal((await revisions.head(ws))?.seq, 1);
   });
 
+  t("allHeads: every workspace with a head, each with its two head ids (FOL-126, revisions.mirror)", async ({ revisions }) => {
+    if (!revisions.allHeads) return; // optional: a store without it has no mirror
+    const a = fresh();
+    const b = fresh();
+    const ra = (await revisions.commit(a, { base: null, authored: "a".repeat(64), state: "b".repeat(64), opId: op(), digest: "d", by: "u", message: "one" })) as { revision: Revision };
+    const rs = (await revisions.commit({ ...a, scope: "state" }, { base: null, authored: "a".repeat(64), state: "c".repeat(64), opId: op(), digest: "d", by: "u", message: "s" })) as { revision: Revision };
+    const rb = (await revisions.commit(b, { base: null, authored: "d".repeat(64), state: "b".repeat(64), opId: op(), digest: "d", by: "u", message: "one" })) as { revision: Revision };
+    const all = await revisions.allHeads();
+    const of = (w: { tenant: string; workspace: string }) => all.find((h) => h.tenant === w.tenant && h.workspace === w.workspace);
+    assert.deepEqual(of(a), { tenant: a.tenant, workspace: a.workspace, workspaceHead: ra.revision.id, stateHead: rs.revision.id });
+    assert.deepEqual(of(b), { tenant: b.tenant, workspace: b.workspace, workspaceHead: rb.revision.id, stateHead: null });
+  });
+
   t("commit: the same op id twice is a duplicate of the first, never a second revision", async ({ revisions }) => {
     const ws = fresh();
     const id = op();
