@@ -335,3 +335,61 @@ test("a blob whose bytes do not hash to its name is refused: never written into 
   assert.equal(r.failed, 1);
   assert.notEqual(read("memory/notes.md"), "tampered\n");
 });
+
+test("a mirrored pod keeps no local history: the store is the history, the account shelf's included (FOL-126)", async () => {
+  const { writeLibraryFile, deleteLibraryPath } = await import("../src/library.ts");
+  const { accountDir } = await import("../src/store.ts");
+  const { listRevisions, readRevision, snapshotAt, ensureBaseline } = await import("../src/history.ts");
+  fs.writeFileSync(path.join(accountDir(T), "AGENTS.md"), "---\nname: acme\n---\n");
+  writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
+  writeLibraryFile(T, "skills", "s/SKILL.md", "---\nname: s\ndescription: d\n---\nv1\n", { by: "user:a" });
+  await flushRevisions();
+  writeLibraryFile(T, "skills", "s/SKILL.md", "---\nname: s\ndescription: d\n---\nv2\n", { by: "user:a", message: "second" });
+  await flushRevisions();
+  const local = fs.readdirSync(podA, { recursive: true }).map(String).filter((n) => n.split(path.sep).includes(".history"));
+  assert.deepEqual(local, [], "nothing written to this pod's own history");
+  assert.equal(await ensureBaseline(T, "brand-new"), null, "no local baseline either");
+
+  const ws = await listRevisions(T, W);
+  assert.ok(ws.some((r) => r.paths.includes("memory/notes.md")), "the workspace's history is the store's");
+
+  const shelf = await listRevisions(T, "@library");
+  assert.ok(shelf.length >= 2);
+  for (const r of shelf) {
+    assert.ok(r.paths.length > 0);
+    assert.ok(r.paths.every((p) => p.startsWith("skills/")), `shelf paths, not the account's: ${r.paths}`);
+  }
+  const forPath = await listRevisions(T, "@library", { forPath: "skills/s/SKILL.md" });
+  assert.equal(forPath[0].message, "second");
+  const detail = await readRevision(T, "@library", forPath[0].id);
+  assert.deepEqual(detail?.files.map((f) => [f.path, f.after]), [["skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\nv2\n"]]);
+  const snap = await snapshotAt(T, "@library", forPath[1].id);
+  assert.deepEqual(snap?.map((f) => f.path), ["skills/s/SKILL.md"], "AGENTS.md is not on the shelf");
+  assert.match(snap![0].content, /v1/);
+
+  deleteLibraryPath(T, "skills", "s", { by: "user:a" });
+  await flushRevisions();
+  assert.match((await listRevisions(T, "@library", { limit: 1 }))[0].message, /deleted skills\/s/);
+});
+
+test("the shelf's newest revisions changing only the account AGENTS.md do not hide older shelf history (Codex review)", async () => {
+  const { writeLibraryFile } = await import("../src/library.ts");
+  const { accountDir } = await import("../src/store.ts");
+  const { listRevisions } = await import("../src/history.ts");
+  writeLibraryFile(T, "skills", "s/SKILL.md", "---\nname: s\ndescription: d\n---\nv1\n", { by: "user:a", message: "the skill" });
+  await flushRevisions();
+  for (const n of [1, 2, 3]) {
+    fs.writeFileSync(path.join(accountDir(T), "AGENTS.md"), `---\nname: acme\n---\nrules ${n}\n`);
+    assert.notEqual(await reconcileWorkspace(T, "@library"), null);
+  }
+  const [newest] = await listRevisions(T, "@library", { limit: 1 });
+  assert.equal(newest?.message, "the skill");
+});
+
+test("store registered but not serving reads: the pod keeps its local history (Codex review)", async () => {
+  const deps: Deps = { blobs: bounded(fsBlobStore(path.join(shared, ".objects")), { backoffMs: 1 }), revisions: localRevisionStore(path.join(shared, ".revisions")) };
+  setRevisionBackend(deps, { journal: () => true, read: () => false });
+  writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
+  await flushRevisions();
+  assert.ok(fs.existsSync(path.join(podA, T, ".history")) || fs.readdirSync(podA, { recursive: true }).map(String).some((n) => n.includes(".history")));
+});

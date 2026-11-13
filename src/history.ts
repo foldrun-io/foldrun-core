@@ -39,6 +39,7 @@ import { processState } from "./process-state.ts";
 import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
+import { mirrorOn } from "./mirror-base.ts";
 
 /**
  * The current tree of a scope, so the first commit can be a full import.
@@ -202,6 +203,23 @@ export function recordRevision(
 ): Revision | null {
   const changed = files.filter((f) => f.before !== f.after);
   if (changed.length === 0) return null;
+
+  // A pod whose folders are a copy of the heads (revisions.mirror): the
+  // revisions store is the history, and this disk is a cache that goes with
+  // the pod. A local record and snapshot per save only filled it (FOL-126,
+  // 13 Nov 2026) — nothing reads one that is newer than the store's rows.
+  if (mirrorOn() && storeServes()) {
+    if (meta.commit) assertCommitId(meta.commit);
+    const at = new Date().toISOString();
+    const by = meta.by ?? "system";
+    const message = meta.message ?? describe(changed);
+    try {
+      REG.journal!(tenant, scope, changed, { by, message, at });
+    } catch {
+      // the revision store is not allowed to break a save; workspace-revisions logs and retries
+    }
+    return { id: meta.id ?? newRevisionId(), at, by, message, commit: meta.commit ?? null, files: changed.map((f) => ({ path: f.path, before: clip(f.before), after: clip(f.after) })) };
+  }
 
   const dir = historyDir(tenant, scope);
   fs.mkdirSync(dir, { recursive: true });
@@ -559,7 +577,7 @@ export function latestRevisionIdLocal(tenant: string, scope: string): string | n
 // install with the journal off) or a workspace has no revisions yet, the
 // local `.history/` answers, exactly as before; where both exist the list is
 // the revisions followed by the older local entries, so turning revisions on
-// loses no history. The account shelf ("@library") is never in revisions.
+// loses no history. The account shelf ("@library") is read through viewFor.
 
 export interface RevisionView {
   /** Newest first, or null when revisions do not serve this scope. Every page
@@ -571,9 +589,61 @@ export interface RevisionView {
   /** One revision by id, looked up rather than listed (paths []); null when
    *  the store has none. Optional: a view without it is asked through `list`. */
   get?(tenant: string, scope: string, id: string): Promise<RevisionSummary | null>;
+  /** Whether the store serves history right now (its journal and reads on).
+   *  A view without it is taken as serving. */
+  on?(): boolean;
+}
+/** The store is the history: registered, journalling and read (Codex review). */
+function storeServes(): boolean {
+  if (!REG.view || !REG.journal) return false;
+  try {
+    return REG.view.on ? REG.view.on() === true : true;
+  } catch {
+    return false;
+  }
 }
 export function registerRevisionView(v: RevisionView | null) {
   REG.view = v;
+}
+
+// The account shelf ("@library") in the store: its folder is the account's,
+// so its revisions name `library/<kind>/<file>` and the account's AGENTS.md
+// beside them; its own history names `<kind>/<file>` (library.ts). Read
+// through this, the shelf's history is the store's like any workspace's
+// (FOL-126, 13 Nov 2026 — until then it was each pod's own .history, which
+// a pod on its own disk does not keep). AGENTS.md is not on the shelf: it is
+// left out, and a revision that changed only it is not a shelf revision.
+const SHELF = "library/";
+const onShelf = (p: string) => p.startsWith(SHELF);
+const shelfPath = (p: string) => p.slice(SHELF.length);
+function viewFor(scope: string): RevisionView | null {
+  const v = REG.view;
+  if (!v || scope !== "@library") return v;
+  return {
+    async list(tenant, s, opts) {
+      const want = opts.limit ?? 200;
+      const withPaths = opts.paths !== false || !!opts.forPath;
+      // A revision that changed only the account's AGENTS.md is dropped
+      // after the store's limit was spent on it: ask for more until `want`
+      // shelf revisions are found or history ends (Codex review).
+      for (let ask = want; ; ask = Math.min(ask * 4, Number.MAX_SAFE_INTEGER)) {
+        const rows = await v.list(tenant, s, { ...opts, limit: ask, ...(opts.forPath ? { forPath: SHELF + opts.forPath } : {}) });
+        if (!rows) return null;
+        const mine = rows.map((r) => ({ ...r, paths: r.paths.filter(onShelf).map(shelfPath) })).filter((r) => !withPaths || r.paths.length > 0);
+        if (mine.length >= want || rows.length < ask || !Number.isFinite(want) || ask >= Number.MAX_SAFE_INTEGER) return mine.slice(0, want);
+      }
+    },
+    async read(tenant, s, id, forPath) {
+      const r = await v.read(tenant, s, id, forPath === undefined ? undefined : SHELF + forPath);
+      return r && { ...r, files: r.files.filter((f) => onShelf(f.path)).map((f) => ({ ...f, path: shelfPath(f.path) })) };
+    },
+    async snapshot(tenant, s, id) {
+      const files = await v.snapshot(tenant, s, id);
+      return files && files.filter((f) => onShelf(f.path)).map((f) => ({ ...f, path: shelfPath(f.path) }));
+    },
+    ...(v.get ? { get: (tenant: string, s: string, id: string) => v.get!(tenant, s, id) } : {}),
+    ...(v.on ? { on: () => v.on!() } : {}),
+  };
 }
 
 /** Revisions first, then the local entries older than the oldest of them.
@@ -587,7 +657,8 @@ async function combinedRows(
   const limit = opts.limit ?? 200;
   // The whole of `limit`, every page of it: the store's first page is not all
   // of history (FOL-152).
-  const mine = REG.view && scope !== "@library" ? await REG.view.list(tenant, scope, { ...opts, limit }) : null;
+  const view = viewFor(scope);
+  const mine = view ? await view.list(tenant, scope, { ...opts, limit }) : null;
   let local = listRevisionsLocal(tenant, scope, { forPath: opts.forPath, limit: Infinity });
   if (restorableOnly) {
     const have = snapshotIds(tenant, scope);
@@ -618,24 +689,27 @@ export async function listRevisionsRestorable(tenant: string, scope: string, opt
 
 export async function readRevision(tenant: string, scope: string, id: string, forPath?: string): Promise<Revision | null> {
   assertSafeName(id, "revision id");
-  const fromStore = REG.view && scope !== "@library" ? await REG.view.read(tenant, scope, id, forPath) : null;
+  const view = viewFor(scope);
+  const fromStore = view ? await view.read(tenant, scope, id, forPath) : null;
   return fromStore ?? readRevisionLocal(tenant, scope, id, forPath);
 }
 
 export async function snapshotAt(tenant: string, scope: string, id: string): Promise<{ path: string; content: string }[] | null> {
   assertSafeName(id, "revision id");
-  const fromStore = REG.view && scope !== "@library" ? await REG.view.snapshot(tenant, scope, id) : null;
+  const view = viewFor(scope);
+  const fromStore = view ? await view.snapshot(tenant, scope, id) : null;
   return fromStore ?? snapshotAtLocal(tenant, scope, id);
 }
 
 export async function hasSnapshot(tenant: string, scope: string, id: string): Promise<boolean> {
   assertSafeName(id, "revision id");
   if (hasSnapshotLocal(tenant, scope, id)) return true;
-  if (!REG.view || scope === "@library") return false;
+  const view = viewFor(scope);
+  if (!view) return false;
   // Looked up by id: a listing stops at a page, and a revision older than it
   // was "not restorable" until 9 Nov 2026 (FOL-152).
-  if (REG.view.get) return (await REG.view.get(tenant, scope, id)) !== null;
-  return Boolean((await REG.view.list(tenant, scope, { limit: Infinity, paths: false }))?.some((r) => r.id === id));
+  if (view.get) return (await view.get(tenant, scope, id)) !== null;
+  return Boolean((await view.list(tenant, scope, { limit: Infinity, paths: false }))?.some((r) => r.id === id));
 }
 
 export async function headRevision(tenant: string, scope: string): Promise<RevisionSummary | null> {
@@ -647,8 +721,9 @@ export async function resolveRevision(tenant: string, scope: string, to: string,
   // An id in the store is one lookup; anything else (a date, a local id, a
   // commit) is answered from ALL of history — every page of the store, without
   // the changed paths, then the local entries.
-  if ("id" in want && REG.view?.get && scope !== "@library") {
-    const hit = await REG.view.get(tenant, scope, want.id);
+  const view = viewFor(scope);
+  if ("id" in want && view?.get) {
+    const hit = await view.get(tenant, scope, want.id);
     if (hit) return { id: hit.id, at: hit.at, by: hit.by, message: hit.message };
   }
   return pick(await combined(tenant, scope, { limit: Infinity, paths: false }, true), want);
@@ -667,6 +742,9 @@ export async function latestRevisionId(tenant: string, scope: string): Promise<s
 /** A scope with no revision at all gets a local baseline, as before. */
 export async function ensureBaseline(tenant: string, scope: string, by = "foldrun"): Promise<string | null> {
   const head = await headRevision(tenant, scope);
+  // A mirrored pod's history is the store's: a baseline on its own disk
+  // would be gone with the pod (FOL-126).
+  if (!head && mirrorOn() && storeServes()) return null;
   return head ? head.id : ensureBaselineLocal(tenant, scope, by);
 }
 

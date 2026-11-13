@@ -1922,6 +1922,9 @@ const view: RevisionView = {
   read: (t, w, id, p) => guarded("read", t, w, () => readRevisionDetail(t, w, id, p)),
   snapshot: (t, w, id) => guarded("snapshot", t, w, () => snapshotFiles(t, w, id)),
   get: (t, w, id) => guarded("get", t, w, () => revisionSummary(t, w, id)),
+  // guarded() answers null whenever the journal is off; reads too, for a
+  // pod that keeps no history of its own (history.ts storeServes).
+  on: () => revisionReadsOn(),
 };
 
 // ------------------------------------------------------------- reads through heads
