@@ -52,7 +52,9 @@ export class CapturedCallUnavailable extends Error {
 
 const portFor = (tenant: string, workspace: string) => {
   const p = records(tenant, workspace);
-  return p?.async?.stepPut && p.async.stepGet ? p : null;
+  // stepRuns too: without it a deleted workspace's calls could never be
+  // found again to release their pins (Codex review, 13 Nov 2026).
+  return p?.async?.stepPut && p.async.stepGet && p.async.stepRuns ? p : null;
 };
 const switchedOn = (p: { callsStoreOn?(): boolean }): boolean => {
   try {

@@ -32,6 +32,7 @@ import { processState } from "./process-state.ts";
 import { dataRoot, singleWorkspace, singleAccountRoot, entriesNoFollow } from "./paths.ts";
 import { platform } from "./platform.ts";
 import { records } from "./records.ts";
+import { docRows, quietly } from "./workspace-docs.ts";
 import { toLF, asRaw } from "./eol.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
@@ -4066,6 +4067,9 @@ export interface RunRecord {
 // runs/<run>/). The runner writes them, secrets already masked.
 
 const SAFE_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+/** Captured calls kept as rows for one day on dev (13 Nov 2026); read and
+ *  dropped with their run, never written again. */
+const LEGACY_CALL_KIND = "call";
 
 function capturedCallFile(workspaceRoot: string, runId: string, callId: string): string | null {
   if (!SAFE_ID.test(runId) || !SAFE_ID.test(callId) || callId.startsWith(".") || runId.startsWith(".")) return null;
@@ -4095,6 +4099,10 @@ export function writeCapturedCall(workspaceRoot: string, runId: string, part: Ca
 export function readCapturedCall(tenant: string, workspace: string, runId: string, callId: string): CapturedCall | null {
   const file = capturedCallFile(workspaceDir(tenant, workspace), runId, callId);
   if (!file) return null;
+  // A call kept as a workspace_docs row (records.docs_store, 13 Nov 2026,
+  // before calls went to the blob store): still read until its run goes.
+  const legacy = quietly(() => docRows(tenant, workspace)?.get(tenant, workspace, LEGACY_CALL_KIND, `${runId}/${callId}`), undefined) as CapturedCall | undefined;
+  if (legacy) return legacy;
   try {
     return JSON.parse(fs.readFileSync(file, "utf8")) as CapturedCall;
   } catch {
@@ -4139,6 +4147,7 @@ export function deleteRun(tenant: string, workspace: string, runId: string, opts
   // and finishes — the other order left the content with nothing pointing
   // at it (Codex review, FOL-124).
   fs.rmSync(dir, { recursive: true, force: true });
+  if (SAFE_ID.test(runId)) quietly(() => docRows(tenant, workspace)?.dropPrefix(tenant, workspace, LEGACY_CALL_KIND, `${runId}/`), undefined);
   if (port) port.runDelete(tenant, workspace, runId);
   else {
     fs.rmSync(file, { force: true });

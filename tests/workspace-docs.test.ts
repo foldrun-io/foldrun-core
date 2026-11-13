@@ -137,3 +137,17 @@ test("a deploy's eval lock taken in one place holds after the switch moves (Code
   on = false;
   assert.equal((await evaluateDeployed(T, ws, "c3")).skipped, "evals already running for an earlier deploy");
 });
+
+test("a captured call kept as a row before calls went to the blob store still reads, and goes with its run (Codex review)", async (t) => {
+  t.after(resetPlatform);
+  const { readCapturedCall, deleteRun } = await import("../src/store.ts");
+  const ws = "legacy-calls";
+  const mem = setup(ws);
+  mem.port.put(T, ws, "call", "run-1/c1", { id: "c1", tool: "web", input: "in", output: "out" });
+  mem.port.put(T, ws, "call", "run-10/c1", { id: "c1", tool: "web", input: "other" });
+  assert.equal(readCapturedCall(T, ws, "run-1", "c1")?.output, "out");
+  fs.mkdirSync(path.join(workspaceDir(T, ws), "runs", "run-1"), { recursive: true });
+  deleteRun(T, ws, "run-1");
+  assert.equal(readCapturedCall(T, ws, "run-1", "c1"), null);
+  assert.equal(readCapturedCall(T, ws, "run-10", "c1")?.input, "other");
+});
