@@ -17,11 +17,15 @@
 // TEMPORARY, remove at cutover (phase 9): a write that fails with an error
 // (store down, database refuses) falls back to the volume file and logs
 // `captured_calls.fallback`. At cutover that branch becomes "the call is not
-// recorded, and the event says so".
+// recorded, and the event says so". Already so on a pod whose data root is its
+// own disk (localDisk()): the volume file would be lost with the pod, so the
+// call is logged `captured_calls.not_recorded` and not written (ops log only;
+// the capture sink has no run to put an event on).
 
 import { records } from "./records.ts";
 import { blobObjectKey, sha256Hex } from "./manifest.ts";
 import { opsError } from "./ops-log.ts";
+import { localDisk } from "./mirror-base.ts";
 import { BlobNotFound, readAll } from "./blob-store.ts";
 import type { Deps } from "./publish.ts";
 import { writeCapturedCall, readCapturedCall, registerRunRemovedHook, type CapturedCall } from "./store.ts";
@@ -94,6 +98,7 @@ const sessions = new WeakMap<object, Session>();
 async function storeCall(ctx: Ctx, call: CapturedCall): Promise<void> {
   const a = active(ctx.tenant, ctx.workspace);
   const fall = (err: unknown) => {
+    if (localDisk()) return opsError("captured_calls.not_recorded", err, { tenant: ctx.tenant, workspace: ctx.workspace, runId: ctx.runId, callId: call.id });
     // TEMPORARY (see the header): the volume copy, so the call is not lost.
     opsError("captured_calls.fallback", err, { tenant: ctx.tenant, workspace: ctx.workspace, runId: ctx.runId, callId: call.id });
     try {

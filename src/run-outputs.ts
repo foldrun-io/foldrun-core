@@ -29,6 +29,9 @@
 // are copied to the volume as before and the failure is logged
 // (`run_outputs.fallback`). A laptop or an install with no backend always
 // uses the volume: it is a local disk there, not the thing being retired.
+// Not on a pod whose data root is its own disk (localDisk(), an emptyDir): the
+// volume goes with the pod, so there a failed publish fails the archive
+// (`run_outputs.publish_failed`) instead of keeping nothing.
 //
 // Reads (`listRunOutputs`, `openRunOutput`) ask the records first and the
 // volume second, per agent, so a run archived either way stays readable
@@ -58,6 +61,7 @@ import {
 } from "./manifest.ts";
 import { BlobMissing, loadManifest, type Deps } from "./publish.ts";
 import { opsError } from "./ops-log.ts";
+import { localDisk } from "./mirror-base.ts";
 import { refusalText } from "./run-output-refusal.ts";
 export { refusalText };
 import { listRunOutputsOnVolume, registerRunRemovedHook, runOutputPathOnVolume, type RefusedOutput, type RunOutputFile } from "./store.ts";
@@ -416,6 +420,11 @@ export async function archiveRunOutputs(
     const r = await publishRunOutputs(b, tenant, workspace, runId, agent, dir);
     return { where: "store", refused: r.refused };
   } catch (err) {
+    // On a pod's own disk the volume copy would be lost with the pod: fail.
+    if (localDisk()) {
+      opsError("run_outputs.publish_failed", err, { tenant, workspace, run: runId, agent });
+      throw err;
+    }
     // TEMPORARY (EFS cutover, FOL-126 phase 9): an error publishing is not a
     // reason to lose the run's outputs while the volume still exists. Remove
     // this branch with the volume; then a failed publish fails the archive.
