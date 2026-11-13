@@ -13,6 +13,26 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [22.1.0] — 2026-11-13
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `DiscoveredSkill` from `@foldrun/core`
+
+### New in the public API
+
+- `gallerySkillFile` from `@foldrun/core`
+- `toolSites` from `@foldrun/core/network`
+- `toolSiteProblems` from `@foldrun/core/network`
+
+- feat(revisions): each pod's workspace folders as a copy of the heads (FOL-126) ([1239857](https://github.com/foldrun-io/foldrun-core/commit/1239857))
+
+### feat
+
+- a tool's network: field, and gallery skills named by skills: ([5be1bc5](https://github.com/foldrun-io/foldrun-core/commit/5be1bc5))
+
 ## [22.0.0] — 2026-11-13
 
 ### Breaking changes
