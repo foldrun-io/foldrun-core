@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [21.2.0] — 2026-11-13
+
+### New in the public API
+
+- `vaultFileScopes` from `@foldrun/core`
+- `vaultRecordOpens` from `@foldrun/core`
+
+- feat(secrets): vaultFileScopes and vaultRecordOpens, for a fleet check of the vault (FOL-126) ([1a98e26](https://github.com/foldrun-io/foldrun-core/commit/1a98e26))
+- test(secrets): vault contract — OAuth replace, lost races, refusing store, canary (FOL-126) ([a1185ea](https://github.com/foldrun-io/foldrun-core/commit/a1185ea))
+- fix(secrets): a change a store runs again reports about the retry, not the first try (FOL-126) ([0a65d8c](https://github.com/foldrun-io/foldrun-core/commit/0a65d8c))
+
 ## [21.1.0] — 2026-11-12
 
 ### Widened in the public API
