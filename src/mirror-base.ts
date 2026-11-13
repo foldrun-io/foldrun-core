@@ -84,6 +84,34 @@ export function writeMirrorBase(tenant: string, workspace: string, base: MirrorB
 export function dropMirrorBase(tenant: string, workspace: string): void {
   const f = mirrorBaseFile(tenant, workspace);
   if (f) fs.rmSync(f, { force: true });
+  dropHeadsSeen(tenant, workspace);
+}
+
+// "This pod has seen heads for the workspace": a marker beside the base, kept
+// whether or not the mirror is on (own disk, mirror off, has no base). A folder
+// here whose heads are gone and which carries it is a stale copy of a workspace
+// deleted elsewhere, not a new workspace: its first revision is not published.
+// A workspace made on this pod has no marker until its first revision lands.
+const seenFile = (tenant: string, workspace: string): string | null => {
+  const f = mirrorBaseFile(tenant, workspace);
+  return f ? f.replace(/\.json$/, ".seen") : null;
+};
+
+export function headsSeen(tenant: string, workspace: string): boolean {
+  const f = seenFile(tenant, workspace);
+  return !!f && fs.existsSync(f);
+}
+
+export function noteHeadsSeen(tenant: string, workspace: string): void {
+  const f = seenFile(tenant, workspace);
+  if (!f || fs.existsSync(f)) return;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, "");
+}
+
+export function dropHeadsSeen(tenant: string, workspace: string): void {
+  const f = seenFile(tenant, workspace);
+  if (f) fs.rmSync(f, { force: true });
 }
 
 /** Every workspace this pod holds a copy of, by its base files. */
