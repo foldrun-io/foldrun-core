@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.0.1] — 2026-11-13
+
+- chore(comments): the ops log's destination is CloudWatch Logs, not Grafana Cloud ([e8f2c6e](https://github.com/foldrun-io/foldrun-core/commit/e8f2c6e))
+
 ## [23.0.0] — 2026-11-13
 
 ### Breaking changes
