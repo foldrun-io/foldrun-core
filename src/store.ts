@@ -369,6 +369,10 @@ export function isPlatformPath(rel: string): boolean {
   // are the vault, as far as anything outside the platform is concerned.
   if (/(^|\/)secrets\.json\./.test(norm)) return true;
   if (norm === "trigger-log.jsonl.tmp") return true;
+  // The revision mirror's in-flight file (`<name>.<pid>.<hex>.mirror-tmp`,
+  // workspace-revisions.ts): a crash between its write and its rename leaves
+  // it, and the next scan would publish half a file as the author's.
+  if (norm.endsWith(".mirror-tmp")) return true;
   if (ENGINE_HOME_RE.test(norm)) return true;
   return norm === "runs" || norm.startsWith("runs/") || norm === ".foldrun" || norm.startsWith(".foldrun/");
 }
@@ -2813,7 +2817,7 @@ export function accountFileSealed(rel: string): string | null {
  *  honesty's clothes. `accountFileSealed` still refuses these if a path is
  *  constructed directly — the listing hides them, the reader guards them. */
 const ACCOUNT_BOOKKEEPING =
-  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json(\.[^/]+)?$/;
+  /^(billed\/|once\/|topups\/|ledger\.jsonl$|oauth-clients\.json$|billing\.json$|oauth-connections\.json$|secret-health\.json$|[^/]+\.json\.imported-[\d-]+$)|(^|\/)runs\/|(^|\/)secrets\.json(\.[^/]+)?$|\.mirror-tmp$/;
 
 /**
  * The account directory as it actually is on disk.

@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { writeWorkspaceFile, deleteWorkspacePath, workspaceDir } from "../src/store.ts";
+import { writeWorkspaceFile, deleteWorkspacePath, workspaceDir, listWorkspaceFiles, listAccountFiles, accountDir, isPlatformPath } from "../src/store.ts";
 import { fsBlobStore, bounded } from "../src/blob-store.ts";
 import { localRevisionStore } from "../src/revision-store.ts";
 import {
@@ -412,4 +412,24 @@ test("read-your-writes: one account synced on demand — its new workspace here,
   assert.equal(fs.existsSync(workspaceDir(T, W)), false, "deleted on A, gone here before any poll");
   setMirrorGate(() => false);
   assert.deepEqual(await syncTenantFromHeads(T), { synced: 0, removed: 0, failed: 0 }, "mirror off: nothing");
+});
+
+test("a mirror's temp file left by a crash is never published or listed as a user file (FOL-126)", async () => {
+  writeWorkspaceFile(T, W, "memory/notes.md", "one\n", { by: "user:a" });
+  await flushRevisions();
+  const tmp = "memory/x.md.123.abcd1234.mirror-tmp";
+  fs.writeFileSync(file(tmp), "half a file\n");
+  assert.equal(isPlatformPath(tmp), true);
+  assert.equal(isPlatformPath("memory/x.md"), false, "a real file beside it is still a user file");
+  assert.equal(isPlatformPath("memory/mirror-tmp.md"), false);
+  await reconcileWorkspace(T, W);
+  assert.equal(await head(tmp), null, "not published");
+  assert.equal(await head("memory/notes.md"), "one\n", "normal files unaffected");
+  assert.ok(!listWorkspaceFiles(T, W).includes(tmp), "not listed");
+  assert.ok(listWorkspaceFiles(T, W).includes("memory/notes.md"));
+  fs.mkdirSync(accountDir(T), { recursive: true });
+  fs.mkdirSync(path.join(accountDir(T), "library"), { recursive: true });
+  fs.writeFileSync(path.join(accountDir(T), "library", "a.md.9.deadbeef.mirror-tmp"), "x");
+  fs.writeFileSync(path.join(accountDir(T), "library", "a.md"), "y");
+  assert.deepEqual(listAccountFiles(T).filter((f) => f.startsWith("library/")), ["library/a.md"], "the account shelf's listing too");
 });
