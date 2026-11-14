@@ -193,6 +193,12 @@ test("file store keys: a name accepted by upload is read, listed and deleted by 
   const diskOk = (h: string) => {
     try {
       const f = path.join(probe, ...h.replaceAll("\\", "/").split("/"));
+      // A name that climbs out of the probe folder is never tried on the
+      // disk: the probe itself wrote `flows/`, `state/` and the rest two
+      // levels up (into /tmp on the CI machine, 14 Nov 2026), and the layout
+      // test then read every temp folder as a workspace. Whether the store
+      // takes such a name is putFile's to say, below.
+      if (!isInside(probe, f) || f === probe) return true;
       fs.mkdirSync(path.dirname(f), { recursive: true });
       fs.writeFileSync(f, "x");
       return true;
@@ -225,6 +231,7 @@ test("file store keys: a name accepted by upload is read, listed and deleted by 
   assert.equal(fs.readFileSync(outside, "utf8"), "TOP SECRET");
   for (const p of new Set(kept)) assert.equal(await deleteFile("acme", "desk", p), true, `delete accepts what upload accepted: ${JSON.stringify(p)}`);
   assert.equal(listStorage("acme", "desk").length, 0);
+  fs.rmSync(probe, { recursive: true, force: true });
 }));
 
 test("file store: a file and a folder can not share a name, or one run's mirror breaks every run of the workspace", withData(async () => {
