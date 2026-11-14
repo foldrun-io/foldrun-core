@@ -117,6 +117,8 @@ export function sideOf(rel: string): Side | null {
  * `a/b` on another.
  */
 export const MAX_PATH_BYTES = 400;
+/** The longest one name (a folder or a file) a filesystem holds. */
+export const MAX_SEGMENT_BYTES = 255;
 /** Files per manifest (authored and state each). A manifest is read and
  *  rewritten whole on every publish; this bounds that cost until manifests
  *  are sharded. 50k files is ~5 MB of canonical JSON. */
@@ -127,6 +129,10 @@ export function assertManifestPath(rel: string, kind?: Manifest["kind"]): string
   if (rel.includes("\\") || rel.startsWith("/") || /^[a-zA-Z]:/.test(rel)) throw new Error(`illegal manifest path: ${rel}`);
   if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) throw new Error(`illegal manifest path: ${rel}`);
   if (/[\u0000-\u001f\u007f]/.test(rel)) throw new Error(`illegal manifest path: ${rel}`);
+  // One name is at most 255 bytes on every disk a manifest is extracted to; a
+  // longer one is a path no machine can create, and the extract of the whole
+  // manifest fails on it.
+  if (rel.split("/").some((s) => Buffer.byteLength(s) > MAX_SEGMENT_BYTES)) throw new Error(`illegal manifest path (a name is over ${MAX_SEGMENT_BYTES} bytes): ${rel.slice(0, 80)}`);
   // NFC only: "é" typed as one character and as e + a combining accent are one
   // name on a Mac and two on Linux. A manifest holds the composed form, so it
   // extracts the same everywhere. (Case is handled per manifest, below.)

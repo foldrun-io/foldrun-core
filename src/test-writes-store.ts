@@ -14,7 +14,7 @@ import { records } from "./records.ts";
 import { revisionBackend } from "./workspace-revisions.ts";
 import { blobObjectKey, sha256Hex } from "./manifest.ts";
 import { readAll } from "./blob-types.ts";
-import { registerRunRemovedHook } from "./store.ts";
+import { registerRunRemovedHook, landsInside } from "./store.ts";
 import { opsError } from "./ops-log.ts";
 import { processState } from "./process-state.ts";
 
@@ -46,7 +46,9 @@ function walk(root: string): { rel: string; abs: string }[] {
   for (const e of fs.readdirSync(root, { recursive: true, withFileTypes: true })) {
     if (!e.isFile()) continue; // links and the rest never leave the worker
     const abs = path.join(e.parentPath, e.name);
-    out.push({ rel: path.relative(root, abs).replaceAll("\\", "/"), abs });
+    // split on the platform's separator, not every backslash: on Linux `a\b` is one
+    // file name, and turning it into a/b made two files one row and a folder of a file.
+    out.push({ rel: path.relative(root, abs).split(path.sep).join("/"), abs });
   }
   return out;
 }
@@ -136,6 +138,15 @@ export async function restoreTestWrites(tenant: string, workspace: string, runId
     if (typeof f?.path !== "string" || refOf(f.path) !== row.ref) continue;
     const abs = path.resolve(dir, f.path);
     if (!abs.startsWith(path.resolve(dir) + path.sep)) continue; // names stay inside the folder
+    // …and a link in the folder is not a way out of it (a row through `state` -> /elsewhere).
+    if (!landsInside(dir, abs)) continue;
+    // A name a later step made a folder (or the other way round): the old row is
+    // stale, not a missing write — skipped, rather than failing every step after.
+    try {
+      if (fs.statSync(abs).isDirectory()) continue;
+    } catch {
+      /* not there */
+    }
     const t = new Date(f.mtimeMs);
     const known = knownOf(dir);
     if (fs.existsSync(abs)) {
@@ -154,7 +165,12 @@ export async function restoreTestWrites(tenant: string, workspace: string, runId
     }
     const bytes = await readAll(deps.blobs, blobObjectKey(tenant, f.sha));
     if (sha256Hex(bytes) !== f.sha) throw new Error("a diverted file's object does not hash to its name — refused");
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    try {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST" || (err as NodeJS.ErrnoException).code === "ENOTDIR") continue; // an ancestor is a file now
+      throw err;
+    }
     fs.writeFileSync(abs, bytes);
     fs.utimesSync(abs, t, t); // a verify that asks whether a file is fresh answers for the step that wrote it
     known.set(f.path, f.sha);
