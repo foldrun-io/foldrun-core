@@ -2764,12 +2764,25 @@ export function isEditablePath(rel: string): boolean {
   }
 }
 
+/** One name holds 255 bytes on a disk; a longer one failed in the filesystem call, as a 500. */
+function assertNameLengths(norm: string, rel: string) {
+  if (norm.split("/").some((s) => Buffer.byteLength(s) > 255)) throw new Error(`illegal path (a name is over 255 bytes): ${rel.slice(0, 80)}`);
+}
+
 export function assertEditablePath(rel: string) {
+  // A NUL or other control character passed every check below and only failed
+  // deep in the filesystem calls (a 500 from PUT /source, with the real cause in the log).
+  if (/[\u0000-\u001f\u007f]/.test(rel)) throw new Error(`illegal path: ${rel.replace(/[\u0000-\u001f\u007f]/g, "?")}`);
   const norm = path.normalize(rel);
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
+  assertNameLengths(norm, rel);
   assertCanonicalCase(norm);
   if (norm === "project.md" || norm === "AGENTS.md") return norm;
   if (norm.includes("outputs/")) throw new Error(`not an editable path: ${rel}`);
+  // What the listing and a deploy leave out (runs/, .results/ — generated) the
+  // writer refuses too: knowledge/runs/x.md could be saved, was never shown,
+  // and an agent still read it.
+  if (/(^|\/)(runs|\.results)\//.test(norm.replaceAll("\\", "/"))) throw new Error(`not an editable path: ${rel}`);
   if (/scripts\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
   if (/^agents\/[^/]+\/skills\/[^/]+\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
   if (/^(skills|memory|knowledge|tools|state)\//.test(norm) && SCRIPT_EXT.test(norm)) return norm;
@@ -2943,7 +2956,7 @@ function realLanding(full: string, followLast = true): string | null {
  *  path as written; a link planted inside the workspace — `knowledge/x.md` →
  *  /etc/passwd, or a folder → / — passed them, and reads, writes and the run
  *  archive followed it out. */
-function landsInside(dir: string, full: string, followLast = true): boolean {
+export function landsInside(dir: string, full: string, followLast = true): boolean {
   // Canonical the same way as the path: a workspace not made yet under a
   // linked ancestor (macOS /tmp → /private/tmp) is its nearest real
   // ancestor plus the rest, or a first write into it would read as leaving.
@@ -2952,7 +2965,7 @@ function landsInside(dir: string, full: string, followLast = true): boolean {
   return at !== null && (at === root || at.startsWith(root + path.sep));
 }
 
-function assertLandsInside(dir: string, full: string, rel: string, followLast = true) {
+export function assertLandsInside(dir: string, full: string, rel: string, followLast = true) {
   if (!landsInside(dir, full, followLast)) throw new Error(`illegal path: ${rel} leads out of the workspace through a symlink`);
 }
 
@@ -3166,6 +3179,7 @@ function deletionsUnder(dir: string, norm: string): RevisionFile[] {
 export function assertDeletable(tenant: string, workspace: string, rel: string): { norm: string; folder: boolean } {
   const norm = path.normalize(rel).replaceAll("\\", "/");
   if (norm.startsWith("..") || path.isAbsolute(norm)) throw new Error(`illegal path: ${rel}`);
+  assertNameLengths(norm, rel);
   const dir = workspaceDir(tenant, workspace);
   // The two files a workspace cannot exist without. assertEditablePath lets
   // them through — they are editable — but editable and deletable are

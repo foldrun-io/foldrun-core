@@ -28,6 +28,8 @@ import {
   listWorkspaces,
   listAgents,
   workspaceDir,
+  assertLandsInside,
+  landsInside,
   deleteWorkspacePath,
   assertDeletable,
   type ToolDef,
@@ -126,6 +128,8 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
 
   const describe = (file: string, fallback: string) => {
     try {
+      // a link out of the shelf is not read for its description
+      if (!landsInside(dir, file)) return { name: fallback, description: "" };
       const { data } = matter(fs.readFileSync(file, "utf8"));
       return { name: data.name ?? fallback, description: data.description ?? "" };
     } catch {
@@ -205,7 +209,7 @@ export function listLibrary(tenant: string, kind: LibraryKind): LibraryEntry[] {
   for (const entry of fs.readdirSync(dir, { recursive: true })) {
     const rel = String(entry);
     const full = path.join(dir, rel);
-    if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel)) continue;
+    if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel) || !landsInside(dir, full)) continue;
     // The memory index is generated, so it isn't an entry in its own list.
     if ((kind === "memory" || kind === "knowledge") &&
         ["index.md", "log.md"].includes(rel)) continue;
@@ -236,6 +240,9 @@ function toolShape(file: string, rel: string): { transport?: LibraryEntry["trans
 export function readLibraryFile(tenant: string, kind: LibraryKind, rel: string): string {
   const p = path.join(libraryDir(tenant, kind), assertLibraryPath(kind, rel));
   if (!fs.existsSync(p)) throw new Error(`not found: ${rel}`);
+  // The same rule as a workspace file (FOL-83): a link inside the shelf that
+  // leads out of it is not read through.
+  assertLandsInside(libraryDir(tenant, kind), p, rel);
   return fs.readFileSync(p, "utf8");
 }
 
@@ -261,6 +268,9 @@ export function writeLibraryFile(
   const norm = assertLibraryPath(kind, rel);
   if (norm.endsWith(".md")) matter(content); // reject broken frontmatter
   const p = path.join(libraryDir(tenant, kind), norm);
+  // Before anything is created: mkdir below would otherwise make folders
+  // through a linked directory too.
+  assertLandsInside(libraryDir(tenant, kind), p, rel);
   const existed = fs.existsSync(p);
   const before = existed ? fs.readFileSync(p, "utf8") : null;
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -288,6 +298,8 @@ export function deleteLibraryPath(
   // tool or skill from every workspace (30 Oct 2026). Name what goes.
   if (norm === "." || norm === "./") throw new Error(`illegal path: ${rel} — name the file or folder to delete, not the whole ${kind} shelf`);
   const target = path.join(libraryDir(tenant, kind), norm);
+  // The link itself may be removed; a linked folder above it may not be walked.
+  assertLandsInside(libraryDir(tenant, kind), target, rel, false);
   const gone: { path: string; before: string | null; after: null }[] = [];
   if (fs.existsSync(target)) {
     const entries = fs.statSync(target).isFile()
@@ -295,7 +307,7 @@ export function deleteLibraryPath(
       : fs.readdirSync(target, { recursive: true }).map((e) => path.join(target, String(e)));
     for (const e of entries) {
       try {
-        if (fs.statSync(e).isFile()) {
+        if (fs.statSync(e).isFile() && landsInside(libraryDir(tenant, kind), e)) {
           gone.push({ path: `${kind}/${path.relative(libraryDir(tenant, kind), e).split(path.sep).join("/")}`, before: fs.readFileSync(e, "utf8"), after: null });
         }
       } catch {
@@ -429,7 +441,7 @@ registerTreeReader((tenant, scope) => {
       const rel = String(entry).split(path.sep).join("/");
       const full = path.join(dir, rel);
       try {
-        if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel)) continue;
+        if (!fs.statSync(full).isFile() || !TEXT_EXT.test(rel) || !landsInside(dir, full)) continue;
         out.push({ path: `${kind}/${rel}`, before: null, after: fs.readFileSync(full, "utf8") });
       } catch {
         // skip

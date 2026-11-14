@@ -527,6 +527,16 @@ export function buildIndex(
   return `${head}# ${title}\n\n${sections.join("\n\n")}${sub}\n`;
 }
 
+/** A generated file that is a link is replaced by a real file, never written
+ *  through: the link's target is not the bundle's to overwrite. */
+function unlinkIfLink(file: string) {
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) fs.unlinkSync(file);
+  } catch {
+    /* not there */
+  }
+}
+
 /**
  * Write index.md for a bundle and for every directory inside it. The spec puts
  * an index at each level, so a nested bundle is navigable without a full walk.
@@ -539,14 +549,18 @@ export function syncIndex(dir: string, title: string, isRoot = false, depth = 0)
     .readdirSync(dir)
     .filter((e) => {
       try {
-        return fs.statSync(path.join(dir, e)).isDirectory();
+        // lstat: a link to a folder is not a section. Following it wrote an
+        // index.md into whatever the link names, outside the bundle.
+        return fs.lstatSync(path.join(dir, e)).isDirectory();
       } catch {
         return false;
       }
     })
     .sort();
 
-  fs.writeFileSync(path.join(dir, "index.md"), buildIndex(here, title, isRoot, children));
+  const indexFile = path.join(dir, "index.md");
+  unlinkIfLink(indexFile);
+  fs.writeFileSync(indexFile, buildIndex(here, title, isRoot, children));
   for (const child of children) {
     syncIndex(path.join(dir, child), child, false, depth + 1);
   }
@@ -706,6 +720,7 @@ export function appendLog(dir: string, file: string, kind: "Creation" | "Update"
   const day = at.toISOString().slice(0, 10);
   const entry = `- **${kind}** [${file.replace(/\.md$/, "")}](${file})`;
   const logFile = path.join(dir, "log.md");
+  unlinkIfLink(logFile);
 
   let body = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "# Log\n";
   if (body.includes(`## ${day}`)) {

@@ -475,7 +475,10 @@ export async function openRunOutput(tenant: string, workspace: string, runId: st
   const rec = (await recordsOf(tenant, workspace, runId)).find((r) => r.agent === agent);
   if (rec && OUT.backend) {
     const m = await loadManifest(readDeps(OUT.backend), tenant, rec.manifest);
-    const e = m.files[rel.normalize("NFC")];
+    // Own names only: `constructor` or `toString` is not an output, and the
+    // inherited function was read as one (a 500 where this answers 404).
+    const name = rel.normalize("NFC");
+    const e = Object.hasOwn(m.files, name) ? m.files[name] : undefined;
     if (!e) return null;
     const key = blobObjectKey(tenant, e.sha);
     const blobs = OUT.backend.blobs;

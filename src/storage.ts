@@ -83,6 +83,16 @@ interface Index {
   files: FileRecord[];
 }
 
+/** A file and a folder can not share a name: `reports` and `reports/q1.csv`
+ *  were both accepted, and the next run's mirror then failed on the second
+ *  (EEXIST/ENOTDIR) — every run of the workspace, until someone deleted one. */
+function assertNoNameClash(files: Pick<FileRecord, "path">[], norm: string): void {
+  for (const f of files) {
+    if (f.path !== norm && norm.startsWith(`${f.path}/`)) throw new Error(`${norm}: "${f.path}" is already stored as a file — a file and a folder can not share a name`);
+    if (f.path !== norm && f.path.startsWith(`${norm}/`)) throw new Error(`${norm}: "${f.path}" is stored under that name as a folder — a file and a folder can not share a name`);
+  }
+}
+
 // ---------- limits ----------
 
 const maxBytes = () => Number(process.env.FOLDRUN_STORAGE_MAX_MB ?? 512) * 1024 * 1024;
@@ -169,6 +179,9 @@ export function assertFilePath(rel: string): string {
   }
   // Control characters survive a normalize and break every header they touch.
   if (/[\u0000-\u001f\u007f]/.test(norm)) throw new Error(`illegal file path: ${rel}`);
+  // The mirror writes this path onto a disk, where one name holds 255 bytes:
+  // a longer one stored fine and then failed the mirror of every run.
+  if (norm.split("/").some((s) => Buffer.byteLength(s) > 255)) throw new Error(`illegal file path (a name is over 255 bytes): ${rel.slice(0, 80)}`);
   return norm;
 }
 
@@ -1105,6 +1118,7 @@ async function putFileQuietly(
   // that counts, this one only saves uploading what will be refused.
   {
     const seen = readIndex(tenant, workspace);
+    assertNoNameClash(seen.files, norm);
     const before = seen.files.find((f) => f.path === norm);
     if (before?.sha !== sha && usedBytes(tenant, workspace) - (before?.size ?? 0) + body.length > quotaBytes()) {
       throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
@@ -1118,6 +1132,7 @@ async function putFileQuietly(
 
   return withFileStoreLock(tenant, workspace, async () => {
     const index = readIndex(tenant, workspace);
+    assertNoNameClash(index.files, norm);
     const previous = index.files.find((f) => f.path === norm);
     if (previous?.sha === sha) return previous; // same bytes, same name: nothing happened
 
@@ -1177,6 +1192,7 @@ export async function registerUpload(
       throw new Error("no object at that key — the upload did not complete");
     }
     const index = readIndex(tenant, workspace);
+    assertNoNameClash(index.files, norm);
     const previous = index.files.find((f) => f.path === norm);
     const record: FileRecord = {
       path: norm,
@@ -1332,6 +1348,7 @@ export async function uploadUrl(
   // the bucket refuses any other (30 Oct 2026). registerUpload checks the
   // real object again; this is what keeps an oversized one from ever landing
   // — an object that is PUT and never registered was otherwise unbounded.
+  assertNoNameClash(readIndex(tenant, workspace).files, norm);
   if (size !== undefined) {
     if (!Number.isSafeInteger(size) || size <= 0) throw new Error("size must be the file's length in bytes, a whole number above 0");
     if (size > maxBytes()) throw new Error(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
