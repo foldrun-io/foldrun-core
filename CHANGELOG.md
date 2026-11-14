@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.1.1] — 2026-11-14
+
+- test(path-safety): the disk probe never writes outside its own folder ([95dd2d0](https://github.com/foldrun-io/foldrun-core/commit/95dd2d0))
+
 ## [23.1.0] — 2026-11-14
 
 ### New in the public API
