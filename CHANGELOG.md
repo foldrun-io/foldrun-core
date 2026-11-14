@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.1.0] — 2026-11-14
+
+### New in the public API
+
+- `landsInside` from `@foldrun/core`
+- `assertLandsInside` from `@foldrun/core`
+
+### fix
+
+- path safety — name clashes, 255-byte names, library/bundle links, proto-named outputs, test-writes (property tests) ([08457d8](https://github.com/foldrun-io/foldrun-core/commit/08457d8))
+
 ## [23.0.4] — 2026-11-13
 
 - fix(revisions): the mirror's .mirror-tmp files are platform files, never published or listed (FOL-126) ([e761dd5](https://github.com/foldrun-io/foldrun-core/commit/e761dd5))
