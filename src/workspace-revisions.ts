@@ -63,7 +63,7 @@ import {
 } from "./manifest.ts";
 import { mirrorOn, localDisk, readMirrorBase, writeMirrorBase, dropMirrorBase, mirroredWorkspaces, headsSeen, noteHeadsSeen, dropHeadsSeen, type MirrorBase } from "./mirror-base.ts";
 import { headsOf, loadManifest, manifestsAt, manifestsOf, publish, restore, requestDigest, stateOpId, BlobMissing, PublishError, type Deps, type Heads, type PublishResult } from "./publish.ts";
-import { OpIdReused, type Revision, type WorkspaceRef } from "./revision-store.ts";
+import { OpIdReused, type HeadIds, type Revision, type WorkspaceRef } from "./revision-store.ts";
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 import type { SweepMarks } from "./blob-sweeper.ts";
 import { setCallsBackend, dropWorkspaceCalls, settleCalls } from "./captured-calls.ts";
@@ -1779,6 +1779,20 @@ function throughLink(dir: string, rel: string): boolean {
   return false;
 }
 
+/** This pod's copy is already at these heads (15 Nov 2026): the ids come
+ *  from the one allHeads query, so the two head reads syncNow would make per
+ *  workspace — 2 x N queries a pass, every 3 s, on every pod — are skipped
+ *  for a workspace nothing changed in. The same test syncNow makes after
+ *  reading them; a copy mid-sync still has its old ids recorded, so it misses
+ *  here and goes through syncFromHeads in turn. */
+function alreadyAt(h: HeadIds): boolean {
+  const base = readMirrorBase(h.tenant, h.workspace);
+  if (!base || base.workspaceHead !== h.workspaceHead || base.stateHead !== h.stateHead) return false;
+  if (!fs.existsSync(folderOf(h.tenant, h.workspace))) return false;
+  noteHeadsSeen(h.tenant, h.workspace);
+  return true;
+}
+
 /** Every workspace with heads, and every copy here whose heads are gone. One
  *  failure does not stop the rest. */
 /**
@@ -1794,7 +1808,7 @@ export async function syncTenantFromHeads(tenant: string): Promise<{ synced: num
   const deps = S.backend;
   const out = { synced: 0, removed: 0, failed: 0 };
   if (!deps?.revisions.allHeads || !mirrorOn()) return out;
-  let mine: { tenant: string; workspace: string }[];
+  let mine: HeadIds[];
   try {
     mine = (await deps.revisions.allHeads()).filter((h) => h.tenant === tenant);
   } catch (err) {
@@ -1804,7 +1818,7 @@ export async function syncTenantFromHeads(tenant: string): Promise<{ synced: num
     return out;
   }
   const seen = new Set(mine.map((h) => h.workspace));
-  const todo = [...mine.map((h) => h.workspace), ...mirroredWorkspaces().filter((w) => w.tenant === tenant && !seen.has(w.workspace)).map((w) => w.workspace)];
+  const todo = [...mine.filter((h) => !alreadyAt(h)).map((h) => h.workspace), ...mirroredWorkspaces().filter((w) => w.tenant === tenant && !seen.has(w.workspace)).map((w) => w.workspace)];
   for (const workspace of todo) {
     try {
       const r = await syncFromHeads(tenant, workspace);
@@ -1827,8 +1841,11 @@ export async function syncAllFromHeads(): Promise<{ synced: number; removed: num
   if (!deps?.revisions.allHeads || !mirrorOn()) return out;
   const all = await deps.revisions.allHeads();
   const seen = new Set(all.map((h) => key(h.tenant, h.workspace)));
-  const todo = [...all.map((h) => ({ tenant: h.tenant, workspace: h.workspace })), ...mirroredWorkspaces().filter((w) => !seen.has(key(w.tenant, w.workspace)))];
-  out.total = todo.length;
+  const stale = all.filter((h) => !alreadyAt(h));
+  const todo = [...stale.map((h) => ({ tenant: h.tenant, workspace: h.workspace })), ...mirroredWorkspaces().filter((w) => !seen.has(key(w.tenant, w.workspace)))];
+  // Every workspace looked at, the ones already current included: "all of
+  // them failed" means all, not all of the few that needed a sync.
+  out.total = todo.length + (all.length - stale.length);
   for (const w of todo) {
     try {
       const r = await syncFromHeads(w.tenant, w.workspace);

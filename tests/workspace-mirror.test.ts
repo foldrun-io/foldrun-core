@@ -433,3 +433,34 @@ test("a mirror's temp file left by a crash is never published or listed as a use
   fs.writeFileSync(path.join(accountDir(T), "library", "a.md"), "y");
   assert.deepEqual(listAccountFiles(T).filter((f) => f.startsWith("library/")), ["library/a.md"], "the account shelf's listing too");
 });
+
+test("a pass over copies already at their heads reads no head per workspace (one allHeads query only)", async () => {
+  writeWorkspaceFile(T, W, "memory/notes.md", "from A\n", { by: "user:a" });
+  await flushRevisions();
+  // The same stores, with head() counted.
+  const store = localRevisionStore(path.join(shared, ".revisions"));
+  let heads = 0;
+  const counted = { ...store, head: (ws: Parameters<typeof store.head>[0]) => (heads++, store.head(ws)) };
+  setRevisionBackend({ blobs: bounded(fsBlobStore(path.join(shared, ".objects")), { backoffMs: 1 }), revisions: counted }, ON);
+  on(podB);
+  assert.deepEqual(await syncAllFromHeads(), { synced: 1, removed: 0, failed: 0, total: 1 });
+  assert.ok(heads > 0, "the first pass reads the heads it syncs to");
+  heads = 0;
+  assert.deepEqual(await syncAllFromHeads(), { synced: 0, removed: 0, failed: 0, total: 1 }, "still counted as looked at");
+  assert.equal(heads, 0, "nothing changed: no per-workspace head reads");
+  assert.deepEqual(await syncTenantFromHeads(T), { synced: 0, removed: 0, failed: 0 });
+  assert.equal(heads, 0, "the per-account sync takes the same short cut");
+  // A change elsewhere: the ids differ, so that workspace goes the long way.
+  on(podA);
+  writeWorkspaceFile(T, W, "memory/notes.md", "two\n", { by: "user:a" });
+  await flushRevisions();
+  on(podB);
+  heads = 0;
+  assert.deepEqual(await syncAllFromHeads(), { synced: 1, removed: 0, failed: 0, total: 1 });
+  assert.ok(heads > 0);
+  assert.equal(read("memory/notes.md"), "two\n");
+  // Its folder gone (a cleared disk): not "already there", synced again.
+  fs.rmSync(workspaceDir(T, W), { recursive: true, force: true });
+  assert.deepEqual(await syncAllFromHeads(), { synced: 1, removed: 0, failed: 0, total: 1 });
+  assert.equal(read("memory/notes.md"), "two\n");
+});
