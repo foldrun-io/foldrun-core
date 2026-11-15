@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.0.0] — 2026-11-15
+
+### Breaking changes
+
+- `RefusedOutput` from `@foldrun/core` — reason changed
+
+### fix
+
+- open output files with O_NOFOLLOW and fstat instead of lstat then open ([3a7fc2a](https://github.com/foldrun-io/foldrun-core/commit/3a7fc2a))
+- stored run events get the credential-pattern and private-key masking captured calls have ([60c96f9](https://github.com/foldrun-io/foldrun-core/commit/60c96f9))
+
 ## [23.4.0] — 2026-11-15
 
 - feat(backfill): stream large outputs instead of reading them whole, cap one file at 32 GiB (FOL-126 M6) ([7a05790](https://github.com/foldrun-io/foldrun-core/commit/7a05790))
