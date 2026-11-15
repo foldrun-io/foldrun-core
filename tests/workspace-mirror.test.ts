@@ -60,7 +60,7 @@ test("a new pod's sync brings every workspace from the heads, and records what i
   on(podB);
   assert.equal(fs.existsSync(workspaceDir(T, W)), false);
   const r = await syncAllFromHeads();
-  assert.deepEqual(r, { synced: 1, removed: 0, failed: 0 });
+  assert.deepEqual(r, { synced: 1, removed: 0, failed: 0, total: 1 });
   assert.equal(read("memory/notes.md"), "from A\n");
   assert.equal(read("agents/writer/agent.md"), "---\nname: writer\n---\nv1\n");
   assert.ok(readMirrorBase(T, W)?.files["memory/notes.md"]);
@@ -145,7 +145,7 @@ test("a workspace deleted elsewhere is removed here; one this pod never synced i
   on(podA);
   await dropWorkspaceRevisions(T, W, () => fs.rmSync(workspaceDir(T, W), { recursive: true, force: true }));
   on(podB);
-  assert.deepEqual(await syncAllFromHeads(), { synced: 0, removed: 1, failed: 0 });
+  assert.deepEqual(await syncAllFromHeads(), { synced: 0, removed: 1, failed: 0, total: 1 });
   assert.equal(fs.existsSync(workspaceDir(T, W)), false);
   assert.equal(readMirrorBase(T, W), null);
   assert.ok(fs.existsSync(path.join(podB, T, "workspaces", "local-only")));
@@ -164,7 +164,7 @@ test("off (a laptop, the CLI, until switched on): nothing is synced", async () =
   writeWorkspaceFile(T, W, "memory/notes.md", "x\n", { by: "user:a" });
   await flushRevisions();
   on(podB);
-  assert.deepEqual(await syncAllFromHeads(), { synced: 0, removed: 0, failed: 0 });
+  assert.deepEqual(await syncAllFromHeads(), { synced: 0, removed: 0, failed: 0, total: 0 });
   assert.equal(fs.existsSync(workspaceDir(T, W)), false);
 });
 

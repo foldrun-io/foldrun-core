@@ -112,6 +112,9 @@ export const FIELDS: Record<string, Kind> = {
   // How many, how long, how much.
   count: "num", ms: "num", secs: "num", bytes: "num", usd: "num", attempt: "num",
   step: "num", port: "num", status: "num", exitCode: "num", percent: "num", tries: "num",
+  // A pass over many things (the mirror loop's, 15 Nov 2026: these were
+  // dropped, and its lines read `"dropped":2` with no numbers).
+  failed: "num", removed: "num", total: "num",
   // What kind.
   op: "word", role: "word", outcome: "word", reason: "word", stream: "word", kind: "word",
   verdict: "word", phase: "word", signal: "code", where: "word",

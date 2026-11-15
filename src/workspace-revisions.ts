@@ -1818,13 +1818,17 @@ export async function syncTenantFromHeads(tenant: string): Promise<{ synced: num
   return out;
 }
 
-export async function syncAllFromHeads(): Promise<{ synced: number; removed: number; failed: number }> {
+/** `total` is how many workspaces the pass looked at, so a caller can tell
+ *  "every one failed" (the store is unreachable: back off) from "one of
+ *  forty failed" (15 Nov 2026). */
+export async function syncAllFromHeads(): Promise<{ synced: number; removed: number; failed: number; total: number }> {
   const deps = S.backend;
-  const out = { synced: 0, removed: 0, failed: 0 };
+  const out = { synced: 0, removed: 0, failed: 0, total: 0 };
   if (!deps?.revisions.allHeads || !mirrorOn()) return out;
   const all = await deps.revisions.allHeads();
   const seen = new Set(all.map((h) => key(h.tenant, h.workspace)));
   const todo = [...all.map((h) => ({ tenant: h.tenant, workspace: h.workspace })), ...mirroredWorkspaces().filter((w) => !seen.has(key(w.tenant, w.workspace)))];
+  out.total = todo.length;
   for (const w of todo) {
     try {
       const r = await syncFromHeads(w.tenant, w.workspace);
