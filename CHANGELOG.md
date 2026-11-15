@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.1.3] — 2026-11-15
+
+- chore(deps): bump hono from 4.13.13 to 4.13.18 ([cfcec40](https://github.com/foldrun-io/foldrun-core/commit/cfcec40))
+
 ## [23.1.2] — 2026-11-15
 
 ### ci
