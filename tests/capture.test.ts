@@ -245,3 +245,57 @@ test("the raw stream gives each call its true output tokens and stop reason; wit
     const one = new Map(plain.filter((e) => e.extra?.turn).map((e) => [e.extra!.turn!.id, e.extra!.turn!])).get("msg_1")!;
     assert.equal(one.stop, "tool_use");
   }));
+
+// S3: a cut made before the host sees the text (the step's own cap, the
+// runner's re-cut, an error line, the stderr tail) can leave only the start of
+// a secret at the end of it, or only its end at the start. Every offset of
+// the cut, plain and in every encoded form.
+import { redactionsFor, scrubWith, maskCall } from "../src/capture.ts";
+
+// built, not spelled: a key-shaped literal here trips the repo's secret scanner
+const SECRET = "sk-live-" + Array.from({ length: 34 }, (_, i) => "abcdefghijklmnopqrstuvwxyz0123456789"[(i * 7 + 3) % 36]).join("");
+const named = { API_KEY: SECRET };
+const forms = (): string[] => redactionsFor(named).map(([v]) => v);
+
+test("S3: a secret straddling the step's cut is masked at every offset, plain and encoded", () => {
+  const reds = redactionsFor(named);
+  const SEND_CAP = CAPTURE_CAP + 4096;
+  assert.ok(forms().length >= 6, "the plain value and its hex / url / base64 forms are all in the list");
+  for (const value of forms()) {
+    for (let k = 1; k < value.length; k++) {
+      // k characters of the value fit before the cut, the rest is gone
+      const raw = ("filler ".repeat(SEND_CAP).slice(0, SEND_CAP - k) + value).slice(0, SEND_CAP);
+      const { text } = maskCall(raw, (t) => scrubWith(reds, t));
+      for (let n = 8; n <= k; n++) assert.ok(!text.includes(value.slice(0, n)) || n < 8, `a ${n}-char start of ${value.slice(0, 12)}… survived (cut after ${k})`);
+      assert.ok(k < 8 || !text.includes(value.slice(0, 8)), `${k} chars of ${value.slice(0, 12)}… kept`);
+    }
+  }
+});
+
+test("S3: the same when the masked text shrinks below the cap (many whole secrets before the cut)", () => {
+  const reds = redactionsFor(named);
+  // each whole secret becomes the shorter marker, so the cut piece lands inside the cap
+  const raw = (SECRET + " ").repeat(2000).slice(0, CAPTURE_CAP + 4096);
+  assert.notEqual(raw.length % (SECRET.length + 1), 0, "the cut falls inside a secret");
+  const { text } = maskCall(raw, (t) => scrubWith(reds, t));
+  assert.ok(text.length < CAPTURE_CAP, "masked, it is under the cap, so nothing else would cut the piece");
+  assert.ok(!text.includes(SECRET.slice(0, 8)));
+});
+
+test("S3: a cut that left only the END of a secret at the start of a text (the stderr tail) is masked", () => {
+  const reds = redactionsFor(named);
+  for (const value of forms()) {
+    for (let k = 8; k < value.length; k++) {
+      const text = scrubWith(reds, value.slice(value.length - k) + " trailing words");
+      assert.ok(!text.includes(value.slice(value.length - k)), `the last ${k} chars of ${value.slice(0, 12)}… kept`);
+    }
+  }
+});
+
+test("S3: ordinary text, a whole secret and a short piece are left as they were", () => {
+  const reds = redactionsFor(named);
+  assert.equal(scrubWith(reds, "nothing here"), "nothing here");
+  assert.equal(scrubWith(reds, `a ${SECRET} b`), "a [redacted:API_KEY] b");
+  assert.equal(scrubWith(reds, `see ${SECRET.slice(0, 7)}`), `see ${SECRET.slice(0, 7)}`, "under 8 characters is no key");
+  assert.equal(scrubWith([], "x"), "x");
+});
