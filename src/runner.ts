@@ -6,7 +6,7 @@
 import { opsLog, opsError } from "./ops-log.ts";
 import { globMatch } from "./bounded-match.ts";
 import { latestRevisionId } from "./history.ts";
-import { recordCallIo, redactionsFor } from "./capture.ts";
+import { recordCallIo, redactionsFor, scrubWith } from "./capture.ts";
 import { callSink, flushCalls } from "./captured-calls.ts";
 import { AUTH_REFUSAL, platformCause } from "./issues.ts";
 import { hookNames } from "./hooks.ts";
@@ -2292,11 +2292,7 @@ async function runStepBody(
   // read; the verdict at the end of this function reads it.
   let canActOutward = false;
   const eventsAtStart = step.events.length;
-  const redact = (text: string) => {
-    let out = text;
-    for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
-    return out;
-  };
+  const redact = (text: string) => scrubWith(redactions, text);
 
   // The reply, the conclusion and an `output: json` value land on the same
   // record the events do, and a model that quotes a script's stdout puts

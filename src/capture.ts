@@ -122,6 +122,53 @@ export function encodedForms(v: string): string[] {
   return [...forms].filter((f) => f.length >= 12);
 }
 
+/** The shortest piece of a secret that is masked when a cut left only that
+ *  much of it at an edge of a text. The same floor as a whole secret (8):
+ *  fewer characters than that is no key. */
+const EDGE_MIN = 8;
+
+/**
+ * Every secret value in `text` → `[redacted:NAME]` (the runner's scrub), and
+ * also the piece of one a cut left at an end of the text. A sandbox cuts what
+ * it sends (a tool's output, a reply, an error line, the stderr tail) before
+ * the host sees it, so a secret on the cut arrives as a prefix at the end
+ * (or a suffix at the start), which no whole-value match recognises — and
+ * masking first and cutting second cannot help what was cut before it got
+ * here. An end that is the start of a value (8+ characters, `EDGE_MIN`) is
+ * masked as that value, plain or in any of the encoded forms in the list.
+ */
+export function scrubWith(redactions: [string, string][], text: string): string {
+  let out = text;
+  for (const [value, name] of redactions) out = out.split(value).join(`[redacted:${name}]`);
+  if (out.length < EDGE_MIN) return out;
+  for (const [value, name] of redactions) {
+    if (value.length <= EDGE_MIN) continue;
+    const mark = `[redacted:${name}]`;
+    // the end of the text begins the value: look only where a piece shorter
+    // than the whole value can fit
+    const tail = out.slice(-(value.length - 1));
+    const head8 = value.slice(0, EDGE_MIN);
+    for (let at = tail.indexOf(head8); at >= 0; at = tail.indexOf(head8, at + 1)) {
+      if (value.startsWith(tail.slice(at))) {
+        out = out.slice(0, out.length - (tail.length - at)) + mark;
+        break;
+      }
+    }
+    // the start of the text ends the value
+    const lead = out.slice(0, value.length - 1);
+    const first8 = lead.slice(0, EDGE_MIN);
+    if (first8.length === EDGE_MIN) {
+      for (let j = value.indexOf(first8, 1); j >= 0 && value.length - j >= EDGE_MIN; j = value.indexOf(first8, j + 1)) {
+        if (out.startsWith(value.slice(j))) {
+          out = mark + out.slice(value.length - j);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 // A private key's whole block — scan.ts names a key header and leaves the
 // body, which is right for a finding and wrong for a stored output.
 // Unterminated too: a key cut short, or printed without its END line, is
