@@ -13,6 +13,8 @@ export function refusalText(r: RefusedOutput): string {
       return `${r.agent}/${r.path} (${mib(r.bytes)}) was not kept: this run's outputs may total at most ${mib(r.limit ?? 0)}`;
     case "count":
       return `${r.agent}/${r.path} was not kept: a run keeps at most ${r.limit ?? 50_000} files per agent`;
+    case "unsafe":
+      return `${r.agent}/${r.path} was not kept: it was replaced by a link or a pipe while the run ended, so it was not read`;
     default:
       return `${r.agent}/${r.path} was not kept: its name cannot be stored (control characters, over 400 bytes, or differs from another file only by case)`;
   }

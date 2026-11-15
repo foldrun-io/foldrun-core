@@ -5,6 +5,7 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { plainStream, statPlain, UnsafeFileError, type PlainOpts } from "./safe-open.ts";
 
 export class BlobNotFound extends Error {
   readonly key: string;
@@ -185,15 +186,25 @@ export function bufferSource(buf: Uint8Array): BlobSource {
 
 /** A file on disk. The size is taken now; if the file is shorter (or longer)
  *  when it is read, the read throws BlobSourceError rather than send a body
- *  that no longer matches what was announced. */
-export function fileSource(filePath: string): BlobSource {
-  const size = fs.statSync(filePath).size;
+ *  that no longer matches what was announced. A link is never followed, and a
+ *  different file (or a FIFO) swapped in since the size was taken is refused:
+ *  each read opens the path without following links and must find the same
+ *  inode (safe-open.ts, SYMRACE). */
+export function fileSource(filePath: string, expect: PlainOpts = {}): BlobSource {
+  const seen = statPlain(filePath, expect);
+  const size = seen.size;
   return {
     size,
     async *read(start, end, signal) {
       const hi = Math.min(end, size);
       if (hi <= start) return;
-      const stream = fs.createReadStream(filePath, { start, end: hi - 1, highWaterMark: 1 << 20, signal });
+      let stream: fs.ReadStream;
+      try {
+        stream = plainStream(filePath, { start, end: hi - 1, highWaterMark: 1 << 20, signal, dev: seen.dev, ino: seen.ino, root: expect.root });
+      } catch (err) {
+        if (err instanceof UnsafeFileError) throw new BlobSourceError(`${filePath} changed while it was being uploaded: ${err.message}`);
+        throw err;
+      }
       let got = 0;
       for await (const chunk of stream) {
         got += (chunk as Buffer).length;
