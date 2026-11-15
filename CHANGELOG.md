@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.4.0] — 2026-11-15
+
+- feat(backfill): stream large outputs instead of reading them whole, cap one file at 32 GiB (FOL-126 M6) ([7a05790](https://github.com/foldrun-io/foldrun-core/commit/7a05790))
+
+### fix
+
+- mask the piece of a secret a cut leaves at the end of a text (S3) ([be8957d](https://github.com/foldrun-io/foldrun-core/commit/be8957d))
+
 ## [23.3.0] — 2026-11-15
 
 - perf(mirror): skip the per-workspace head reads when allHeads says the copy is current ([fa8c8ca](https://github.com/foldrun-io/foldrun-core/commit/fa8c8ca))
