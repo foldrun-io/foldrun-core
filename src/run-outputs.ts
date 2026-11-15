@@ -43,7 +43,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
 import { processState } from "./process-state.ts";
-import { BlobNotFound, type BlobStore } from "./blob-store.ts";
+import { BlobNotFound, fileSource, hashRange, type BlobStore } from "./blob-store.ts";
 import { PUBLISH_PIN_TTL_MS, noPins, type BlobPins, type PinHolder } from "./blob-pins.ts";
 import {
   MAX_MANIFEST_FILES,
@@ -222,6 +222,14 @@ const releaseRecords = async (b: RunOutputsBackend, recs: readonly RunOutputReco
 
 /** How many files are in flight at once, and so at most this many buffered. */
 const UPLOAD_CONCURRENCY = 4;
+/** Up to this size a file is read whole (4 lanes at most, so at most 4 x this in
+ *  memory); past it, it is hashed and uploaded from disk in chunks. */
+export const SMALL_OUTPUT_FILE_BYTES = 8 * 1024 * 1024;
+/** No output is kept past this, whatever `runs.output_file_mb` says (0 = no
+ *  setting, which is what the backfill uses): the streamed path bounds memory,
+ *  not time or storage, and a file this big is not an output an agent should
+ *  leave. Refused as "file-cap", so it is named, never silent. */
+export const HARD_OUTPUT_FILE_BYTES = 32 * 1024 * 1024 * 1024;
 const MAX_REFUSALS_ON_RECORD = 100;
 
 interface Candidate {
@@ -271,6 +279,7 @@ export async function publishRunOutputs(
 ): Promise<PublishedOutputs> {
   safeName(agent, "agent");
   const fileMax = b.fileMaxBytes();
+  const fileCap = fileMax > 0 ? Math.min(fileMax, HARD_OUTPUT_FILE_BYTES) : HARD_OUTPUT_FILE_BYTES;
   const runMax = b.runMaxBytes();
   const refused: RefusedOutput[] = [];
   // What the run's other agents already hold counts against the run's cap.
@@ -296,8 +305,8 @@ export async function publishRunOutputs(
       refuse("count", MAX_MANIFEST_FILES);
       continue;
     }
-    if (fileMax > 0 && c.size > fileMax) {
-      refuse("file-cap", fileMax);
+    if (c.size > fileCap) {
+      refuse("file-cap", fileCap);
       continue;
     }
     if (runMax > 0 && used + c.size > runMax) {
@@ -319,25 +328,45 @@ export async function publishRunOutputs(
   let id: ManifestId | null = null;
   try {
     // Pin BEFORE the objects exist: a sweeper that looks now sees the pin.
-    // Read each file once for its hash (a file can only be named by its
-    // bytes), then upload; at most UPLOAD_CONCURRENCY buffers are live.
+    // A file can only be named by its bytes, so each is hashed first, then
+    // uploaded. A small one is read whole (as always); a bigger one is hashed
+    // and uploaded from disk in chunks, so at most UPLOAD_CONCURRENCY small
+    // buffers (and some 1 MiB chunks) are live, whatever the file's size.
     let next = 0;
     const lane = async () => {
       for (;;) {
         const i = next++;
         if (i >= kept.length) return;
         const c = kept[i];
-        const body = fs.readFileSync(c.abs);
-        // Grew since it was measured (an agent still writing): same rule, same cap.
-        if (fileMax > 0 && body.length > fileMax) {
-          refused.push({ agent, path: c.rel, bytes: body.length, reason: "file-cap", limit: fileMax });
-          continue;
+        let sha: string;
+        let size: number;
+        if (c.size <= SMALL_OUTPUT_FILE_BYTES) {
+          const body = fs.readFileSync(c.abs);
+          // Grew since it was measured (an agent still writing): same rule, same cap.
+          if (body.length > fileCap) {
+            refused.push({ agent, path: c.rel, bytes: body.length, reason: "file-cap", limit: fileCap });
+            continue;
+          }
+          sha = sha256Hex(body);
+          size = body.length;
+          // Pin each blob before its put; a repeat extends the lease.
+          await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
+          await b.blobs.putIfAbsent(blobObjectKey(tenant, sha), body);
+        } else {
+          const source = fileSource(c.abs);
+          if (source.size > fileCap) {
+            refused.push({ agent, path: c.rel, bytes: source.size, reason: "file-cap", limit: fileCap });
+            continue;
+          }
+          // A file that changes under the read throws BlobSourceError (and the
+          // store checks the hash it is given): the publish fails, never stores
+          // bytes under a name they do not have.
+          sha = (await hashRange(source, 0, source.size)).sha256;
+          size = source.size;
+          await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
+          await b.blobs.putSourceIfAbsent(blobObjectKey(tenant, sha), source, { sha256: sha });
         }
-        const sha = sha256Hex(body);
-        // Pin each blob before its put; a repeat extends the lease.
-        await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
-        await b.blobs.putIfAbsent(blobObjectKey(tenant, sha), body);
-        files[c.rel] = { sha, size: body.length, mode: c.mode };
+        files[c.rel] = { sha, size, mode: c.mode };
       }
     };
     await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, kept.length) }, lane));
@@ -460,6 +489,25 @@ export async function listRunOutputs(tenant: string, workspace: string, runId: s
   const mine = new Set(recs.map((r) => r.agent));
   for (const f of listRunOutputsOnVolume(tenant, workspace, runId)) if (!mine.has(f.agent)) out.push(f);
   return out.sort((a, b) => a.agent.localeCompare(b.agent) || a.path.localeCompare(b.path));
+}
+
+/** What the STORE holds for a run, with each file's hash — the volume is not
+ *  asked (the backfill's verify compares these to the folder's bytes). */
+export async function storedRunOutputs(tenant: string, workspace: string, runId: string): Promise<{ agent: string; path: string; sha: string; size: number }[]> {
+  const out: { agent: string; path: string; sha: string; size: number }[] = [];
+  if (!OUT.backend) return out;
+  for (const r of await recordsOf(tenant, workspace, runId)) {
+    const m = await loadManifest(readDeps(OUT.backend), tenant, r.manifest);
+    for (const [p, e] of Object.entries(m.files)) out.push({ agent: r.agent, path: p, sha: e.sha, size: e.size });
+  }
+  return out;
+}
+
+/** The blob is in the store at the size the manifest says (a head, no bytes read). */
+export async function storedBlobIntact(tenant: string, sha: string, size: number): Promise<boolean> {
+  if (!OUT.backend) return false;
+  const h = await OUT.backend.blobs.head(blobObjectKey(tenant, sha));
+  return !!h && h.size === size;
 }
 
 export interface OpenedOutput {
