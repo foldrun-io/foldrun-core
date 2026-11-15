@@ -240,7 +240,11 @@ export const SUPPLY_KEY_NAME = "FOLDRUN_SUPPLY_KEY";
  * What the platform says about one account's model supply, before any
  * provider: block of its own is considered (a written block always wins):
  *   none     — it did not choose foldrun's models: its own key, as before
- *   foldrun  — it chose them and they are on: run on the platform's key
+ *   foldrun  — it chose them and they are on: run on the platform's key;
+ *              with `via: "login"`, on the account's Claude subscription
+ *              instead (16 Nov 2026: an account holding a Claude Code plan
+ *              runs its routines and sessions on Claude, counted in the
+ *              plan's monthly and weekly windows like its Claude Code calls)
  *   refused  — it chose them and they cannot be had now (switched off, the
  *              provider withdrawn, the account refused). The step FAILS
  *              with the reason: never quietly onto the account's stored
@@ -255,6 +259,11 @@ export type SupplyAnswer =
       /** The price list's output ceiling per model id: the most one reply
        *  may be on the platform's key, told to the runtime up front. */
       ceilings?: Record<string, number>;
+      /** "login": the calls go on the platform's Claude logins, as the
+       *  account's subscription — the proxy sends them through the gateway's
+       *  login path (pool, windows, extra usage), not metered on an API key.
+       *  Anthropic only. Absent: the platform's API key, metered. */
+      via?: "login";
     }
   | { kind: "refused"; reason: string };
 
@@ -263,17 +272,28 @@ export type SupplyAnswer =
  *  which the proxy fills with the platform's key. Sent anywhere unproxied
  *  it is only a word a provider refuses. */
 const MARKER = "foldrun-supply:";
-export const supplyToken = (provider: SupplyProviderName) => `${MARKER}${provider}`;
+/** `+login` after the provider: the subscription's marker (SupplyAnswer.via). */
+const VIA_LOGIN = "+login";
+export const supplyToken = (provider: SupplyProviderName, via?: "login") => `${MARKER}${provider}${via === "login" ? VIA_LOGIN : ""}`;
 export function supplyProviderOfToken(value: string | null | undefined): SupplyProviderName | null {
   if (typeof value !== "string" || !value.startsWith(MARKER)) return null;
-  const p = value.slice(MARKER.length);
+  let p = value.slice(MARKER.length);
+  if (p.endsWith(VIA_LOGIN)) {
+    p = p.slice(0, -VIA_LOGIN.length);
+    // A subscription is Claude's alone.
+    if (p !== "anthropic") return null;
+  }
   return isSupplyProvider(p) ? p : null;
+}
+/** "login" when the marker is the subscription's, else null. */
+export function supplyViaOfToken(value: string | null | undefined): "login" | null {
+  return supplyProviderOfToken(value) !== null && String(value).endsWith(VIA_LOGIN) ? "login" : null;
 }
 
 /** The provider block a step on foldrun's models runs with: the preset's
  *  endpoint and format, the operator's tier map, and the key as a
  *  placeholder only. */
-export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial<Record<"fast" | "default" | "max", string>>): Record<string, unknown> {
+export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial<Record<"fast" | "default" | "max", string>>, via?: "login"): Record<string, unknown> {
   const p = SUPPLY_PROVIDERS[provider];
   const preset = p.preset ? providerPreset(p.preset) : undefined;
   const baseUrl = p.baseUrl ?? preset?.baseUrl;
@@ -285,7 +305,7 @@ export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial
     base_url: baseUrl,
     format: p.format,
     auth: p.auth,
-    token: supplyToken(provider),
+    token: supplyToken(provider, via),
     ...(Object.keys(tiers).length ? { models: tiers } : {}),
   };
 }

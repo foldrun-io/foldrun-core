@@ -1439,7 +1439,7 @@ export function agentContext(
   const providerBlock =
     fileBlock ??
     (supply.kind === "foldrun"
-      ? supplyProviderBlock(supply.provider, supply.tiers)
+      ? supplyProviderBlock(supply.provider, supply.tiers, supply.via)
       : supply.kind === "refused"
         ? undefined
         : accountModelBlock((name) => getSecret(tenant, name)?.value ?? null));
@@ -2624,7 +2624,9 @@ async function runStepBody(
     const before: StepSupply = (step.credential ?? "").startsWith("provider:") ? "own" : "operator";
     for (const t of step.tries ?? []) t.supply ??= before;
     step.credential = onSupply
-      ? `foldrun models · ${SUPPLY_TITLES[supply.provider]}`
+      ? supply.via === "login"
+        ? "Claude subscription"
+        : `foldrun models · ${SUPPLY_TITLES[supply.provider]}`
       : credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
     step.supply = onSupply ? "foldrun" : primaryOnPlatform ? "operator" : "own";
     if (onSupply) step.supplyProvider = supply.provider;

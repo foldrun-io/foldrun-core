@@ -17,7 +17,7 @@ import { setSecret } from "../src/secrets.ts";
 import { ACCOUNT_MODEL_SECRETS } from "../src/model-credential.ts";
 import { billedTokenCost, runMeter, type RunRecord, type StepRecord } from "../src/store.ts";
 import type { SupplyAnswer } from "../src/model-supply.ts";
-import { supplyProviderOfToken, supplyToken } from "../src/model-supply.ts";
+import { supplyProviderOfToken, supplyToken, supplyViaOfToken } from "../src/model-supply.ts";
 import type { EgressGrant, EgressLease } from "../src/egress.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
 
@@ -85,6 +85,19 @@ test("an account on foldrun's models runs on the platform's key — as a supply 
     const g = c.grants[0].secrets.FOLDRUN_MODEL_KEY;
     assert.deepEqual(g, { value: "", hosts: ["api.anthropic.com"], supply: { provider: "anthropic" } }, "a supply grant: no value in the lease");
     assert.equal(done.steps[0].tries?.[0].supply, "foldrun");
+  });
+});
+
+test("an account on its Claude subscription (16 Nov 2026): a subscription grant — the proxy sends it on a login, never a value in the pod", async () => {
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {}, via: "login" } }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(done.steps[0].supply, "foldrun", "billed as foldrun's models are: by the proxy, never from the step's own tokens");
+    assert.equal(done.steps[0].credential, "Claude subscription");
+    const env = JSON.stringify(c.calls[0].env);
+    assert.ok(!env.includes("sk-ant-api03") && !env.includes("foldrun-supply:"), "no key and no marker in the pod");
+    assert.match(env, /egress\.test\/e\/tok\/https:\/\/api\.anthropic\.com/);
+    assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["api.anthropic.com"], supply: { provider: "anthropic", via: "login" } });
   });
 });
 
@@ -166,6 +179,12 @@ test("the marker is a word, not a secret, and only names a known provider", () =
   assert.equal(supplyProviderOfToken(supplyToken("gemini")), "gemini");
   assert.equal(supplyProviderOfToken("foldrun-supply:nope"), null);
   assert.equal(supplyProviderOfToken("sk-ant-x"), null);
+  // The subscription's marker: Claude's alone, and told apart from the API key's.
+  assert.equal(supplyProviderOfToken(supplyToken("anthropic", "login")), "anthropic");
+  assert.equal(supplyViaOfToken(supplyToken("anthropic", "login")), "login");
+  assert.equal(supplyViaOfToken(supplyToken("anthropic")), null);
+  assert.equal(supplyProviderOfToken("foldrun-supply:openai+login"), null);
+  assert.equal(supplyViaOfToken("foldrun-supply:openai+login"), null);
 });
 
 test("outside a step (a judge, a grader, a draft): the same rung, through a host lease, or refused", async () => {
