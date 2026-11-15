@@ -175,9 +175,19 @@ export function scrubWith(redactions: [string, string][], text: string): string 
 // masked to the end of the text.
 const PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$(?![\s\S]))/g;
 
+/** What no vault value covers: a credential-shaped string (a GitHub, Anthropic
+ *  or AWS key, a JWT, `token=…`, a bearer) and a private key's whole block.
+ *  Applied after the step's own value masks, to every piece of stored text that
+ *  came out of a sandbox or a model — a tool's output, a prompt, stderr — so a
+ *  key a tool read off disk is not kept just because it was never a secret
+ *  of ours. Ordinary text (ids, URLs, paths, hashes) is left as it was. */
+export function maskPatterns(text: string): string {
+  return redactText(text).replace(PRIVATE_KEY, "[redacted:private key]");
+}
+
 /** Masked, then cut to the cap. */
 export function maskCall(text: string, redactSecrets: (text: string) => string): { text: string; cut: boolean } {
-  const masked = redactText(redactSecrets(text)).replace(PRIVATE_KEY, "[redacted:private key]");
+  const masked = maskPatterns(redactSecrets(text));
   return masked.length > CAPTURE_CAP ? { text: masked.slice(0, CAPTURE_CAP), cut: true } : { text: masked, cut: false };
 }
 
