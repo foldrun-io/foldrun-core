@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.3.0] — 2026-11-15
+
+- perf(mirror): skip the per-workspace head reads when allHeads says the copy is current ([fa8c8ca](https://github.com/foldrun-io/foldrun-core/commit/fa8c8ca))
+
 ## [23.2.0] — 2026-11-15
 
 - feat(revisions): syncAllFromHeads says how many workspaces it looked at; the ops log keeps failed/removed/total ([13eed21](https://github.com/foldrun-io/foldrun-core/commit/13eed21))
