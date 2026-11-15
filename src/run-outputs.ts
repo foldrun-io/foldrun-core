@@ -44,6 +44,7 @@ import crypto from "node:crypto";
 import { dataRoot } from "./paths.ts";
 import { processState } from "./process-state.ts";
 import { BlobNotFound, fileSource, hashRange, type BlobStore } from "./blob-store.ts";
+import { plainStream, readPlain, statPlain, UnsafeFileError } from "./safe-open.ts";
 import { PUBLISH_PIN_TTL_MS, noPins, type BlobPins, type PinHolder } from "./blob-pins.ts";
 import {
   MAX_MANIFEST_FILES,
@@ -237,10 +238,17 @@ interface Candidate {
   abs: string;
   size: number;
   mode: number;
+  /** The inode the walk saw: the read must find the same one (safe-open.ts). */
+  dev: number;
+  ino: number;
 }
 
 function walk(root: string): Candidate[] {
   const out: Candidate[] = [];
+  // The folder itself a link (an agent folder pointed elsewhere): its
+  // contents are not this run's outputs, and the per-file root check would
+  // take the link's target for the root. Nothing is kept from it.
+  if (fs.lstatSync(root).isSymbolicLink()) return out;
   const rec = (dir: string, rel: string) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, e.name);
@@ -248,7 +256,7 @@ function walk(root: string): Candidate[] {
       if (e.isDirectory()) rec(abs, r);
       else if (e.isFile()) {
         const st = fs.lstatSync(abs);
-        out.push({ rel: r, abs, size: st.size, mode: st.mode & 0o111 ? MODE_EXEC : MODE_FILE });
+        out.push({ rel: r, abs, size: st.size, mode: st.mode & 0o111 ? MODE_EXEC : MODE_FILE, dev: st.dev, ino: st.ino });
       }
       // symlinks, sockets and the like are not outputs (the volume copy skipped them too)
     }
@@ -340,33 +348,44 @@ export async function publishRunOutputs(
         const c = kept[i];
         let sha: string;
         let size: number;
-        if (c.size <= SMALL_OUTPUT_FILE_BYTES) {
-          const body = fs.readFileSync(c.abs);
-          // Grew since it was measured (an agent still writing): same rule, same cap.
-          if (body.length > fileCap) {
-            refused.push({ agent, path: c.rel, bytes: body.length, reason: "file-cap", limit: fileCap });
-            continue;
+        // The walk looked with lstat; the read opens the path without following
+        // a link and must find the inode the walk saw (a file the agent swapped
+        // for a link to a secret, or a FIFO, since is refused, not read). The
+        // outputs folder is the root: a folder swapped for a link out is too.
+        const want = { dev: c.dev, ino: c.ino, root: dir };
+        try {
+          if (c.size <= SMALL_OUTPUT_FILE_BYTES) {
+            // A file that grew past twice the small size since the walk is not read whole.
+            const body = readPlain(c.abs, { ...want, maxBytes: 2 * SMALL_OUTPUT_FILE_BYTES });
+            // Grew since it was measured (an agent still writing): same rule, same cap.
+            if (body.length > fileCap) {
+              refused.push({ agent, path: c.rel, bytes: body.length, reason: "file-cap", limit: fileCap });
+              continue;
+            }
+            sha = sha256Hex(body);
+            size = body.length;
+            // Pin each blob before its put; a repeat extends the lease.
+            await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
+            await b.blobs.putIfAbsent(blobObjectKey(tenant, sha), body);
+          } else {
+            const source = fileSource(c.abs, want);
+            if (source.size > fileCap) {
+              refused.push({ agent, path: c.rel, bytes: source.size, reason: "file-cap", limit: fileCap });
+              continue;
+            }
+            // A file that changes under the read throws BlobSourceError (and the
+            // store checks the hash it is given): the publish fails, never stores
+            // bytes under a name they do not have.
+            sha = (await hashRange(source, 0, source.size)).sha256;
+            size = source.size;
+            await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
+            await b.blobs.putSourceIfAbsent(blobObjectKey(tenant, sha), source, { sha256: sha });
           }
-          sha = sha256Hex(body);
-          size = body.length;
-          // Pin each blob before its put; a repeat extends the lease.
-          await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
-          await b.blobs.putIfAbsent(blobObjectKey(tenant, sha), body);
-        } else {
-          const source = fileSource(c.abs);
-          if (source.size > fileCap) {
-            refused.push({ agent, path: c.rel, bytes: source.size, reason: "file-cap", limit: fileCap });
-            continue;
-          }
-          // A file that changes under the read throws BlobSourceError (and the
-          // store checks the hash it is given): the publish fails, never stores
-          // bytes under a name they do not have.
-          sha = (await hashRange(source, 0, source.size)).sha256;
-          size = source.size;
-          await pins.pinBlobs(tenant, [sha], publishHolder, { ttlMs: PUBLISH_PIN_TTL_MS });
-          await b.blobs.putSourceIfAbsent(blobObjectKey(tenant, sha), source, { sha256: sha });
+          files[c.rel] = { sha, size, mode: c.mode };
+        } catch (err) {
+          if (!(err instanceof UnsafeFileError)) throw err;
+          refused.push({ agent, path: c.rel, bytes: c.size, reason: "unsafe" });
         }
-        files[c.rel] = { sha, size, mode: c.mode };
       }
     };
     await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, kept.length) }, lane));
@@ -560,11 +579,13 @@ export async function openRunOutput(tenant: string, workspace: string, runId: st
   }
   const file = runOutputPathOnVolume(tenant, workspace, runId, agent, rel);
   if (!file) return null;
-  const size = fs.statSync(file).size;
+  // Opened without following a link: the path was checked by
+  // runOutputPathOnVolume, and a swap since (link, FIFO) is refused (SYMRACE).
+  const seen = statPlain(file);
   return {
-    size,
+    size: seen.size,
     // Node's own bridge keeps the file stream paused until the reader pulls.
-    read: (range) => Readable.toWeb(fs.createReadStream(file, range ? { start: range.start, end: range.end } : undefined)) as ReadableStream<Uint8Array>,
+    read: (range) => Readable.toWeb(plainStream(file, { dev: seen.dev, ino: seen.ino, ...(range ? { start: range.start, end: range.end } : {}) })) as ReadableStream<Uint8Array>,
   };
 }
 

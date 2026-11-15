@@ -68,6 +68,7 @@ import {
 } from "./manifest.ts";
 import { headsOf, manifestsAt, publish, requestDigest, type Deps } from "./publish.ts";
 import { BlobNotFound, BlobSourceError, downloadToFile, fileSource } from "./blob-store.ts";
+import { plainStream, readPlain, type PlainOpts } from "./safe-open.ts";
 import type { Revision, WorkspaceRef } from "./revision-store.ts";
 import { isPlatformPath } from "./store.ts";
 
@@ -135,9 +136,11 @@ export interface ScanOptions {
   workspaces?: string[];
 }
 
-export async function hashFile(abs: string): Promise<string> {
+export async function hashFile(abs: string, expect: PlainOpts = {}): Promise<string> {
   const h = crypto.createHash("sha256");
-  await pipeline(fs.createReadStream(abs), h);
+  // Never through a link, never waiting on a pipe, and (with `st`) the file the
+  // scan listed: the scan's lstat said "regular file" earlier (safe-open.ts).
+  await pipeline(plainStream(abs, expect), h);
   return h.digest("hex");
 }
 
@@ -313,7 +316,7 @@ async function scanWorkspace(tenant: string, workspace: string, dir: string): Pr
     if (from) ws.conflicts.push({ path: from, keptAs: rel });
     let sha: string;
     try {
-      sha = await hashFile(f.abs);
+      sha = await hashFile(f.abs, { dev: f.st.dev, ino: f.st.ino, root: dir });
     } catch (err) {
       ws.unmapped.push({ path: f.rel, reason: `unreadable (${(err as NodeJS.ErrnoException).code ?? "error"})`, files: 1, bytes: f.st.size });
       continue;
@@ -508,7 +511,7 @@ export async function importWorkspace(scan: WorkspaceScan, opts: ImportOptions):
       bytesOf: async (sha) => {
         const f = bySha.get(sha);
         if (!f) throw new Error(`no source file for ${sha.slice(0, 12)}…`);
-        const b = fs.readFileSync(f.abs);
+        const b = readPlain(f.abs);
         if (sha256Hex(b) !== sha) throw new Error(`${f.path} changed while it was being imported`);
         return b;
       },

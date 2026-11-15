@@ -51,6 +51,7 @@ import { putStepState, getStepState, dropStepState } from "./step-state.ts";
 import { stageRunInputs, type RunInputFile } from "./storage.ts";
 import { INPUTS_DIR, stagedLine } from "./run-inputs.ts";
 import { textBesideInputs } from "./input-text.ts";
+import { readPlain, readPlainText, UnsafeFileError } from "./safe-open.ts";
 
 /** What crosses the boundary. Everything in here is values — pre-resolved
  *  secrets in headers, assembled prompt, serializable MCP configs. */
@@ -555,8 +556,8 @@ export function applyContainerChanges(
     // the same rule as every file below.
     const dir = path.join(containerWs, ".foldrun");
     const file = path.join(dir, "copied-back.json");
-    if (fs.lstatSync(dir).isDirectory() && fs.lstatSync(file).isFile()) {
-      const m = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (fs.lstatSync(dir).isDirectory()) {
+      const m = JSON.parse(readPlainText(file, { root: containerWs, maxBytes: 16 * 1024 * 1024 }));
       if (m && typeof m === "object" && !Array.isArray(m)) {
         for (const [rel, h] of Object.entries(m as Record<string, unknown>)) {
           // Every version the host handed back for the path counts: two jobs
@@ -592,7 +593,19 @@ export function applyContainerChanges(
       if (opts.drop && (posix.startsWith(opts.drop) || `${posix}/` === opts.drop)) continue;
       if (opts.keepOnly && !posix.startsWith(opts.keepOnly)) continue;
       if (!allowedBack(rel)) continue;
-      let next: Buffer = fs.readFileSync(abs);
+      // Read from a descriptor opened without following a link, inside the
+      // sandbox's folder: the walk's readdir said "regular file" a moment ago,
+      // and the step may have swapped it for a link to the host's
+      // /proc/self/environ, or a FIFO that would block this read forever
+      // (SYMRACE). Such a path is skipped and said, like any other refusal.
+      let next: Buffer;
+      try {
+        next = readPlain(abs, { root: containerWs });
+      } catch (err) {
+        if (!(err instanceof UnsafeFileError)) throw err;
+        note?.(`${posix} was not copied back: ${err.message}`);
+        continue;
+      }
       // What the step was handed: its bytes (a staging dir) or its hash.
       // null when the file did not exist then; undefined when no baseline.
       let was: Buffer | string | null | undefined;

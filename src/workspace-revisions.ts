@@ -67,6 +67,7 @@ import { OpIdReused, type HeadIds, type Revision, type WorkspaceRef } from "./re
 import { pruneStateRevisions, type StateRetention } from "./state-retention.ts";
 import type { SweepMarks } from "./blob-sweeper.ts";
 import { setCallsBackend, dropWorkspaceCalls, settleCalls } from "./captured-calls.ts";
+import { plainStream, readPlain, readPlainAsync, UnsafeFileError, type PlainOpts } from "./safe-open.ts";
 import { dropTenantOutputs, dropWorkspaceOutputs, moveWorkspaceOutputs, settleRunOutputs } from "./run-outputs.ts";
 
 // ------------------------------------------------------------- the backend
@@ -1094,13 +1095,29 @@ interface FolderFile {
   mode: number;
 }
 
-async function hashOf(abs: string, size: number): Promise<string> {
+async function hashOf(abs: string, size: number, expect: PlainOpts = {}): Promise<string> {
   // Read off the event loop: a dashboard process runs this too, and a desk can
-  // hold thousands of files.
-  if (size <= LARGE_FILE) return sha256Hex(await fs.promises.readFile(abs));
+  // hold thousands of files. From a descriptor opened without following a link,
+  // on the inode the scan listed (a swap since is refused: safe-open.ts).
+  if (size <= LARGE_FILE) return sha256Hex(await readPlainAsync(abs, expect));
   const h = crypto.createHash("sha256");
-  await pipeline(fs.createReadStream(abs), h);
+  await pipeline(plainStream(abs, expect), h);
   return h.digest("hex");
+}
+
+/** What a file holds now: its sha, null when there is none. A link or a pipe
+ *  that took its place since the caller's link check reads as something that
+ *  matches nothing — "changed meanwhile", so the file is left alone — instead
+ *  of being followed or waited on (safe-open.ts). */
+const NOT_A_FILE = "!not-a-regular-file";
+function shaOnDisk(abs: string): string | null {
+  try {
+    return sha256Hex(readPlain(abs));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (err instanceof UnsafeFileError) return NOT_A_FILE;
+    throw err;
+  }
 }
 
 /**
@@ -1169,7 +1186,7 @@ async function scanFolder(tenant: string, workspace: string): Promise<{ files: M
     try {
       assertManifestPath(f.rel);
       if (lower.has(fold)) throw new Error("differs only by case");
-      files.set(f.rel, { abs: f.abs, sha: await hashOf(f.abs, f.st.size), size: f.st.size, mode: f.st.mode & 0o111 ? MODE_EXEC : MODE_FILE });
+      files.set(f.rel, { abs: f.abs, sha: await hashOf(f.abs, f.st.size, { dev: f.st.dev, ino: f.st.ino, root: dir }), size: f.st.size, mode: f.st.mode & 0o111 ? MODE_EXEC : MODE_FILE });
       lower.add(fold);
     } catch {
       left.add(f.rel);
@@ -1352,7 +1369,7 @@ async function commitEntry(deps: Deps, tenant: string, workspace: string, entry:
           changes: todo,
           restoredFrom: done.authored ? undefined : restoredFrom,
           bytesOf: async (sha) => {
-            const b = bytes.get(sha) ?? (onDisk.has(sha) ? fs.readFileSync(onDisk.get(sha)!) : null);
+            const b = bytes.get(sha) ?? (onDisk.has(sha) ? readPlain(onDisk.get(sha)!) : null);
             if (!b) throw new Error(`the journal lost the bytes for ${sha.slice(0, 12)}…`);
             return b;
           },
@@ -1516,7 +1533,7 @@ async function afterPublish(deps: Deps, ws: WorkspaceRef, changes: Changes, r: P
       const abs = path.join(dir, p);
       // Never through a link, on any branch below (Codex review).
       if (throughLink(dir, p) || (fs.existsSync(abs) && fs.lstatSync(abs).isSymbolicLink())) continue;
-      const local = fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null;
+      const local = shaOnDisk(abs);
       // Only while the file is still what this pod published (or gone, for a delete).
       if (c.op === "delete" ? local !== null : local !== c.sha) continue;
       if (winner) {
@@ -1525,7 +1542,7 @@ async function afterPublish(deps: Deps, ws: WorkspaceRef, changes: Changes, r: P
         // Again after the download: an edit made meanwhile is kept, and never
         // through a link — the file or a folder on its way (Codex review).
         if (throughLink(dir, p) || (fs.existsSync(abs) && fs.lstatSync(abs).isSymbolicLink())) continue;
-        if ((fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null) !== local) continue;
+        if (shaOnDisk(abs) !== local) continue;
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         // A new file renamed over the old one: replaces it, follows nothing.
         const tmp = `${abs}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.mirror-tmp`;
@@ -1663,7 +1680,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
         next[p] = s;
         continue;
       }
-      if (fs.existsSync(f.abs) && (sha256Hex(fs.readFileSync(f.abs)) !== f.sha || modeOfFile(f.abs) !== f.mode)) {
+      if (fs.existsSync(f.abs) && (shaOnDisk(f.abs) !== f.sha || modeOfFile(f.abs) !== f.mode)) {
         ownChanges = true;
         next[p] = s;
         continue;
@@ -1727,7 +1744,7 @@ async function syncNow(tenant: string, workspace: string): Promise<"unchanged" |
     // this very file while it ran (Codex review). The file must still be what
     // the scan saw, or it is this pod's change now and is left alone.
     if (busy()) return "skipped";
-    const nowSha = fs.existsSync(abs) ? sha256Hex(fs.readFileSync(abs)) : null;
+    const nowSha = shaOnDisk(abs);
     if (nowSha !== (f?.sha ?? null) || (f && modeOfFile(abs) !== f.mode)) {
       ownChanges = true;
       if (synced[p]) next[p] = synced[p];

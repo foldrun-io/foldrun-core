@@ -76,6 +76,7 @@ import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
 import type { RunContext, RunInput, ConversationRecord } from "./conversation.ts";
 import type { RunInputFile } from "./storage.ts";
+import { copyPlain, readPlainText, UnsafeFileError } from "./safe-open.ts";
 
 // Where workspaces live. The hosted app keeps many under data/; the CLI runs
 // against one folder, which is what `foldrun run ./my-desk` has to mean.
@@ -471,7 +472,7 @@ export function saveWorkspace(
   if (fs.existsSync(dir)) {
     for (const rel of listWorkspaceFiles(tenant, workspace)) {
       try {
-        before.set(rel, fs.readFileSync(path.join(dir, rel), "utf8"));
+        before.set(rel, readPlainText(path.join(dir, rel)));
       } catch {
         // vanished mid-read; not part of the revision
       }
@@ -497,7 +498,15 @@ export function saveWorkspace(
       }
       const to = path.join(snapshot, rel);
       fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.copyFileSync(from, to);
+      try {
+        // From a descriptor opened without following a link: the lstat above
+        // can be out of date by now (SYMRACE), and a swapped-in link would copy
+        // its target into the snapshot, then back into the workspace.
+        copyPlain(from, to);
+      } catch (err) {
+        if (err instanceof UnsafeFileError || (err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw err;
+      }
       preserved.push(rel);
     }
   }
@@ -2974,7 +2983,16 @@ export function readWorkspaceFile(tenant: string, workspace: string, rel: string
   const p = path.join(dir, assertEditablePath(rel));
   if (!fs.existsSync(p)) throw new Error(`file not found: ${rel}`);
   assertLandsInside(dir, p, rel);
-  return fs.readFileSync(p, "utf8");
+  // The check above is by path. A link that stays inside the workspace is
+  // allowed, so the read goes to where it really lands, opened without
+  // following a link and found still inside the workspace: a file or folder
+  // swapped for a link out since the check is refused (SYMRACE).
+  try {
+    return readPlainText(realLanding(p) ?? p, { root: dir });
+  } catch (err) {
+    if (err instanceof UnsafeFileError) throw new Error(`illegal path: ${rel} leads out of the workspace through a symlink`);
+    throw err;
+  }
 }
 
 /** Who made a change and why — recorded on its revision. */
@@ -3955,7 +3973,7 @@ export interface RefusedOutput {
   /** Relative to that agent's outputs/. */
   path: string;
   bytes: number;
-  reason: "file-cap" | "run-cap" | "name" | "count";
+  reason: "file-cap" | "run-cap" | "name" | "count" | "unsafe";
   /** The cap in bytes that was exceeded (the count for "count"). */
   limit?: number;
 }
