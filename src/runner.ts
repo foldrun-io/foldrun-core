@@ -6,7 +6,7 @@
 import { opsLog, opsError } from "./ops-log.ts";
 import { globMatch } from "./bounded-match.ts";
 import { latestRevisionId } from "./history.ts";
-import { recordCallIo, redactionsFor, scrubWith } from "./capture.ts";
+import { maskPatterns, recordCallIo, redactionsFor, scrubWith } from "./capture.ts";
 import { callSink, flushCalls } from "./captured-calls.ts";
 import { AUTH_REFUSAL, platformCause } from "./issues.ts";
 import { hookNames } from "./hooks.ts";
@@ -45,7 +45,7 @@ const isolatedRun = () => {
 import { gatherConsults, buildConsultTools } from "./agent-tools.ts";
 import { DELEGATE_TOOL, gatherSubagents, ownSandbox, subagentPrompt, subagentTools, SUBAGENT_NO_REMOTES, type DelegateSpec, type SubagentSpec } from "./subagents.ts";
 import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNames, localDelegateChannel, readCopyBack } from "./delegate-tools.ts";
-import type { DelegationResult } from "./operator.ts";
+import type { DelegationResult, OperatorEvent } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
 import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
@@ -2293,6 +2293,27 @@ async function runStepBody(
   let canActOutward = false;
   const eventsAtStart = step.events.length;
   const redact = (text: string) => scrubWith(redactions, text);
+  // An event line, a question, a message: text that came out of a sandbox or a
+  // model, read by viewers, A2A callers, notifications and exports. The values
+  // above, then what no vault value covers (a key a tool printed, a private
+  // key block) — the mask a captured call already gets. One place: the retry
+  // row's error, the run's failure reason and a notification's summary are all
+  // read back off these events.
+  const mask = (text: string) => maskPatterns(redact(text));
+  const maskOperator = (ev: OperatorEvent): OperatorEvent => {
+    switch (ev.kind) {
+      case "asked":
+        return { ...ev, question: mask(ev.question), ...(ev.options ? { options: ev.options.map(mask) } : {}) };
+      case "message":
+      case "peer":
+      case "told":
+        return { ...ev, text: mask(ev.text) };
+      case "answered":
+        return { ...ev, answer: mask(ev.answer) };
+      default:
+        return ev;
+    }
+  };
 
   // The reply, the conclusion and an `output: json` value land on the same
   // record the events do, and a model that quotes a script's stdout puts
@@ -2329,7 +2350,9 @@ async function runStepBody(
   let captureFull = false;
   const callsRoot = path.resolve(agentDir, "..", "..");
   const sink = runId ? callSink(step, { tenant, workspace: path.basename(callsRoot), runId, workspaceRoot: callsRoot }) : undefined;
-  const push = (type: StepRecord["events"][number]["type"], text: string, extra?: EventExtra) => {
+  const push = (type: StepRecord["events"][number]["type"], text: string, given?: EventExtra) => {
+    // A question or a message a model wrote is masked before it is stored or sent on.
+    const extra: EventExtra | undefined = given?.operator ? { ...given, operator: maskOperator(given.operator) } : given;
     const t = new Date().toISOString();
     // The model has begun its first response: held only in memory, for
     // the fan-out gate (warmGate). Not a line in the trace.
@@ -2368,7 +2391,7 @@ async function runStepBody(
         rest = { ...others, captured: true };
       }
     }
-    step.events.push({ t, type, text: redact(text), ...rest });
+    step.events.push({ t, type, text: mask(text), ...rest });
     // A person in the loop: the question, its answer, a message delivered —
     // onto the step, so the run page, the API and history show them.
     if (extra?.operator) {
