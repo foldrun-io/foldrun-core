@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [23.1.2] — 2026-11-15
+
+### ci
+
+- a push to main whose checks passed deploys staging (sibling-push to foldrun-infra) ([ee9e930](https://github.com/foldrun-io/foldrun-core/commit/ee9e930))
+
 ## [23.1.1] — 2026-11-14
 
 - test(path-safety): the disk probe never writes outside its own folder ([95dd2d0](https://github.com/foldrun-io/foldrun-core/commit/95dd2d0))
