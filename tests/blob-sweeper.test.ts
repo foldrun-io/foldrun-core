@@ -27,7 +27,10 @@ let blobs: BlobStore & BlobSweeper;
 let revisions: RevisionStore;
 let fp: ReturnType<typeof fakePins>;
 let deps: Deps;
-let now = Date.parse("2026-11-08T00:00:00Z");
+// The store stamps objects with the real time, so the test clock starts at
+// it: a fixed date fell behind the real one and every age went negative.
+const START = Date.now();
+let now = START;
 const clock = () => new Date(now);
 
 function fakePins() {
@@ -95,7 +98,7 @@ beforeEach(() => {
   revisions = localRevisionStore(path.join(root, ".revisions"));
   fp = fakePins();
   deps = { blobs, revisions, pins: fp.pins };
-  now = Date.parse("2026-11-08T00:00:00Z");
+  now = START;
 });
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -297,7 +300,7 @@ test("maxDeletes is one budget: an account that fails part-way still pays for wh
     blobs = bounded(fsBlobStore(path.join(root, ".objects")), { backoffMs: 1 });
     revisions = localRevisionStore(path.join(root, ".revisions"));
     deps = { blobs, revisions, pins: fp.pins };
-    now = Date.parse("2026-11-08T00:00:00Z");
+    now = START;
     const marks = memorySweepMarks(clock);
     await put({ "memory/a.md": "a\n" });
     for (const t of [T, "beta"]) for (const i of [1, 2, 3]) await blobs.putIfAbsent(blobObjectKey(t, sha256Hex(Buffer.from(`${t}${i}\n`))), Buffer.from(`${t}${i}\n`));
