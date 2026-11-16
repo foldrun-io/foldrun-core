@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.2.0] — 2026-11-16
+
+### New in the public API
+
+- `deployPathProblems` from `@foldrun/core`
+
+- fix(deploy): a path that names no file, or is also a folder, is an issue, not an EISDIR ([a3d8960](https://github.com/foldrun-io/foldrun-core/commit/a3d8960))
+
 ## [24.1.1] — 2026-11-16
 
 - test(sweeper): the test clock starts at the real time, not 8 Nov ([e22a111](https://github.com/foldrun-io/foldrun-core/commit/e22a111))
