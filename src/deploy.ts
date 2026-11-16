@@ -492,6 +492,34 @@ function structuralWarnings(files: DeployFile[], extraOutward: Iterable<string> 
   return out;
 }
 
+/**
+ * The deploy paths that cannot be written whatever the workspace holds: one
+ * that names no file (empty, ".", ending in "/") and one that is also a
+ * folder of another path in the same deploy. They reached open() — an
+ * EISDIR, a 500 from POST …/deploy (FOL-199, hosted fuzz). The route answers
+ * them 400 before anything reads the files; deployIssues reports them too.
+ */
+export function deployPathProblems(files: { path: string }[]): { issues: DeployIssue[]; unwritable: Set<string> } {
+  const issues: DeployIssue[] = [];
+  const unwritable = new Set<string>();
+  const folders = new Set<string>();
+  for (const f of files) {
+    const parts = path.normalize(f.path).split("/");
+    for (let i = 1; i < parts.length; i++) folders.add(parts.slice(0, i).join("/"));
+  }
+  for (const f of files) {
+    const norm = path.normalize(f.path);
+    if (!f.path.trim() || norm === "." || norm === "./" || /[/\\]$/.test(f.path)) {
+      issues.push({ where: f.path, message: "not a file path — a deploy names files, never a folder" });
+      unwritable.add(f.path);
+    } else if (folders.has(norm)) {
+      issues.push({ where: f.path, message: "is a folder of another file in this deploy — one path cannot be both" });
+      unwritable.add(f.path);
+    }
+  }
+  return { issues, unwritable };
+}
+
 export function deployIssues(files: DeployFile[]): DeployIssue[] {
   const issues: DeployIssue[] = [];
   const at = (where: string, message: string) => issues.push({ where, message });
@@ -501,6 +529,10 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
 
   // Path safety, as questions rather than exceptions: a push should report
   // everything wrong with it at once, not fail on the first bad path.
+  // Paths that name no file, or one that is also a folder here (FOL-199).
+  const shape = deployPathProblems(files);
+  issues.push(...shape.issues);
+  const unwritable = shape.unwritable;
   for (const f of files) {
     const norm = path.normalize(f.path);
     if (norm.startsWith("..") || path.isAbsolute(norm) || norm.startsWith("runs")) {
@@ -654,12 +686,16 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
   try {
     for (const f of files) {
       const norm = path.normalize(f.path);
-      if (norm.startsWith("..") || path.isAbsolute(norm)) continue;
+      if (norm.startsWith("..") || path.isAbsolute(norm) || unwritable.has(f.path)) continue;
       const target = path.join(staged, norm);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, f.content);
     }
+    // Only a bundle that is a folder: a FILE called knowledge is not one
+    // (readdir of it was an ENOTDIR, a 500 — FOL-199).
+    const isDir = (d: string) => { try { return fs.statSync(d).isDirectory(); } catch { return false; } };
     for (const bundle of ["memory", "knowledge"]) {
+      if (!isDir(path.join(staged, bundle))) continue;
       for (const { file, issue } of conformanceIssues(path.join(staged, bundle))) {
         at(`${bundle}/${file}`, issue);
       }
@@ -667,6 +703,7 @@ export function deployIssues(files: DeployFile[]): DeployIssue[] {
     for (const agent of agents) {
       for (const bundle of ["memory", "knowledge"]) {
         const dir = path.join(staged, "agents", agent, bundle);
+        if (!isDir(dir)) continue;
         for (const { file, issue } of conformanceIssues(dir)) {
           at(`agents/${agent}/${bundle}/${file}`, issue);
         }

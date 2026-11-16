@@ -474,3 +474,29 @@ test("the checks' reader bounds data (state/, memory/, an agent's own) and refus
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// FOL-199 (hosted fuzz): a deploy path that names a folder reached open() —
+// EISDIR, a 500 from POST …/deploy. Each is a deploy issue now, nothing thrown.
+test("a path that names no file, or is both a file and a folder, is an issue — never an EISDIR", () =>
+  withData(() => {
+    deployWorkspace("acme", "desk", workspace(), {});
+    for (const bad of ["", " ", ".", "./", "flows/", "x/", "flows//", "agents/writer/", "agents", "agents/writer", "flows", "a/../flows"]) {
+      const files = [...workspace(), { path: bad, content: "x" }];
+      let plan;
+      assert.doesNotThrow(() => { plan = planDeploy("acme", "desk", files); }, `plan ${JSON.stringify(bad)}`);
+      assert.ok(plan!.issues.some((i) => i.where === bad || i.where === path.normalize(bad)), `plan ${JSON.stringify(bad)}: ${JSON.stringify(plan!.issues)}`);
+      const r = deployWorkspace("acme", "desk", files, {});
+      assert.equal(r.applied, false, JSON.stringify(bad));
+    }
+    // A path under another file in the same deploy.
+    const under = planDeploy("acme", "desk", [...workspace(), { path: "flows/publish.md/x.md", content: "x" }]);
+    assert.ok(under.issues.some((i) => /folder of another file/.test(i.message)), JSON.stringify(under.issues));
+    // A folder in the workspace now becoming a file is a real change, not a
+    // clash: the save replaces the source tree (Codex).
+    const becomes = planDeploy("acme", "desk", [...workspace().filter((f) => !f.path.startsWith("flows/")), { path: "flows", content: "x" }]);
+    assert.ok(!becomes.issues.some((i) => i.where === "flows" && /folder/.test(i.message)), JSON.stringify(becomes.issues));
+    // A file called knowledge (no folder of that name anywhere) is not scanned as a bundle.
+    assert.doesNotThrow(() => planDeploy("acme", "desk", [...workspace(), { path: "knowledge", content: "x" }]));
+    // The tree is as it was.
+    assert.ok(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/flows/publish.md")));
+  }));
