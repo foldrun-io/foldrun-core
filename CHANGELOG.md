@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.1.1] — 2026-11-16
+
+- test(sweeper): the test clock starts at the real time, not 8 Nov ([e22a111](https://github.com/foldrun-io/foldrun-core/commit/e22a111))
+
 ## [24.1.0] — 2026-11-15
 
 - feat(model-supply): a run can go on the account's Claude subscription (via "login") ([0190ab7](https://github.com/foldrun-io/foldrun-core/commit/0190ab7))
