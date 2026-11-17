@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.2.3] — 2026-11-17
+
+### fix
+
+- messages say "project", not "workspace" ([c96f122](https://github.com/foldrun-io/foldrun-core/commit/c96f122))
+
 ## [24.2.2] — 2026-11-17
 
 - chore(deps): bump @anthropic-ai/claude-agent-sdk (#126) ([88af409](https://github.com/foldrun-io/foldrun-core/commit/88af409))
