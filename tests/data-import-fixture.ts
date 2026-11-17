@@ -48,7 +48,7 @@ export function buildSource(): string {
   put(w("acme", "desk", "knowledge", "logo.bin"), BINARY);
   put(w("acme", "desk", "knowledge", "big.bin"), BIG);
   put(w("acme", "desk", "state", "cursor.json"), '{"n":1}\n');
-  put(w("acme", "desk", "scratch", "tmp.txt"), "not workspace content\n");
+  put(w("acme", "desk", "scratch", "tmp.txt"), "not project content\n");
   put(w("acme", "desk", "hooks.json"), JSON.stringify({ publish: { token: CANARY } }));
   fs.symlinkSync("/etc/hosts", w("acme", "desk", "agents", "evil"));
   // runs/ on the volume: counted, never read

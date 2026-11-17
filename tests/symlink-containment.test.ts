@@ -42,7 +42,7 @@ link(path.join(outside, "nothing-here.md"), "knowledge/dangling.md");
 fs.writeFileSync(path.join(dir, "knowledge/inside.md"), "inside\n");
 link(path.join(dir, "knowledge/inside.md"), "knowledge/alias.md");
 
-const refused = /illegal path: .* leads out of the workspace through a symlink/;
+const refused = /illegal path: .* leads out of the project through a symlink/;
 
 test("read: a file link and a folder link out are refused; one that stays inside reads", () => {
   assert.throws(() => readWorkspaceFile(TENANT, WS, "knowledge/leak.md"), refused);

@@ -103,7 +103,7 @@ test("resolveHooks: a hook name that is a path is an error, and nothing outside 
 test("a write into a workspace that does not exist is a 404 and makes nothing", withData(() => {
   assert.throws(
     () => writeWorkspaceFile("acme", "ghost", "flows/x.md", "---\nname: x\n---\n"),
-    (e: Error & { status?: number }) => e.status === 404 && /workspace ghost not found/.test(e.message),
+    (e: Error & { status?: number }) => e.status === 404 && /project ghost not found/.test(e.message),
   );
   assert.equal(fs.existsSync(workspaceDir("acme", "ghost")), false);
   saveWorkspace("acme", "desk", [{ path: "AGENTS.md", content: AGENTS }]);

@@ -71,7 +71,7 @@ export function dataImportSuite(label: string, make: () => Promise<ImportHarness
     assert.ok(desk.unmapped.some((u) => u.path === "secrets.json" && /never opened/.test(u.reason)), "secrets are named, not opened");
     assert.ok(desk.unmapped.some((u) => u.path === "trigger-log.jsonl.imported-2026-11-09"), "a set-aside trigger log is reported, not read");
     assert.deepEqual(desk.runs, { recordFiles: 2, outputFolders: 1, outputFiles: 1, outputBytes: "output bytes\n".length }, "runs/ is counted, never read");
-    assert.ok(!desk.files.some((f) => f.path.includes(".claude")), "engine home files are not workspace content");
+    assert.ok(!desk.files.some((f) => f.path.includes(".claude")), "engine home files are not project content");
     for (const p of ["storage", "secrets.json", "library", ".history"]) assert.ok(acme.unmapped.some((u) => u.path === p), `account-level ${p} is reported`);
 
     const legacy = scan.tenants.find((t) => t.tenant === "beta")!;

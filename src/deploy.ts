@@ -181,7 +181,7 @@ export function readTree(dir: string, opts: ReadTreeOptions = {}): DeployFile[] 
     }
     sourceBytes += bytes;
     if (opts.maxSourceBytes !== undefined && sourceBytes > opts.maxSourceBytes) {
-      throw new TreeTooLarge(`the workspace's files other than state/ and memory/ are over ${Math.round(opts.maxSourceBytes / 1048576)} MiB — not read`);
+      throw new TreeTooLarge(`the project's files other than state/ and memory/ are over ${Math.round(opts.maxSourceBytes / 1048576)} MiB — not read`);
     }
     return true;
   };
@@ -440,7 +440,7 @@ function structuralWarnings(files: DeployFile[], extraOutward: Iterable<string> 
   const agentNames: string[] = [];
   const out: (DeployIssue & { kind?: string })[] = [];
   if (!files.some((f) => /^agents\/[^/]+\/agent\.md$/.test(f.path)) && !files.some((f) => /^\.(claude|agents)\/agents\/[^/]+\.md$/.test(f.path))) {
-    out.push({ where: "agents/", message: "no agents yet — add one (agents/<name>/agent.md), or import one from another workspace" });
+    out.push({ where: "agents/", message: "no agents yet — add one (agents/<name>/agent.md), or import one from another project" });
   }
   // The web: warnings check prints — the old session: key, and a pinned
   // user agent behind the runner image's Chrome, which the platform knows

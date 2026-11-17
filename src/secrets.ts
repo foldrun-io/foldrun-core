@@ -174,7 +174,7 @@ function vaultAad(tenant: string, workspace: string | undefined, name: string, r
     throw new Error("malformed sites");
   }
   if (rec.workspaces !== undefined && (!Array.isArray(rec.workspaces) || rec.workspaces.some((x) => typeof x !== "string"))) {
-    throw new Error("malformed workspaces");
+    throw new Error("malformed projects");
   }
   return Buffer.from(
     JSON.stringify([
@@ -434,7 +434,7 @@ export interface SecretLimit {
 function cleanWorkspaceList(workspaces: unknown): string[] | null {
   if (workspaces === null) return null;
   if (!Array.isArray(workspaces) || workspaces.some((w) => typeof w !== "string")) {
-    throw new Error("workspaces is a list of workspace names, or null for every workspace");
+    throw new Error("projects is a list of project names, or null for every project");
   }
   const clean = [...new Set((workspaces as string[]).map((w) => w.trim()).filter(Boolean))].sort();
   for (const w of clean) assertSafeName(w, "workspace");
@@ -443,7 +443,7 @@ function cleanWorkspaceList(workspaces: unknown): string[] | null {
 function assertWorkspacesExist(list: string[] | null, exists?: (w: string) => boolean) {
   if (!list || !exists) return;
   const missing = list.filter((w) => !exists(w));
-  if (missing.length) throw Object.assign(new Error(`no workspace ${missing.join(", ")} in this account`), { status: 400 });
+  if (missing.length) throw Object.assign(new Error(`no project ${missing.join(", ")} in this account`), { status: 400 });
 }
 
 export function setSecret(
@@ -485,7 +485,7 @@ export function setSecret(
  *  asked to change it. Only the account's store has lists. */
 function limitFor(workspace: string | undefined, limit: SecretLimit): string[] | null | undefined {
   if (limit.workspaces === undefined) return undefined;
-  if (workspace) throw new Error("a workspace's own secret is that workspace's already — only an account secret is limited to workspaces");
+  if (workspace) throw new Error("a project's own secret is that project's already — only an account secret is limited to projects");
   return cleanWorkspaceList(limit.workspaces);
 }
 
@@ -531,7 +531,7 @@ export function setSecretSites(tenant: string, name: string, sites: string[], wo
     else delete rec.sites;
     return all;
   });
-  if (!found) throw new Error(`no secret ${name}${workspace ? ` in workspace ${workspace}` : " in the account"}`);
+  if (!found) throw new Error(`no secret ${name}${workspace ? ` in project ${workspace}` : " in the account"}`);
   return clean;
 }
 
@@ -700,7 +700,7 @@ export function setSecretWorkspaces(
     if (expected !== undefined) {
       const now = Array.isArray(rec.workspaces) ? [...rec.workspaces].sort() : null;
       if (JSON.stringify(now) !== JSON.stringify(expected)) {
-        throw Object.assign(new Error(`${name}'s workspaces changed since you loaded them (now ${now === null ? "every workspace" : now.length ? now.join(", ") : "none"}) — reload and try again`), { status: 409 });
+        throw Object.assign(new Error(`${name}'s projects changed since you loaded them (now ${now === null ? "every project" : now.length ? now.join(", ") : "none"}) — reload and try again`), { status: 409 });
       }
     }
     assertWorkspacesExist(clean, opts.exists);
@@ -716,7 +716,7 @@ export function setSecretWorkspaces(
  *  One that will not open is refused, never relabelled (setSecretSites). */
 function withWorkspaces(tenant: string, name: string, rec: StoredSecret, workspaces: string[] | null): StoredSecret {
   const value = openRecord(tenant, undefined, name, rec);
-  if (value === null) throw new Error(`${name} cannot be read with this install's keys — set its value again before changing its workspaces`);
+  if (value === null) throw new Error(`${name} cannot be read with this install's keys — set its value again before changing its projects`);
   return sealRecord(tenant, undefined, name, value, { kind: rec.kind, sites: rec.sites, workspaces: workspaces ?? undefined, updatedAt: rec.updatedAt }, true);
 }
 

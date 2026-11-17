@@ -165,7 +165,7 @@ test("published flow: an outward step with no person before it", () => {
   const ungated = (flow: string) => scanFiles(files(flow)).filter((f) => f.rule === "security/published-flow-ungated");
   const open = ungated("1. [[drafter]] — Draft it.\n2. [[poster]] — Post it.\n3. [[caller]] — Tell the partner.\n");
   assert.equal(open.length, 2, "the post and the message to an outside agent");
-  assert.match(open[0]!.message, /step 2 \(\[\[poster\]\]\) can act outside the workspace \(outward tool post_x\)/);
+  assert.match(open[0]!.message, /step 2 \(\[\[poster\]\]\) can act outside the project \(outward tool post_x\)/);
   assert.match(open[1]!.message, /outside agent checker/);
   assert.equal(ungated("1. [[drafter]] — Draft it.\n2!. [[poster]] — Post it.\n3. [[caller]] — Tell the partner.\n").length, 0, "a gate holds every step after it");
   assert.equal(ungated("1!. [[drafter]] — Draft it.\n2. [[poster]] — Post it.\n").length, 0, "a gate before");

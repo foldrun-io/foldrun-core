@@ -191,7 +191,7 @@ export const SCAN_RULES: readonly ScanRule[] = [
     id: "security/published-flow-ungated",
     category: "security",
     level: "warn",
-    title: "A flow published over A2A acts outside the workspace with no person in the way",
+    title: "A flow published over A2A acts outside the project with no person in the way",
     help:
       "An outside caller can start a published flow as often as its key allows. A step that posts, sends, writes to an API or calls " +
       "another outside agent, with no approval (`!`) or `ask:` before it or on it, does what any caller asked. Put a gate before the " +
@@ -225,7 +225,7 @@ export const SCAN_RULES: readonly ScanRule[] = [
     level: "warn",
     title: "A download piped straight into a shell",
     help:
-      "`curl … | sh` runs whatever the server returns today, unreviewed, in the sandbox that holds this workspace. " +
+      "`curl … | sh` runs whatever the server returns today, unreviewed, in the sandbox that holds this project. " +
       "Declare the package under `runtime: system:` or `packages:`, or download, verify a checksum, then run.",
     owasp: ["ASI04", "ASI05"],
   },
@@ -410,15 +410,15 @@ const OWN_RULES = "checks-own-rules";
 export const CHECK_RULES: readonly (Omit<ScanRule, "level"> & { level?: ScanLevel })[] = [
   { id: "agent/config", anchor: OWN_RULES, category: "config", title: "An agent's frontmatter or references are wrong", help: "A field foldrun cannot read, or a tool, skill, colleague or hook it names that does not exist. The message says which and what to write." },
   { id: "flow/config", anchor: OWN_RULES, category: "config", title: "A flow's steps or options are wrong", help: "A step naming no agent, an option value the parser cannot read, a verify: written as prose, or an arrangement that cannot have what its instruction asks for." },
-  { id: "flow/outward-ungated", category: "security", title: "A step that acts outside the workspace with no check and no approval", help: "Give the step a verify: that reads what it did, or an approval (`!`), so a wrong post or send is caught before it repeats.", owasp: ["ASI02", "ASI09"] },
+  { id: "flow/outward-ungated", category: "security", title: "A step that acts outside the project with no check and no approval", help: "Give the step a verify: that reads what it did, or an approval (`!`), so a wrong post or send is caught before it repeats.", owasp: ["ASI02", "ASI09"] },
   { id: "tool/config", anchor: OWN_RULES, category: "config", title: "A tool's definition or program is wrong", help: "A run: program that does not exist, a package it imports that nothing declares, or a leftover type: field." },
   { id: "skill/config", anchor: OWN_RULES, category: "config", title: "A skill does not follow the skill format", help: "SKILL.md needs a name and a description the model can choose it by." },
   { id: "eval/config", anchor: OWN_RULES, category: "config", title: "An eval names nothing, or has no cases", help: "An eval names one agent or flow that exists and holds at least one case." },
   { id: "hook/config", anchor: OWN_RULES, category: "config", title: "A hook is not a valid hook, or a hooks: name resolves to nothing", help: "hooks/<name>/hook.md with on:, and run.mjs beside it; a run refuses a step whose hook is missing rather than run it unguarded." },
   { id: "knowledge/okf", anchor: OWN_RULES, category: "config", title: "A knowledge or memory document is not a conformant OKF bundle entry", help: "Each document needs a type:; dates are YYYY-MM-DD; stale documents are flagged so an agent does not treat them as current." },
-  { id: "workspace/config", anchor: OWN_RULES, category: "config", title: "A workspace or account setting cannot be read", help: "AGENTS.md defaults — limits:, network:, foldrun_version: — that would leave every agent on the level above, and paths a deploy refuses." },
-  { id: "library/config", anchor: OWN_RULES, category: "config", title: "A library entry is wrong", help: "The same rules as in a workspace, for the account's shared library." },
-  { id: "paths/workspace-spelling", anchor: OWN_RULES, category: "config", title: "An older spelling of a workspace path", help: "`../../storage/x` still works; `workspace/storage/x` reads the same in every tool, script and check." },
+  { id: "workspace/config", anchor: OWN_RULES, category: "config", title: "A project or account setting cannot be read", help: "AGENTS.md defaults — limits:, network:, foldrun_version: — that would leave every agent on the level above, and paths a deploy refuses." },
+  { id: "library/config", anchor: OWN_RULES, category: "config", title: "A library entry is wrong", help: "The same rules as in a project, for the account's shared library." },
+  { id: "paths/workspace-spelling", anchor: OWN_RULES, category: "config", title: "An older spelling of a project path", help: "`../../storage/x` still works; `workspace/storage/x` reads the same in every tool, script and check." },
 ];
 
 /** The rule id of a check or deploy problem, from where it was found and
@@ -1030,7 +1030,7 @@ function scanPublishedFlows(flows: FlowFacts[], legs: Map<string, AgentLegs>, tr
         if (!writes.length) continue;
         push(
           "security/published-flow-ungated", fl.file, s.line ?? at, `published ungated ${g} ${s.agent}`,
-          `step ${g} ([[${s.agent}]]) can act outside the workspace (${writes.slice(0, 2).join(", ")}${writes.length > 2 ? ", …" : ""}) and ${info.name} is published over A2A, ` +
+          `step ${g} ([[${s.agent}]]) can act outside the project (${writes.slice(0, 2).join(", ")}${writes.length > 2 ? ", …" : ""}) and ${info.name} is published over A2A, ` +
             `with no approval or ask: before it — any caller with a key starts it. Put a gate (\`${g}!.\`) on it or before it`,
         );
       }

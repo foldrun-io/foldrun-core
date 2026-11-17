@@ -510,7 +510,7 @@ function permanent(err: unknown): boolean {
   if (err instanceof PublishError) return err.code === "bad_change";
   if (err instanceof OpIdReused) return true; // commitEntry asked again and it still is: see there
   const m = err instanceof Error ? err.message : "";
-  return /^illegal manifest path|differ only by case|a manifest holds at most|is not workspace content/.test(m);
+  return /^illegal manifest path|differ only by case|a manifest holds at most|is not project content/.test(m);
 }
 
 /** Wait until every queued change (of one workspace, or all) is committed.
@@ -1486,7 +1486,7 @@ async function reconcileNow(tenant: string, workspace: string, by = "reconcile")
       ws,
       opId,
       by,
-      message: "workspace content recorded",
+      message: "project content recorded",
       changes,
       // Read when asked, one file at a time; publish checks the bytes against
       // the sha, so a file that changed since the scan fails this repair (the

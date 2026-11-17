@@ -137,7 +137,7 @@ export function assertManifestPath(rel: string, kind?: Manifest["kind"]): string
   // name on a Mac and two on Linux. A manifest holds the composed form, so it
   // extracts the same everywhere. (Case is handled per manifest, below.)
   if (rel !== rel.normalize("NFC")) throw new Error(`illegal manifest path (not NFC-normalised): ${rel}`);
-  if (kind !== "run-output" && sideOf(rel) === null) throw new Error(`${rel} is not workspace content (authored: ${[...AUTHORED_DIRS, ...AUTHORED_ROOT_FILES].join(", ")}; state: state/)`);
+  if (kind !== "run-output" && sideOf(rel) === null) throw new Error(`${rel} is not project content (authored: ${[...AUTHORED_DIRS, ...AUTHORED_ROOT_FILES].join(", ")}; state: state/)`);
   return rel;
 }
 

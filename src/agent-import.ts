@@ -76,8 +76,8 @@ export function importAgent(
   const name = opts.as?.trim() || agent;
   assertSafeName(name, "agent");
   const known = new Set(listWorkspaces(tenant).map((w) => w.name));
-  if (!known.has(from)) throw new AgentImportError(`no workspace called "${from}" in this account`, 404);
-  if (!known.has(to)) throw new AgentImportError(`no workspace called "${to}" in this account`, 404);
+  if (!known.has(from)) throw new AgentImportError(`no project called "${from}" in this account`, 404);
+  if (!known.has(to)) throw new AgentImportError(`no project called "${to}" in this account`, 404);
   if (from === to && name === agent) {
     throw new AgentImportError(`${agent} is already in ${to} — give the copy another name with "as"`, 409);
   }

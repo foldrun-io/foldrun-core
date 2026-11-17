@@ -306,7 +306,7 @@ export function checkFormatVersion(declared: unknown): VersionCheck {
       declared: value,
       supported: FORMAT_VERSION,
       warning:
-        `this workspace targets foldrun format ${value}, and this build understands ` +
+        `this project targets foldrun format ${value}, and this build understands ` +
         `${FORMAT_VERSION}. A different major version may mean different behaviour — ` +
         `read it as best-effort rather than correct.`,
     };
@@ -316,7 +316,7 @@ export function checkFormatVersion(declared: unknown): VersionCheck {
       declared: value,
       supported: FORMAT_VERSION,
       warning:
-        `this workspace targets foldrun format ${value}; this build understands ` +
+        `this project targets foldrun format ${value}; this build understands ` +
         `${FORMAT_VERSION}. Newer fields will be ignored rather than rejected.`,
     };
   }
@@ -422,7 +422,7 @@ export function saveWorkspace(
     assertCanonicalCase(norm);
     if (!IN_WORKSPACE_DIR.test(norm) && norm !== "project.md" && norm !== "AGENTS.md") {
       throw new Error(
-        `unexpected file: ${f.path} — a workspace holds AGENTS.md plus ` +
+        `unexpected file: ${f.path} — a project holds AGENTS.md plus ` +
           `${WORKSPACE_DIRS.map((d) => `${d}/`).join(", ")}`,
       );
     }
@@ -2173,7 +2173,7 @@ export function parseFlow(file: string, raw: string): FlowInfo {
           else step.schema = parsed.schema;
         }
         else if (!/\s/.test(value) && (/\.(json|ya?ml)$/i.test(value) || value.includes("/"))) step.schemaPath = value;
-        else problem("a JSON object, a path under the workspace (schemas/lead.json), or a YAML block on the lines below");
+        else problem("a JSON object, a path under the project (schemas/lead.json), or a YAML block on the lines below");
       }
     }
   }
@@ -2828,7 +2828,7 @@ export function accountFileSealed(rel: string): string | null {
     return "generated bookkeeping, not an authored file.";
   }
   if (/^workspaces\/[^/]+\/secrets\.json$/.test(norm)) {
-    return "the workspace vault — encrypted, and never served to a browser.";
+    return "the project vault — encrypted, and never served to a browser.";
   }
   return null;
 }
@@ -2975,7 +2975,7 @@ export function landsInside(dir: string, full: string, followLast = true): boole
 }
 
 export function assertLandsInside(dir: string, full: string, rel: string, followLast = true) {
-  if (!landsInside(dir, full, followLast)) throw new Error(`illegal path: ${rel} leads out of the workspace through a symlink`);
+  if (!landsInside(dir, full, followLast)) throw new Error(`illegal path: ${rel} leads out of the project through a symlink`);
 }
 
 export function readWorkspaceFile(tenant: string, workspace: string, rel: string): string {
@@ -2990,7 +2990,7 @@ export function readWorkspaceFile(tenant: string, workspace: string, rel: string
   try {
     return readPlainText(realLanding(p) ?? p, { root: dir });
   } catch (err) {
-    if (err instanceof UnsafeFileError) throw new Error(`illegal path: ${rel} leads out of the workspace through a symlink`);
+    if (err instanceof UnsafeFileError) throw new Error(`illegal path: ${rel} leads out of the project through a symlink`);
     throw err;
   }
 }
@@ -3019,7 +3019,7 @@ export function writeWorkspaceFile(
   // workspace:manage role and the plan's workspace count that POST
   // /api/workspaces, deploy and import apply. Those create through
   // saveWorkspace / applyImport, not through here.
-  if (!fs.existsSync(dir)) throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
+  if (!fs.existsSync(dir)) throw Object.assign(new Error(`project ${workspace} not found`), { status: 404 });
   const p = path.join(dir, assertEditablePath(rel));
   // Before anything is created: mkdir below would otherwise make folders
   // through a linked directory too.
@@ -3105,7 +3105,7 @@ export function anchoredReason(rel: string): string | null {
   const norm = rel.replaceAll("\\", "/");
   const base = norm.split("/").pop()!;
   if (norm === "AGENTS.md" || norm === "project.md") {
-    return `${base} is the workspace's own identity — it cannot move; rename or delete the workspace instead`;
+    return `${base} is the project's own identity — it cannot move; rename or delete the project instead`;
   }
   if (base === "agent.md") {
     return "agent.md is the agent because of where it sits — to rename the agent, rename its folder";
@@ -3251,7 +3251,7 @@ export function deleteWorkspacePath(tenant: string, workspace: string, rel: stri
 
 export function deleteWorkspace(tenant: string, workspace: string) {
   const dir = workspaceDir(tenant, workspace);
-  if (!fs.existsSync(dir)) throw new Error(`workspace ${workspace} not found`);
+  if (!fs.existsSync(dir)) throw new Error(`project ${workspace} not found`);
   // Its records in the database (runs, trigger log, file index) go BEFORE the
   // folder: if that throws, nothing was removed and the delete can be retried;
   // after the folder is gone a retry would answer "not found" with rows left.
@@ -3282,7 +3282,7 @@ export function deleteWorkspace(tenant: string, workspace: string) {
 export async function deleteWorkspaceAsync(tenant: string, workspace: string): Promise<void> {
   const lc = workspaceLifecycle();
   if (!lc) return deleteWorkspace(tenant, workspace);
-  if (!fs.existsSync(workspaceDir(tenant, workspace))) throw new Error(`workspace ${workspace} not found`);
+  if (!fs.existsSync(workspaceDir(tenant, workspace))) throw new Error(`project ${workspace} not found`);
   await lc.drop(tenant, workspace, () => deleteWorkspace(tenant, workspace));
 }
 
@@ -3315,14 +3315,14 @@ export function renameWorkspace(tenant: string, from: string, to: string) {
   if (from === to) return;
 
   const src = workspaceDir(tenant, from);
-  if (!fs.existsSync(src)) throw new Error(`workspace ${from} not found`);
+  if (!fs.existsSync(src)) throw new Error(`project ${from} not found`);
 
   // Deliberately not workspaceDir(): that returns the *legacy* path when one
   // exists, and renaming into `projects/` would resurrect the old layout.
   const dest = singleWorkspace()
     ? (() => { throw new Error("cannot rename in single-workspace mode"); })()
     : path.join(dataRoot(), tenant, WORKSPACES, to);
-  if (fs.existsSync(dest)) throw new Error(`workspace ${to} already exists`);
+  if (fs.existsSync(dest)) throw new Error(`project ${to} already exists`);
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.renameSync(src, dest);
@@ -3355,11 +3355,11 @@ export async function renameWorkspaceAsync(tenant: string, from: string, to: str
   const lc = workspaceLifecycle();
   if (!lc || from === to) return renameWorkspace(tenant, from, to);
   assertSafeName(to, "workspace");
-  if (!fs.existsSync(workspaceDir(tenant, from))) throw new Error(`workspace ${from} not found`);
+  if (!fs.existsSync(workspaceDir(tenant, from))) throw new Error(`project ${from} not found`);
   // The checks renameWorkspace makes, BEFORE the history moves: a name that is
   // taken must never have its history replaced by this one's.
   if (singleWorkspace()) return renameWorkspace(tenant, from, to); // throws
-  if (fs.existsSync(workspaceDir(tenant, to)) || fs.existsSync(path.join(dataRoot(), tenant, WORKSPACES, to))) throw new Error(`workspace ${to} already exists`);
+  if (fs.existsSync(workspaceDir(tenant, to)) || fs.existsSync(path.join(dataRoot(), tenant, WORKSPACES, to))) throw new Error(`project ${to} already exists`);
   await lc.move(tenant, from, to, () => renameWorkspace(tenant, from, to));
 }
 
@@ -3374,7 +3374,7 @@ export async function renameWorkspaceAsync(tenant: string, from: string, to: str
  *  through writeWorkspaceFile, as a revision. */
 export function setWorkspaceDescription(tenant: string, workspace: string, description: string, meta: ChangeMeta = {}) {
   const file = path.join(workspaceDir(tenant, workspace), "AGENTS.md");
-  if (!fs.existsSync(file)) throw new Error("this workspace has no AGENTS.md");
+  if (!fs.existsSync(file)) throw new Error("this project has no AGENTS.md");
 
   const raw = fs.readFileSync(file, "utf8");
   if (!/^---\r?\n[\s\S]*?\r?\n---/.test(raw)) throw new Error("AGENTS.md has no frontmatter");

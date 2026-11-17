@@ -38,7 +38,7 @@ test("schema: inline JSON, a YAML block, or a path; anything else is a check err
   assert.equal(file.schema, undefined);
 
   assert.match(errors("1. [[a]] — find\n   output: json\n   schema: {not json\n")[0], /^schema: \{not json — cannot read the schema/);
-  assert.match(errors("1. [[a]] — find\n   output: json\n   schema: 3\n")[0], /a JSON object, a path under the workspace \(schemas\/lead\.json\), or a YAML block/);
+  assert.match(errors("1. [[a]] — find\n   output: json\n   schema: 3\n")[0], /a JSON object, a path under the project \(schemas\/lead\.json\), or a YAML block/);
   assert.match(errors("1. [[a]] — find\n   output: json\n   schema: just some words\n")[0], /^schema: just some words/);
   assert.match(errors("1. [[a]] — find\n   output: json\n   schema:\n2. [[b]] — next\n")[0], /the block under it is empty/);
   // lint: a schema on a step that returns no data checks nothing.

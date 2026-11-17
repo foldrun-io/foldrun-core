@@ -403,7 +403,7 @@ export async function testTool(
       detail: clip(
         (caller
           ? `ran from agents/${caller.name}/, where a run runs\n\n`
-          : `ran from the workspace root — there is no agent to stand in for, so a script that reaches workspace/ or ../../ will not find the workspace there\n\n`) +
+          : `ran from the project root — there is no agent to stand in for, so a script that reaches workspace/ or ../../ will not find the project there\n\n`) +
           (out || "(no output)"),
       ),
     });

@@ -245,7 +245,7 @@ export function revisionContract(label: string, make: () => Promise<Harness>): v
     const ws = fresh();
     for (const bad of ["storage/x.csv", "runs/r1/out", "../etc/passwd", "agents\\x.md", "/agents/x.md", "secrets.json"]) {
       const w = await edit(deps, ws, null, { [bad]: "x" }).catch(() => null);
-      if (w) await assert.rejects(() => publish(deps, w.input), /illegal manifest path|not workspace content/);
+      if (w) await assert.rejects(() => publish(deps, w.input), /illegal manifest path|not project content/);
     }
     assert.equal(await deps.revisions.head(ws), null);
   });

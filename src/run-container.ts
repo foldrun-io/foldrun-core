@@ -661,8 +661,8 @@ export function applyContainerChanges(
           applied.push(conflictRel);
           written.push({ path: conflictRel.replaceAll("\\", "/"), base: null, after: next });
           note?.(
-            `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the workspace while this step ran, ` +
-              `and not only by appending — kept the workspace's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
+            `write-back conflict on ${rel.replaceAll("\\", "/")}: it changed on the project while this step ran, ` +
+              `and not only by appending — kept the project's version; this step's version is ${conflictRel.replaceAll("\\", "/")}`,
           );
           continue;
         }
@@ -694,7 +694,7 @@ export function applyContainerChanges(
     try {
       recordStepOutputs(opts.revision.tenant, path.basename(hostWs), written, { runId: opts.revision.runId, step: opts.revision.step, base: opts.revision.base });
     } catch (err) {
-      note?.(`the step's files were written to the workspace but not recorded as a revision yet: ${err instanceof Error ? err.message : String(err)}`);
+      note?.(`the step's files were written to the project but not recorded as a revision yet: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return applied;

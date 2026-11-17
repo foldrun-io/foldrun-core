@@ -118,7 +118,7 @@ function bytesOf(files: Pick<FileRecord, "sha" | "size">[]): number {
  */
 export function requireWorkspace(tenant: string, workspace: string): void {
   if (!fs.existsSync(workspaceDir(tenant, workspace))) {
-    throw Object.assign(new Error(`workspace ${workspace} not found`), { status: 404 });
+    throw Object.assign(new Error(`project ${workspace} not found`), { status: 404 });
   }
 }
 
@@ -1121,7 +1121,7 @@ async function putFileQuietly(
     assertNoNameClash(seen.files, norm);
     const before = seen.files.find((f) => f.path === norm);
     if (before?.sha !== sha && usedBytes(tenant, workspace) - (before?.size ?? 0) + body.length > quotaBytes()) {
-      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+      throw new Error(`project file quota exceeded (${quotaBytes() / 1e6}MB)`);
     }
   }
   // The upload happens outside the lock: it can be long, and a blob is
@@ -1140,7 +1140,7 @@ async function putFileQuietly(
     if (projected > quotaBytes()) {
       // Nothing names the blob we just put unless another record already does.
       if (!index.files.some((f) => f.sha === sha)) await driver.remove(key).catch(() => {});
-      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+      throw new Error(`project file quota exceeded (${quotaBytes() / 1e6}MB)`);
     }
     // A delete or replace that ran between our upload and now may have
     // collected this very blob (it was unreferenced then). We hold the bytes,
@@ -1214,7 +1214,7 @@ export async function registerUpload(
       await refuse(`${norm} is ${Math.round(size / 1e6)}MB — the limit is ${maxBytes() / 1e6}MB`);
     }
     if (bytesOf(files) > quotaBytes() && bytesOf(files) > bytesOf(index.files)) {
-      await refuse(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+      await refuse(`project file quota exceeded (${quotaBytes() / 1e6}MB)`);
     }
     indexPut(tenant, workspace, index, record);
     if (previous && previous.sha !== sha) await collectLocked(tenant, workspace, previous.sha);
@@ -1355,7 +1355,7 @@ export async function uploadUrl(
     const files = readIndex(tenant, workspace).files;
     const next = [...files.filter((f) => f.path !== norm), { sha, size }];
     if (bytesOf(next) > quotaBytes() && bytesOf(next) > bytesOf(files)) {
-      throw new Error(`workspace file quota exceeded (${quotaBytes() / 1e6}MB)`);
+      throw new Error(`project file quota exceeded (${quotaBytes() / 1e6}MB)`);
     }
   }
   return driverFor(tenant, workspace).presignPut(blobKey(tenant, workspace, sha), mimeFor(norm), undefined, size);
@@ -1434,7 +1434,7 @@ async function moveUnlocked(tenant: string, from: string, to: string): Promise<v
   if (!fs.existsSync(src) && !(port && port.fileList(tenant, from).length)) return;
   const driver = driverFor(tenant, from);
   const shas = driver.kind === "fs" ? [] : [...new Set(readIndex(tenant, from).files.map((f) => f.sha))];
-  if (shas.length && !driver.copy) throw new Error(`the ${driver.kind} store cannot move files to a new workspace name`);
+  if (shas.length && !driver.copy) throw new Error(`the ${driver.kind} store cannot move files to a new project name`);
   for (const sha of shas) await driver.copy!(blobKey(tenant, from, sha), blobKey(tenant, to, sha));
   if (fs.existsSync(src)) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });

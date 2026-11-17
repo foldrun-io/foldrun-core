@@ -81,7 +81,7 @@ export function refusedLine(refused: readonly RefusedPath[]): string {
   const shown = refused.slice(0, 20).map((r) => `${r.path} (${r.kind})`).join(", ");
   const more = refused.length > 20 ? ` and ${refused.length - 20} more` : "";
   return (
-    `refused path: ${shown}${more} — a step cannot change the workspace's configuration or code; ` +
-    `the workspace keeps its own copy. Propose the change instead (Proposed fixes), and a person applies it.`
+    `refused path: ${shown}${more} — a step cannot change the project's configuration or code; ` +
+    `the project keeps its own copy. Propose the change instead (Proposed fixes), and a person applies it.`
   );
 }

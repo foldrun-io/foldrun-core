@@ -179,7 +179,7 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "server.client-credentials", role: "server", title: "Client credentials for machine clients", spec: "RFC 6749 §4.4",
-    status: "supported", note: "An admin registers a machine client (Settings, or `foldrun mcp clients add`) with a role, workspaces and access; no refresh token; disconnecting it makes it `invalid_client`.",
+    status: "supported", note: "An admin registers a machine client (Settings, or `foldrun mcp clients add`) with a role, projects and access; no refresh token; disconnecting it makes it `invalid_client`.",
     proof: [web("tests/mcp-oauth.test.ts", "machine clients (client credentials, part G)"), web("tests/mcp-oauth.test.ts", "a machine client can sign in with private_key_jwt"), cli("tests/cli-mcp.test.ts", "mcp clients add")],
   },
   {

@@ -979,9 +979,9 @@ export function readBrowseSettings(raw: unknown): { settings: BrowseSettings; re
     }
     if (k === "init" || k === "extensions") {
       const list = browseList(v);
-      if (!list) return { settings, rest: left(rest), error: `web.browse.${k} is a list of workspace paths, like [${k === "init" ? "scripts/stub.js" : "library/extensions/my-ext"}].` };
+      if (!list) return { settings, rest: left(rest), error: `web.browse.${k} is a list of project paths, like [${k === "init" ? "scripts/stub.js" : "library/extensions/my-ext"}].` };
       const bad = list.find((p) => p.startsWith("/") || p.split(/[\\/]/).includes("..") || p.includes(","));
-      if (bad) return { settings, rest: left(rest), error: `web.browse.${k}: ${bad} must be a path inside the workspace (no leading /, no .., no comma).` };
+      if (bad) return { settings, rest: left(rest), error: `web.browse.${k}: ${bad} must be a path inside the project (no leading /, no .., no comma).` };
       if (list.length) settings[k] = list;
       continue;
     }

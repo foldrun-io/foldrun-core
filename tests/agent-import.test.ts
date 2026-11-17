@@ -40,7 +40,7 @@ test("a blank workspace has no agents, flows or example knowledge", () => {
   const paths = blankWorkspaceFiles("x").map((f) => f.path).sort();
   assert.deepEqual(paths, [".gitignore", "AGENTS.md", "CLAUDE.md"]);
   assert.deepEqual(blankTemplateFiles("x").map((f) => f.path), ["AGENTS.md"]);
-  assert.match(blankTemplateFiles("x")[0].content, /import one from another workspace/);
+  assert.match(blankTemplateFiles("x")[0].content, /import one from another project/);
 });
 
 test("an agent is copied with its own skills, without its memory", () => {

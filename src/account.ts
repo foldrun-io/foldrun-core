@@ -100,7 +100,7 @@ export function readAccountTree(accountRoot: string, only?: string): AccountTree
   }
   const names = listWorkspaceDirs(root).filter((n) => (only ? n === only : true));
   if (only && names.length === 0) {
-    throw new Error(`no workspace "${only}" in ${root} — have: ${listWorkspaceDirs(root).join(", ") || "none"}`);
+    throw new Error(`no project "${only}" in ${root} — have: ${listWorkspaceDirs(root).join(", ") || "none"}`);
   }
   const wsRoot = path.join(root, "workspaces");
   const legacy = path.join(root, "projects");
@@ -130,7 +130,7 @@ export function accountTreeFrom(from: string, only?: string): { layout: Layout; 
   if (layout.kind === "flat" || layout.kind === "empty") {
     const dir = layout.workspaceDir!;
     const name = path.basename(dir);
-    if (only && only !== name) throw new Error(`${dir} is a single workspace called "${name}", not "${only}"`);
+    if (only && only !== name) throw new Error(`${dir} is a single project called "${name}", not "${only}"`);
     return {
       layout,
       tree: {

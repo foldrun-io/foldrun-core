@@ -175,7 +175,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
       message: zoneProblem,
       detail:
         "This is the zone the schedule fires in AND the calendar every step in this flow works " +
-        "to. Unreadable, the schedule falls back to UTC and each step inherits the workspace's " +
+        "to. Unreadable, the schedule falls back to UTC and each step inherits the project's " +
         "zone instead of this one.",
     });
   }
@@ -237,7 +237,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
   // Trigger shapes that can never fire, said at check time rather than
   // discovered as a flow that "never runs".
   if (flow.budgetProblem) {
-    warnings.push({ step: null, message: flow.budgetProblem, detail: "A flow's `budget:` is the most one run may spend — a number in USD, or `unlimited`. A cap over a day, week or month belongs in the workspace's or the account's AGENTS.md, where it means every run put together." });
+    warnings.push({ step: null, message: flow.budgetProblem, detail: "A flow's `budget:` is the most one run may spend — a number in USD, or `unlimited`. A cap over a day, week or month belongs in the project's or the account's AGENTS.md, where it means every run put together." });
   }
   if (flow.trigger === "once" && !flow.at) {
     warnings.push({ step: null, message: "trigger: once needs an `at:` instant", detail: "Write `at: 2026-09-05T09:00:00+10:00` (ISO 8601). Without a readable instant this flow never fires." });
@@ -246,7 +246,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
     warnings.push({ step: null, message: "trigger: watch needs an http(s) `url:`", detail: "The scheduler polls that URL and starts the flow when its content changes." });
   }
   if (flow.trigger === "flow") {
-    if (!flow.after) warnings.push({ step: null, message: "trigger: flow needs `after: <flow>`", detail: "Name the flow of this workspace whose finishing starts this one." });
+    if (!flow.after) warnings.push({ step: null, message: "trigger: flow needs `after: <flow>`", detail: "Name the flow of this project whose finishing starts this one." });
     else if (flow.after === flow.name) warnings.push({ step: null, message: "trigger: flow — a flow cannot chain on itself", detail: "That is a loop with no bound. Chain on the flow that produces what this one needs." });
   }
   if (flow.signature && !flow.signingSecret) {
@@ -364,7 +364,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         line: step.line,
         level: "error",
         kind: "outward",
-        message: `[[${step.agent}]] can act outside this workspace and this step has no verify: and no gate`,
+        message: `[[${step.agent}]] can act outside this project and this step has no verify: and no gate`,
         detail:
           "A step that sends, posts, buys or publishes needs one of two things: a `verify:` the " +
           "runtime can fail the step on — a receipt file, a ledger row, the reply's own verdict " +
@@ -383,7 +383,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         step: i,
         line: step.line,
         kind: "outward",
-        message: `[[${step.agent}]] can act outside this workspace and this step has retry: ${step.retry}`,
+        message: `[[${step.agent}]] can act outside this project and this step has retry: ${step.retry}`,
         detail:
           "A retry runs the whole step again, sends included. The runner does not retry a failure " +
           "that came from the check after the step's tools ran, but an attempt that failed mid-way — " +
@@ -438,7 +438,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         step: i,
         line: step.line,
         level: "error",
-        message: `[[${step.agent}]] is not an agent in this workspace`,
+        message: `[[${step.agent}]] is not an agent in this project`,
         detail:
           "This step has nothing to run. Every run of this flow fails here. Check the spelling " +
           "against `agents/<name>/agent.md` — the name is the folder's, not the file's heading — " +
@@ -495,7 +495,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
           warnings.push({
             step: i,
             line: step.line,
-            message: `delegate: "${name}" is not an agent in this workspace`,
+            message: `delegate: "${name}" is not an agent in this project`,
             detail:
               "The runner only accepts picks from the declared set, so this name can never be " +
               "chosen — the step silently has one fewer colleague to call on. Fix the spelling, " +
@@ -507,7 +507,7 @@ export function lintFlow(flow: FlowInfo, known?: KnownNames): FlowWarning[] {
         warnings.push({
           step: i,
           line: step.line,
-          message: `on-fail: "${step.onFail}" is not an agent in this workspace`,
+          message: `on-fail: "${step.onFail}" is not an agent in this project`,
           detail:
             "The recovery path is the one you cannot test by running the flow successfully. As " +
             "written, a failure here has nowhere to go and the step just fails.",

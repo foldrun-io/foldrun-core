@@ -183,7 +183,7 @@ test("value and limit in one write: a new secret is never open in between; a wor
   assert.equal(s.getSecret("acme", "BORN_LIMITED", "blog")?.value, "w");
   assert.throws(() => s.setSecret("acme", "OWN", "v", "blog", undefined, { workspaces: ["sales"] }), /only an account secret/);
   // A name that does not exist, asked under the lock: nothing is written.
-  assert.throws(() => s.setSecret("acme", "GHOST", "v", undefined, undefined, { workspaces: ["nosuch"], exists: (w) => w !== "nosuch" }), /no workspace nosuch/);
+  assert.throws(() => s.setSecret("acme", "GHOST", "v", undefined, undefined, { workspaces: ["nosuch"], exists: (w) => w !== "nosuch" }), /no project nosuch/);
   assert.equal(readJson().GHOST, undefined);
 });
 
@@ -211,7 +211,7 @@ test("a conditional update is refused when the list changed meanwhile; names are
   assert.deepEqual(s.setSecretWorkspaces("acme", "COND", ["sales"], { ifWorkspaces: ["ops"] }), ["sales"]);
   assert.throws(
     () => s.setSecretWorkspaces("acme", "COND", ["gone"], { exists: (w) => w !== "gone" }),
-    (err: Error & { status?: number }) => err.status === 400 && /no workspace gone/.test(err.message),
+    (err: Error & { status?: number }) => err.status === 400 && /no project gone/.test(err.message),
   );
   assert.deepEqual(readJson().COND.workspaces, ["sales"]);
   assert.throws(() => s.setSecretWorkspaces("acme", "NOT_THERE", null), (err: Error & { status?: number }) => err.status === 404);

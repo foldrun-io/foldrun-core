@@ -217,7 +217,7 @@ test("a file the step never touched is not written back over a concurrent edit",
 });
 
 test("node_modules never comes back", () => {
-  // A dependency tree is not workspace content: nothing authored lives there,
+  // A dependency tree is not project content: nothing authored lives there,
   // it is enormous, and a runtime linked beside a tool so ESM can resolve it
   // would otherwise be copied back file by file.
   assert.equal(allowedBack("tools/x/node_modules/sharp/package.json"), false);

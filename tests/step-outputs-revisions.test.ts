@@ -120,7 +120,7 @@ test("a step's journal entry is on disk before the commit, so a crash cannot lea
   assert.equal(fs.existsSync(dir), false);
 });
 
-test("files that are not workspace content and over-size files are not journalled; a big one is left to the reconcile", async () => {
+test("files that are not project content and over-size files are not journalled; a big one is left to the reconcile", async () => {
   const n = recordStepOutputs(T, W, [
     { path: "runs/run-1/x.json", base: null, after: Buffer.from("{}") },
     { path: "agents/writer/.claude/settings.json", base: null, after: Buffer.from("{}") },

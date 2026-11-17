@@ -326,7 +326,7 @@ export async function attemptWebhook(
   const config = notifyConfig(tenant, workspace);
   const base = { n: d.attempt, at, ...(d.manual ? { manual: true } : {}) };
   if (!config?.url) {
-    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "this workspace's notify: has no url any more" };
+    return { ...base, ok: false, statusCode: null, durationMs: 0, response: null, error: "this project's notify: has no url any more" };
   }
   const { url, refused, filled } = webhookTarget(tenant, workspace, config);
   if (!url) {
@@ -540,7 +540,7 @@ export async function sendTestNotification(
       ok: false,
       destination: "none",
       detail:
-        "no notify: in this workspace's AGENTS.md or the account's — nothing would be sent for a failure or a gate either",
+        "no notify: in this project's AGENTS.md or the account's — nothing would be sent for a failure or a gate either",
     };
   }
   const sent = new Date().toISOString();

@@ -406,7 +406,7 @@ async function publishScope(deps: Deps, input: PublishInput, scope: Scope, chang
     if (res.status === "duplicate") return { status: "duplicate", revision: res.revision, conflicts: [] };
     // stale: the head moved. Fold again onto it.
   }
-  throw new PublishError("the workspace changed too often while publishing; try again", "too_many_replays");
+  throw new PublishError("the project changed too often while publishing; try again", "too_many_replays");
 }
 
 /** Combine the two heads' answers: the workspace revision is `revision`, the
@@ -499,7 +499,7 @@ async function restoreScope(deps: Deps, input: RestoreInput, scope: Scope, toId:
     if (res.status === "committed") return { status: "committed", revision: res.revision, conflicts: [] };
     if (res.status === "duplicate") return { status: "duplicate", revision: res.revision, conflicts: [] };
   }
-  throw new PublishError("the workspace changed too often while restoring; try again", "too_many_replays");
+  throw new PublishError("the project changed too often while restoring; try again", "too_many_replays");
 }
 
 /** A new revision with an old one's content. History is untouched. Refuses,

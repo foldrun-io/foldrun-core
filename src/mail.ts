@@ -90,7 +90,7 @@ export const MAIL_CATEGORIES: readonly MailCategoryInfo[] = [
     label: "Run alerts",
     required: false,
     perWorkspace: true,
-    description: "A run failed, finished, or was blocked; a flow was quarantined, a run passed its SLA, a budget is nearly spent — mail from a workspace's notify: email.",
+    description: "A run failed, finished, or was blocked; a flow was quarantined, a run passed its SLA, a budget is nearly spent — mail from a project's notify: email.",
   },
   {
     id: "approvals",

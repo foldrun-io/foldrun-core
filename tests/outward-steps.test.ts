@@ -11,13 +11,13 @@ const flow = (step: Record<string, unknown>) => ({
 }) as never;
 const known = { agents: ["sender"], outwardAgents: ["sender"] };
 const outwardErrors = (f: never, k = known) =>
-  lintFlow(f, k).filter((w) => w.message.includes("act outside this workspace"));
+  lintFlow(f, k).filter((w) => w.message.includes("act outside this project"));
 
 test("no verify and no gate on an outward step is an error, not a warning", () => {
   const [w] = outwardErrors(flow({}));
   assert.ok(w, "the rule fired");
   assert.equal(w.level, "error");
-  assert.match(w.message, /\[\[sender\]\] can act outside this workspace/);
+  assert.match(w.message, /\[\[sender\]\] can act outside this project/);
   assert.match(w.detail, /sends, posts, buys or publishes/);
   assert.equal(w.line, 3, "it points at the step");
 });
@@ -47,7 +47,7 @@ test("retry: on an outward step is a warning — a retry can send twice", () => 
   const [w] = warn({ verify: "test -s ../../storage/sent.md", retry: 2 });
   assert.ok(w, "the rule fired");
   assert.equal(w.level, undefined, "advisory, not an error");
-  assert.match(w.message, /\[\[sender\]\] can act outside this workspace and this step has retry: 2/);
+  assert.match(w.message, /\[\[sender\]\] can act outside this project and this step has retry: 2/);
   assert.equal(warn({ verify: "x" }).length, 0, "no retry, nothing to say");
   assert.equal(lintFlow(flow({ verify: "x", retry: 2 }), { agents: ["sender"], outwardAgents: [] }).filter((w) => /has retry:/.test(w.message)).length, 0);
 });

@@ -292,18 +292,18 @@ export function loadOpenApiDocument(
   const root = path.resolve(workspaceRoot);
   const abs = path.resolve(root, source);
   const inside = (p: string, r: string) => p === r || p.startsWith(r + path.sep);
-  if (!inside(abs, root)) return { doc: null, error: `${source} escapes the workspace` };
+  if (!inside(abs, root)) return { doc: null, error: `${source} escapes the project` };
   let text: string;
   try {
     // The real path too: a symlink out of the workspace is still out. Both
     // sides resolved, because the root itself may sit behind one (/var on
     // macOS is /private/var).
     const real = fs.realpathSync(abs);
-    if (!inside(real, fs.realpathSync(root))) return { doc: null, error: `${source} escapes the workspace` };
+    if (!inside(real, fs.realpathSync(root))) return { doc: null, error: `${source} escapes the project` };
     text = fs.readFileSync(real, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    return { doc: null, error: code === "ENOENT" ? `${source}: no such file in the workspace` : `${source}: ${(err as Error).message}` };
+    return { doc: null, error: code === "ENOENT" ? `${source}: no such file in the project` : `${source}: ${(err as Error).message}` };
   }
   try {
     return { doc: parseDocumentText(text), error: null };

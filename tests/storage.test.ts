@@ -543,7 +543,7 @@ test("a registered upload is held to the workspace quota, and bytes a record nam
 
 test("storage writes refuse a workspace that does not exist, as a 404", async () => {
   const { registerUpload, uploadUrl } = await import("../src/storage.ts");
-  const is404 = (err: unknown) => (err as { status?: number }).status === 404 && /workspace invented not found/.test((err as Error).message);
+  const is404 = (err: unknown) => (err as { status?: number }).status === 404 && /project invented not found/.test((err as Error).message);
   await assert.rejects(putFile(TENANT, "invented", "a.txt", Buffer.from("x"), "user:me"), is404);
   await assert.rejects(registerUpload(TENANT, "invented", "a.txt", "a".repeat(64), 1, "user:me"), is404);
   await assert.rejects(uploadUrl(TENANT, "invented", "a.txt", "a".repeat(64), 1), is404);

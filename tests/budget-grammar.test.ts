@@ -39,7 +39,7 @@ test("a value nobody can read is no cap when running, and a named problem when l
 
 test("a period the file cannot have is named, with where it belongs", () => {
   assert.match(budgetProblem("5/day", ["run"])!, /per run/);
-  assert.match(budgetProblem("5/day", ["run"])!, /workspace's or the account's/);
+  assert.match(budgetProblem("5/day", ["run"])!, /project's or the account's/);
   assert.equal(budgetProblem("5", ["run"]), null);
   assert.equal(budgetProblem("5/run", ["run"]), null, "saying run where run is the default is fine");
   assert.equal(budgetProblem("5/day", ["day", "week", "month"]), null);

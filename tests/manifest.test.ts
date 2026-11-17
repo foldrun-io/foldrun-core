@@ -24,13 +24,13 @@ test("every WORKSPACE_DIRS entry is on exactly one side; only state/ is state", 
 test("storage/, runs/, records and dot-folders belong to no manifest", () => {
   for (const p of ["storage/a.csv", "runs/r1/out.md", "secrets.json", "trigger-log.jsonl", "hook-deliveries.jsonl", ".git/config", "node_modules/x", "agents"]) {
     assert.equal(sideOf(p), null, p);
-    assert.throws(() => assertManifestPath(p), /not workspace content|illegal/);
+    assert.throws(() => assertManifestPath(p), /not project content|illegal/);
   }
 });
 
 test("paths: forward slashes only, relative, no dot segments, no control characters, bounded", () => {
   for (const bad of ["", "/agents/a.md", "agents\\a.md", "agents/../x", "agents/./a.md", "agents//a.md", "C:/x", "agents/a\u0000.md", "agents/" + "x".repeat(400)]) {
-    assert.throws(() => assertManifestPath(bad), /illegal manifest path|not workspace content/, JSON.stringify(bad));
+    assert.throws(() => assertManifestPath(bad), /illegal manifest path|not project content/, JSON.stringify(bad));
   }
   assert.equal(assertManifestPath("agents/ünï/agent.md"), "agents/ünï/agent.md");
 });

@@ -192,8 +192,8 @@ test("boundaries, webgpu and ignore_https_errors are true or false, only true ca
 test("init and extensions are paths inside the workspace", () => {
   assert.deepEqual(readBrowseSettings({ init: ["scripts/stub.js"] }).settings.init, ["scripts/stub.js"]);
   assert.deepEqual(readBrowseSettings({ extensions: "library/ext/a" }).settings.extensions, ["library/ext/a"]);
-  assert.match(readBrowseSettings({ init: ["/etc/passwd"] }).error!, /inside the workspace/);
-  assert.match(readBrowseSettings({ extensions: ["../other/ext"] }).error!, /inside the workspace/);
+  assert.match(readBrowseSettings({ init: ["/etc/passwd"] }).error!, /inside the project/);
+  assert.match(readBrowseSettings({ extensions: ["../other/ext"] }).error!, /inside the project/);
 });
 
 test("state_key names a secret, never the key", () => {

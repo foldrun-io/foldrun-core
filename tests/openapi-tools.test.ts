@@ -173,10 +173,10 @@ test("loadOpenApiDocument reads YAML from the workspace and refuses to leave it"
 
   const escape = loadOpenApiDocument("t", ws, "../outside-openapi.json");
   assert.equal(escape.doc, null);
-  assert.match(escape.error!, /escapes the workspace/);
+  assert.match(escape.error!, /escapes the project/);
 
   const absolute = loadOpenApiDocument("t", ws, path.join(path.dirname(ws), "outside-openapi.json"));
-  assert.match(absolute.error!, /escapes the workspace/);
+  assert.match(absolute.error!, /escapes the project/);
 
   const missing = loadOpenApiDocument("t", ws, "tools/crm/nope.json");
   assert.match(missing.error!, /no such file/);

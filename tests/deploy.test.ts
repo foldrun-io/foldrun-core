@@ -386,10 +386,10 @@ test("an outward step without a gate is a deploy WARNING, not a blocking issue",
     "flows/publish.md": "---\nname: publish\n---\n\n1. [[writer]] — send it\n",
   });
   // Not blocking:
-  assert.ok(!deployIssues(files).some((i) => /act outside this workspace/.test(i.message)));
+  assert.ok(!deployIssues(files).some((i) => /act outside this project/.test(i.message)));
   // But surfaced as a warning naming the step:
   const warns = deployWarnings(files);
-  assert.ok(warns.some((w) => /act outside this workspace/.test(w.message)), warns.map((w) => w.message).join(" | "));
+  assert.ok(warns.some((w) => /act outside this project/.test(w.message)), warns.map((w) => w.message).join(" | "));
 });
 
 test("a gated outward step raises no deploy warning", () => {

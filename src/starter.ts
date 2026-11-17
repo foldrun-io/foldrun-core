@@ -43,7 +43,7 @@ export function accountFiles(account: string): StarterFile[] {
       path: "AGENTS.md",
       content: `---
 foldrun_version: "0.1"
-# Config here applies to every workspace under this account, and a workspace
+# Config here applies to every project under this account, and a project
 # that declares the same key replaces it *whole* — base_url and token never
 # merge across scopes, so a provider block belongs entirely at one level.
 #
@@ -84,9 +84,9 @@ foldrun_version: "0.1"
 
 # ${account}
 
-Context every agent in every workspace here shares.
+Context every agent in every project here shares.
 
-Unlike the frontmatter above, this prose **accumulates**: a workspace's
+Unlike the frontmatter above, this prose **accumulates**: a project's
 AGENTS.md is added to it, not swapped for it, so a rule written here cannot be
 dropped further down.
 `,
@@ -135,7 +135,7 @@ export function starterFiles(workspace: string): StarterFile[] {
       path: "AGENTS.md",
       content: `---
 name: ${workspace}
-description: A starter workspace — edit the agents, then run the flow.
+description: A starter project — edit the agents, then run the flow.
 foldrun_version: "0.1"
 ---
 
@@ -153,7 +153,7 @@ Context every agent here shares. Prices, rules, anything they should all know.
       // every secret *inside the workspace*, and without this file the first
       // `git add -A` after setting a secret commits it.
       path: ".gitignore",
-      content: `# The key that decrypts every secret in this workspace, plus the
+      content: `# The key that decrypts every secret in this project, plus the
 # local run store. Never commit these.
 .foldrun/
 
@@ -298,7 +298,7 @@ only when they asked for exactly that deletion.
 
 | Path | What |
 |---|---|
-| \`AGENTS.md\` | shared context every agent in this workspace sees |
+| \`AGENTS.md\` | shared context every agent in this project sees |
 | \`agents/<name>/agent.md\` | one role: its persona, model, tools |
 | \`flows/<name>.md\` | steps, in order, naming the agents that run them |
 | \`knowledge/\` | reference material agents read |
@@ -317,10 +317,10 @@ Regenerated every run means a file; accumulated across runs means \`state/\`.
 That last row is worth knowing: a subagent you write in Claude Code is imported
 as \`agents/<name>/agent.md\` at deploy, no conversion. Write it either way.
 
-## Paths inside a workspace
+## Paths inside a project
 
 An agent's working directory is \`agents/<name>/\`. Write every path to the
-workspace's own folders as \`workspace/…\` — \`workspace/storage/report.csv\`,
+project's own folders as \`workspace/…\` — \`workspace/storage/report.csv\`,
 \`workspace/state/cursor.json\` — in an agent's prose, in flow options
 (\`each: rows of\`, \`when: rows of\`, \`verify:\`, \`preview:\`, \`schema:\`) and in
 script arguments. It resolves the same in the file tools, the shell, scripts
@@ -346,9 +346,9 @@ A step held to its list still searches the web through the proxy's search door;
 at \`none\` or \`defaults: false\` write it out — \`web: {actions: [search, fetch]}\` —
 because a query's words leave (\`foldrun docs network\`).
 
-## Talking to a deployed workspace
+## Talking to a deployed project
 
-The CLI is local except for \`deploy\`. To inspect or drive a workspace running
+The CLI is local except for \`deploy\`. To inspect or drive a project running
 on a server, use the HTTP API — every route takes the same API key
 (\`Authorization: Bearer $FOLDRUN_TOKEN\`, from Settings → API keys) or a browser
 session, and refuses without one.
@@ -367,7 +367,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 
 | Route | Methods | For |
 |---|---|---|
-| \`/\` | GET DELETE PATCH | the workspace itself |
+| \`/\` | GET DELETE PATCH | the project itself |
 | \`/deploy\` | POST | what \`foldrun deploy\` calls |
 | \`/source\` | GET PUT PATCH DELETE | read and write single files |
 | \`/runs\` | GET | list runs |
@@ -381,19 +381,19 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
 | \`/flows/<f>/run\` | POST | start a flow |
 | \`/flows/<f>/filter\` | POST | would this delivery start it? its \`filter:\` against a payload — nothing starts |
-| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · GET POST | list agents, run one, copy one in from another workspace |
+| \`/agents\` · \`/agents/<a>/run\` · \`/agents/import\` | GET POST · POST · GET POST | list agents, run one, copy one in from another project |
 | \`/evals\` · \`/evals/<e>/run\` | GET POST · POST | list evals, run one |
 | \`/evals/<e>/compare\` | GET POST | its cases under two to four models, side by side — test runs, a spend limit |
 | \`/evals/<e>/grades\` · \`/evals/<e>/grade\` | GET · POST | a grader's grades (\`trigger: runs\`); grade one finished run now |
 | \`/evals/<e>/improve\` · \`/proposals\` · \`/proposals/<id>\` | POST · GET · GET POST | ask for a proposed fix; list them; apply or dismiss one |
 | \`/tools/<t>/test\` | POST | exercise one tool alone |
-| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | workspace files, any type; \`preview\` returns one parsed for reading |
+| \`/storage\` · \`/storage/download\` · \`/storage/upload-url\` · \`/storage/preview\` | GET POST PUT DELETE · GET · POST · GET | project files, any type; \`preview\` returns one parsed for reading |
 | \`/assets\` | POST | upload an asset |
 | \`/hooks/<f>/rotate\` | POST | new webhook token for a flow |
 | \`/notify/deliveries\` · \`/notify/deliveries/<id>/redeliver\` | GET · POST | every notify: webhook sent and each attempt; send one again |
-| \`/export\` · \`/import\` | GET · POST | the workspace, a flow (\`?kind=flow&name=\`) or an agent as a .zip; take one in (\`?dryRun=1\` first, \`?overwrite=1\` to replace) |
-| \`/restore\` | POST | the workspace's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
-| \`/vocabulary\` | GET | what this workspace's documents may say |
+| \`/export\` · \`/import\` | GET · POST | the project, a flow (\`?kind=flow&name=\`) or an agent as a .zip; take one in (\`?dryRun=1\` first, \`?overwrite=1\` to replace) |
+| \`/restore\` | POST | the project's source back to a point in its history — \`dryRun\` first, then \`confirm\` |
+| \`/vocabulary\` | GET | what this project's documents may say |
 | \`/a2a\` | GET | what it serves to outside agents over A2A: flows that say \`a2a:\`, card URLs, recent tasks |
 | \`/check\` | GET | what \`foldrun check\` says about the deployed copy, as findings with rule ids (\`?security=1\`) |
 | \`/assistant\` | POST | ask the assistant, or have it write agents, flows, tools and skills — from the docs only; proposals come back, nothing is written |
@@ -538,7 +538,7 @@ Only \`name\` and the prose are required. Every other field widens or narrows
 what the agent can reach, and the default is narrow.
 
 \`timezone:\` is nearest-wins all the way down: the agent's own, else its
-flow's, else the workspace's AGENTS.md, else the account's, else UTC. It sets
+flow's, else the project's AGENTS.md, else the account's, else UTC. It sets
 \`TZ\` and the date the agent is told, so a Sydney desk stamps the Sydney date.
 
 \`runtime:\` installs pip/npm packages in the sandbox each agent runs in. Pin
@@ -591,8 +591,8 @@ export function blankWorkspaceFiles(workspace: string): StarterFile[] {
         ? {
             ...f,
             content: f.content.replace(
-              "description: A starter workspace — edit the agents, then run the flow.",
-              "description: A new workspace — add an agent or import one from another workspace, then write a flow.",
+              "description: A starter project — edit the agents, then run the flow.",
+              "description: A new project — add an agent or import one from another project, then write a flow.",
             ),
           }
         : f,

@@ -112,7 +112,7 @@ const MAX_PACKAGE_FILE = 10 * 1024 * 1024;
 export function packageOf(tenant: string, workspace: string, kind: PackageKind, name?: string): Package {
   assertSafeName(workspace, "workspace");
   if (!listWorkspaces(tenant).some((w) => w.name === workspace)) {
-    throw new PackageError(`no workspace called "${workspace}" in this account`, 404);
+    throw new PackageError(`no project called "${workspace}" in this account`, 404);
   }
   const all = listWorkspaceFiles(tenant, workspace).filter(isPackagedPath);
   const read = (p: string) => readWorkspaceFile(tenant, workspace, p);
@@ -342,7 +342,7 @@ export function planImport(tenant: string, workspace: string, pkg: Package): Imp
   assertSafeName(workspace, "workspace");
   const exists = listWorkspaces(tenant).some((w) => w.name === workspace);
   if (!exists && pkg.manifest.kind !== "workspace") {
-    throw new PackageError(`no workspace called "${workspace}" — a ${pkg.manifest.kind} imports into one that exists`, 404);
+    throw new PackageError(`no project called "${workspace}" — a ${pkg.manifest.kind} imports into one that exists`, 404);
   }
   const dir = workspaceDir(tenant, workspace);
   const added: string[] = [];

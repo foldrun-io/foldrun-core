@@ -88,7 +88,7 @@ export function budgetProblem(raw: unknown, allowed: BudgetPeriod[]): string | n
     if (!allowed.includes(period)) {
       return period === "run"
         ? `budget: is per run here already — write the number alone`
-        : `budget: "${period}" does not apply here — this cap is per run; a cap over time belongs in the workspace's or the account's AGENTS.md`;
+        : `budget: "${period}" does not apply here — this cap is per run; a cap over time belongs in the project's or the account's AGENTS.md`;
     }
   }
   return null;

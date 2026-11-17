@@ -211,9 +211,9 @@ const PLATFORM_MARKERS: Record<string, string> = {
   "trigger-log.jsonl.tmp": "trigger log temp file (not read here)",
   "hooks.json": "webhook tokens (platform file; not mapped)",
   "hook-deliveries.jsonl": "hook delivery log (not mapped)",
-  ".repo.json": "platform file; not workspace content",
+  ".repo.json": "platform file; not project content",
   once: "operation markers (the unique keys decide now; not imported)",
-  ".foldrun": "platform folder; not workspace content",
+  ".foldrun": "platform folder; not project content",
   storage: "workspace-local storage folder (the storage index moved in FOL-152; not read here)",
 };
 
@@ -253,7 +253,7 @@ async function scanWorkspace(tenant: string, workspace: string, dir: string): Pr
   try {
     top = fs.readdirSync(dir, { withFileTypes: true });
   } catch (err) {
-    ws.error = `workspace folder unreadable (${(err as NodeJS.ErrnoException).code ?? "error"})`;
+    ws.error = `project folder unreadable (${(err as NodeJS.ErrnoException).code ?? "error"})`;
     return ws;
   }
   for (const e of top.sort(byName)) {
@@ -289,7 +289,7 @@ async function scanWorkspace(tenant: string, workspace: string, dir: string): Pr
       ws.unmapped.push({ path: name, reason: PLATFORM_MARKERS[name], ...t });
     } else {
       const t = st.isDirectory() ? tally(abs) : { files: 1, bytes: st.size };
-      ws.unmapped.push({ path: name, reason: "not part of a workspace manifest (in neither the authored nor the state list)", ...t });
+      ws.unmapped.push({ path: name, reason: "not part of a project manifest (in neither the authored nor the state list)", ...t });
     }
   }
 
@@ -297,7 +297,7 @@ async function scanWorkspace(tenant: string, workspace: string, dir: string): Pr
   const mapped: { rel: string; abs: string; st: fs.Stats }[] = [];
   for (const f of found) {
     if (isPlatformPath(f.rel)) {
-      ws.unmapped.push({ path: f.rel, reason: "platform or engine file, not workspace content", files: 1, bytes: f.st.size });
+      ws.unmapped.push({ path: f.rel, reason: "platform or engine file, not project content", files: 1, bytes: f.st.size });
       continue;
     }
     try {
@@ -571,7 +571,7 @@ export async function planImport(scan: SourceScan, deps?: Deps): Promise<PlanWor
           const sides = new Set(Object.keys(want).filter((k) => !(all[k]?.sha === want[k].sha && all[k]?.mode === want[k].mode)).map((k) => w.files.find((f) => f.path === k)!.side));
           p.revisionsToMake = sides.size;
           const foreign = await foreignRevisions(deps, wsRef(w));
-          if (foreign.length) p.note = `${foreign.length} revision(s) by someone else (latest by ${foreign[0].by}): an import skips this workspace unless --force`;
+          if (foreign.length) p.note = `${foreign.length} revision(s) by someone else (latest by ${foreign[0].by}): an import skips this project unless --force`;
         } catch (err) {
           p.note = `could not read the destination: ${(err as Error).message}`;
         }
@@ -589,7 +589,7 @@ export function renderPlan(scan: SourceScan, plan: PlanWorkspace[]): string {
   let files = 0;
   let bytes = 0;
   for (const t of scan.tenants) {
-    L.push(`account ${t.tenant}  (${t.workspaces.length} workspace(s))`);
+    L.push(`account ${t.tenant}  (${t.workspaces.length} project(s))`);
     for (const u of t.unmapped) L.push(`  can't map  ${u.path}: ${u.reason} (${u.files ?? 0} files, ${kb(u.bytes ?? 0)})`);
     for (const w of t.workspaces) {
       const p = plan.find((x) => x.tenant === w.tenant && x.workspace === w.workspace)!;
@@ -602,7 +602,7 @@ export function renderPlan(scan: SourceScan, plan: PlanWorkspace[]): string {
       for (const u of w.unmapped) L.push(`    can't map  ${u.path}: ${u.reason}${u.files ? ` (${u.files} files, ${kb(u.bytes ?? 0)})` : ""}`);
     }
   }
-  L.push("", `Total: ${files} workspace files, ${kb(bytes)}.`);
+  L.push("", `Total: ${files} project files, ${kb(bytes)}.`);
   return L.join("\n") + "\n";
 }
 
@@ -729,7 +729,7 @@ export function renderVerify(r: VerifyReport): string {
     list("extra in head", w.extra);
     for (const n of w.notes) L.push(`      note: ${n}`);
   }
-  L.push("", `${r.workspaces.filter((w) => w.pass).length} of ${r.workspaces.length} workspace(s) passed.`);
+  L.push("", `${r.workspaces.filter((w) => w.pass).length} of ${r.workspaces.length} project(s) passed.`);
   return L.join("\n") + "\n";
 }
 
