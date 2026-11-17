@@ -8,10 +8,14 @@
 // — and everything above the loop (hooks, limits, confinement, verify, the
 // run record) is unchanged.
 //
-// It is NOT the default. `FOLDRUN_ENGINE=foldrun` in a step's environment
-// selects it; anything else runs the SDK. It moves to a written setting, and
-// then to the default, only when it matches the SDK on the coding evals
-// (foldrun-infra docs/coding-api-adr.md, "Build order").
+// It is NOT the default, and nothing a tenant writes can select it: the
+// caller of executeStep passes `engine: "foldrun"` (ExecOptions), and no
+// caller in the runner does yet. Deliberately not an environment variable —
+// a step's environment carries its secrets under names the tenant chose
+// (runner.ts), so a secret called after the switch would have thrown it.
+// It moves to a written setting, and then to the default, only when it
+// matches the SDK on the coding evals (foldrun-infra
+// docs/coding-api-adr.md, "Build order").
 //
 // What this first slice does:
 //   - the turns, against an Anthropic-format Messages endpoint — the step's
@@ -25,19 +29,17 @@
 //
 // What it refuses, by name, rather than run without: MCP servers (so every
 // tool that is not one of the six), sub-agents, and a shell on a host that
-// asked for the SDK's OS sandbox, which this engine does not have. It does
+// asked for the SDK's OS sandbox, which this engine does not have (the
+// caller may say `engineHostShell` for a person's own machine). It does
 // not summarise a full context yet: the model's own stop reason comes back
 // on the result, as it does from the SDK.
 
 import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
-import { ENGINE_TOOLS, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
+import { ENGINE_TOOLS, killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
 
-/** The environment variable that selects the engine for a step. */
-export const ENGINE_ENV = "FOLDRUN_ENGINE";
-/** Run Bash on a host with no OS sandbox. For tests and a person's own
- *  laptop run, where they have said so; a run container needs no flag. */
-export const HOST_BASH_ENV = "FOLDRUN_ENGINE_HOST_BASH";
+/** Which loop runs a step's turns. */
+export type Engine = "sdk" | "foldrun";
 
 const DEFAULT_BASE = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
@@ -80,11 +82,6 @@ interface LoopOptions {
   outer: AbortSignal | null;
 }
 
-/** Whether a step's environment asks for this engine. */
-export function wantsFoldrunEngine(env: Record<string, string | undefined> | undefined): boolean {
-  return (env?.[ENGINE_ENV] ?? process.env[ENGINE_ENV]) === "foldrun";
-}
-
 function hookFns(hooks: unknown, event: string): HookFn[] {
   const groups = (hooks as Record<string, { hooks?: HookFn[] }[] | undefined> | undefined)?.[event];
   return (groups ?? []).flatMap((g) => g.hooks ?? []);
@@ -107,10 +104,9 @@ function readOptions(options: Json): LoopOptions {
     throw new Error("the foldrun engine does not run sub-agents yet — run this agent on the default engine.");
   }
   const sandbox = options.sandbox as { enabled?: boolean } | undefined;
-  if (names.includes("Bash") && sandbox?.enabled !== false && env[HOST_BASH_ENV] !== "1") {
-    throw new Error(
-      `the foldrun engine has no OS sandbox for the shell on this host — run the step in a container, or set ${HOST_BASH_ENV}=1 to run commands unsandboxed on this machine.`,
-    );
+  // Never read from `env`: that is where a tenant's secrets live.
+  if (names.includes("Bash") && sandbox?.enabled !== false && options.engineHostShell !== true) {
+    throw new Error("the foldrun engine has no OS sandbox for the shell on this host — run the step in a container.");
   }
   const model = String(options.model ?? "");
   if (!model) throw new Error("the foldrun engine needs a model");
@@ -252,6 +248,8 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
   const res = await openStream(o, buildRequest(o, messages), signal);
   const turn: Turn = { id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set() };
   const partialJson = new Map<number, string>();
+  const open = new Set<number>();
+  let stopped = false;
   for await (const ev of sse(res)) {
     const type = ev.type as string;
     if (type === "error") {
@@ -267,6 +265,7 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
       const block = { ...(ev.content_block as Block) };
       if (block.type === "tool_use") block.input = {};
       turn.content[ev.index as number] = block;
+      open.add(ev.index as number);
     } else if (type === "content_block_delta") {
       const block = turn.content[ev.index as number];
       const d = ev.delta as { type?: string; text?: string; partial_json?: string; thinking?: string; signature?: string } | undefined;
@@ -276,6 +275,7 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
       else if (d.type === "thinking_delta") block.thinking = String(block.thinking ?? "") + (d.thinking ?? "");
       else if (d.type === "signature_delta") block.signature = d.signature;
     } else if (type === "content_block_stop") {
+      open.delete(ev.index as number);
       const block = turn.content[ev.index as number];
       if (block?.type === "tool_use") {
         const raw = partialJson.get(ev.index as number) ?? "";
@@ -291,10 +291,13 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
       const d = ev.delta as { stop_reason?: string | null } | undefined;
       if (d?.stop_reason) turn.stopReason = d.stop_reason;
       addUsage(turn.usage, ev.usage as Json | undefined);
-    }
+    } else if (type === "message_stop") stopped = true;
     if (o.partial || type === "message_start" || type === "message_delta") yield ev;
   }
   if (!turn.id) throw new Error("the model stream ended before it began a message");
+  // A stream that just stops is not an answer: half a reply must not read
+  // as the model's last word, nor half a tool call as none.
+  if (!stopped || open.size || !turn.stopReason) throw new Error("the model stream ended part-way through a reply — the connection to the model was cut");
   turn.content = turn.content.filter(Boolean);
   return turn;
 }
@@ -342,7 +345,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   const sessionId = crypto.randomUUID();
   const startedAt = Date.now();
   const byName = new Map(o.tools.map((t) => [t.name, t]));
-  const ctx: ToolContext = { cwd: o.cwd, env: o.env, signal, reads: new Map() };
+  const ctx: ToolContext = { cwd: o.cwd, env: o.env, signal, reads: new Map(), groups: new Set() };
   const messages: { role: string; content: Block[] }[] = [{ role: "user", content: [{ type: "text", text: prompt }] }];
   const total = emptyUsage();
   let turns = 0;
@@ -363,6 +366,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
 
   yield { type: "system", subtype: "init", session_id: sessionId, cwd: o.cwd, model: o.model, tools: o.tools.map((t) => t.name), mcp_servers: [], engine: "foldrun" };
 
+  try {
   for (;;) {
     if (o.maxTurns !== null && turns >= o.maxTurns) {
       yield result("error_max_turns", null);
@@ -407,26 +411,21 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       return;
     }
 
-    // Decide every call first, in the order the model asked, so limits are
-    // counted in that order whatever runs side by side afterwards.
-    const planned: { block: Block; tool: EngineTool | null; decision: Decision }[] = [];
-    for (const block of calls) {
+    // What each call comes to: refused, or run. A call is decided
+    // immediately before it runs, never ahead of a call that runs first: a
+    // command can change what a later path points at (a link it makes, a
+    // file it moves), and a check made before that would be a check of
+    // something else.
+    type Planned = { block: Block; tool: EngineTool | null; decision: Decision };
+    const settle = async (block: Block): Promise<Planned> => {
       const name = String(block.name);
       const id = String(block.id);
       const tool = byName.get(name) ?? null;
-      if (!tool) {
-        planned.push({ block, tool, decision: { input: {}, refusal: `Tool ${name} is not enabled for this agent.` } });
-        continue;
-      }
-      if (turn.malformed.has(id)) {
-        planned.push({ block, tool, decision: { input: {}, refusal: `the arguments for ${name} were not valid JSON — send the call again` } });
-        continue;
-      }
-      const decision = await decide(o, name, id, (block.input ?? {}) as Json, sessionId, signal);
-      planned.push({ block, tool, decision });
-    }
-
-    const execute = async (p: (typeof planned)[number]): Promise<{ outcome: ToolOutcome; context: string[] }> => {
+      if (!tool) return { block, tool, decision: { input: {}, refusal: `Tool ${name} is not enabled for this agent.` } };
+      if (turn.malformed.has(id)) return { block, tool, decision: { input: {}, refusal: `the arguments for ${name} were not valid JSON — send the call again` } };
+      return { block, tool, decision: await decide(o, name, id, (block.input ?? {}) as Json, sessionId, signal) };
+    };
+    const execute = async (p: Planned): Promise<{ outcome: ToolOutcome; context: string[] }> => {
       if (p.decision.refusal || !p.tool) return { outcome: { text: p.decision.refusal ?? "refused", isError: true }, context: [] };
       let outcome: ToolOutcome;
       try {
@@ -437,15 +436,21 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       const context = await after(o, p.tool.name, String(p.block.id), p.decision.input, outcome, sessionId, signal);
       return { outcome, context };
     };
-    // Reads side by side; anything that changes a file or runs a command,
-    // one at a time in the order asked — two edits of one file, or a test
-    // run beside the edit it is testing, must not race.
+    const planned: Planned[] = [];
     const done: { outcome: ToolOutcome; context: string[] }[] = [];
-    if (planned.every((p) => p.tool?.readOnly || p.decision.refusal)) {
+    if (calls.every((b) => byName.get(String(b.name))?.readOnly !== false)) {
+      // Only reads (or names that are refused anyway): none can change what
+      // another is checked against, so they are decided in the order asked
+      // — limits count in that order — and then run side by side.
+      for (const block of calls) planned.push(await settle(block));
       done.push(...(await Promise.all(planned.map(execute))));
     } else {
-      for (const p of planned) {
+      // Anything that changes a file or runs a command: one at a time, in
+      // the order asked, each decided just before it runs.
+      for (const block of calls) {
         if (interrupted()) break;
+        const p = await settle(block);
+        planned.push(p);
         done.push(await execute(p));
       }
     }
@@ -461,6 +466,11 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     const content: Block[] = [...results, ...context.map((c) => ({ type: "text", text: c }))];
     messages.push({ role: "user", content });
     yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null, session_id: sessionId };
+  }
+  } finally {
+    // However the loop ended — an answer, a stop, a consumer that walked
+    // away — nothing a command started outlives the step.
+    killGroups(ctx);
   }
 }
 

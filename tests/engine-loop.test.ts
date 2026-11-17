@@ -1,5 +1,5 @@
 // foldrun's own agent loop (src/engine-loop.ts), driven the way production
-// drives it: through executeStep, with FOLDRUN_ENGINE=foldrun, against a
+// drives it: through executeStep, with `engine: "foldrun"`, against a
 // model endpoint that plays back scripted turns. So what is tested is the
 // loop under step-exec's real hooks, confinement, limits and clocks — not a
 // stand-in for them.
@@ -12,12 +12,14 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { executeStep, type ExecOptions } from "../src/step-exec.ts";
-import { buildRequest, foldrunQuery, wantsFoldrunEngine } from "../src/engine-loop.ts";
+import { buildRequest, foldrunQuery } from "../src/engine-loop.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
 
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown; rawInput?: string };
 interface Scripted {
   content: Block[];
+  /** End the stream after the first block's text, with no closing events. */
+  cut?: boolean;
   stop?: string;
   status?: number;
   usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; output_tokens?: number };
@@ -48,6 +50,7 @@ async function fakeModel(turns: Scripted[]) {
           // In two pieces, as a real stream would send it.
           const half = Math.ceil(b.text.length / 2);
           send({ type: "content_block_delta", index, delta: { type: "text_delta", text: b.text.slice(0, half) } });
+          if (turn.cut) return;
           send({ type: "content_block_delta", index, delta: { type: "text_delta", text: b.text.slice(half) } });
         } else {
           send({ type: "content_block_start", index, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } });
@@ -58,6 +61,7 @@ async function fakeModel(turns: Scripted[]) {
         }
         send({ type: "content_block_stop", index });
       });
+      if (turn.cut) return res.end();
       const stop = turn.stop ?? (turn.content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn");
       send({ type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: u.output_tokens ?? 5 } });
       send({ type: "message_stop" });
@@ -87,12 +91,13 @@ async function runStep(turns: Scripted[], over: Partial<ExecOptions> & { files?:
   const events: Event[] = [];
   try {
     const run = () => executeStep({
+      engine: "foldrun",
       agentDir, workspaceRoot: root, libraryRoot: "/nonexistent",
       prompt: "do the task", model: "test-model", systemPrompt: "You write code.",
       allowed: ["Read", "Write", "Edit", "Glob", "Grep"], mcpNames: [], mcpServers: {},
       emit: (type, text, extra) => events.push({ type, text, extra: extra as Record<string, unknown> }),
       ...opts,
-      env: { PATH: process.env.PATH, FOLDRUN_ENGINE: "foldrun", ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "test-key", ...(opts.env ?? {}) },
+      env: { PATH: process.env.PATH, ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "test-key", ...(opts.env ?? {}) },
     });
     let out: Awaited<ReturnType<typeof executeStep>> | null = null;
     let error: Error | null = null;
@@ -113,10 +118,21 @@ async function runStep(turns: Scripted[], over: Partial<ExecOptions> & { files?:
 const use = (id: string, name: string, input: unknown): Block => ({ type: "tool_use", id, name, input });
 const say = (text: string): Block => ({ type: "text", text });
 
-test("the engine is chosen by the step's environment, and only by the word foldrun", () => {
-  assert.equal(wantsFoldrunEngine({ FOLDRUN_ENGINE: "foldrun" }), true);
-  assert.equal(wantsFoldrunEngine({ FOLDRUN_ENGINE: "sdk" }), false);
-  assert.equal(wantsFoldrunEngine({}), false);
+test("no environment variable chooses the engine or drops the shell's sandbox — a secret's name is the tenant's to pick", () => {
+  // A step's environment carries its secrets under names the tenant chose,
+  // so a switch read from it would be the tenant's to throw. The choice is
+  // ExecOptions.engine, and nothing in the engine reads a name for it.
+  const src = path.join(import.meta.dirname, "..", "src");
+  for (const file of ["engine-loop.ts", "engine-tools.ts", "step-exec.ts"]) {
+    const code = fs.readFileSync(path.join(src, file), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+    assert.equal(/FOLDRUN_ENGINE/.test(code), false, `${file} reads no FOLDRUN_ENGINE* name`);
+  }
+  assert.match(fs.readFileSync(path.join(src, "step-exec.ts"), "utf8"), /runQuery: QueryFn = opts\.engine === "foldrun" \? foldrunQuery : \(query as unknown as QueryFn\)/);
+  // And the engine itself does not take the word of its environment.
+  assert.throws(
+    () => foldrunQuery({ prompt: "p", options: { cwd: "/tmp", model: "m", tools: ["Bash"], env: { FOLDRUN_ENGINE_HOST_BASH: "1", FOLDRUN_ENGINE: "foldrun" } } }),
+    /no OS sandbox for the shell on this host/,
+  );
 });
 
 test("a coding step: read, edit, answer — the file changes and the record says what happened", async () => {
@@ -290,4 +306,36 @@ test("what this engine cannot run yet is refused by name, not run without", () =
   assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, mcpServers: { crm: {} } } }), /does not connect MCP servers yet \(crm\)/);
   assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, agents: { helper: {} } } }), /does not run sub-agents yet/);
   assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, tools: ["Read", "TodoWrite"] } }), /no tool named TodoWrite yet/);
+});
+
+test("a call is checked just before it runs: a link made by an earlier command in the same turn does not open a way out", async () => {
+  // knowledge/ may not be written by an agent. Checked ahead of the turn,
+  // the Write below named a path that did not exist yet; checked in its
+  // turn, it names a link into knowledge/ and is refused.
+  const r = await runStep([
+    { content: [
+      use("t1", "Bash", { command: "ln -s ../../knowledge outputs/link" }),
+      use("t2", "Write", { file_path: "outputs/link/planted.md", content: "planted" }),
+    ] },
+    { content: [say("done")] },
+  ], { allowed: ["Bash", "Write"], sandboxBash: false, files: { "../../knowledge/real.md": "real" } });
+  assert.equal(r.out!.status, "completed");
+  assert.equal(fs.existsSync(path.join(r.root, "knowledge", "planted.md")), false, "nothing was written into knowledge/");
+  const [, write] = r.requests[1].body.messages[2].content;
+  assert.equal(write.is_error, true, JSON.stringify(write));
+});
+
+test("a stream cut part-way is a failure, never the model's answer", async () => {
+  const r = await runStep([{ content: [say("The answer is forty-")], cut: true }]);
+  assert.equal(r.out, null);
+  assert.match(r.error!.message, /ended part-way through a reply/);
+});
+
+test("on a person's own machine the caller may say the shell runs unsandboxed", async () => {
+  const r = await runStep([
+    { content: [use("t1", "Bash", { command: "echo local" })] },
+    { content: [say("ok")] },
+  ], { allowed: ["Bash"], engineHostShell: true });
+  assert.equal(r.out!.status, "completed");
+  assert.equal(r.requests[1].body.messages[2].content[0].content, "local");
 });

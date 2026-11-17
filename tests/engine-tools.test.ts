@@ -7,12 +7,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ENGINE_TOOLS, globToRegExp, occurrences, capped, RESULT_CAP, type ToolContext } from "../src/engine-tools.ts";
+import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, type ToolContext } from "../src/engine-tools.ts";
 
 function withDir(body: (dir: string, ctx: ToolContext, stop: AbortController) => Promise<void>) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-engine-tools-")));
   const stop = new AbortController();
-  const ctx: ToolContext = { cwd: dir, env: { PATH: process.env.PATH }, signal: stop.signal, reads: new Map() };
+  const ctx: ToolContext = { cwd: dir, env: { PATH: process.env.PATH }, signal: stop.signal, reads: new Map(), groups: new Set() };
   return body(dir, ctx, stop).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
 }
 const { Read, Write, Edit, Glob, Grep, Bash } = ENGINE_TOOLS;
@@ -166,4 +166,43 @@ test("a command past its timeout, or running when the step stops, is ended with 
     assert.match(stopped.text, /\[stopped with the step\]/);
     await new Promise((r) => setTimeout(r, 2500));
     assert.equal(fs.existsSync(marker), false, "the background child was killed with its group");
+  }));
+
+test("a link is edited through to its target, and stays a link", () =>
+  withDir(async (dir, ctx) => {
+    fs.writeFileSync(path.join(dir, "real.txt"), "old\n");
+    fs.symlinkSync("real.txt", path.join(dir, "link.txt"));
+    await Read.run({ file_path: "link.txt" }, ctx);
+    const r = await Edit.run({ file_path: "link.txt", old_string: "old", new_string: "new" }, ctx);
+    assert.equal(r.isError, undefined, r.text);
+    assert.equal(fs.readFileSync(path.join(dir, "real.txt"), "utf8"), "new\n");
+    assert.equal(fs.lstatSync(path.join(dir, "link.txt")).isSymbolicLink(), true);
+  }));
+
+test("Glob looks inside the folders a pattern names, through a link; Grep tests a named file by its own name", () =>
+  withDir(async (dir, ctx) => {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-engine-ws-")));
+    try {
+      fs.mkdirSync(path.join(outside, "storage"));
+      fs.writeFileSync(path.join(outside, "storage", "report.md"), "total: 3\n");
+      fs.symlinkSync(outside, path.join(dir, "workspace"));
+      assert.equal((await Glob.run({ pattern: "workspace/storage/*.md" }, ctx)).text, path.join(outside, "storage", "report.md"));
+      assert.match((await Glob.run({ pattern: "workspace/nowhere/*.md" }, ctx)).text, /^No files match/);
+      const hit = await Grep.run({ pattern: "total", path: "workspace/storage/report.md", glob: "*.md" }, ctx);
+      assert.equal(hit.text, path.join(outside, "storage", "report.md"));
+      assert.match((await Grep.run({ pattern: "total", path: "workspace/storage/report.md", glob: "*.ts" }, ctx)).text, /^No matches/);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }));
+
+test("what a command left in the background is ended when the session ends", () =>
+  withDir(async (dir, ctx) => {
+    const marker = path.join(dir, "late");
+    const r = await Bash.run({ command: `(sleep 2; touch ${marker}) >/dev/null 2>&1 & echo started` }, ctx);
+    assert.equal(r.text, "started", "the command itself returned at once");
+    assert.equal(ctx.groups.size, 1);
+    killGroups(ctx);
+    await new Promise((done) => setTimeout(done, 2500));
+    assert.equal(fs.existsSync(marker), false, "the background job did not outlive the session");
   }));

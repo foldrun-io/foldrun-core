@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { foldrunQuery, wantsFoldrunEngine } from "./engine-loop.ts";
+import { foldrunQuery, type Engine } from "./engine-loop.ts";
 import type { HookInput, McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, type Effort, type ModelCall } from "./store.ts";
 import { costOf, type TokenPrice } from "./catalog.ts";
@@ -105,6 +105,14 @@ export interface ExecOptions {
    *  host's paths. A name that resolves to nothing refuses the step. */
   hookNames?: string[];
   hookBase?: Record<string, unknown>;
+  /** Which loop runs the turns: the SDK (the default) or foldrun's own
+   *  (engine-loop.ts). The caller's choice, from configuration it trusts —
+   *  never read from `env`, which carries the tenant's secrets by name. */
+  engine?: Engine;
+  /** With foldrun's engine on a host: run the shell with no OS sandbox.
+   *  Only for a person's own machine, on their word; a run container is
+   *  its own boundary and needs nothing said (`sandboxBash: false`). */
+  engineHostShell?: boolean;
   agentDir: string;
   workspaceRoot: string;
   libraryRoot: string;
@@ -348,9 +356,9 @@ export async function executeStep(
   opts: ExecOptions,
   /** The model loop. Injected so the clock and the stop can be tested
    *  without a model; production passes nothing and gets the SDK — or
-   *  foldrun's own loop when the step's environment asks for it
-   *  (FOLDRUN_ENGINE=foldrun, engine-loop.ts). */
-  runQuery: QueryFn = wantsFoldrunEngine(opts.env) ? foldrunQuery : (query as unknown as QueryFn),
+   *  foldrun's own loop when the caller asked for it (`opts.engine`,
+   *  engine-loop.ts). */
+  runQuery: QueryFn = opts.engine === "foldrun" ? foldrunQuery : (query as unknown as QueryFn),
 ): Promise<ExecOutcome> {
   // `workspace/…` for the shell, the scripts and a shell `verify:` — the
   // file tools expand the prefix themselves. Held for the step, verify
@@ -483,6 +491,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       // false) and the container's walls do the containing; the in-process
       // path (the CLI on someone's laptop, and the host executor) keeps it,
       // because there a shell escape reaches the real machine.
+      ...(opts.engineHostShell ? { engineHostShell: true } : {}),
       sandbox: {
         enabled: opts.sandboxBash !== false,
         // Must stay false. Auto-allowing bash because it's sandboxed skips

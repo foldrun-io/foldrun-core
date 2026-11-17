@@ -33,6 +33,22 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Files read in this session → their mtime when read. */
   reads: Map<string, number>;
+  /** The process groups this session's commands started. A command that
+   *  left something in the background has returned, but what it left is
+   *  still the step's: the loop ends every group when the step ends. */
+  groups: Set<number>;
+}
+
+/** End everything the session's commands started and left running. */
+export function killGroups(ctx: ToolContext): void {
+  for (const pgid of ctx.groups) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch {
+      // the group is already gone
+    }
+  }
+  ctx.groups.clear();
 }
 
 export interface ToolOutcome {
@@ -78,8 +94,21 @@ function str(input: Record<string, unknown>, key: string): string | null {
   return typeof v === "string" ? v : null;
 }
 
+/** The file a path names, with links followed: what is read, checked for
+ *  staleness and replaced is then one and the same file. A rename over the
+ *  path as given would replace a link with a copy and leave its target as
+ *  it was. For a file that does not exist yet, its folder is resolved. */
 function abs(ctx: ToolContext, p: string): string {
-  return path.resolve(ctx.cwd, p);
+  const given = path.resolve(ctx.cwd, p);
+  try {
+    return fs.realpathSync(given);
+  } catch {
+    try {
+      return path.join(fs.realpathSync(path.dirname(given)), path.basename(given));
+    } catch {
+      return given;
+    }
+  }
 }
 
 function looksBinary(buf: Buffer): boolean {
@@ -314,7 +343,7 @@ function searchRoot(input: Record<string, unknown>, ctx: ToolContext): { root: s
   const given = str(input, "path");
   const root = given ? abs(ctx, given) : ctx.cwd;
   if (!fs.existsSync(root)) return fail(`${root} does not exist`);
-  return { root };
+  return { root: fs.realpathSync(root) };
 }
 
 const glob: EngineTool = {
@@ -336,7 +365,20 @@ const glob: EngineTool = {
     if (!pattern) return fail("Glob needs pattern");
     const where = searchRoot(input, ctx);
     if ("text" in where) return where;
-    const re = globToRegExp(pattern.replace(/^\.\//, ""));
+    // The folders a pattern names before its first wildcard are where to
+    // look, not something to match: `workspace/storage/*.md` searches
+    // workspace/storage. The walk follows no links, and `workspace` is one
+    // (confine.ts#linkWorkspace), so the root is resolved through it here.
+    const segs = pattern.replace(/^\.\//, "").split("/");
+    const wild = segs.findIndex((seg) => /[*?{]/.test(seg));
+    const fixed = wild < 0 ? segs.slice(0, -1) : segs.slice(0, wild);
+    const rest = segs.slice(fixed.length).join("/");
+    if (fixed.length) {
+      const deeper = path.join(where.root, ...fixed);
+      if (!fs.existsSync(deeper)) return { text: `No files match ${pattern}` };
+      where.root = fs.realpathSync(deeper);
+    }
+    const re = globToRegExp(rest);
     // A pattern with no folder in it matches at any depth, as people expect of `*.md`.
     const anyDepth = !pattern.includes("/");
     const { files, cut } = walk(where.root);
@@ -400,8 +442,10 @@ const grep: EngineTool = {
     const out: string[] = [];
     let total = 0;
     for (const rel of files.sort()) {
-      if (filterRe && !filterRe.test(filterAnyDepth ? path.posix.basename(rel) : rel)) continue;
       const full = single ? where.root : path.join(where.root, rel);
+      // A file named outright is tested by its own name: it has no path
+      // under a search root to match against.
+      if (filterRe && !filterRe.test(single || filterAnyDepth ? path.basename(full) : rel)) continue;
       let buf: Buffer;
       try {
         if (fs.statSync(full).size > SEARCH_FILE_BYTES) continue;
@@ -460,6 +504,7 @@ const bash: EngineTool = {
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
+      if (child.pid) ctx.groups.add(child.pid);
       let out = "";
       let dropped = 0;
       const take = (chunk: Buffer) => {
