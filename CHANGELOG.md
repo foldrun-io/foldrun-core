@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.2.2] — 2026-11-17
+
+- chore(deps): bump @anthropic-ai/claude-agent-sdk (#126) ([88af409](https://github.com/foldrun-io/foldrun-core/commit/88af409))
+
 ## [24.2.1] — 2026-11-16
 
 - ci(security): ask the registry again when it leaves out a signing key ([dc66777](https://github.com/foldrun-io/foldrun-core/commit/dc66777))
