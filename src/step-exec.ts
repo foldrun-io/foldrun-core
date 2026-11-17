@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { foldrunQuery, wantsFoldrunEngine } from "./engine-loop.ts";
 import type { HookInput, McpServerConfig, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CAPTURE_CAP, type Effort, type ModelCall } from "./store.ts";
 import { costOf, type TokenPrice } from "./catalog.ts";
@@ -346,8 +347,10 @@ export function stepCeilingFor(
 export async function executeStep(
   opts: ExecOptions,
   /** The model loop. Injected so the clock and the stop can be tested
-   *  without a model; production passes nothing and gets the SDK. */
-  runQuery: QueryFn = query as unknown as QueryFn,
+   *  without a model; production passes nothing and gets the SDK — or
+   *  foldrun's own loop when the step's environment asks for it
+   *  (FOLDRUN_ENGINE=foldrun, engine-loop.ts). */
+  runQuery: QueryFn = wantsFoldrunEngine(opts.env) ? foldrunQuery : (query as unknown as QueryFn),
 ): Promise<ExecOutcome> {
   // `workspace/…` for the shell, the scripts and a shell `verify:` — the
   // file tools expand the prefix themselves. Held for the step, verify
