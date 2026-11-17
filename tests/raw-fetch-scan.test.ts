@@ -27,6 +27,7 @@ const RAW = /(^|[^.\w$])(fetch|undiciFetch)\(|\bhttps?\.(request|get)\(/g;
 const ALLOWED: Record<string, { count: number; why: string }> = {
   "platform.ts": { count: 1, why: "the laptop's own fetchUntrusted: single-tenant, its LAN on purpose; a platform replaces it" },
   "translator.ts": { count: 2, why: "the egress-proxy path only, on both wires (Chat Completions and the Anthropic passthrough) — the proxy guards the address; without a proxy it is fetchUntrusted" },
+  "engine-loop.ts": { count: 1, why: "the step's own model endpoint (ANTHROPIC_BASE_URL), the address the SDK's binary sends the same request to today: the lease's egress proxy in a sandbox, the step's local translator for other providers, the person's own on a laptop — no address this engine adds" },
   "api-tools.ts": { count: 1, why: "an http tool's call inside the step, through the lease's egress proxy on a platform" },
   "run-container.ts": { count: 3, why: "the in-pod driver's /identity call to the egress proxy, and two curl install snippets — sandbox, not host" },
   "storage.ts": { count: 2, why: "S3: FOLDRUN_S3_ENDPOINT and the AWS container-credential endpoint, both operator env" },
