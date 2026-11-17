@@ -631,7 +631,7 @@ export const JUDGE_TIMEOUT_MS = 120_000;
  * assistant's tool loop.
  */
 export function judgeSdkEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  return { ...hostSafeEnv(), ...env };
+  return sdkEnv({ ...hostSafeEnv(), ...env });
 }
 
 /** One judge call: its words and what it cost (the SDK's result line). */

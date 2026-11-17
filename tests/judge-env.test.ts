@@ -8,6 +8,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { judgeSdkEnv } from "../src/evals.ts";
+
+test("judge SDK disables optional network traffic even when provider env tries to enable it", () => {
+  const env = judgeSdkEnv({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "", ENABLE_CLAUDEAI_MCP_SERVERS: "true" });
+  assert.equal(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+  assert.equal(env.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+});
 import { modelProcessError } from "../src/step-exec.ts";
 
 test("a judge's model process gets the host's PATH and HOME under the provider's variables, and none of the host's secrets", () => {
