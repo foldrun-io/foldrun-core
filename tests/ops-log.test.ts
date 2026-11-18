@@ -201,3 +201,16 @@ test("who asked: a member id, a key id, a request id and the surface fit; an ema
   assert.equal(leak.surface, undefined);
   assert.equal(leak.dropped, 4);
 });
+
+test("the gateway's request shape fits whole: client and version, counts, flags — a free-text client or a word for a number does not (19 Nov 2026)", () => {
+  const line = opsLine("info", "gateway.not_claude_code", { tenant: "acme", key: "k1", client: "Claude", clientVersion: "1.3.0", answered: true, model: "claude-haiku-5-5", maxTokens: 1, messages: 1, tools: 0, streaming: false, json: true, bytes: 120 });
+  assert.equal(line.dropped, undefined, JSON.stringify(line));
+  assert.deepEqual(
+    { client: line.client, clientVersion: line.clientVersion, answered: line.answered, maxTokens: line.maxTokens, messages: line.messages, tools: line.tools, streaming: line.streaming, json: line.json },
+    { client: "Claude", clientVersion: "1.3.0", answered: true, maxTokens: 1, messages: 1, tools: 0, streaming: false, json: true },
+  );
+  assert.equal(FIELDS.stream, "word", "stream stays the word it was (stdout, stderr)");
+  const bad = opsLine("info", "gateway.not_claude_code", { client: "Claude/1.3.0", clientVersion: "1.3.0 (Electron; macOS)", answered: "yes", maxTokens: "4000", messages: [] as unknown as string, streaming: "true", json: 1 as unknown as boolean });
+  for (const k of ["client", "clientVersion", "answered", "maxTokens", "messages", "streaming", "json"]) assert.equal(bad[k], undefined, k);
+  assert.equal(bad.dropped, 7);
+});

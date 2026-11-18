@@ -127,6 +127,15 @@ export const FIELDS: Record<string, Kind> = {
   // A failure.
   errorClass: "class", errorName: "errorName", code: "code", syscall: "word", cause: "cause",
   at: "frame", frames: "frames", retrying: "bool", ok: "bool",
+  // The model gateway (gateway-door.ts, 19 Nov 2026): what kind of client
+  // called and the SHAPE of what it sent — never its words. These were
+  // dropped (`gateway.not_claude_code` read `"dropped":5`): `client` held a
+  // whole product token ("Claude/1.3.0"), and `/` does not fit an id, so the
+  // product and its version are two ids. Counts are counts of the request's
+  // parts (messages, tools), not of anything in them. `streaming` is the
+  // request's stream flag; `stream` stays the word it was (stdout/stderr).
+  client: "id", clientVersion: "id", answered: "bool", maxTokens: "num", messages: "num",
+  tools: "num", streaming: "bool", json: "bool",
 };
 
 export type OpsValue = string | number | boolean | null | undefined | readonly string[];
