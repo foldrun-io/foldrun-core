@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.3.1] — 2026-11-18
+
+- fix(ops-log): keep the model gateway's client and request-shape fields ([a0e159a](https://github.com/foldrun-io/foldrun-core/commit/a0e159a))
+
 ## [24.3.0] — 2026-11-17
 
 - chore(hooks): pre-push links console/node_modules into the worktree it checks ([e36d7fe](https://github.com/foldrun-io/foldrun-core/commit/e36d7fe))
