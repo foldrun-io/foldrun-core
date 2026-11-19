@@ -74,7 +74,7 @@ import { readTransport, KINDS } from "./kinds.ts";
 import { providerPreset, looksOpenAiShaped, PROTECTED_PARAMS, type WireFormat, type AuthShape } from "./providers.ts";
 import { starterFiles, accountFiles, blankWorkspaceFiles } from "./starter.ts";
 import { trimSlashes, MAX_EDITABLE_FILE } from "./paths.ts";
-import type { RunContext, RunInput, ConversationRecord } from "./conversation.ts";
+import type { RunContext, RunInput, ConversationRecord, SessionMessage } from "./conversation.ts";
 import type { RunInputFile } from "./storage.ts";
 import { copyPlain, readPlainText, UnsafeFileError } from "./safe-open.ts";
 
@@ -4103,6 +4103,12 @@ export interface RunRecord {
    *  an A2A message's text and data. Kept on a run with a `context`, so a
    *  later turn reads the question, never a step's decorated instruction. */
   input?: RunInput;
+  /** Messages other sessions sent this conversation that the person chose
+   *  to include in this turn (session messages, 19 Nov 2026). Claimed for
+   *  this run when it was made, so a retry, a resume or a rescue reads the
+   *  same ones; read by the step the run's task reaches, beside the
+   *  earlier turns (conversation.ts messagesBlock). */
+  sessionMessages?: SessionMessage[];
   /** FOL-163: the files the run was handed — storage paths and the blob each
    *  named when the run was made (held for it; storage.ts holdRunInputs). */
   inputs?: RunInputFile[];

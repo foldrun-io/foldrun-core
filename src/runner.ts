@@ -130,7 +130,7 @@ import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
-import { earlierTurns, conversationBlock, type RunContext, type RunInput } from "./conversation.ts";
+import { earlierTurns, conversationBlock, messagesBlock, type RunContext, type RunInput, type SessionMessage } from "./conversation.ts";
 import { inputsNote, type RunInputFile } from "./run-inputs.ts";
 import { textCandidates } from "./input-text.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
@@ -4683,6 +4683,11 @@ export function readSchemaFile(workspaceRoot: string, rel: string): Record<strin
   return null;
 }
 
+/** A fresh run id, in the form every run has. */
+export function newRunId(): string {
+  return `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 export function createFlowRun(
   tenant: string,
   workspace: string,
@@ -4708,6 +4713,13 @@ export function createFlowRun(
   inputs?: RunInputFile[],
   /** FOL-168: which of the partner's own users the run is for. */
   customer?: string,
+  /** Session messages this turn includes (19 Nov 2026), on the record from
+   *  its first write so no later write can race a stop. Only with a
+   *  conversation. */
+  sessionMessages?: SessionMessage[],
+  /** The run's id, when the caller chose it first (newRunId) — so what it
+   *  binds to the run (session messages) is bound before the record exists. */
+  id?: string,
 ): RunRecord {
   let flowMaxOut: number | undefined;
   try {
@@ -4716,7 +4728,7 @@ export function createFlowRun(
     flowMaxOut = undefined;
   }
   const run: RunRecord = {
-    id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    id: id ?? newRunId(),
     flow: flowName,
     tags,
     status,
@@ -4781,6 +4793,7 @@ export function createFlowRun(
     if (run.steps[0]) run.steps[0].inputsTurn = true;
   }
   if (customer) run.customer = customer;
+  if (sessionMessages?.length && run.context) run.sessionMessages = sessionMessages;
   writeRun(tenant, workspace, run);
 
   // Start every run from an empty outputs/ for each agent it will touch.
@@ -5896,26 +5909,41 @@ function driveRunInner(
         // resume) — the same turns each time, since which runs count is
         // fixed by when this run was made. A lookup that fails costs the
         // step its history, never the step.
+        // Session messages (19 Nov 2026): what other sessions sent this
+        // conversation and the person chose to include, after the earlier
+        // turns — on the run record since it was made, so every start reads
+        // the same ones. A first turn has no history but may have messages.
         const conversationFor = (step: StepRecord): string | undefined => {
           if (!step.conversationTurn || !run.context) return undefined;
+          let history: string | undefined;
           try {
             const built = conversationBlock(run, earlierTurns(tenant, workspace, run));
             if (!built) {
               delete step.history;
-              return undefined;
+            } else {
+              step.history = built.record;
+              const r = built.record;
+              step.events.push({
+                t: new Date().toISOString(),
+                type: "info",
+                text: `conversation ${run.context.id}: given ${r.runs.length} earlier run${r.runs.length === 1 ? "" : "s"} (${r.chars.toLocaleString("en")} characters)${r.omitted ? `, ${r.omitted} older not given` : ""}${r.truncated ? `, ${r.truncated} cut short` : ""}`,
+              });
+              history = built.text;
             }
-            step.history = built.record;
-            const r = built.record;
+          } catch (err) {
+            step.events.push({ t: new Date().toISOString(), type: "info", text: `conversation ${run.context.id}: the earlier runs could not be read (${err instanceof Error ? err.message : String(err)}) — this step runs without them` });
+          }
+          const messages = messagesBlock(run.sessionMessages);
+          if (messages) {
+            const all = run.sessionMessages?.length ?? 0;
             step.events.push({
               t: new Date().toISOString(),
               type: "info",
-              text: `conversation ${run.context.id}: given ${r.runs.length} earlier run${r.runs.length === 1 ? "" : "s"} (${r.chars.toLocaleString("en")} characters)${r.omitted ? `, ${r.omitted} older not given` : ""}${r.truncated ? `, ${r.truncated} cut short` : ""}`,
+              text: `session messages: given ${messages.given} of ${all} from other sessions${messages.cut ? `, ${messages.cut} cut short` : ""}`,
             });
-            return built.text;
-          } catch (err) {
-            step.events.push({ t: new Date().toISOString(), type: "info", text: `conversation ${run.context.id}: the earlier runs could not be read (${err instanceof Error ? err.message : String(err)}) — this step runs without them` });
-            return undefined;
           }
+          const parts = [history, messages?.text].filter((x): x is string => !!x);
+          return parts.length ? parts.join("\n\n") : undefined;
         };
         const mayDefer = (step: StepRecord) => () => {
           if (!opts.parkOnApproval) return false;

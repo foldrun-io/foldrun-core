@@ -378,6 +378,7 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/runs/<id>/approve\` | POST | release a run waiting on a human |
 | \`/runs/<id>/answer\` | POST | answer a question an agent is asking mid-step (\`tools: [ask]\`) |
 | \`/runs/<id>/message\` | POST | tell a running step something; \`step\` picks one of a parallel group |
+| \`/sessions/<context>/messages\` | GET POST | message another conversation of the project; it waits until that session's person includes it in a turn (\`messages\` on a run) |
 | \`/flows\` · \`/flows/<f>\` | GET POST · POST DELETE PATCH | list, create, edit |
 | \`/flows/<f>/run\` | POST | start a flow |
 | \`/flows/<f>/filter\` | POST | would this delivery start it? its \`filter:\` against a payload — nothing starts |
