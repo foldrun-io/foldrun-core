@@ -241,6 +241,13 @@ test("worker description: set, replaced (including a folded block), quoted when 
   const folded = "---\nname: w\ndescription: >\n  old words\n  more\nmodel: fast\n---\nB\n";
   assert.equal(setFrontmatterScalar(folded, "description", "New one"), "---\nname: w\ndescription: New one\nmodel: fast\n---\nB\n");
   assert.equal(setFrontmatterScalar(AGENT_MD, "description", "Leads."), AGENT_MD.replace("Runs the desk.", "Leads."));
+  // Every line deeper than the key is its value's, blank lines inside included (Codex).
+  for (const old of ["---\nname: w\nmodel:\n\n  max\neffort: low\n---\nB\n", "---\nname: w\nmodel: claude-\n  opus\neffort: low\n---\nB\n", "---\nname: w\n\"model\": |\n  max\n\n  more\n\neffort: low\n---\nB\n"]) {
+    const next = setFrontmatterScalar(old, "model", "default");
+    const data = matter(next).data;
+    assert.equal(data.model, "default", next);
+    assert.equal(data.effort, "low", next);
+  }
   assert.equal(yamlScalar("yes"), '"yes"');
   assert.equal(yamlScalar("Plain words, fine"), "Plain words, fine");
   assert.equal(yamlScalar("# not a comment"), '"# not a comment"');

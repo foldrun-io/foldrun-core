@@ -587,10 +587,16 @@ export function setFrontmatterScalar(raw: string, key: string, value: string): s
   if (!b) return ["---", line, "---", ...lines].join(eol);
   const k = keyLine(lines, b.close, key);
   if (k) {
-    const { value: v, comment } = splitComment(k.rest);
+    const { comment } = splitComment(k.rest);
+    // Every line indented deeper than the key is its value's — a block
+    // scalar, a plain scalar folded onto the next lines, blank lines inside
+    // either. Trailing blank lines are left where they are (Codex: a value
+    // after a blank line survived and joined the new one).
     let end = k.index + 1;
-    if (/^\s*[|>][-+]?\d*\s*$/.test(v) || !v.trim()) {
-      while (end < b.close && (lines[end].match(/^\s*/)?.[0].length ?? 0) > k.indent.length && /\S/.test(lines[end])) end++;
+    for (let i = k.index + 1; i < b.close; i++) {
+      if (!/\S/.test(lines[i])) continue;
+      if ((lines[i].match(/^\s*/)?.[0].length ?? 0) <= k.indent.length) break;
+      end = i + 1;
     }
     lines.splice(k.index, end - k.index, `${k.indent}${line}${comment}`);
     return lines.join(eol);
