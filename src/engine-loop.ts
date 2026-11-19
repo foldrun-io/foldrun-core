@@ -80,6 +80,9 @@ interface LoopOptions {
   post: HookFn[];
   canUseTool: CanUseTool | null;
   outer: AbortSignal | null;
+  /** The conversation so far, before this prompt: earlier user turns, the
+   *  model's replies and tool results, as the loop yielded them. */
+  history: { role: string; content: Block[] }[];
 }
 
 function hookFns(hooks: unknown, event: string): HookFn[] {
@@ -122,7 +125,23 @@ function readOptions(options: Json): LoopOptions {
     post: hookFns(options.hooks, "PostToolUse"),
     canUseTool: typeof options.canUseTool === "function" ? (options.canUseTool as CanUseTool) : null,
     outer: (options.abortController as AbortController | undefined)?.signal ?? null,
+    history: readHistory(options.history),
   };
+}
+
+/** An earlier conversation, checked: user and assistant turns that
+ *  alternate, starting with the user's, each a list of content blocks. A
+ *  turn that is not one is refused, not sent half-right to the model. */
+function readHistory(raw: unknown): { role: string; content: Block[] }[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new Error("history must be a list of turns");
+  return raw.map((t, i) => {
+    const role = (t as Json)?.role;
+    const content = (t as Json)?.content;
+    if (role !== (i % 2 === 0 ? "user" : "assistant")) throw new Error(`history turn ${i + 1} must be the ${i % 2 === 0 ? "user's" : "model's"}`);
+    if (!Array.isArray(content) || !content.every((b) => b && typeof (b as Json).type === "string")) throw new Error(`history turn ${i + 1} has no content blocks`);
+    return { role, content: content as Block[] };
+  });
 }
 
 function requestHeaders(env: Record<string, string | undefined>): Record<string, string> {
@@ -346,7 +365,10 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   const startedAt = Date.now();
   const byName = new Map(o.tools.map((t) => [t.name, t]));
   const ctx: ToolContext = { cwd: o.cwd, env: o.env, signal, reads: new Map(), groups: new Set() };
-  const messages: { role: string; content: Block[] }[] = [{ role: "user", content: [{ type: "text", text: prompt }] }];
+  // An earlier conversation comes first (foldrun code's local turns carry
+  // theirs, 19 Nov 2026); the prompt is always the newest user turn.
+  if (o.history.length % 2 !== 0) throw new Error("history must end with the model's turn, so the prompt is the next user turn");
+  const messages: { role: string; content: Block[] }[] = [...o.history, { role: "user", content: [{ type: "text", text: prompt }] }];
   const total = emptyUsage();
   let turns = 0;
   let lastText = "";

@@ -339,3 +339,32 @@ test("on a person's own machine the caller may say the shell runs unsandboxed", 
   assert.equal(r.out!.status, "completed");
   assert.equal(r.requests[1].body.messages[2].content[0].content, "local");
 });
+
+test("history: an earlier conversation goes before the prompt, as given; a broken one is refused before a model call", async () => {
+  const { foldrunQuery } = await import("../src/engine-loop.ts");
+  const model = await fakeModel([{ content: [say("Still 5.")] }]);
+  try {
+    const history = [
+      { role: "user", content: [{ type: "text", text: "what is 2+3?" }] },
+      { role: "assistant", content: [{ type: "text", text: "5." }] },
+    ];
+    const q = foldrunQuery({ prompt: "and now?", options: { cwd: os.tmpdir(), model: "test-model", tools: [], history, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } });
+    let result: any = null;
+    for await (const m of q) if ((m as any).type === "result") result = m;
+    assert.equal(result?.result, "Still 5.");
+    const sent = model.requests[0]!.body.messages;
+    assert.equal(sent.length, 3);
+    assert.equal(sent[0].content[0].text, "what is 2+3?");
+    assert.equal(sent[1].role, "assistant");
+    assert.equal(sent[2].content[0].text, "and now?");
+    for (const bad of [[{ role: "assistant", content: [say("x")] }], [{ role: "user", content: "text" }], [{ role: "user", content: [say("x")] }], "nope"]) {
+      const before = model.requests.length;
+      await assert.rejects(async () => {
+        for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], history: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
+      });
+      assert.equal(model.requests.length, before, "refused before any model call");
+    }
+  } finally {
+    await model.close();
+  }
+});

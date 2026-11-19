@@ -34,7 +34,8 @@
       "./subagents",
       "./tool-names",
       "./scan",
-      "./snapshot-archive"
+      "./snapshot-archive",
+      "./engine-loop"
     ]
   },
   "main": "./dist/index.js",
