@@ -13,6 +13,18 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.5.0] — 2026-11-19
+
+### New in the public API
+
+- `@foldrun/core/engine-loop`
+- `Engine` from `@foldrun/core/engine-loop`
+- `buildRequest` from `@foldrun/core/engine-loop`
+- `foldrunQuery` from `@foldrun/core/engine-loop`
+
+- fix(engine): history's role is a string to the compiler too ([94d2a08](https://github.com/foldrun-io/foldrun-core/commit/94d2a08))
+- feat(engine): the loop takes an earlier conversation, and is a public subpath ([9f7b541](https://github.com/foldrun-io/foldrun-core/commit/9f7b541))
+
 ## [24.4.2] — 2026-11-19
 
 - fix(runner): a snapshot step speaks of the person's folder, not snapshot/ ([6fb0049](https://github.com/foldrun-io/foldrun-core/commit/6fb0049))
