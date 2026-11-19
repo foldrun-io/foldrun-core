@@ -140,7 +140,7 @@ function readHistory(raw: unknown): { role: string; content: Block[] }[] {
     const content = (t as Json)?.content;
     if (role !== (i % 2 === 0 ? "user" : "assistant")) throw new Error(`history turn ${i + 1} must be the ${i % 2 === 0 ? "user's" : "model's"}`);
     if (!Array.isArray(content) || !content.every((b) => b && typeof (b as Json).type === "string")) throw new Error(`history turn ${i + 1} has no content blocks`);
-    return { role, content: content as Block[] };
+    return { role: String(role), content: content as Block[] };
   });
 }
 
