@@ -322,14 +322,98 @@ export function globToRegExp(glob: string): RegExp {
 
 /** The most folders one walk opens: a tree of empty folders is bounded too. */
 const WALK_DIRS = 20_000;
-/** The most wildcards a glob may hold: each `*` is a loop in the regular
- *  expression it becomes, matched on the loop's own thread. */
-export const GLOB_WILDCARDS = 12;
+/** The most alternatives a glob's braces may expand to. */
+export const GLOB_ALTERNATIVES = 64;
+
+type GlobToken = { t: "lit"; c: string } | { t: "one" } | { t: "star" } | { t: "any" } | { t: "dirs" };
+
+/** `{a,b}` expanded, as globToRegExp reads braces: no nesting, the inside literal. */
+function expandBraces(glob: string): string[] | null {
+  const i = glob.indexOf("{");
+  if (i < 0) return [glob];
+  const end = glob.indexOf("}", i);
+  if (end < 0) return [glob];
+  const rest = expandBraces(glob.slice(end + 1));
+  if (!rest) return null;
+  const out: string[] = [];
+  for (const alt of glob.slice(i + 1, end).split(",")) {
+    for (const r of rest) {
+      out.push(`${glob.slice(0, i)}\u0000${alt}\u0000${r}`);
+      if (out.length > GLOB_ALTERNATIVES) return null;
+    }
+  }
+  return out;
+}
+
+function globTokens(glob: string): GlobToken[] {
+  const out: GlobToken[] = [];
+  let literal = false;
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    // \u0000 brackets a brace's alternative: its characters are literal.
+    if (c === "\u0000") {
+      literal = !literal;
+      continue;
+    }
+    if (literal) out.push({ t: "lit", c });
+    else if (c === "*") {
+      if (glob[i + 1] === "*") {
+        i++;
+        if (glob[i + 1] === "/") {
+          i++;
+          out.push({ t: "dirs" });
+        } else out.push({ t: "any" });
+      } else out.push({ t: "star" });
+    } else if (c === "?") out.push({ t: "one" });
+    else out.push({ t: "lit", c });
+  }
+  return out;
+}
+
+/** Whether `text` matches the tokens: a table over tokens × positions, so
+ *  the time is bounded by their product whatever the pattern (Codex: a
+ *  backtracking regular expression is not). */
+function tokensMatch(tokens: GlobToken[], text: string): boolean {
+  const n = text.length;
+  let cur = new Uint8Array(n + 1);
+  cur[0] = 1;
+  for (const tok of tokens) {
+    const next = new Uint8Array(n + 1);
+    if (tok.t === "lit") {
+      for (let j = 0; j < n; j++) if (cur[j] && text[j] === tok.c) next[j + 1] = 1;
+    } else if (tok.t === "one") {
+      for (let j = 0; j < n; j++) if (cur[j] && text[j] !== "/") next[j + 1] = 1;
+    } else if (tok.t === "star" || tok.t === "any") {
+      for (let j = 0; j <= n; j++) {
+        if (cur[j] || (j > 0 && next[j - 1] && (tok.t === "any" || text[j - 1] !== "/"))) next[j] = 1;
+      }
+    } else {
+      // Zero or more whole folders: `name/` repeated, each name non-empty.
+      for (let j = 0; j <= n; j++) {
+        if (cur[j]) next[j] = 1;
+        if (!next[j]) continue;
+        const slash = text.indexOf("/", j);
+        if (slash > j) next[slash + 1] = 1;
+      }
+    }
+    cur = next;
+  }
+  return cur[n] === 1;
+}
+
+/** A glob as a test over a `/`-separated relative path — the same language
+ *  as globToRegExp, matched in bounded time. Throws when its braces expand
+ *  past GLOB_ALTERNATIVES. */
+export function globMatcher(glob: string): (text: string) => boolean {
+  const alts = expandBraces(glob);
+  if (!alts) throw new Error(`the glob's braces make more than ${GLOB_ALTERNATIVES} patterns — name fewer`);
+  const compiled = alts.map(globTokens);
+  return (text) => compiled.some((t) => tokensMatch(t, text));
+}
 
 /** Why a glob is refused, or null. */
 export function globProblem(glob: string): string | null {
-  const n = (glob.match(/\*+|\?/g) ?? []).length;
-  return n > GLOB_WILDCARDS ? `the glob has ${n} wildcards — at most ${GLOB_WILDCARDS}; name more of the path` : null;
+  return expandBraces(glob) ? null : `the glob's braces make more than ${GLOB_ALTERNATIVES} patterns — name fewer`;
 }
 
 /** Every file under `root`, as paths relative to it. Bounded. */
@@ -400,7 +484,7 @@ const glob: EngineTool = {
       if (!fs.existsSync(deeper)) return { text: `No files match ${pattern}` };
       where.root = fs.realpathSync(deeper);
     }
-    const re = globToRegExp(rest);
+    const re = { test: globMatcher(rest) };
     // A pattern with no folder in it matches at any depth, as people expect of `*.md`.
     const anyDepth = !pattern.includes("/");
     const { files, cut } = walk(where.root);
@@ -519,7 +603,7 @@ const grep: EngineTool = {
     const filter = str(input, "glob");
     const tooWild = filter ? globProblem(filter) : null;
     if (tooWild) return fail(tooWild);
-    const filterRe = filter ? globToRegExp(filter.replace(/^\.\//, "")) : null;
+    const filterRe = filter ? { test: globMatcher(filter.replace(/^\.\//, "")) } : null;
     const filterAnyDepth = filter ? !filter.includes("/") : false;
     const single = fs.statSync(where.root).isFile();
     const { files, cut } = single ? { files: [""], cut: false } : walk(where.root);

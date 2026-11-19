@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, matchInWorker, type ToolContext } from "../src/engine-tools.ts";
+import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, matchInWorker, globMatcher, type ToolContext } from "../src/engine-tools.ts";
 
 function withDir(body: (dir: string, ctx: ToolContext, stop: AbortController) => Promise<void>) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-engine-tools-")));
@@ -147,10 +147,24 @@ test("a costly Grep pattern is ended at its time limit or a stop, and never free
     setTimeout(() => stop.abort(), 100);
     assert.deepEqual(await matchInWorker(job, ctx.signal, 60_000), { stopped: true });
     assert.deepEqual(await matchInWorker({ ...job, pattern: "a" }, ctx.signal, 60_000), { stopped: true }, "already stopped: no worker");
-    const wild = "*a".repeat(13);
-    assert.match((await ENGINE_TOOLS.Glob.run({ pattern: wild }, ctx)).text, /13 wildcards/);
-    assert.match((await ENGINE_TOOLS.Grep.run({ pattern: "a", glob: wild }, ctx)).text, /13 wildcards/);
+    // A glob that backtracks for ages as a regular expression is matched
+    // in bounded time.
+    fs.writeFileSync(path.join(dir, `${"a".repeat(200)}.txt`), "x\n");
+    const wild = `${"*a".repeat(30)}*b`;
+    const live = { ...ctx, signal: new AbortController().signal };
+    const t0 = Date.now();
+    assert.match((await ENGINE_TOOLS.Glob.run({ pattern: wild }, live)).text, /^No files match/);
+    assert.match((await ENGINE_TOOLS.Grep.run({ pattern: "x", glob: wild }, live)).text, /^No matches/);
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+    const braces = "{a,b,c}{d,e,f}{g,h,i}{j,k,l}";
+    assert.match((await ENGINE_TOOLS.Glob.run({ pattern: braces }, live)).text, /more than 64 patterns/);
   }));
+
+test("globMatcher agrees with globToRegExp", () => {
+  const globs = ["*.ts", "src/**/*.ts", "src/**/*.test.{ts,js}", "**/x", "a?c", "**", "*", "src/*/b.md", "**/*.{md,mdx}", "a.b", "x+y(1)", "**/"];
+  const paths = ["a.ts", "src/a.ts", "src/x/y/a.ts", "src/a/b/x.test.js", "x", "d/x", "d/e/x", "abc", "a/c", "src/q/b.md", "src/q/r/b.md", "docs/a.mdx", "a.b", "axb", "x+y(1)", "src/", "", "dir/"];
+  for (const g of globs) for (const p of paths) assert.equal(globMatcher(g)(p), globToRegExp(g).test(p), `${g} vs ${p}`);
+});
 
 test("globs and counting", () => {
   assert.ok(globToRegExp("src/**/*.test.{ts,js}").test("src/a/b/x.test.js"));
