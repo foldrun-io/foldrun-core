@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.4.1] — 2026-11-19
+
+- fix(flow-patterns): setFrontmatterScalar replaces the whole value ([8e15f1d](https://github.com/foldrun-io/foldrun-core/commit/8e15f1d))
+
 ## [24.4.0] — 2026-11-19
 
 ### Widened in the public API
