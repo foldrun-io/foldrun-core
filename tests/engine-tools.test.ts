@@ -147,6 +147,9 @@ test("a costly Grep pattern is ended at its time limit or a stop, and never free
     setTimeout(() => stop.abort(), 100);
     assert.deepEqual(await matchInWorker(job, ctx.signal, 60_000), { stopped: true });
     assert.deepEqual(await matchInWorker({ ...job, pattern: "a" }, ctx.signal, 60_000), { stopped: true }, "already stopped: no worker");
+    const wild = "*a".repeat(13);
+    assert.match((await ENGINE_TOOLS.Glob.run({ pattern: wild }, ctx)).text, /13 wildcards/);
+    assert.match((await ENGINE_TOOLS.Grep.run({ pattern: "a", glob: wild }, ctx)).text, /13 wildcards/);
   }));
 
 test("globs and counting", () => {

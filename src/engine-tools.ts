@@ -320,11 +320,25 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
+/** The most folders one walk opens: a tree of empty folders is bounded too. */
+const WALK_DIRS = 20_000;
+/** The most wildcards a glob may hold: each `*` is a loop in the regular
+ *  expression it becomes, matched on the loop's own thread. */
+export const GLOB_WILDCARDS = 12;
+
+/** Why a glob is refused, or null. */
+export function globProblem(glob: string): string | null {
+  const n = (glob.match(/\*+|\?/g) ?? []).length;
+  return n > GLOB_WILDCARDS ? `the glob has ${n} wildcards — at most ${GLOB_WILDCARDS}; name more of the path` : null;
+}
+
 /** Every file under `root`, as paths relative to it. Bounded. */
 function walk(root: string): { files: string[]; cut: boolean } {
   const files: string[] = [];
   const stack = [""];
+  let dirs = 0;
   while (stack.length) {
+    if (++dirs > WALK_DIRS) return { files, cut: true };
     const rel = stack.pop()!;
     let entries: fs.Dirent[];
     try {
@@ -369,6 +383,8 @@ const glob: EngineTool = {
   async run(input, ctx) {
     const pattern = str(input, "pattern");
     if (!pattern) return fail("Glob needs pattern");
+    const tooWild = globProblem(pattern);
+    if (tooWild) return fail(tooWild);
     const where = searchRoot(input, ctx);
     if ("text" in where) return where;
     // The folders a pattern names before its first wildcard are where to
@@ -411,8 +427,8 @@ const glob: EngineTool = {
 // The matching half of Grep, run in a worker thread (see GREP_MS). It reads
 // each file itself and skips the large and the binary, as the tool always did.
 const MATCH_WORKER = `
-const { parentPort, workerData: w } = require("node:worker_threads");
-const fs = require("node:fs");
+const { parentPort, workerData: w } = process.getBuiltinModule("node:worker_threads");
+const fs = process.getBuiltinModule("node:fs");
 const re = new RegExp(w.pattern, w.flags);
 const out = [];
 let total = 0;
@@ -501,6 +517,8 @@ const grep: EngineTool = {
     const mode = str(input, "output_mode") ?? "files_with_matches";
     const limit = Math.max(1, Math.min(GREP_RESULTS, Number.isInteger(input.head_limit) ? (input.head_limit as number) : GREP_RESULTS));
     const filter = str(input, "glob");
+    const tooWild = filter ? globProblem(filter) : null;
+    if (tooWild) return fail(tooWild);
     const filterRe = filter ? globToRegExp(filter.replace(/^\.\//, "")) : null;
     const filterAnyDepth = filter ? !filter.includes("/") : false;
     const single = fs.statSync(where.root).isFile();
