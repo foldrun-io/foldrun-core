@@ -13,6 +13,21 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.4.0] — 2026-11-19
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `RunRecord` from `@foldrun/core`
+- `createFlowRun` from `@foldrun/core`
+
+### New in the public API
+
+- `newRunId` from `@foldrun/core`
+
+- feat(conversation): session messages a turn includes, as data ([452e6f2](https://github.com/foldrun-io/foldrun-core/commit/452e6f2))
+
 ## [24.3.1] — 2026-11-18
 
 - fix(ops-log): keep the model gateway's client and request-shape fields ([a0e159a](https://github.com/foldrun-io/foldrun-core/commit/a0e159a))
