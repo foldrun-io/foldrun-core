@@ -522,7 +522,9 @@ const SNAPSHOT_NOTE =
   "The folder you were sent to work on is in snapshot/ (inside your working directory). Make your changes there, as files: " +
   "when you finish, foldrun turns what changed in snapshot/ into a patch the person applies. " +
   "Only snapshot/ (as that patch) and your outputs/ come back from this step; anything you write elsewhere is not kept. " +
-  "Do not create links or a .git folder in snapshot/ — links make the patch refused, and .git is left out.";
+  "Do not create links or a .git folder in snapshot/ — links make the patch refused, and .git is left out. " +
+  "snapshot/ is the person's own folder: when you write to them, name paths from its top (site/index.html, not snapshot/site/index.html), " +
+  "and do not mention snapshot/, outputs/, the sandbox or the patch — to them it is just their folder.";
 
 /**
  * Configuration from AGENTS.md, nearest-wins: the workspace's overrides the
