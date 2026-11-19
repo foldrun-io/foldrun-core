@@ -116,13 +116,25 @@ function readOptions(options: Json): LoopOptions {
   }
   const model = String(options.model ?? "");
   if (!model) throw new Error("the foldrun engine needs a model");
+  // Tools the host brings, as EngineTool objects: they sit beside the
+  // built-in ones and go through canUseTool and the hooks like them.
+  // foldrun code's cloud_agents is one. A name may not shadow a built-in.
+  const extra: EngineTool[] = [];
+  for (const t of Array.isArray(options.extraTools) ? (options.extraTools as unknown[]) : []) {
+    const tool = t as Partial<EngineTool> | null;
+    if (!tool || typeof tool.name !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(tool.name) || typeof tool.run !== "function" || typeof tool.input_schema !== "object") {
+      throw new Error("extraTools: each needs a name (letters, digits, _ and -), an input_schema and a run function");
+    }
+    if (ENGINE_TOOLS[tool.name] || extra.some((x) => x.name === tool.name)) throw new Error(`extraTools: ${tool.name} is already a tool`);
+    extra.push({ name: tool.name, description: String(tool.description ?? ""), input_schema: tool.input_schema as Record<string, unknown>, readOnly: tool.readOnly === true, run: tool.run });
+  }
   return {
     cwd: String(options.cwd ?? process.cwd()),
     env,
     shellEnv: options.shellEnv && typeof options.shellEnv === "object" ? (options.shellEnv as Record<string, string | undefined>) : env,
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
-    tools: names.map((n) => ENGINE_TOOLS[n]),
+    tools: [...names.map((n) => ENGINE_TOOLS[n]), ...extra],
     maxTurns: typeof options.maxTurns === "number" && options.maxTurns > 0 ? options.maxTurns : null,
     partial: options.includePartialMessages === true,
     pre: hookFns(options.hooks, "PreToolUse"),

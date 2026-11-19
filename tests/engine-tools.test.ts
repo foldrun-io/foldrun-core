@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, type ToolContext } from "../src/engine-tools.ts";
+import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, matchInWorker, type ToolContext } from "../src/engine-tools.ts";
 
 function withDir(body: (dir: string, ctx: ToolContext, stop: AbortController) => Promise<void>) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-engine-tools-")));
@@ -128,6 +128,25 @@ test("Glob and Grep find files, skip dependencies, and bound what they return", 
     assert.equal((await Grep.run({ pattern: "alpha", path: "src/a.ts", output_mode: "count" }, ctx)).text, `${path.join(dir, "src/a.ts")}:1`);
     assert.match((await Grep.run({ pattern: "(" }, ctx)).text, /not a valid regular expression/);
     assert.match((await Grep.run({ pattern: "alpha", head_limit: 1 }, ctx)).text, /\[2 more not shown/);
+  }));
+
+test("a costly Grep pattern is ended at its time limit or a stop, and never freezes the process", () =>
+  withDir(async (dir, ctx, stop) => {
+    const file = path.join(dir, "evil.txt");
+    fs.writeFileSync(file, `${"a".repeat(40)}!\n`);
+    const job = { pattern: "^(a+)+$", flags: "", files: [file], mode: "files_with_matches", limit: 10, maxBytes: 1 << 20 };
+    let ticks = 0;
+    const clock = setInterval(() => ticks++, 20);
+    const started = Date.now();
+    const r = await matchInWorker(job, ctx.signal, 300);
+    clearInterval(clock);
+    assert.deepEqual(r, { timedOut: true });
+    assert.ok(Date.now() - started < 5000, "ended near its limit");
+    assert.ok(ticks >= 5, "the event loop kept running while the pattern did");
+
+    setTimeout(() => stop.abort(), 100);
+    assert.deepEqual(await matchInWorker(job, ctx.signal, 60_000), { stopped: true });
+    assert.deepEqual(await matchInWorker({ ...job, pattern: "a" }, ctx.signal, 60_000), { stopped: true }, "already stopped: no worker");
   }));
 
 test("globs and counting", () => {

@@ -23,6 +23,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { Worker } from "node:worker_threads";
 
 export interface ToolContext {
   /** Relative paths resolve here: the agent's directory. */
@@ -73,6 +74,11 @@ const SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 const WALK_FILES = 20_000;
 const GLOB_RESULTS = 200;
 const GREP_RESULTS = 250;
+/** How long one Grep may match for. A pattern the model wrote can take
+ *  exponential time on the wrong text (`(a+)+$`); the matching runs in a
+ *  worker thread that is ended at this limit or when the step is stopped,
+ *  so it never freezes the process that runs the loop. */
+export const GREP_MS = 30_000;
 export const BASH_DEFAULT_MS = 120_000;
 export const BASH_MAX_MS = 600_000;
 const KILL_GRACE_MS = 2000;
@@ -402,6 +408,66 @@ const glob: EngineTool = {
   },
 };
 
+// The matching half of Grep, run in a worker thread (see GREP_MS). It reads
+// each file itself and skips the large and the binary, as the tool always did.
+const MATCH_WORKER = `
+const { parentPort, workerData: w } = require("node:worker_threads");
+const fs = require("node:fs");
+const re = new RegExp(w.pattern, w.flags);
+const out = [];
+let total = 0;
+for (const full of w.files) {
+  let buf;
+  try {
+    if (fs.statSync(full).size > w.maxBytes) continue;
+    buf = fs.readFileSync(full);
+  } catch {
+    continue;
+  }
+  if (buf.subarray(0, 8192).includes(0)) continue;
+  const lines = buf.toString("utf8").split("\\n");
+  let inFile = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!re.test(lines[i])) continue;
+    inFile++;
+    if (w.mode === "content" && out.length < w.limit) {
+      out.push(full + ":" + (i + 1) + ":" + (lines[i].length > 500 ? lines[i].slice(0, 500) + " [… line cut]" : lines[i]));
+    }
+  }
+  if (!inFile) continue;
+  total += w.mode === "content" ? inFile : 1;
+  if (w.mode === "files_with_matches" && out.length < w.limit) out.push(full);
+  if (w.mode === "count" && out.length < w.limit) out.push(full + ":" + inFile);
+}
+parentPort.postMessage({ out, total });
+`;
+
+type MatchJob = { pattern: string; flags: string; files: string[]; mode: string; limit: number; maxBytes: number };
+type MatchResult = { out: string[]; total: number } | { timedOut: true } | { stopped: true } | { error: string };
+
+/** Run MATCH_WORKER over `job.files`; end it at `ms` or when `signal` fires. */
+export function matchInWorker(job: MatchJob, signal: AbortSignal, ms: number): Promise<MatchResult> {
+  if (signal.aborted) return Promise.resolve({ stopped: true });
+  return new Promise((resolve) => {
+    let settled = false;
+    const worker = new Worker(MATCH_WORKER, { eval: true, workerData: job });
+    const finish = (r: MatchResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      void worker.terminate();
+      resolve(r);
+    };
+    const onAbort = () => finish({ stopped: true });
+    const timer = setTimeout(() => finish({ timedOut: true }), ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+    worker.once("message", (m: { out: string[]; total: number }) => finish(m));
+    worker.once("error", (err: unknown) => finish({ error: err instanceof Error ? err.message : String(err) }));
+    worker.once("exit", () => finish({ error: "the search ended without an answer" }));
+  });
+}
+
 const grep: EngineTool = {
   name: "Grep",
   description:
@@ -439,35 +505,24 @@ const grep: EngineTool = {
     const filterAnyDepth = filter ? !filter.includes("/") : false;
     const single = fs.statSync(where.root).isFile();
     const { files, cut } = single ? { files: [""], cut: false } : walk(where.root);
-    const out: string[] = [];
-    let total = 0;
+    const chosen: string[] = [];
     for (const rel of files.sort()) {
       const full = single ? where.root : path.join(where.root, rel);
       // A file named outright is tested by its own name: it has no path
       // under a search root to match against.
       if (filterRe && !filterRe.test(single || filterAnyDepth ? path.basename(full) : rel)) continue;
-      let buf: Buffer;
-      try {
-        if (fs.statSync(full).size > SEARCH_FILE_BYTES) continue;
-        buf = fs.readFileSync(full);
-      } catch {
-        continue;
-      }
-      if (looksBinary(buf)) continue;
-      const lines = buf.toString("utf8").split("\n");
-      let inFile = 0;
-      for (let i = 0; i < lines.length; i++) {
-        if (!re.test(lines[i])) continue;
-        inFile++;
-        if (mode === "content" && out.length < limit) {
-          out.push(`${full}:${i + 1}:${lines[i].length > 500 ? `${lines[i].slice(0, 500)} [… line cut]` : lines[i]}`);
-        }
-      }
-      if (!inFile) continue;
-      total += mode === "content" ? inFile : 1;
-      if (mode === "files_with_matches" && out.length < limit) out.push(full);
-      if (mode === "count" && out.length < limit) out.push(`${full}:${inFile}`);
+      chosen.push(full);
     }
+    const found = await matchInWorker(
+      { pattern, flags: re.flags, files: chosen, mode, limit, maxBytes: SEARCH_FILE_BYTES },
+      ctx.signal,
+      GREP_MS,
+    );
+    if ("stopped" in found) return fail("the search was stopped");
+    if ("timedOut" in found)
+      return fail(`the search ran past ${GREP_MS / 1000} s and was ended: the pattern is too costly for this text. Use a simpler pattern or a narrower path or glob.`);
+    if ("error" in found) return fail(`the search failed: ${found.error}`);
+    const { out, total } = found;
     if (!out.length) return { text: `No matches for ${pattern}${cut ? ` (search stopped at ${WALK_FILES} files)` : ""}` };
     const more = total > out.length ? `\n\n[${total - out.length} more not shown — narrow the search or raise head_limit]` : "";
     return { text: capped(out.join("\n")) + more };

@@ -383,3 +383,52 @@ test("shellEnv: the tools get it, the model call keeps env's key", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("extraTools: a host's own tool is offered, asked through canUseTool, and run with the step's signal", async () => {
+  const { foldrunQuery } = await import("../src/engine-loop.ts");
+  const model = await fakeModel([{ content: [use("c1", "cloud_agents", { tasks: ["fix the tests"] })] }, { content: [say("done")] }]);
+  try {
+    const asked: string[] = [];
+    let got: unknown = null;
+    let hadSignal = false;
+    const extraTools = [
+      {
+        name: "cloud_agents",
+        description: "run agents elsewhere",
+        input_schema: { type: "object", properties: { tasks: { type: "array", items: { type: "string" } } }, required: ["tasks"] },
+        run: async (input: Record<string, unknown>, ctx: { signal: AbortSignal }) => {
+          got = input;
+          hadSignal = ctx.signal instanceof AbortSignal;
+          return { text: "1 agent finished" };
+        },
+      },
+    ];
+    const q = foldrunQuery({
+      prompt: "p",
+      options: {
+        cwd: os.tmpdir(),
+        model: "m",
+        tools: ["Read"],
+        extraTools,
+        canUseTool: async (name: string, input: Record<string, unknown>) => {
+          asked.push(name);
+          return { behavior: "allow", updatedInput: input };
+        },
+        env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" },
+      },
+    });
+    for await (const _ of q) void _;
+    assert.deepEqual(model.requests[0]!.body.tools.map((t: { name: string }) => t.name), ["Read", "cloud_agents"]);
+    assert.deepEqual(asked, ["cloud_agents"]);
+    assert.deepEqual(got, { tasks: ["fix the tests"] });
+    assert.ok(hadSignal);
+    assert.equal(model.requests[1]!.body.messages[2].content[0].content, "1 agent finished");
+    for (const bad of [[{ name: "Read", input_schema: {}, run: async () => ({ text: "" }) }], [{ name: "bad name", input_schema: {}, run: async () => ({ text: "" }) }], [{ name: "x", input_schema: {} }]]) {
+      await assert.rejects(async () => {
+        for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: ["Read"], extraTools: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
+      }, /extraTools/);
+    }
+  } finally {
+    await model.close();
+  }
+});
