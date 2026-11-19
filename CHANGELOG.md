@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.6.0] — 2026-11-19
+
+- feat(engine): shellEnv — what the tools get, apart from the model's key ([6e5cf8f](https://github.com/foldrun-io/foldrun-core/commit/6e5cf8f))
+
 ## [24.5.0] — 2026-11-19
 
 ### New in the public API
