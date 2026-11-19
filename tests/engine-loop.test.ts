@@ -368,3 +368,18 @@ test("history: an earlier conversation goes before the prompt, as given; a broke
     await model.close();
   }
 });
+
+test("shellEnv: the tools get it, the model call keeps env's key", async () => {
+  const { foldrunQuery } = await import("../src/engine-loop.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-shellenv-")));
+  const model = await fakeModel([{ content: [use("b1", "Bash", { command: "echo key=${ANTHROPIC_AUTH_TOKEN:-none} own=$OWN > out.txt" })] }, { content: [say("ok")] }]);
+  try {
+    const q = foldrunQuery({ prompt: "p", options: { cwd: dir, model: "m", tools: ["Bash"], engineHostShell: true, sandbox: { enabled: false }, env: { PATH: process.env.PATH, ANTHROPIC_BASE_URL: model.url, ANTHROPIC_AUTH_TOKEN: "secret-gw" }, shellEnv: { PATH: process.env.PATH, OWN: "mine" } } });
+    for await (const _ of q) void _;
+    assert.equal(fs.readFileSync(path.join(dir, "out.txt"), "utf8").trim(), "key=none own=mine");
+    assert.equal(model.requests[0]!.headers.authorization, "Bearer secret-gw");
+  } finally {
+    await model.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

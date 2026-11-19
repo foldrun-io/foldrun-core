@@ -71,6 +71,9 @@ interface Usage {
 interface LoopOptions {
   cwd: string;
   env: Record<string, string | undefined>;
+  /** What the tools (Bash) get; `env` when not given. foldrun code passes
+   *  the person's own environment here, so the model key stays with the loop. */
+  shellEnv: Record<string, string | undefined>;
   model: string;
   systemPrompt: string;
   tools: EngineTool[];
@@ -116,6 +119,7 @@ function readOptions(options: Json): LoopOptions {
   return {
     cwd: String(options.cwd ?? process.cwd()),
     env,
+    shellEnv: options.shellEnv && typeof options.shellEnv === "object" ? (options.shellEnv as Record<string, string | undefined>) : env,
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
     tools: names.map((n) => ENGINE_TOOLS[n]),
@@ -364,7 +368,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   const sessionId = crypto.randomUUID();
   const startedAt = Date.now();
   const byName = new Map(o.tools.map((t) => [t.name, t]));
-  const ctx: ToolContext = { cwd: o.cwd, env: o.env, signal, reads: new Map(), groups: new Set() };
+  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set() };
   // An earlier conversation comes first (foldrun code's local turns carry
   // theirs, 19 Nov 2026); the prompt is always the newest user turn.
   if (o.history.length % 2 !== 0) throw new Error("history must end with the model's turn, so the prompt is the next user turn");
