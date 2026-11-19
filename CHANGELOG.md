@@ -13,6 +13,13 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.7.0] — 2026-11-19
+
+- fix(engine): `**` stops at a line break, as the regular expression it replaced did (Codex) ([11bce54](https://github.com/foldrun-io/foldrun-core/commit/11bce54))
+- fix(engine): globs are matched in bounded time, not as backtracking regular expressions ([bffdc62](https://github.com/foldrun-io/foldrun-core/commit/bffdc62))
+- fix(engine): bound Glob's wildcards and the walk's folders; the Grep worker runs in ESM hosts ([7fbd773](https://github.com/foldrun-io/foldrun-core/commit/7fbd773))
+- feat(engine): Grep matches in a worker with a time limit; extraTools for a host's own tools ([8f1b1ce](https://github.com/foldrun-io/foldrun-core/commit/8f1b1ce))
+
 ## [24.6.0] — 2026-11-19
 
 - feat(engine): shellEnv — what the tools get, apart from the model's key ([6e5cf8f](https://github.com/foldrun-io/foldrun-core/commit/6e5cf8f))
