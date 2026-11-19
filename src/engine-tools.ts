@@ -385,7 +385,8 @@ function tokensMatch(tokens: GlobToken[], text: string): boolean {
       for (let j = 0; j < n; j++) if (cur[j] && text[j] !== "/") next[j + 1] = 1;
     } else if (tok.t === "star" || tok.t === "any") {
       for (let j = 0; j <= n; j++) {
-        if (cur[j] || (j > 0 && next[j - 1] && (tok.t === "any" || text[j - 1] !== "/"))) next[j] = 1;
+        // `**` stops at a line break as the `.*` it was always read as does.
+        if (cur[j] || (j > 0 && next[j - 1] && (tok.t === "any" ? !/[\n\r\u2028\u2029]/.test(text[j - 1]!) : text[j - 1] !== "/"))) next[j] = 1;
       }
     } else {
       // Zero or more whole folders: `name/` repeated, each name non-empty.

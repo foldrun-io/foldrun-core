@@ -162,7 +162,7 @@ test("a costly Grep pattern is ended at its time limit or a stop, and never free
 
 test("globMatcher agrees with globToRegExp", () => {
   const globs = ["*.ts", "src/**/*.ts", "src/**/*.test.{ts,js}", "**/x", "a?c", "**", "*", "src/*/b.md", "**/*.{md,mdx}", "a.b", "x+y(1)", "**/"];
-  const paths = ["a.ts", "src/a.ts", "src/x/y/a.ts", "src/a/b/x.test.js", "x", "d/x", "d/e/x", "abc", "a/c", "src/q/b.md", "src/q/r/b.md", "docs/a.mdx", "a.b", "axb", "x+y(1)", "src/", "", "dir/"];
+  const paths = ["a.ts", "src/a.ts", "src/x/y/a.ts", "src/a/b/x.test.js", "x", "d/x", "d/e/x", "abc", "a/c", "src/q/b.md", "src/q/r/b.md", "docs/a.mdx", "a.b", "axb", "x+y(1)", "src/", "", "dir/", "a\nb.ts", "d/a\r.md"];
   for (const g of globs) for (const p of paths) assert.equal(globMatcher(g)(p), globToRegExp(g).test(p), `${g} vs ${p}`);
 });
 
