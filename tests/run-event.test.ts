@@ -95,6 +95,10 @@ test("SLO: the customer's own code, settings and decisions are excluded; ours, a
   assert.deepEqual(failed("script fetch.py exited (code 1)"), { slo: "excluded", reason: "customer_code" });
   assert.deepEqual(failed("verify: exit 1", { events: [ev("error", "verify: exit 1", { check: true })] }), { slo: "excluded", reason: "customer_check" });
   assert.deepEqual(failed("over budget — the flow's budget: $1 is spent"), { slo: "excluded", reason: "customer_budget" });
+  // The runner's refusal for an account with no model key — recorded with
+  // supply "operator" — is the account's setting (customer bench, 20 Nov 2026).
+  const noKey = "no model key: this account runs on its own API key, and none is set. Add one in Settings → Models";
+  assert.deepEqual(failed(noKey, { supply: "operator" } as Partial<StepRecord>), { slo: "excluded", reason: "customer_credential" });
   assert.deepEqual(failed("sandbox ended: OOMKilled (exit 137)", { reserved: { cpus: 1, memGiB: 2 } }), { slo: "excluded", reason: "customer_limit" });
   assert.deepEqual(failed("timed out after 900s (timeout: in the flow file)"), { slo: "excluded", reason: "customer_limit" });
   assert.deepEqual(failed("sandbox ended: this step holds 64 GiB, more than the largest node's 32 GiB"), { slo: "bad", reason: "capacity" });

@@ -211,3 +211,13 @@ test("a run that failed with no failed step still says why: a stop, or a budget 
   // Nothing to say: still null, as before.
   assert.equal(runFailure(run(step({ status: "completed" }))), null);
 });
+
+test("no model key is the account's setting, not a platform error (customer bench, 20 Nov 2026)", () => {
+  const e = explainFailure(
+    "no model key: this account runs on its own API key, and none is set. Add one in Settings → Models (or `foldrun account model set <provider> --key …`), or write a provider: block in AGENTS.md",
+  );
+  assert.deepEqual([e.class, e.kind], ["policy_denied", "credential"]);
+  assert.match(e.fix ?? "", /Settings → Models/);
+  // A step's own error that merely starts the same way is not the refusal.
+  assert.notEqual(explainFailure("no model key found in fixture (exit 1)").kind, "credential");
+});

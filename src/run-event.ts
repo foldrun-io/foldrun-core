@@ -38,7 +38,7 @@
 import crypto from "node:crypto";
 import { isSplicedRecord, runFailure, type RunRecord, type StepRecord } from "./store.ts";
 import { ERROR_CLASSES, opsLine, type ErrorClass, type OpsFields } from "./ops-log.ts";
-import { explainFailure, type FailureExplained, type FailureKind, type LimitScope } from "./failure.ts";
+import { explainFailure, NO_MODEL_KEY, type FailureExplained, type FailureKind, type LimitScope } from "./failure.ts";
 import { startupBreakdown, type StartupPhase } from "./startup.ts";
 
 /** The funnel's marks, in order. */
@@ -63,7 +63,8 @@ export type SloReason = (typeof SLO_REASONS)[number];
 
 /** The SLO rule's version, on every row: a row says which rule judged it,
  *  so a change to the rule never silently rewrites history's meaning. */
-export const SLO_RULES_VERSION = 1;
+// 2 (20 Nov 2026): the no-model-key refusal is the account's, excluded.
+export const SLO_RULES_VERSION = 2;
 
 export interface RunWideEvent {
   runId: string;
@@ -235,7 +236,10 @@ export function sloOutcome(run: RunRecord, failure = terminalFailure(run)): { sl
       return sloOutcome(run, { ...bare, text: failure.text, step });
     }
     case "credential":
-      return failure.step?.supply === "own" ? excluded("customer_credential") : bad("model");
+      // An account with no model key of its own is refused before a sandbox
+      // is rented: its setting, never foldrun's (customer bench, 20 Nov 2026).
+      if (failure.step?.supply === "own" || NO_MODEL_KEY.test(failure.text ?? "")) return excluded("customer_credential");
+      return bad("model");
     case "memory":
     case "cpu":
     case "disk":

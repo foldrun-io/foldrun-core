@@ -230,6 +230,11 @@ const NODE_PRESSURE = /\bEvicted\b[^\n]*\bThe node (was|had) (low on|condition)|
  * Why this failed step failed, for the customer. `reason` is its last error
  * (store.ts runFailure); the step gives the figures a limit's message says.
  */
+/** The runner's (and model-env's) refusal when a hosted account has no model
+ *  key of its own: the whole sentence, so a step's own "no model key …" error
+ *  is not mistaken for it (Codex). */
+export const NO_MODEL_KEY = /^no model key: this account runs on its own API key, and none is set\b/;
+
 export function explainFailure(reason: string, step?: FailedStepLike | null): FailureExplained {
   const facts = step?.failureFacts;
   const text = String(reason ?? "");
@@ -311,6 +316,19 @@ export function explainFailure(reason: string, step?: FailedStepLike | null): Fa
   }
   if (/^(run )?stopped by |stopped while waiting for room/.test(text)) {
     return { class: "cancelled", kind: "stopped", message: firstSentence(text), fix: null };
+  }
+
+  // The runner's own refusal before a sandbox is rented: the account has no
+  // model key and may not run on the platform's. The account's setting,
+  // not foldrun's fault: it fell to the platform_error bucket below and was
+  // counted as ours (customer bench, 20 Nov 2026).
+  if (NO_MODEL_KEY.test(text)) {
+    return {
+      class: "policy_denied",
+      kind: "credential",
+      message: "This account has no model key for this run, and foldrun's models are not open to it.",
+      fix: "Add one in Settings → Models (or `foldrun account model set <provider> --key …`), or a provider: block in AGENTS.md, then rerun.",
+    };
   }
 
   const cause = platformCause(text);
