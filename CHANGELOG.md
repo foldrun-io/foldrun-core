@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.7.1] — 2026-11-20
+
+- fix(failure): an account with no model key is its own setting, not a platform error ([9b227d6](https://github.com/foldrun-io/foldrun-core/commit/9b227d6))
+
 ## [24.7.0] — 2026-11-19
 
 - fix(engine): `**` stops at a line break, as the regular expression it replaced did (Codex) ([11bce54](https://github.com/foldrun-io/foldrun-core/commit/11bce54))
