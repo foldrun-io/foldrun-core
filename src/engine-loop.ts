@@ -37,6 +37,7 @@
 import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
+import { connectMcp, type McpConnection } from "./engine-mcp.ts";
 import { DEFAULT_MAX_TOKENS, readOptions, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
@@ -274,9 +275,29 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     session_id: sessionId,
   });
 
-  yield { type: "system", subtype: "init", session_id: sessionId, cwd: o.cwd, model: o.model, tools: o.tools.map((t) => t.name), mcp_servers: [], engine: "foldrun" };
-
+  // The step's MCP servers, connected before the first model call: their
+  // tools sit after the built-in and host ones (engine-mcp.ts). One that
+  // does not start refuses the step here, before anything is paid for.
+  let mcp: McpConnection | null = null;
   try {
+  if (Object.keys(o.mcpServers).length) {
+    mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal });
+    for (const t of mcp.tools) {
+      if (byName.has(t.name)) throw new Error(`the MCP tool ${t.name} has the name of a tool the step already has`);
+      byName.set(t.name, t);
+    }
+    o.tools = [...o.tools, ...mcp.tools];
+    if (mcp.instructions.length) {
+      o.systemPrompt = [o.systemPrompt, "# MCP Server Instructions", ...mcp.instructions.map((i) => `## ${i.server}\n${i.text}`)].filter(Boolean).join("\n\n");
+    }
+  }
+  // A tool the step was granted that its server does not offer: the step
+  // would run without it, and the model be told it has none.
+  const missing = o.mcpGranted.filter((g) => mcp?.owner.get(g.name) !== g.server).map((g) => g.name);
+  if (missing.length) throw new Error(`granted but not offered by its MCP server: ${missing.join(", ")}`);
+
+  yield { type: "system", subtype: "init", session_id: sessionId, cwd: o.cwd, model: o.model, tools: o.tools.map((t) => t.name), mcp_servers: mcp?.servers ?? [], engine: "foldrun" };
+
   for (;;) {
     if (o.maxTurns !== null && turns >= o.maxTurns) {
       yield result("error_max_turns", null);
@@ -369,12 +390,15 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     }
     if (interrupted()) return;
 
-    const results: Block[] = planned.map((p, i) => ({
-      type: "tool_result",
-      tool_use_id: String(p.block.id),
-      content: done[i].outcome.text,
-      ...(done[i].outcome.isError ? { is_error: true } : {}),
-    }));
+    const results: Block[] = planned.map((p, i) => {
+      const { text, isError, parts } = done[i].outcome;
+      // An image a tool returned (an MCP server's screenshot) goes to the
+      // model as an image, in its place among the text.
+      const content = parts
+        ? parts.map((p) => p.type === "text" ? { type: "text", text: p.text } : { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } })
+        : text;
+      return { type: "tool_result", tool_use_id: String(p.block.id), content, ...(isError ? { is_error: true } : {}) };
+    });
     const context = done.flatMap((d) => d.context);
     const content: Block[] = [...results, ...context.map((c) => ({ type: "text", text: c }))];
     messages.push({ role: "user", content });
@@ -382,8 +406,10 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   }
   } finally {
     // However the loop ended — an answer, a stop, a consumer that walked
-    // away — nothing a command started outlives the step.
+    // away — nothing a command started outlives the step, and no MCP server
+    // it started either.
     killGroups(ctx);
+    await mcp?.close();
   }
 }
 

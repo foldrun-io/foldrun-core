@@ -17,6 +17,9 @@ import { executeStep, type ExecOptions } from "../src/step-exec.ts";
 import { buildRequest, foldrunQuery } from "../src/engine-loop.ts";
 import type { QueryFn } from "../src/step-exec.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
+import { checkMcpSpecs, outcomeOf, connectMcp } from "../src/engine-mcp.ts";
+import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown; rawInput?: string };
 interface Scripted {
@@ -394,7 +397,8 @@ both("a timeout ends a running command and the step, with the cost of the turns 
 
 both("what this engine cannot run yet is refused by name, not run without", ({ engine, step, loop }) => {
   const base = { cwd: "/tmp", model: "m", env: {}, tools: [] as string[] };
-  assert.throws(() => loop({ prompt: "p", options: { ...base, mcpServers: { crm: {} } } }), /does not connect MCP servers yet \(crm\)/);
+  assert.throws(() => loop({ prompt: "p", options: { ...base, mcpServers: { crm: {} } } }), /cannot connect the MCP server crm \(type stdio\)/);
+  assert.throws(() => loop({ prompt: "p", options: { ...base, mcpServers: { crm: { type: "ws", url: "ws://x" } } } }), /cannot connect the MCP server crm \(type ws\)/);
   assert.throws(() => loop({ prompt: "p", options: { ...base, agents: { helper: {} } } }), /does not run sub-agents yet/);
   assert.throws(() => loop({ prompt: "p", options: { ...base, tools: ["Read", "TodoWrite"] } }), /no tool named TodoWrite yet/);
 });
@@ -731,4 +735,373 @@ test("SSE line endings: CRLF, LF and a bare CR all read, a CRLF split across chu
       await new Promise<void>((r) => server.close(() => r()));
     }
   }
+});
+
+// ---- MCP servers on foldrun's loop (FOL-213): web, browse, agents, apis and
+// an agent's own servers all reach a step this way.
+
+/** An in-process server, the shape foldrun's own tools take (script-tools.ts). */
+function echoServer(seen: unknown[] = []) {
+  return createSdkMcpServer({ name: "kit", version: "1.0.0", tools: [
+    tool("echo", "Say it back.", { words: z.string() }, async (a) => { seen.push(a); return { content: [{ type: "text" as const, text: `echo: ${a.words}` }] }; }),
+    tool("shot", "A picture.", {}, async () => ({ content: [
+      { type: "text" as const, text: "before" }, { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" },
+      { type: "text" as const, text: "after" }, { type: "image" as const, data: "R0lGODlh", mimeType: "image/gif" },
+    ] })),
+  ] });
+}
+
+both("an in-process MCP tool is offered under its SDK name, run through the step's checks, and its answer goes back", async ({ step }) => {
+  const seen: unknown[] = [];
+  const r = await step([
+    { content: [use("t1", "mcp__kit__echo", { words: "hi" })] },
+    { content: [use("t2", "mcp__kit__shot", {})] },
+    { content: [say("done")] },
+  ], { mcpServers: { kit: echoServer(seen) } as never, mcpNames: ["kit"], allowed: ["Read", "mcp__kit__echo", "mcp__kit__shot"] });
+  assert.equal(r.error, null);
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  assert.deepEqual(seen, [{ words: "hi" }]);
+  const offered = r.requests[0].body.tools.map((t: { name: string }) => t.name);
+  assert.ok(offered.includes("mcp__kit__echo") && offered.includes("mcp__kit__shot"), offered.join(","));
+  const echo = r.requests[0].body.tools.find((t: { name: string }) => t.name === "mcp__kit__echo");
+  assert.equal(echo.input_schema.properties.words.type, "string");
+  const first = r.requests[1].body.messages.at(-1).content[0];
+  assert.equal(first.content, "echo: hi");
+  // An image a tool returns reaches the model as an image, each caption in its place.
+  const second = r.requests[2].body.messages.at(-1).content[0];
+  assert.deepEqual(second.content, [
+    { type: "text", text: "before" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+    { type: "text", text: "after" }, { type: "image", source: { type: "base64", media_type: "image/gif", data: "R0lGODlh" } },
+  ]);
+});
+
+both("a tool from a server the agent was not granted is refused, never run", async ({ step }) => {
+  const seen: unknown[] = [];
+  const r = await step([
+    { content: [use("t1", "mcp__kit__echo", { words: "hi" })] },
+    { content: [say("ok")] },
+  ], { mcpServers: { kit: echoServer(seen) } as never, mcpNames: [] });
+  assert.deepEqual(seen, []);
+  const result = r.requests[1].body.messages.at(-1).content[0];
+  assert.equal(result.is_error, true);
+  assert.match(result.content, /Tool mcp__kit__echo is not enabled for this agent/);
+});
+
+/** A stdio MCP server, as an agent's own `mcpServers:` names one. */
+function stdioServer(dir: string) {
+  const file = path.join(dir, "server.mjs");
+  const sdk = path.join(import.meta.dirname, "..", "node_modules", "@modelcontextprotocol", "sdk", "dist", "esm");
+  fs.writeFileSync(file, `
+import fs from "node:fs";
+import { McpServer } from ${JSON.stringify(path.join(sdk, "server", "mcp.js"))};
+import { StdioServerTransport } from ${JSON.stringify(path.join(sdk, "server", "stdio.js"))};
+fs.writeFileSync(${JSON.stringify(path.join(dir, "pid"))}, String(process.pid));
+const s = new McpServer({ name: "own", version: "1.0.0" });
+s.registerTool("env", { description: "What the server sees.", annotations: { readOnlyHint: true } }, async () => ({
+  content: [{ type: "text", text: JSON.stringify({ secret: process.env.STEP_SECRET ?? null, host: process.env.HOST_ONLY ?? null, given: process.env.GIVEN ?? null, cwd: process.cwd() }) }],
+}));
+await s.connect(new StdioServerTransport());
+`);
+  return { command: process.execPath, args: [file], env: { GIVEN: "yes" } };
+}
+
+both("an agent's own stdio MCP server, granted as the runner grants it: started in the agent's folder with the step's environment (never this process's), gone when the step ends", async ({ step }) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-")));
+  roots.push(dir);
+  process.env.HOST_ONLY = "platform-key";
+  let r;
+  try {
+    r = await step([
+      { content: [use("t1", "mcp__own__env", {})] },
+      { content: [say("ok")] },
+    ], { mcpServers: { own: stdioServer(dir) } as never, mcpNames: ["own"], allowed: ["Read", "mcp__own", "mcp__own__*"], env: { STEP_SECRET: "declared" } });
+  } finally {
+    delete process.env.HOST_ONLY;
+  }
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  const seen = JSON.parse(r.requests[1].body.messages.at(-1).content[0].content);
+  // As the SDK did: the step's environment (already the allowlisted one,
+  // with the secrets the agent declared) — and nothing of the host's.
+  assert.equal(seen.secret, "declared");
+  assert.equal(seen.host, null, "this process's environment does not reach the server");
+  assert.equal(seen.given, "yes");
+  assert.equal(seen.cwd, r.agentDir);
+  const pid = Number(fs.readFileSync(path.join(dir, "pid"), "utf8"));
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 50)); } catch { alive = false; }
+  }
+  assert.equal(alive, false, "the server process ended with the step");
+});
+
+both("a server that does not start refuses the step by name, before a model call is paid for", async ({ step }) => {
+  const r = await step([{ content: [say("should not be asked")] }], {
+    mcpServers: { crm: { command: "/nonexistent/mcp-server" } } as never, mcpNames: ["crm"],
+  });
+  assert.equal(r.requests.length, 0);
+  const why = r.error?.message ?? JSON.stringify(r.events.filter((e) => e.type === "error"));
+  assert.match(why, /MCP server crm did not start/);
+  assert.notEqual(r.out?.status, "completed");
+});
+
+both("a granted MCP tool with no server, or one its server does not offer, refuses the step — it never runs without a tool it was given", async ({ step, loop }) => {
+  const base = { cwd: "/tmp", model: "m", env: {} };
+  assert.throws(() => loop({ prompt: "p", options: { ...base, tools: ["mcp__crm__find"] } }), /the tool mcp__crm__find was granted, but the step has no MCP server for it/);
+  const r = await step([{ content: [say("should not be asked")] }], {
+    mcpServers: { kit: echoServer() } as never, mcpNames: ["kit"], allowed: ["mcp__kit__echo", "mcp__kit__gone"],
+  });
+  assert.equal(r.requests.length, 0);
+  assert.match(r.error?.message ?? JSON.stringify(r.events.filter((e) => e.type === "error")), /granted but not offered by its MCP server: mcp__kit__gone/);
+});
+
+both("MCP grants: a server named with __ is read whole; a host tool cannot stand in for a granted server tool; a per-tool policy is refused", async ({ loop }) => {
+  const base = { cwd: "/tmp", model: "m", env: {} };
+  const kit = echoServer();
+  // `sales__eu` is one server, not `sales`.
+  assert.doesNotThrow(() => loop({ prompt: "p", options: { ...base, tools: ["mcp__sales__eu__find", "mcp__sales__eu"], mcpServers: { sales__eu: { command: "x" } } } }));
+  assert.throws(() => loop({ prompt: "p", options: { ...base, mcpServers: { kit: { type: "sdk", name: "kit", instance: kit.instance, tools: [{ name: "echo", permission_policy: "always_deny" }] } } } }), /does not apply per-tool permission policies \(MCP server kit\)/);
+  const model = await fakeModel([{ content: [say("should not be asked")] }]);
+  try {
+    const gen = loop({ prompt: "p", options: { ...base, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, tools: ["mcp__kit__gone"], mcpServers: { kit },
+      extraTools: [{ name: "mcp__kit__gone", description: "", input_schema: { type: "object" }, run: async () => ({ text: "fake" }) }] } });
+    await assert.rejects(async () => { for await (const _ of gen) void _; }, /granted but not offered by its MCP server: mcp__kit__gone/);
+    assert.equal(model.requests.length, 0);
+  } finally {
+    await model.close();
+  }
+});
+
+both("a server that offers no tools connects, with none", async ({ step }) => {
+  const r = await step([{ content: [say("fine")] }], { mcpServers: { empty: createSdkMcpServer({ name: "empty", version: "1.0.0", tools: [] }) } as never, mcpNames: ["empty"] });
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+});
+
+both("an SSE server that never sends its endpoint does not hold the step: a stop ends it", async ({ loop }) => {
+  const sse = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(": hello\n\n");
+    const beat = setInterval(() => res.write(": beat\n\n"), 50);
+    res.on("close", () => clearInterval(beat));
+  });
+  await new Promise<void>((r) => sse.listen(0, "127.0.0.1", r));
+  const abort = new AbortController();
+  const started = Date.now();
+  try {
+    const gen = loop({ prompt: "p", options: { cwd: "/tmp", model: "m", env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:9", ANTHROPIC_API_KEY: "k" }, abortController: abort,
+      mcpServers: { slow: { type: "sse", url: `http://127.0.0.1:${(sse.address() as AddressInfo).port}/sse` } } } });
+    setTimeout(() => abort.abort(), 200);
+    await assert.rejects(async () => { for await (const _ of gen) void _; }, /MCP server slow did not start/);
+    assert.ok(Date.now() - started < 5000, "ended by the stop, not the connect timeout");
+  } finally {
+    sse.closeAllConnections();
+    await new Promise<void>((r) => sse.close(() => r()));
+  }
+});
+
+both("a streamable HTTP server's session is ended (DELETE) when the step ends", async ({ step }) => {
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
+  const methods: string[] = [];
+  const transports = new Map<string, InstanceType<typeof StreamableHTTPServerTransport>>();
+  const web = http.createServer(async (req, res) => {
+    methods.push(req.method!);
+    let raw = "";
+    for await (const c of req) raw += c;
+    const sid = req.headers["mcp-session-id"] as string | undefined;
+    let t = sid ? transports.get(sid) : undefined;
+    if (!t) {
+      t = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(), onsessioninitialized: (id) => { transports.set(id, t!); } });
+      const srv = new McpServer({ name: "web", version: "1.0.0" });
+      srv.registerTool("ping", { description: "pong" }, async () => ({ content: [{ type: "text", text: "pong" }] }));
+      await srv.connect(t);
+    }
+    await t.handleRequest(req, res, raw ? JSON.parse(raw) : undefined);
+  });
+  await new Promise<void>((r) => web.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${(web.address() as AddressInfo).port}/mcp`;
+    const r = await step([{ content: [use("t1", "mcp__web__ping", {})] }, { content: [say("ok")] }], { mcpServers: { web: { type: "http", url } } as never, mcpNames: ["web"] });
+    assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+    assert.equal(r.requests[1].body.messages.at(-1).content[0].content, "pong");
+    assert.ok(methods.includes("DELETE"), `the session was ended: ${methods.join(",")}`);
+  } finally {
+    web.closeAllConnections();
+    await new Promise<void>((r) => web.close(() => r()));
+  }
+});
+
+both("foldrun's own script server (foldrun_scripts, as the runner builds it) runs on this loop: the script runs and its output comes back", async ({ step }) => {
+  const { parseScripts, buildScriptTools } = await import("../src/script-tools.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-scripts-")));
+  roots.push(dir);
+  fs.writeFileSync(path.join(dir, "greet.mjs"), `console.log("hello " + process.argv.slice(2).join(" "));`);
+  const built = buildScriptTools(dir, parseScripts([{ name: "greet", description: "Says hello.", run: "greet.mjs", args: { who: "who to greet" } }]), {});
+  assert.deepEqual(built.toolNames, ["mcp__foldrun_scripts__greet"]);
+  const r = await step([
+    { content: [use("t1", "mcp__foldrun_scripts__greet", { who: "ana" })] },
+    { content: [say("greeted")] },
+  ], { mcpServers: { foldrun_scripts: built.server } as never, mcpNames: [], allowed: ["Read", ...built.toolNames] });
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  assert.match(r.requests[1].body.messages.at(-1).content[0].content, /^exit 0\n\nhello/);
+});
+
+test("MCP results: one text budget, the newlines between counted, nothing kept empty", () => {
+  const out = outcomeOf({ content: Array.from({ length: 60_000 }, () => ({ type: "text", text: "ab" })) });
+  assert.ok(out.text.length <= 100_000 + 40, `${out.text.length}`);
+  assert.match(out.text, /\[cut: \d+ more characters\]$/);
+  assert.equal(/\n\n/.test(out.text), false);
+  assert.equal(outcomeOf({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }).text, "a\nb");
+});
+
+test("an MCP server named __proto__ is a server, not a prototype", () => {
+  const out = checkMcpSpecs(JSON.parse('{"__proto__":{"command":"node"}}'), "foldrun");
+  assert.deepEqual(Object.keys(out), ["__proto__"]);
+});
+
+test("MCP connect: a step already stopped leaves no unhandled rejection; a granted tool must come from the server it names", async () => {
+  const unhandled: unknown[] = [];
+  const on = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", on);
+  try {
+    const abort = new AbortController();
+    abort.abort();
+    await assert.rejects(connectMcp({ kit: { type: "sdk", instance: echoServer().instance } }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: abort.signal }), /did not start: connect: stopped/);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", on);
+  }
+});
+
+both("a granted tool is checked against the server its name points to — a same-named tool from another server does not stand in", async ({ loop }) => {
+  const sales = createSdkMcpServer({ name: "sales", version: "1.0.0", tools: [tool("eu__find", "x", {}, async () => ({ content: [{ type: "text" as const, text: "wrong one" }] }))] });
+  const eu = createSdkMcpServer({ name: "sales__eu", version: "1.0.0", tools: [] });
+  const model = await fakeModel([{ content: [say("should not be asked")] }]);
+  try {
+    const gen = loop({ prompt: "p", options: { cwd: "/tmp", model: "m", env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, tools: ["mcp__sales__eu__find"], mcpServers: { sales, sales__eu: eu } } });
+    // Refused when the servers connect: the name reads as sales__eu's.
+    await assert.rejects(async () => { for await (const _ of gen) void _; }, /mcp__sales__eu__find from sales reads as server sales__eu's/);
+    assert.equal(model.requests.length, 0);
+  } finally {
+    await model.close();
+  }
+});
+
+both("MCP tools: a stdio server starts from the tool environment (shellEnv), not the model's; MCP_TOOL_TIMEOUT holds a call", async ({ loop }) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-env-")));
+  roots.push(dir);
+  const slow = createSdkMcpServer({ name: "slow", version: "1.0.0", tools: [tool("wait", "x", {}, async () => { await new Promise((r) => setTimeout(r, 1500)); return { content: [{ type: "text" as const, text: "late" }] }; })] });
+  const model = await fakeModel([
+    { content: [use("t1", "mcp__own__env", {}), use("t2", "mcp__slow__wait", {})] },
+    { content: [say("ok")] },
+  ]);
+  try {
+    const gen = loop({ prompt: "p", options: { cwd: dir, model: "m", tools: [],
+      env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k", STEP_SECRET: "model-side", MCP_TOOL_TIMEOUT: "1000" },
+      shellEnv: { PATH: process.env.PATH, GIVEN_TOOL: "t" },
+      mcpServers: { own: stdioServer(dir), slow } } });
+    for await (const _ of gen) void _;
+    const results = model.requests[1].body.messages.at(-1).content;
+    const seen = JSON.parse(results[0].content);
+    assert.equal(seen.secret, null, "the model's side of the environment does not reach a tool's process");
+    assert.equal(results[1].is_error, true);
+    assert.match(results[1].content, /timed out|timeout/i);
+  } finally {
+    await model.close();
+  }
+});
+
+test("a script tool stops when its call is stopped — no child outlives the step", async () => {
+  const { parseScripts, buildScriptTools } = await import("../src/script-tools.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-stop-")));
+  roots.push(dir);
+  fs.writeFileSync(path.join(dir, "long.mjs"), `import fs from "node:fs"; fs.writeFileSync("pid", String(process.pid)); setTimeout(() => {}, 30000);`);
+  const built = buildScriptTools(dir, parseScripts([{ name: "long", description: "runs long", run: "long.mjs" }]), {});
+  const tools = (built.server as unknown as { instance: { _registeredTools: Record<string, { handler: (a: object, e: object) => Promise<{ content: { text: string }[] }> }> } }).instance._registeredTools;
+  const abort = new AbortController();
+  const call = tools.long.handler({}, { signal: abort.signal });
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(dir, "pid")); i++) await new Promise((r) => setTimeout(r, 30));
+  abort.abort();
+  const reply = await call;
+  assert.match(reply.content[0].text, /stopped/);
+  const pid = Number(fs.readFileSync(path.join(dir, "pid"), "utf8"));
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) { try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; } }
+  assert.equal(alive, false);
+});
+
+test("MCP round three: no server starts for a stopped step; a long timeout is held to the timer's limit; the text budget counts every newline and never cuts a character in half", async () => {
+  let connects = 0;
+  const kit = echoServer();
+  const counted = { type: "sdk", instance: { connect: (t: never) => { connects++; return kit.instance.connect(t); } } };
+  await assert.rejects(connectMcp({ kit: counted }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: AbortSignal.abort() }), /connect: stopped/);
+  assert.equal(connects, 0);
+
+  const c = await connectMcp({ kit: { type: "sdk", instance: echoServer().instance } }, { env: { MCP_TOOL_TIMEOUT: "2592000000" }, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal });
+  try {
+    const echo = c.tools.find((t) => t.name === "mcp__kit__echo")!;
+    const out = await echo.run({ words: "x" }, { signal: new AbortController().signal } as never);
+    assert.equal(out.text, "echo: x");
+  } finally {
+    await c.close();
+  }
+
+  const lead = outcomeOf({ content: [{ type: "text", text: "" }, { type: "text", text: "a".repeat(100_000) }] });
+  assert.ok(lead.text.length <= 100_000 + 40 && /\[cut: 1 more characters\]$/.test(lead.text), `${lead.text.length} ${lead.text.slice(-30)}`);
+  const emoji = outcomeOf({ content: [{ type: "text", text: "a".repeat(99_999) + "😀" }] });
+  assert.equal(emoji.text.isWellFormed(), true);
+});
+
+test("MCP instructions a server gives reach the model's system prompt, as the SDK put them", async () => {
+  const kit = createSdkMcpServer({ name: "kit", version: "1.0.0", instructions: "Use UTC dates.", tools: [tool("t", "x", {}, async () => ({ content: [{ type: "text" as const, text: "ok" }] }))] } as never);
+  const model = await fakeModel([{ content: [say("ok")] }]);
+  try {
+    for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: "/tmp", model: "m", tools: [], systemPrompt: "You help.", env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, mcpServers: { kit } } })) void _;
+    const system = JSON.stringify(model.requests[0].body.system);
+    assert.match(system, /You help\./);
+    assert.match(system, /## kit\\nUse UTC dates\./);
+  } finally {
+    await model.close();
+  }
+});
+
+test("a granted server does not grant another whose name it begins: sales does not grant sales__eu's tools (step-exec's grant check, which the SDK path shares)", async () => {
+  const seen: string[] = [];
+  const eu = createSdkMcpServer({ name: "sales__eu", version: "1.0.0", tools: [tool("find", "x", {}, async () => { seen.push("eu"); return { content: [{ type: "text" as const, text: "eu" }] }; })] });
+  const sales = createSdkMcpServer({ name: "sales", version: "1.0.0", tools: [tool("list", "x", {}, async () => ({ content: [{ type: "text" as const, text: "s" }] }))] });
+  const r = await runStep([
+    { content: [use("t1", "mcp__sales__eu__find", {})] },
+    { content: [say("ok")] },
+  ], { mcpServers: { sales, sales__eu: eu } as never, mcpNames: ["sales"], allowed: ["Read", "mcp__sales", "mcp__sales__*"] });
+  assert.deepEqual(seen, []);
+  const result = r.requests[1].body.messages.at(-1).content[0];
+  assert.equal(result.is_error, true);
+  assert.match(result.content, /not enabled for this agent/);
+});
+
+test("MCP round four: a tool name that reads as another server's refuses the step; an exact-fit result keeps its last newline", async () => {
+  const sales = createSdkMcpServer({ name: "sales", version: "1.0.0", tools: [tool("eu__find", "x", {}, async () => ({ content: [{ type: "text" as const, text: "s" }] }))] });
+  const eu = createSdkMcpServer({ name: "sales__eu", version: "1.0.0", tools: [] });
+  await assert.rejects(connectMcp({ sales: sales as never, sales__eu: eu as never }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal }), /mcp__sales__eu__find from sales reads as server sales__eu's/);
+  const fit = outcomeOf({ content: [{ type: "text", text: "a".repeat(99_999) }, { type: "text", text: "" }] });
+  assert.equal(fit.text.length, 100_000);
+  assert.doesNotMatch(fit.text, /\[cut/);
+});
+
+test("an unattended script's stop ends what it started too (its process group)", { skip: process.platform === "win32" || process.stdout.isTTY || process.stdin.isTTY }, async () => {
+  const { parseScripts, buildScriptTools } = await import("../src/script-tools.ts");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-group-")));
+  roots.push(dir);
+  fs.writeFileSync(path.join(dir, "parent.sh"), `#!/bin/sh\nsleep 30 &\necho $! > child\nwait\n`, { mode: 0o755 });
+  const built = buildScriptTools(dir, parseScripts([{ name: "parent", description: "x", run: "parent.sh" }]), {});
+  const tools = (built.server as unknown as { instance: { _registeredTools: Record<string, { handler: (a: object, e: object) => Promise<{ content: { text: string }[] }> }> } }).instance._registeredTools;
+  const abort = new AbortController();
+  const call = tools.parent.handler({}, { signal: abort.signal });
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(dir, "child")); i++) await new Promise((r) => setTimeout(r, 30));
+  const pid = Number(fs.readFileSync(path.join(dir, "child"), "utf8"));
+  abort.abort();
+  await call;
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) { try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; } }
+  assert.equal(alive, false, "the script's own child ended with it");
 });

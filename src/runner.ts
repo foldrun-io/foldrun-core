@@ -151,7 +151,7 @@ export function unbindMcpHeaders(
   grant: EgressGrant,
 ): Record<string, McpServerConfig> {
   const known = Object.fromEntries(bound.filter((n) => n in values).map((n) => [n, values[n]]));
-  const out: Record<string, McpServerConfig> = {};
+  const out: Record<string, McpServerConfig> = Object.create(null);
   for (const [name, server] of Object.entries(servers)) {
     if (server.type !== "http") {
       out[name] = server;
@@ -1237,7 +1237,8 @@ export function agentContext(
   // MCP servers an agent connects to. `mcpServers:` is Claude Code's spelling
   // for the inline form; a `type: mcp` tool file is the shared form. Both end
   // up here, and both reach the model as ordinary MCP tools.
-  const mcpServers: Record<string, McpServerConfig> = {};
+  // No prototype: a server an agent names __proto__ is a server.
+  const mcpServers: Record<string, McpServerConfig> = Object.create(null);
   const mcpNames: string[] = [];
 
   // What the granted tools' programs need — merged into this step's runtime

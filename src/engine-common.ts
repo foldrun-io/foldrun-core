@@ -6,6 +6,7 @@
 // @foldrun/core's public API.
 
 import { ENGINE_TOOLS, type EngineTool, type ToolOutcome } from "./engine-tools.ts";
+import { checkMcpSpecs, grantedServer, type McpSpec } from "./engine-mcp.ts";
 
 export const DEFAULT_MAX_TOKENS = 16_000;
 
@@ -60,6 +61,11 @@ export interface LoopOptions {
   /** The conversation so far, before this prompt: earlier user turns, the
    *  model's replies and tool results, as the loop yielded them. */
   history: { role: string; content: Block[] }[];
+  /** The step's MCP servers (engine-mcp.ts), connected when the loop starts. */
+  mcpServers: Record<string, McpSpec>;
+  /** MCP tools the step was granted by name, with the server each names:
+   *  each must be offered by that server once connected, or the step is refused. */
+  mcpGranted: { name: string; server: string }[];
 }
 
 export function hookFns(hooks: unknown, event: string): HookFn[] {
@@ -72,14 +78,25 @@ export function hookFns(hooks: unknown, event: string): HookFn[] {
 /** `engine` names the loop in what it refuses. */
 export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
   const env = (options.env as Record<string, string | undefined> | undefined) ?? process.env;
-  const names = Array.isArray(options.tools) ? (options.tools as unknown[]).map(String) : [];
+  const listed = Array.isArray(options.tools) ? (options.tools as unknown[]).map(String) : [];
+  // A granted MCP tool (`mcp__<server>__<tool>`, what the runner lists for
+  // web, apis, scripts, a2a, ask…) comes from its server, connected when the
+  // loop starts; its server must be one of the step's.
+  const mcpGranted = listed.filter((n) => n.startsWith("mcp__"));
+  const names = listed.filter((n) => !n.startsWith("mcp__"));
   const unsupported = names.filter((n) => !ENGINE_TOOLS[n]);
   if (unsupported.length) {
     throw new Error(`the ${engine} engine has no tool named ${unsupported.join(", ")} yet — it has ${Object.keys(ENGINE_TOOLS).join(", ")}. Run this agent on the default engine.`);
   }
-  const servers = Object.keys((options.mcpServers as Json | undefined) ?? {});
-  if (servers.length) {
-    throw new Error(`the ${engine} engine does not connect MCP servers yet (${servers.join(", ")}) — run this agent on the default engine.`);
+  // MCP servers: checked here, connected when the loop starts (engine-mcp.ts).
+  const mcpServers = checkMcpSpecs((options.mcpServers as Json | undefined) ?? {}, engine);
+  // A whole server granted (`mcp__crm`, `mcp__crm__*`) needs only the
+  // server; a tool granted by name must be offered by it once connected.
+  const mcpTools: { name: string; server: string }[] = [];
+  for (const n of mcpGranted) {
+    const g = grantedServer(n, Object.keys(mcpServers));
+    if (!g) throw new Error(`the tool ${n} was granted, but the step has no MCP server for it`);
+    if (g.tool) mcpTools.push({ name: g.tool, server: g.server });
   }
   if (options.agents && Object.keys(options.agents as Json).length) {
     throw new Error(`the ${engine} engine does not run sub-agents yet — run this agent on the default engine.`);
@@ -117,6 +134,8 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     canUseTool: typeof options.canUseTool === "function" ? (options.canUseTool as CanUseTool) : null,
     outer: (options.abortController as AbortController | undefined)?.signal ?? null,
     history: readHistory(options.history),
+    mcpServers,
+    mcpGranted: mcpTools,
   };
 }
 

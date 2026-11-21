@@ -182,6 +182,8 @@ export function runScript(
   libraryScripts: string,
   interpreters: Record<string, string>,
   exec: ExecutionContext | null,
+  /** A stop for the call (the MCP request's): the script ends with it. */
+  signal?: AbortSignal,
 ): Promise<{ code: number | null; out: string }> {
   // An inline-code tool has no file yet: write it inside the agent's own
   // directory — already an allowed root — and run it like any other script.
@@ -285,11 +287,31 @@ export function runScript(
     // base and gets what the agent declared, by name — see host-env.ts.
     // In a run container `env` already carries the container's whole
     // environment, which is the boundary, so nothing is lost there.
+    const ownGroup = process.platform !== "win32" && !process.stdout.isTTY && !process.stdin.isTTY;
     const child = spawn(cmd, args, {
       cwd,
       env: workspaceLinkEnv({ ...hostSafeEnv(), ...env }, cwd),
       timeout: timeoutFor(spec),
+      // Unattended (no terminal: the platform, a schedule), a script leads
+      // its own process group, so a stop ends what it started too — a
+      // leftover child could otherwise write over a retry's output. At a
+      // terminal it stays in this process's group, so Ctrl-C reaches it.
+      detached: ownGroup,
     });
+    // A stopped step stops its script: the call's stop kills it (its group
+    // when it has one). A container run's script is not followed — as on
+    // the SDK path before.
+    const stop = () => {
+      stopped = true;
+      try {
+        if (ownGroup && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch { /* already gone */ }
+    };
+    let stopped = false;
+    if (signal?.aborted) stop();
+    else signal?.addEventListener("abort", stop, { once: true });
+    child.on("close", () => signal?.removeEventListener("abort", stop));
     let out = "";
     const append = (chunk: Buffer) => {
       if (out.length < MAX_OUTPUT) out += chunk.toString();
@@ -301,9 +323,10 @@ export function runScript(
       resolve({
         code,
         out:
-          out.length > MAX_OUTPUT
+          (stopped ? "stopped: the step was stopped\n" : "") +
+          (out.length > MAX_OUTPUT
             ? `${out.slice(0, MAX_OUTPUT)}\n…[truncated]`
-            : out || "(no output)",
+            : out || "(no output)"),
       }),
     );
   });
@@ -445,12 +468,12 @@ export function buildScriptTools(
         `Credentials it needs are already in its environment.` +
         (spec.guide ? `\n\nHow to use it (from its tool.md):\n${spec.guide}` : ""),
       shape,
-      async (args) => {
+      async (args, extra) => {
         const started = Date.now();
         const values = Object.fromEntries(
           Object.entries(args ?? {}).map(([k, v]) => [k, v === undefined ? "" : String(v)]),
         );
-        const { code, out } = await runScript(agentDir, spec, values, env, libraryScripts, interpreters, exec);
+        const { code, out } = await runScript(agentDir, spec, values, env, libraryScripts, interpreters, exec, (extra as { signal?: AbortSignal } | undefined)?.signal);
         // The arguments, on the record. Without them a run says a script was
         // called and not what it was asked to do — and for a script that
         // writes to someone else's system, "it ran" is not an account of what

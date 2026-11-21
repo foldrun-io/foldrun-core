@@ -28,6 +28,7 @@ import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { CallCounter, callKeysFor, REFUSALS_BEFORE_STOP, type Limits } from "./limits.ts";
 import { classifyCall, podAt, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
+import { grantedServer } from "./engine-mcp.ts";
 
 export interface ExecUsage {
   inputTokens: number;
@@ -401,6 +402,16 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
   // its own list, a path outside the workspace, a shell command — names the
   // agent that tried, not just the step.
   const subagentNames = new Map<string, string>();
+  // An MCP tool is granted when the server it belongs to is. Its server is
+  // read against the step's own server names, the longest first: with
+  // servers `sales` and `sales__eu`, `mcp__sales__eu__find` is sales__eu's,
+  // and granting `sales` does not grant it. A name no server of the step's
+  // claims falls back to the prefix it always matched on.
+  const serverNames = Object.keys(opts.mcpServers ?? {});
+  const fromGrantedMcp = (toolName: string): boolean => {
+    const g = grantedServer(toolName, serverNames);
+    return g ? g.tool !== null && opts.mcpNames.includes(g.server) : opts.mcpNames.some((n) => toolName.startsWith(`mcp__${n}__`));
+  };
   // `limits:` — this step's counts. A new step, a retry of one, or a
   // fan-out instance each start from zero.
   const counter = new CallCounter(opts.limits);
@@ -581,7 +592,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
                   : isFilesystemTool(hookInput.tool_name)
                     ? checkPaths(hookInput.tool_name, v.input, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
                     : { ok: true as const };
-                const granted = opts.allowed.includes(hookInput.tool_name) || opts.mcpNames.some((n) => hookInput.tool_name.startsWith(`mcp__${n}__`));
+                const granted = opts.allowed.includes(hookInput.tool_name) || fromGrantedMcp(hookInput.tool_name);
                 // The sub-agent guard read the ORIGINAL input: a rewrite of a
                 // delegation could otherwise swap subagent_type for one this
                 // step never declared (or the SDK's general-purpose).
@@ -633,7 +644,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
         const via = options?.agentID ? (subagentNames.get(options.agentID) ?? "subagent") : undefined;
         // The toolset was already narrowed to what the agent declared, so
         // anything outside it is a denial with a reason the model can act on.
-        const fromGrantedServer = opts.mcpNames.some((n) => toolName.startsWith(`mcp__${n}__`));
+        const fromGrantedServer = fromGrantedMcp(toolName);
         // A call the hook counted and this refuses never ran: give it back.
         const refund = () => { if (counter.active) counter.refund(callKeysFor(toolName, input, opts.toolOwners)); };
         if (!opts.allowed.includes(toolName) && !fromGrantedServer) {

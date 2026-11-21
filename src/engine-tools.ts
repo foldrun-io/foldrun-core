@@ -55,6 +55,10 @@ export function killGroups(ctx: ToolContext): void {
 export interface ToolOutcome {
   text: string;
   isError?: boolean;
+  /** When the tool returned images (an MCP server's screenshot): its text and
+   *  images in their order, sent to the model so. `text` is still the whole
+   *  text, for the record and the hooks. */
+  parts?: ({ type: "text"; text: string } | { type: "image"; data: string; mediaType: string })[];
 }
 
 export interface EngineTool {
