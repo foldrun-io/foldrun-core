@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.8.0] — 2026-11-21
+
+### New in the public API
+
+- `UnfinishedReply` from `@foldrun/core`
+- `endOf` from `@foldrun/core/engine-loop`
+
+- fix(engine): only a reply the model ended itself is a finished step (FOL-211) ([e851022](https://github.com/foldrun-io/foldrun-core/commit/e851022))
+
 ## [24.7.2] — 2026-11-21
 
 - fix(starter): the starter's agents ask for size: small ([b74ede3](https://github.com/foldrun-io/foldrun-core/commit/b74ede3))
