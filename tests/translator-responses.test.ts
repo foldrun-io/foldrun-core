@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { toResponses, fromResponses, ResponsesStreamTranslator, startTranslator, translatorSpecFor, modelRejectsReasoning } from "../src/translator.ts";
+import { toResponses, fromResponses, ResponsesStreamTranslator, startTranslator, translatorSpecFor, modelRejectsReasoning, UnfinishedReply } from "../src/translator.ts";
 
 type Json = Record<string, unknown>;
 
@@ -389,4 +389,28 @@ test("a Responses stream cut off before its last word is an error; a completed o
   const done = [...ok.feed({ type: "response.created", response: { id: "r", model: "gpt-x" } }), ...ok.feed({ type: "response.completed", response: { usage: { input_tokens: 3, output_tokens: 2 } } }), ...ok.finishStream()].join("");
   assert.match(done, /message_stop/);
   assert.doesNotMatch(done, /event: error/);
+});
+
+test("an incomplete response is never a finish, whatever its reason; a failed one is an error (FOL-211)", () => {
+  // A reason this does not know, or none: an error naming it — not end_turn,
+  // and not max_tokens (which would tell a person to raise a limit no one named).
+  assert.throws(() => fromResponses({ status: "incomplete", output: [{ type: "message", content: [{ type: "output_text", text: "half" }] }], incomplete_details: { reason: "something_new" } }, "m"), (e: Error) => e instanceof UnfinishedReply && /reason: something_new/.test(e.message));
+  assert.throws(() => fromResponses({ status: "incomplete", output: [{ type: "message", content: [{ type: "output_text", text: "half" }] }] }, "m"), (e: Error) => e instanceof UnfinishedReply && /no reason given/.test(e.message));
+  // Nor does a half-made call in it dispatch as tool_use.
+  assert.throws(() => fromResponses({ status: "incomplete", output: [{ type: "function_call", call_id: "c", name: "f", arguments: "{}" }] }, "m"), UnfinishedReply);
+  // The reasons it knows keep their meaning.
+  assert.equal((fromResponses({ status: "incomplete", output: [], incomplete_details: { reason: "max_output_tokens" } }, "m") as Json).stop_reason, "max_tokens");
+  assert.equal((fromResponses({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }] }, "m") as Json).stop_reason, "end_turn");
+  // A failed one: the provider's words, as an error.
+  assert.throws(() => fromResponses({ status: "failed", error: { message: "boom" }, output: [] }, "m"), (e: Error) => e instanceof UnfinishedReply && /boom/.test(e.message));
+
+  const m = new ResponsesStreamTranslator("m");
+  const out: string[] = [];
+  out.push(...m.feed({ type: "response.output_item.added", output_index: 0, item: { type: "message" } }));
+  out.push(...m.feed({ type: "response.output_text.delta", output_index: 0, delta: "half" }));
+  out.push(...m.feed({ type: "response.incomplete", response: { status: "incomplete", usage: { input_tokens: 1, output_tokens: 2 } } }));
+  out.push(...m.finishStream());
+  const ev = events(out);
+  assert.equal(ev.some((e) => e.event === "message_delta"), false, "no normal stop");
+  assert.match(String((ev.find((e) => e.event === "error")!.data.error as Json).message), /incomplete \(no reason given\)/);
 });

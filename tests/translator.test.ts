@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { toChatCompletions, fromChatCompletion, StreamTranslator, startTranslator, anthropicUsage } from "../src/translator.ts";
+import { toChatCompletions, fromChatCompletion, StreamTranslator, startTranslator, anthropicUsage, UnfinishedReply } from "../src/translator.ts";
 
 type Json = Record<string, unknown>;
 
@@ -557,4 +557,49 @@ test("Gemini's thought signature on a tool call comes back on the next turn — 
 test("a provider that attaches nothing gets nothing extra back", () => {
   const out = toChatCompletions({ model: "m", max_tokens: 5, messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: {} }] }] }, { stream: false });
   assert.ok(!("extra_content" in ((out.messages as Json[])[0].tool_calls as Json[])[0]));
+});
+
+test("a Chat Completions refusal is a refusal with its words, not an empty finish (FOL-211)", () => {
+  const whole = fromChatCompletion({ choices: [{ message: { role: "assistant", content: null, refusal: "I can't help with that." }, finish_reason: "stop" }] }, "gpt-x") as Json;
+  assert.equal(whole.stop_reason, "refusal");
+  assert.deepEqual(whole.content, [{ type: "text", text: "I can't help with that." }]);
+
+  const m = new StreamTranslator("gpt-x");
+  const out: string[] = [];
+  out.push(...m.feed({ id: "c2", choices: [{ delta: { role: "assistant", refusal: "I can't " } }] }));
+  out.push(...m.feed({ choices: [{ delta: { refusal: "help with that." }, finish_reason: "stop" }] }));
+  out.push(...m.finishStream());
+  const ev = events(out);
+  const said = ev.filter((e) => e.event === "content_block_delta").map((e) => String((e.data.delta as Json).text)).join("");
+  assert.equal(said, "I can't help with that.");
+  assert.equal((ev.find((e) => e.event === "message_delta")!.data.delta as Json).stop_reason, "refusal");
+
+  // A plain finish is still a finish.
+  assert.equal((fromChatCompletion({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }, "gpt-x") as Json).stop_reason, "end_turn");
+});
+
+test("Chat Completions: only a finish the provider said is one; its error words are kept (FOL-211)", () => {
+  // Missing or unknown: an error naming it, never end_turn or a dispatched tool_use.
+  assert.throws(() => fromChatCompletion({ choices: [{ message: { content: "half" } }] }, "x"), (e: Error) => e instanceof UnfinishedReply && /no finish_reason/.test(e.message));
+  assert.throws(() => fromChatCompletion({ choices: [{ message: { content: "half" }, finish_reason: "server_abort" }] }, "x"), (e: Error) => e instanceof UnfinishedReply && /server_abort/.test(e.message));
+  assert.throws(() => fromChatCompletion({ choices: [{ message: { tool_calls: [{ id: "c", function: { name: "f", arguments: "{}" } }] } }] }, "x"), UnfinishedReply);
+  // Gemini ends a tool turn with "stop": still tool_use. Any case reads.
+  assert.equal((fromChatCompletion({ choices: [{ message: { tool_calls: [{ id: "c", function: { name: "f", arguments: "{}" } }] }, finish_reason: "stop" }] }, "x") as Json).stop_reason, "tool_use");
+  assert.equal((fromChatCompletion({ choices: [{ message: { content: "ok" }, finish_reason: "STOP" }] }, "x") as Json).stop_reason, "end_turn");
+
+  // Streams: an error chunk's words reach the client; no finish is an error.
+  const failed = new StreamTranslator("x");
+  const a: string[] = [];
+  a.push(...failed.feed({ choices: [{ delta: { content: "half" } }] }));
+  a.push(...failed.feed({ error: { message: "generation aborted" } }));
+  a.push(...failed.finishStream());
+  const ea = events(a);
+  assert.equal(ea.some((e) => e.event === "message_delta"), false);
+  assert.match(String((ea.find((e) => e.event === "error")!.data.error as Json).message), /generation aborted/);
+
+  const silent = new StreamTranslator("x");
+  const b: string[] = [];
+  b.push(...silent.feed({ choices: [{ delta: { content: "half" } }] }));
+  b.push(...silent.finishStream());
+  assert.match(String((events(b).find((e) => e.event === "error")!.data.error as Json).message), /no finish_reason/);
 });

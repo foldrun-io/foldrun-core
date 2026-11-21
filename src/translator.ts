@@ -631,21 +631,52 @@ type Stop = { reason: string; sequence: string | null };
  * request asked for; plain OpenAI says `stop` either way, which reads as
  * end_turn. pause_turn has no counterpart: server-side tools are dropped.
  */
-function chatStop(choice: Json, sawTool: boolean, stops: readonly string[]): Stop {
-  const finish = choice.finish_reason;
-  if (finish === "content_filter") return { reason: "refusal", sequence: null };
+function chatStop(choice: Json, sawTool: boolean, stops: readonly string[], sawRefusal = false): Stop | null {
+  const finish = typeof choice.finish_reason === "string" ? choice.finish_reason.toLowerCase() : choice.finish_reason;
+  // OpenAI's `message.refusal` / `delta.refusal` (FOL-211, Codex review):
+  // a declined reply came back as an empty end_turn until 22 Nov 2026.
+  if (sawRefusal || finish === "content_filter") return { reason: "refusal", sequence: null };
   if (finish === "length") return { reason: "max_tokens", sequence: null };
   if (finish === "model_length") return { reason: "model_context_window_exceeded", sequence: null };
-  if (sawTool || finish === "tool_calls" || finish === "function_call") return { reason: "tool_use", sequence: null };
+  if (finish === "tool_calls" || finish === "function_call") return { reason: "tool_use", sequence: null };
+  // Only a finish the provider SAID is one (FOL-211, Codex review, 22 Nov
+  // 2026): vLLM, SGLang and Gemini's OpenAI endpoint all send a reason on a
+  // normal finish. Until then a missing or unknown one read as end_turn, or
+  // as tool_use dispatching a call the provider never confirmed. `stop` with
+  // tool calls in it is Gemini's way of ending a tool turn, and stays one.
+  if (finish !== "stop") return null;
+  if (sawTool) return { reason: "tool_use", sequence: null };
   const matched = typeof choice.stop_reason === "string" ? choice.stop_reason : choice.matched_stop;
   if (typeof matched === "string" && stops.includes(matched)) return { reason: "stop_sequence", sequence: matched };
   return { reason: "end_turn", sequence: null };
 }
 
-/** Why a Response stopped: a refusal part or a content filter is a refusal. */
-function responsesStop(incomplete: unknown, sawTool: boolean, sawRefusal: boolean): string {
+/** A reply the provider did not finish in a way Anthropic's format can say:
+ *  the gateway answers it as an error carrying the provider's own reason,
+ *  never as a normal stop (FOL-211). */
+export class UnfinishedReply extends Error {}
+
+function unfinishedResponse(reason: unknown): string {
+  return `the provider ended the response incomplete (${typeof reason === "string" && reason ? `reason: ${reason.slice(0, 60)}` : "no reason given"})`;
+}
+
+function unfinishedChat(choice: Json): string {
+  const r = choice.finish_reason;
+  return typeof r === "string" && r ? `the provider ended the reply with a reason this gateway does not know (finish_reason: ${r.slice(0, 60)})` : "the provider ended the reply without saying it had finished (no finish_reason)";
+}
+
+/** Why a Response stopped: a refusal part or a content filter is a refusal.
+ *  An incomplete response is never a finish: with a reason this does not
+ *  know, or none, it is null — an error naming it. It was a finish
+ *  (`end_turn`, or `tool_use` dispatching a half-made call) until 22 Nov
+ *  2026 (FOL-211, Codex review). */
+function responsesStop(incomplete: unknown, sawTool: boolean, sawRefusal: boolean, wasIncomplete = false): string | null {
   if (sawRefusal || incomplete === "content_filter") return "refusal";
   if (incomplete === "max_output_tokens") return "max_tokens";
+  // Incomplete for a reason this does not know, or none: an error with that
+  // reason — not max_tokens, which would tell a person to raise a limit the
+  // provider never named (Codex review, 22 Nov 2026).
+  if (wasIncomplete || (typeof incomplete === "string" && incomplete)) return null;
   if (sawTool) return "tool_use";
   return "end_turn";
 }
@@ -670,6 +701,8 @@ export function fromChatCompletion(res: Json, requestedModel: string, stopSequen
   const content: Json[] = [];
   const text = typeof msg.content === "string" ? msg.content : textOf(msg.content);
   if (text) content.push({ type: "text", text });
+  const refusal = typeof msg.refusal === "string" && msg.refusal.trim() ? msg.refusal : null;
+  if (refusal) content.push({ type: "text", text: refusal });
   for (const tc of (Array.isArray(msg.tool_calls) ? msg.tool_calls : []) as Json[]) {
     const fn = (tc.function as Json | undefined) ?? {};
     const id = String(tc.id ?? `call_${crypto.randomBytes(6).toString("hex")}`);
@@ -682,7 +715,8 @@ export function fromChatCompletion(res: Json, requestedModel: string, stopSequen
     });
   }
   const usage = (res.usage as Json | undefined) ?? {};
-  const stop = chatStop(choice, content.some((c) => c.type === "tool_use"), stopList(stopSequences));
+  const stop = chatStop(choice, content.some((c) => c.type === "tool_use"), stopList(stopSequences), refusal !== null);
+  if (!stop) throw new UnfinishedReply(unfinishedChat(choice));
   return {
     id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
     type: "message",
@@ -745,6 +779,10 @@ export class StreamTranslator {
   private tools = new Map<number, { block: number; argsSeen: boolean; id: string }>();
   /** The last choice's stop fields: finish_reason and any matched stop. */
   private finish: Json = {};
+  /** The model declined (OpenAI's `delta.refusal`). */
+  private refused = false;
+  /** An `error` chunk the provider sent mid-stream: its words, said at the end. */
+  private failure: string | null = null;
   private usage: { input: number; cached: number; output: number } | null = null;
   private id = `msg_${crypto.randomBytes(8).toString("hex")}`;
   private readonly model: string;
@@ -795,12 +833,18 @@ export class StreamTranslator {
     if (u && (u.prompt_tokens !== undefined || u.completion_tokens !== undefined)) {
       this.usage = anthropicUsage(u, "chat");
     }
+    // An error chunk (`{"error": {...}}`, no choices): kept, so the end says
+    // the provider's own words, not "no finish_reason" (Codex, FOL-211).
+    const failed = chunk.error as Json | undefined;
+    if (failed && typeof failed === "object") this.failure = typeof failed.message === "string" && failed.message ? failed.message.slice(0, 300) : "the provider sent an error mid-stream";
     const choice = ((chunk.choices as Json[] | undefined) ?? [])[0];
     if (!choice) return out;
     if (choice.finish_reason) this.finish = { finish_reason: choice.finish_reason, stop_reason: choice.stop_reason, matched_stop: choice.matched_stop };
     const delta = (choice.delta as Json | undefined) ?? {};
 
-    const text = typeof delta.content === "string" ? delta.content : "";
+    // A refusal's words stream as text, so the reader sees why (FOL-211).
+    if (typeof delta.refusal === "string" && delta.refusal) this.refused = true;
+    const text = (typeof delta.content === "string" ? delta.content : "") + (typeof delta.refusal === "string" ? delta.refusal : "");
     if (text) {
       if (this.textIndex === null) {
         this.textIndex = this.nextIndex++;
@@ -878,7 +922,13 @@ export class StreamTranslator {
       }
       out.push(this.event("content_block_stop", { type: "content_block_stop", index: entry.block }));
     }
-    const stop = chatStop(this.finish, this.tools.size > 0, this.stops);
+    const stop = chatStop(this.finish, this.tools.size > 0, this.stops, this.refused);
+    // Not a finish the provider said: an Anthropic error event, which a
+    // client reads as a failed request, with the provider's own reason.
+    if (this.failure || !stop) {
+      out.push(this.event("error", { type: "error", error: { type: "api_error", message: this.failure ? `the provider sent an error: ${this.failure}` : unfinishedChat(this.finish) } }));
+      return out;
+    }
     out.push(
       this.event("message_delta", {
         type: "message_delta",
@@ -915,7 +965,14 @@ export function fromResponses(res: Json, requestedModel: string): Json {
   const refused = (Array.isArray(res.output) ? (res.output as Json[]) : []).some(
     (item) => item.type === "message" && Array.isArray(item.content) && (item.content as Json[]).some((c) => c.type === "refusal"),
   );
-  const stop = responsesStop(incomplete, content.some((c) => c.type === "tool_use"), refused);
+  // A failed response is the provider's error, never a stop (Codex, FOL-211):
+  // it read as end_turn here though the stream already said failed.
+  if (res.status === "failed") {
+    const err = (res.error as Json | undefined) ?? {};
+    throw new UnfinishedReply(typeof err.message === "string" && err.message ? `the provider reported the response failed: ${err.message.slice(0, 300)}` : "the provider reported the response failed");
+  }
+  const stop = responsesStop(incomplete, content.some((c) => c.type === "tool_use"), refused, res.status === "incomplete" || typeof incomplete === "string");
+  if (stop === null) throw new UnfinishedReply(unfinishedResponse(incomplete));
   return {
     id: String(res.id ?? `msg_${crypto.randomBytes(8).toString("hex")}`),
     type: "message",
@@ -942,6 +999,8 @@ export class ResponsesStreamTranslator {
   private blocks = new Map<number, { block: number; kind: "text" | "tool"; argsSeen: boolean }>();
   private usage: { input: number; cached: number; output: number } | null = null;
   private incomplete: string | null = null;
+  /** The stream ended with `response.incomplete` (or a response whose status says so). */
+  private wasIncomplete = false;
   private sawTool = false;
   private sawRefusal = false;
   /** The stream's last word: completed or incomplete (an answer), or the
@@ -1049,6 +1108,7 @@ export class ResponsesStreamTranslator {
       if (u) this.usage = anthropicUsage(u, "responses");
       const reason = (r.incomplete_details as Json | undefined)?.reason;
       if (typeof reason === "string") this.incomplete = reason;
+      if (type === "response.incomplete" || r.status === "incomplete") this.wasIncomplete = true;
       if (type === "response.failed") {
         // A failure is not an answer (Codex review, 10 Nov 2026): it was
         // ended as a normal stop, so the caller read a failed reply as done.
@@ -1082,7 +1142,11 @@ export class ResponsesStreamTranslator {
       out.push(this.event("error", { type: "error", error: { type: "api_error", message } }));
       return out;
     }
-    const reason = responsesStop(this.incomplete, this.sawTool, this.sawRefusal);
+    const reason = responsesStop(this.incomplete, this.sawTool, this.sawRefusal, this.wasIncomplete);
+    if (reason === null) {
+      out.push(this.event("error", { type: "error", error: { type: "api_error", message: unfinishedResponse(this.incomplete) } }));
+      return out;
+    }
     out.push(
       this.event("message_delta", {
         type: "message_delta",
@@ -1258,7 +1322,15 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
           return send(502, errorBody(502, `translator: ${label} answered with something that is not JSON`));
         }
         log.push(`POST ${label} → 200 (${Date.now() - started}ms, ${model})`);
-        return send(200, JSON.stringify(responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences, extras)));
+        let reply: Json;
+        try {
+          reply = responses ? fromResponses(parsed, model) : fromChatCompletion(parsed, model, body.stop_sequences, extras);
+        } catch (err) {
+          // A reply the provider did not finish is the provider's error, not a 200 (FOL-211).
+          if (err instanceof UnfinishedReply) return send(502, errorBody(502, `translator: ${label}: ${err.message}`));
+          throw err;
+        }
+        return send(200, JSON.stringify(reply));
       }
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

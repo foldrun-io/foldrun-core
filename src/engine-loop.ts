@@ -175,6 +175,31 @@ function requestHeaders(env: Record<string, string | undefined>): Record<string,
  *  prefix ends: the tools, the system prompt, and the newest message — so
  *  each turn reads everything before it from the cache and writes only
  *  what is new. The conversation itself is never mutated. */
+/** What a turn that asks for no tool comes to. Only a reply the model ended
+ *  itself (`end_turn`, `stop_sequence`) finishes the step. Until 22 Nov 2026
+ *  every such turn was "success" — a reply cut off at the output limit
+ *  included, so a half-written answer passed as a finished step (FOL-211).
+ *  The partial reply is still the result's text; `errors` says why it is not
+ *  a finish, the way the SDK's error results do. */
+export function endOf(stopReason: string | null, calls: number): { subtype: string; error?: string } {
+  switch (stopReason) {
+    case "end_turn":
+    case "stop_sequence":
+      return { subtype: "success" };
+    case "max_tokens":
+      return { subtype: "error_max_output", error: "the reply was cut off at the output limit (max_output_tokens: in the flow file raises it) — the step did not finish" };
+    case "refusal":
+      return { subtype: "error_refusal", error: "the model declined to answer (stop reason: refusal) — the step did not finish" };
+    case "model_context_window_exceeded":
+      return { subtype: "error_context_full", error: "the conversation filled the model's context window — the step did not finish" };
+    case "tool_use":
+      if (!calls) return { subtype: "error_empty_tool_turn", error: "the model said it would call a tool and sent none — the step did not finish" };
+      return { subtype: "success" };
+    default:
+      return { subtype: "error_unknown_stop", error: `the model stopped for a reason this engine does not know (${stopReason ?? "none given"}) — the step did not finish` };
+  }
+}
+
 export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[]): Json {
   const mark = { cache_control: { type: "ephemeral" } };
   const tools = o.tools.map((t, i) => ({
@@ -445,7 +470,10 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     // conversation back as it stands lets it carry on.
     if (turn.stopReason === "pause_turn" && !calls.length) continue;
     if (turn.stopReason !== "tool_use" || !calls.length) {
-      yield result("success", turn.stopReason);
+      const end = endOf(turn.stopReason, calls.length);
+      // A turn that did not finish carries ITS text, empty included — not an
+      // earlier turn's "I'll check" passed off as a refusal's words (Codex).
+      yield end.error ? { ...result(end.subtype, turn.stopReason), result: text, errors: [end.error] } : result(end.subtype, turn.stopReason);
       return;
     }
 

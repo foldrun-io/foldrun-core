@@ -258,6 +258,78 @@ test("max_turns ends the step as failed, saying so", async () => {
   assert.ok(r.events.some((e) => e.type === "error" && /stopped after 2 turns/.test(e.text)));
 });
 
+test("only a reply the model ended itself finishes the step (FOL-211)", async () => {
+  const finished = await runStep([{ content: [say("All done.")], stop: "end_turn" }]);
+  assert.equal(finished.out!.status, "completed");
+  assert.equal(finished.out!.stopReason, "end_turn");
+
+  // Cut off at the output limit: failed, saying why, the partial reply kept.
+  const cut = await runStep([{ content: [say("Here is the first half of the")], stop: "max_tokens" }]);
+  assert.equal(cut.out!.status, "failed");
+  assert.equal(cut.out!.stopReason, "max_tokens");
+  assert.equal(cut.events.filter((e) => e.type === "error").length, 1, "said once");
+  assert.ok(cut.events.some((e) => e.type === "error" && /cut off at the output limit/.test(e.text)));
+  assert.equal(cut.out!.result, "Here is the first half of the");
+
+  // A pause the provider made is carried on, then the finish counts.
+  const paused = await runStep([{ content: [say("part one")], stop: "pause_turn" }, { content: [say("and done")], stop: "end_turn" }]);
+  assert.equal(paused.out!.status, "completed");
+  assert.equal(paused.requests.length, 2);
+
+
+  const refused = await runStep([{ content: [say("I can't help with that.")], stop: "refusal" }]);
+  assert.equal(refused.out!.status, "failed");
+  assert.ok(refused.events.some((e) => e.type === "error" && /declined/.test(e.text)));
+
+  const strange = await runStep([{ content: [say("hm")], stop: "something_new" }]);
+  assert.equal(strange.out!.status, "failed");
+  assert.ok(strange.events.some((e) => e.type === "error" && /something_new/.test(e.text)));
+
+  // Said it would call a tool and sent none.
+  const empty = await runStep([{ content: [say("calling now")], stop: "tool_use" }]);
+  assert.equal(empty.out!.status, "failed");
+  assert.ok(empty.events.some((e) => e.type === "error" && /sent none/.test(e.text)));
+});
+
+test("endOf: each stop reason, and the result keeps the partial reply", async () => {
+  const { endOf } = await import("../src/engine-loop.ts");
+  assert.equal(endOf("end_turn", 0).subtype, "success");
+  assert.equal(endOf("stop_sequence", 0).subtype, "success");
+  assert.equal(endOf("max_tokens", 0).subtype, "error_max_output");
+  assert.equal(endOf("max_tokens", 2).subtype, "error_max_output");
+  assert.equal(endOf("refusal", 0).subtype, "error_refusal");
+  assert.equal(endOf("model_context_window_exceeded", 0).subtype, "error_context_full");
+  assert.equal(endOf("tool_use", 0).subtype, "error_empty_tool_turn");
+  assert.equal(endOf(null, 0).subtype, "error_unknown_stop");
+  assert.equal(endOf("end_turn", 0).error, undefined);
+
+  const server = await fakeModel([{ content: [say("half a sent")], stop: "max_tokens" }]);
+  try {
+    const out: any[] = [];
+    for await (const m of foldrunQuery({ prompt: "go", options: { cwd: os.tmpdir(), model: "test-model", tools: [], env: { ANTHROPIC_BASE_URL: server.url, ANTHROPIC_API_KEY: "k" } } })) out.push(m);
+    const result = out.find((m) => m.type === "result");
+    assert.equal(result.subtype, "error_max_output");
+    assert.equal(result.is_error, true);
+    assert.equal(result.result, "half a sent");
+    assert.match(result.errors[0], /output limit/);
+  } finally {
+    await server.close();
+  }
+
+  // A refusal after a tool turn carries the refusal's (empty) words in the
+  // loop's result — what the CLI reads — not the earlier turn's "I'll check".
+  const late = await fakeModel([{ content: [say("I'll check"), use("g", "Glob", { pattern: "*" })] }, { content: [], stop: "refusal" }]);
+  try {
+    const out: any[] = [];
+    for await (const m of foldrunQuery({ prompt: "go", options: { cwd: os.tmpdir(), model: "test-model", tools: ["Glob"], env: { ANTHROPIC_BASE_URL: late.url, ANTHROPIC_API_KEY: "k" } } })) out.push(m);
+    const result = out.find((m) => m.type === "result");
+    assert.equal(result.subtype, "error_refusal");
+    assert.equal(result.result, "");
+  } finally {
+    await late.close();
+  }
+});
+
 test("an overloaded endpoint is retried; a refused request is not", async () => {
   const retried = await runStep([{ status: 529, content: [] }, { content: [say("there now")] }]);
   assert.equal(retried.out!.status, "completed");

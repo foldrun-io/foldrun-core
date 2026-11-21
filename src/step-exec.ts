@@ -941,6 +941,13 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       }
       if (message.subtype === "error_max_turns") {
         emit("error", `stopped after ${opts.maxTurns ?? "its"} turns (max_turns: in the flow file) — the step did not finish`);
+      } else if (message.subtype !== "success" && opts.engine === "foldrun") {
+        // Why it did not finish, when foldrun's loop said: a reply cut off at
+        // the output limit, a refusal, a full context (engine-loop.ts endOf).
+        // The SDK's own error results are left as they were reported before.
+        for (const why of ("errors" in message && Array.isArray(message.errors) ? message.errors : [])) {
+          if (typeof why === "string" && why.trim()) emit("error", why.trim().slice(0, 500));
+        }
       }
       costUsd = "total_cost_usd" in message ? (message.total_cost_usd ?? null) : null;
       stopReason = "stop_reason" in message && typeof message.stop_reason === "string" ? message.stop_reason : null;
