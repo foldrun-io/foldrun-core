@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.7.2] — 2026-11-21
+
+- fix(starter): the starter's agents ask for size: small ([b74ede3](https://github.com/foldrun-io/foldrun-core/commit/b74ede3))
+
 ## [24.7.1] — 2026-11-20
 
 - fix(failure): an account with no model key is its own setting, not a platform error ([9b227d6](https://github.com/foldrun-io/foldrun-core/commit/9b227d6))
