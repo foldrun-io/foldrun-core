@@ -36,129 +36,16 @@
 
 import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
-import { ENGINE_TOOLS, killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
+import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
+import { DEFAULT_MAX_TOKENS, readOptions, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
 export type Engine = "sdk" | "foldrun";
 
 const DEFAULT_BASE = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
-const DEFAULT_MAX_TOKENS = 16_000;
 const MODEL_TRIES = 4;
 const RETRY_AFTER_CAP_MS = 30_000;
-
-/** The tier names an agent may write, where the environment names no model
- *  for them. The SDK's binary resolves these itself; here it is said. */
-const TIER_DEFAULTS: Record<string, string> = {
-  haiku: "claude-haiku-5-5",
-  sonnet: "claude-sonnet-5-5",
-  opus: "claude-opus-5-5",
-};
-
-type Json = Record<string, unknown>;
-type Block = Json & { type: string };
-type HookFn = (input: Json, toolUseId?: string, extra?: { signal: AbortSignal }) => Promise<Json | undefined> | Json | undefined;
-type CanUseTool = (name: string, input: Json, extra: { signal: AbortSignal; toolUseID: string }) =>
-  Promise<{ behavior: "allow"; updatedInput?: Json } | { behavior: "deny"; message: string }>;
-
-interface Usage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
-}
-
-interface LoopOptions {
-  cwd: string;
-  env: Record<string, string | undefined>;
-  /** What the tools (Bash) get; `env` when not given. foldrun code passes
-   *  the person's own environment here, so the model key stays with the loop. */
-  shellEnv: Record<string, string | undefined>;
-  model: string;
-  systemPrompt: string;
-  tools: EngineTool[];
-  maxTurns: number | null;
-  partial: boolean;
-  pre: HookFn[];
-  post: HookFn[];
-  canUseTool: CanUseTool | null;
-  outer: AbortSignal | null;
-  /** The conversation so far, before this prompt: earlier user turns, the
-   *  model's replies and tool results, as the loop yielded them. */
-  history: { role: string; content: Block[] }[];
-}
-
-function hookFns(hooks: unknown, event: string): HookFn[] {
-  const groups = (hooks as Record<string, { hooks?: HookFn[] }[] | undefined> | undefined)?.[event];
-  return (groups ?? []).flatMap((g) => g.hooks ?? []);
-}
-
-/** The SDK's options, as this engine reads them. What it cannot honour it
- *  refuses here, before a model call is paid for. */
-function readOptions(options: Json): LoopOptions {
-  const env = (options.env as Record<string, string | undefined> | undefined) ?? process.env;
-  const names = Array.isArray(options.tools) ? (options.tools as unknown[]).map(String) : [];
-  const unsupported = names.filter((n) => !ENGINE_TOOLS[n]);
-  if (unsupported.length) {
-    throw new Error(`the foldrun engine has no tool named ${unsupported.join(", ")} yet — it has ${Object.keys(ENGINE_TOOLS).join(", ")}. Run this agent on the default engine.`);
-  }
-  const servers = Object.keys((options.mcpServers as Json | undefined) ?? {});
-  if (servers.length) {
-    throw new Error(`the foldrun engine does not connect MCP servers yet (${servers.join(", ")}) — run this agent on the default engine.`);
-  }
-  if (options.agents && Object.keys(options.agents as Json).length) {
-    throw new Error("the foldrun engine does not run sub-agents yet — run this agent on the default engine.");
-  }
-  const sandbox = options.sandbox as { enabled?: boolean } | undefined;
-  // Never read from `env`: that is where a tenant's secrets live.
-  if (names.includes("Bash") && sandbox?.enabled !== false && options.engineHostShell !== true) {
-    throw new Error("the foldrun engine has no OS sandbox for the shell on this host — run the step in a container.");
-  }
-  const model = String(options.model ?? "");
-  if (!model) throw new Error("the foldrun engine needs a model");
-  // Tools the host brings, as EngineTool objects: they sit beside the
-  // built-in ones and go through canUseTool and the hooks like them.
-  // foldrun code's cloud_agents is one. A name may not shadow a built-in.
-  const extra: EngineTool[] = [];
-  for (const t of Array.isArray(options.extraTools) ? (options.extraTools as unknown[]) : []) {
-    const tool = t as Partial<EngineTool> | null;
-    if (!tool || typeof tool.name !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(tool.name) || typeof tool.run !== "function" || typeof tool.input_schema !== "object") {
-      throw new Error("extraTools: each needs a name (letters, digits, _ and -), an input_schema and a run function");
-    }
-    if (ENGINE_TOOLS[tool.name] || extra.some((x) => x.name === tool.name)) throw new Error(`extraTools: ${tool.name} is already a tool`);
-    extra.push({ name: tool.name, description: String(tool.description ?? ""), input_schema: tool.input_schema as Record<string, unknown>, readOnly: tool.readOnly === true, run: tool.run });
-  }
-  return {
-    cwd: String(options.cwd ?? process.cwd()),
-    env,
-    shellEnv: options.shellEnv && typeof options.shellEnv === "object" ? (options.shellEnv as Record<string, string | undefined>) : env,
-    model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
-    systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
-    tools: [...names.map((n) => ENGINE_TOOLS[n]), ...extra],
-    maxTurns: typeof options.maxTurns === "number" && options.maxTurns > 0 ? options.maxTurns : null,
-    partial: options.includePartialMessages === true,
-    pre: hookFns(options.hooks, "PreToolUse"),
-    post: hookFns(options.hooks, "PostToolUse"),
-    canUseTool: typeof options.canUseTool === "function" ? (options.canUseTool as CanUseTool) : null,
-    outer: (options.abortController as AbortController | undefined)?.signal ?? null,
-    history: readHistory(options.history),
-  };
-}
-
-/** An earlier conversation, checked: user and assistant turns that
- *  alternate, starting with the user's, each a list of content blocks. A
- *  turn that is not one is refused, not sent half-right to the model. */
-function readHistory(raw: unknown): { role: string; content: Block[] }[] {
-  if (raw == null) return [];
-  if (!Array.isArray(raw)) throw new Error("history must be a list of turns");
-  return raw.map((t, i) => {
-    const role = (t as Json)?.role;
-    const content = (t as Json)?.content;
-    if (role !== (i % 2 === 0 ? "user" : "assistant")) throw new Error(`history turn ${i + 1} must be the ${i % 2 === 0 ? "user's" : "model's"}`);
-    if (!Array.isArray(content) || !content.every((b) => b && typeof (b as Json).type === "string")) throw new Error(`history turn ${i + 1} has no content blocks`);
-    return { role: String(role), content: content as Block[] };
-  });
-}
 
 function requestHeaders(env: Record<string, string | undefined>): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": API_VERSION };
@@ -265,18 +152,29 @@ async function openStream(o: LoopOptions, body: Json, signal: AbortSignal): Prom
 async function* sse(res: Response): AsyncGenerator<Json> {
   const decoder = new TextDecoder();
   let buffer = "";
+  // SSE ends a line with CRLF, LF or a bare CR (WHATWG). Every one becomes
+  // LF here; a CR at the end of a chunk waits for the next, in case it is
+  // the first half of a CRLF split across them.
+  let held = "";
   for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    buffer += decoder.decode(chunk, { stream: true });
-    for (let at = buffer.search(/\r?\n\r?\n/); at >= 0; at = buffer.search(/\r?\n\r?\n/)) {
+    let text = held + decoder.decode(chunk, { stream: true });
+    held = text.endsWith("\r") ? "\r" : "";
+    if (held) text = text.slice(0, -1);
+    buffer += text.replace(/\r\n?/g, "\n");
+    for (let at = buffer.indexOf("\n\n"); at >= 0; at = buffer.indexOf("\n\n")) {
       const frame = buffer.slice(0, at);
-      buffer = buffer.slice(at).replace(/^\r?\n\r?\n/, "");
-      const data = frame.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
+      buffer = buffer.slice(at + 2);
+      const data = frame.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
       if (!data || data === "[DONE]") continue;
+      let parsed: Json;
       try {
-        yield JSON.parse(data) as Json;
+        parsed = JSON.parse(data) as Json;
       } catch {
-        // a frame that is not JSON carries nothing this loop reads
+        // A frame that is not JSON may be a lost piece of the reply: a reply
+        // missing words would otherwise pass as whole (Codex, 22 Nov 2026).
+        throw new Error("the model stream sent a frame that is not JSON — the reply cannot be trusted whole");
       }
+      yield parsed;
     }
   }
 }
@@ -289,18 +187,6 @@ interface Turn {
   usage: Usage;
   /** tool_use ids whose arguments did not arrive as valid JSON. */
   malformed: Set<string>;
-}
-
-const emptyUsage = (): Usage => ({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
-
-function addUsage(into: Usage, u: Partial<Record<keyof Usage, unknown>> | undefined): void {
-  if (!u) return;
-  // The closing delta repeats the counts it knows; one that leaves the input
-  // side at zero is not saying the input was free.
-  for (const k of Object.keys(into) as (keyof Usage)[]) {
-    const v = u[k];
-    if (typeof v === "number" && (v > 0 || k === "output_tokens")) into[k] = v;
-  }
 }
 
 /** One model call: yields the raw stream events, returns the whole turn. */
@@ -360,45 +246,6 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
   if (!stopped || open.size || !turn.stopReason) throw new Error("the model stream ended part-way through a reply — the connection to the model was cut");
   turn.content = turn.content.filter(Boolean);
   return turn;
-}
-
-interface Decision {
-  input: Json;
-  refusal: string | null;
-}
-
-/** May this call run, and with what input? The order the SDK kept, which
- *  step-exec's checks are written against: every PreToolUse hook first — a
- *  deny ends it, an allow carries the input the hook settled on and skips
- *  the question below — then canUseTool, where confinement lives. */
-async function decide(o: LoopOptions, name: string, id: string, input: Json, sessionId: string, signal: AbortSignal): Promise<Decision> {
-  let current = input;
-  let allowed = false;
-  for (const hook of o.pre) {
-    const out = await hook({ hook_event_name: "PreToolUse", session_id: sessionId, cwd: o.cwd, tool_name: name, tool_input: current, tool_use_id: id }, id, { signal });
-    const d = (out as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; updatedInput?: Json } } | undefined)?.hookSpecificOutput;
-    if (!d) continue;
-    if (d.permissionDecision === "deny") return { input: current, refusal: d.permissionDecisionReason || `${name} was refused` };
-    if (d.updatedInput) current = d.updatedInput;
-    if (d.permissionDecision === "allow") allowed = true;
-  }
-  if (!allowed && o.canUseTool) {
-    const r = await o.canUseTool(name, current, { signal, toolUseID: id });
-    if (r.behavior === "deny") return { input: current, refusal: r.message || `${name} was refused` };
-    if (r.updatedInput) current = r.updatedInput;
-  }
-  return { input: current, refusal: null };
-}
-
-/** After a call: tell the PostToolUse hooks, and collect what they add. */
-async function after(o: LoopOptions, name: string, id: string, input: Json, outcome: ToolOutcome, sessionId: string, signal: AbortSignal): Promise<string[]> {
-  const added: string[] = [];
-  for (const hook of o.post) {
-    const out = await hook({ hook_event_name: "PostToolUse", session_id: sessionId, cwd: o.cwd, tool_name: name, tool_input: input, tool_response: outcome.text, tool_use_id: id }, id, { signal });
-    const context = (out as { hookSpecificOutput?: { additionalContext?: string } } | undefined)?.hookSpecificOutput?.additionalContext;
-    if (context) added.push(context);
-  }
-  return added;
 }
 
 async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interrupted: () => boolean): AsyncGenerator<Json> {

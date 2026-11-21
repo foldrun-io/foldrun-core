@@ -1,6 +1,8 @@
 // foldrun's own agent loop (src/engine-loop.ts), driven the way production
-// drives it: through executeStep, with `engine: "foldrun"`, against a
-// model endpoint that plays back scripted turns. So what is tested is the
+// drives it: through executeStep, with `engine: "foldrun"`, against a model
+// endpoint that plays back scripted turns. The behaviour tests are written
+// per loop (`both`, ENGINES): a second loop put behind executeStep — Pi was
+// tried and set aside on 22 Nov 2026 (FOL-213) — must pass every one. So what is tested is the
 // loop under step-exec's real hooks, confinement, limits and clocks — not a
 // stand-in for them.
 
@@ -13,6 +15,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { executeStep, type ExecOptions } from "../src/step-exec.ts";
 import { buildRequest, foldrunQuery } from "../src/engine-loop.ts";
+import type { QueryFn } from "../src/step-exec.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
 
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown; rawInput?: string };
@@ -22,6 +25,12 @@ interface Scripted {
   cut?: boolean;
   stop?: string;
   status?: number;
+  /** Leave the blocks open: the closing events come, the block stops do not. */
+  unclosed?: boolean;
+  /** End after message_delta, with no message_stop. */
+  noStop?: boolean;
+  /** Counts the closing message_delta carries, over output_tokens. */
+  deltaUsage?: Record<string, number>;
   usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; output_tokens?: number };
 }
 
@@ -59,12 +68,12 @@ async function fakeModel(turns: Scripted[]) {
           send({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: json.slice(0, half) } });
           send({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: json.slice(half) } });
         }
-        send({ type: "content_block_stop", index });
+        if (!turn.unclosed) send({ type: "content_block_stop", index });
       });
       if (turn.cut) return res.end();
       const stop = turn.stop ?? (turn.content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn");
-      send({ type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: u.output_tokens ?? 5 } });
-      send({ type: "message_stop" });
+      send({ type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: u.output_tokens ?? 5, ...(turn.deltaUsage ?? {}) } });
+      if (!turn.noStop) send({ type: "message_stop" });
       res.end();
     });
   });
@@ -118,12 +127,22 @@ async function runStep(turns: Scripted[], over: Partial<ExecOptions> & { files?:
 const use = (id: string, name: string, input: unknown): Block => ({ type: "tool_use", id, name, input });
 const say = (text: string): Block => ({ type: "text", text });
 
+const ENGINES: Record<"foldrun", QueryFn> = { foldrun: foldrunQuery };
+type EngineName = keyof typeof ENGINES;
+interface On { engine: EngineName; step: typeof runStep; loop: QueryFn }
+/** One behaviour, tested on each loop. */
+function both(name: string, fn: (on: On) => unknown) {
+  for (const engine of Object.keys(ENGINES) as EngineName[]) {
+    test(`${name} [${engine}]`, () => fn({ engine, step: (turns, over = {}) => runStep(turns, { engine, ...over }), loop: ENGINES[engine] }));
+  }
+}
+
 test("no environment variable chooses the engine or drops the shell's sandbox — a secret's name is the tenant's to pick", () => {
   // A step's environment carries its secrets under names the tenant chose,
   // so a switch read from it would be the tenant's to throw. The choice is
   // ExecOptions.engine, and nothing in the engine reads a name for it.
   const src = path.join(import.meta.dirname, "..", "src");
-  for (const file of ["engine-loop.ts", "engine-tools.ts", "step-exec.ts"]) {
+  for (const file of ["engine-loop.ts", "engine-common.ts", "engine-tools.ts", "step-exec.ts"]) {
     const code = fs.readFileSync(path.join(src, file), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
     assert.equal(/FOLDRUN_ENGINE/.test(code), false, `${file} reads no FOLDRUN_ENGINE* name`);
   }
@@ -135,8 +154,8 @@ test("no environment variable chooses the engine or drops the shell's sandbox �
   );
 });
 
-test("a coding step: read, edit, answer — the file changes and the record says what happened", async () => {
-  const r = await runStep([
+both("a coding step: read, edit, answer — the file changes and the record says what happened", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [say("I'll read it first."), use("t1", "Read", { file_path: "math.js" })] },
     { content: [use("t2", "Edit", { file_path: "math.js", old_string: "a - b", new_string: "a + b" })], usage: { input_tokens: 4, cache_read_input_tokens: 30, output_tokens: 7 } },
     { content: [say("Fixed: add() now adds.")] },
@@ -187,11 +206,11 @@ test("cache marks sit on the tools, the system prompt and the newest message —
   assert.equal(JSON.stringify(messages).includes("cache_control"), false, "the conversation itself is not marked");
 });
 
-test("confinement is step-exec's, unchanged: a path outside the workspace is refused and never read", async () => {
+both("confinement is step-exec's, unchanged: a path outside the workspace is refused and never read", async ({ engine, step, loop }) => {
   const secret = path.join(os.tmpdir(), `foldrun-engine-secret-${process.pid}.txt`);
   fs.writeFileSync(secret, "TOP SECRET");
   try {
-    const r = await runStep([
+    const r = await step([
       { content: [use("t1", "Read", { file_path: secret })] },
       { content: [say("I could not read it.")] },
     ]);
@@ -205,8 +224,8 @@ test("confinement is step-exec's, unchanged: a path outside the workspace is ref
   }
 });
 
-test("workspace/ paths are expanded by the hook's rewrite, and the tool runs on the rewritten input", async () => {
-  const r = await runStep([
+both("workspace/ paths are expanded by the hook's rewrite, and the tool runs on the rewritten input", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("t1", "Write", { file_path: "workspace/storage/report.txt", content: "done" })] },
     { content: [say("Written.")] },
   ]);
@@ -214,8 +233,8 @@ test("workspace/ paths are expanded by the hook's rewrite, and the tool runs on 
   assert.equal(fs.readFileSync(path.join(r.root, "storage", "report.txt"), "utf8"), "done");
 });
 
-test("limits: a call past the limit never runs, and the model is told", async () => {
-  const r = await runStep([
+both("limits: a call past the limit never runs, and the model is told", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("t1", "Write", { file_path: "a.txt", content: "1" })] },
     { content: [use("t2", "Write", { file_path: "b.txt", content: "2" })] },
     { content: [say("One written.")] },
@@ -228,8 +247,8 @@ test("limits: a call past the limit never runs, and the model is told", async ()
   assert.match(refused.content, /^limit reached: calls 1 of 1/);
 });
 
-test("a tool the agent was not given, and arguments that are not JSON, come back as errors the model can act on", async () => {
-  const r = await runStep([
+both("a tool the agent was not given, and arguments that are not JSON, come back as errors the model can act on", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("t1", "Bash", { command: "echo hi" }), { type: "tool_use", id: "t2", name: "Read", input: {}, rawInput: '{"file_path": "a' }] },
     { content: [say("ok")] },
   ]);
@@ -240,8 +259,8 @@ test("a tool the agent was not given, and arguments that are not JSON, come back
   assert.equal(bash.is_error && read.is_error, true);
 });
 
-test("several reads in one turn all answer, in the order asked", async () => {
-  const r = await runStep([
+both("several reads in one turn all answer, in the order asked", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("a", "Read", { file_path: "1.txt" }), use("b", "Read", { file_path: "2.txt" }), use("c", "Glob", { pattern: "*.txt" })] },
     { content: [say("read both")] },
   ], { files: { "1.txt": "one", "2.txt": "two" } });
@@ -251,20 +270,20 @@ test("several reads in one turn all answer, in the order asked", async () => {
   assert.equal(results[1].content, "1\ttwo");
 });
 
-test("max_turns ends the step as failed, saying so", async () => {
-  const r = await runStep([{ content: [use("t", "Glob", { pattern: "*" })] }], { maxTurns: 2 });
+both("max_turns ends the step as failed, saying so", async ({ engine, step, loop }) => {
+  const r = await step([{ content: [use("t", "Glob", { pattern: "*" })] }], { maxTurns: 2 });
   assert.equal(r.out!.status, "failed");
   assert.equal(r.requests.length, 2);
   assert.ok(r.events.some((e) => e.type === "error" && /stopped after 2 turns/.test(e.text)));
 });
 
-test("only a reply the model ended itself finishes the step (FOL-211)", async () => {
-  const finished = await runStep([{ content: [say("All done.")], stop: "end_turn" }]);
+both("only a reply the model ended itself finishes the step (FOL-211)", async ({ engine, step, loop }) => {
+  const finished = await step([{ content: [say("All done.")], stop: "end_turn" }]);
   assert.equal(finished.out!.status, "completed");
   assert.equal(finished.out!.stopReason, "end_turn");
 
   // Cut off at the output limit: failed, saying why, the partial reply kept.
-  const cut = await runStep([{ content: [say("Here is the first half of the")], stop: "max_tokens" }]);
+  const cut = await step([{ content: [say("Here is the first half of the")], stop: "max_tokens" }]);
   assert.equal(cut.out!.status, "failed");
   assert.equal(cut.out!.stopReason, "max_tokens");
   assert.equal(cut.events.filter((e) => e.type === "error").length, 1, "said once");
@@ -272,21 +291,21 @@ test("only a reply the model ended itself finishes the step (FOL-211)", async ()
   assert.equal(cut.out!.result, "Here is the first half of the");
 
   // A pause the provider made is carried on, then the finish counts.
-  const paused = await runStep([{ content: [say("part one")], stop: "pause_turn" }, { content: [say("and done")], stop: "end_turn" }]);
+  const paused = await step([{ content: [say("part one")], stop: "pause_turn" }, { content: [say("and done")], stop: "end_turn" }]);
   assert.equal(paused.out!.status, "completed");
   assert.equal(paused.requests.length, 2);
 
 
-  const refused = await runStep([{ content: [say("I can't help with that.")], stop: "refusal" }]);
+  const refused = await step([{ content: [say("I can't help with that.")], stop: "refusal" }]);
   assert.equal(refused.out!.status, "failed");
   assert.ok(refused.events.some((e) => e.type === "error" && /declined/.test(e.text)));
 
-  const strange = await runStep([{ content: [say("hm")], stop: "something_new" }]);
+  const strange = await step([{ content: [say("hm")], stop: "something_new" }]);
   assert.equal(strange.out!.status, "failed");
   assert.ok(strange.events.some((e) => e.type === "error" && /something_new/.test(e.text)));
 
   // Said it would call a tool and sent none.
-  const empty = await runStep([{ content: [say("calling now")], stop: "tool_use" }]);
+  const empty = await step([{ content: [say("calling now")], stop: "tool_use" }]);
   assert.equal(empty.out!.status, "failed");
   assert.ok(empty.events.some((e) => e.type === "error" && /sent none/.test(e.text)));
 });
@@ -330,32 +349,32 @@ test("endOf: each stop reason, and the result keeps the partial reply", async ()
   }
 });
 
-test("an overloaded endpoint is retried; a refused request is not", async () => {
-  const retried = await runStep([{ status: 529, content: [] }, { content: [say("there now")] }]);
+both("an overloaded endpoint is retried; a refused request is not", async ({ engine, step, loop }) => {
+  const retried = await step([{ status: 529, content: [] }, { content: [say("there now")] }]);
   assert.equal(retried.out!.status, "completed");
   assert.equal(retried.requests.length, 2);
-  const refused = await runStep([{ status: 400, content: [] }]);
+  const refused = await step([{ status: 400, content: [] }]);
   assert.match(refused.error!.message, /the model endpoint answered 400/);
   assert.equal(refused.requests.length, 1);
 });
 
-test("the shell: refused on a host that asked for an OS sandbox, run where the caller is the boundary", async () => {
+both("the shell: refused on a host that asked for an OS sandbox, run where the caller is the boundary", async ({ engine, step, loop }) => {
   const turns: Scripted[] = [
     { content: [use("t1", "Bash", { command: "echo built > out.txt && cat out.txt" })] },
     { content: [say("Built.")] },
   ];
-  const host = await runStep(turns, { allowed: ["Bash"] });
+  const host = await step(turns, { allowed: ["Bash"] });
   assert.match(host.error!.message, /no OS sandbox for the shell on this host/);
   assert.equal(host.requests.length, 0, "refused before a model call was paid for");
 
-  const contained = await runStep(turns, { allowed: ["Bash"], sandboxBash: false });
+  const contained = await step(turns, { allowed: ["Bash"], sandboxBash: false });
   assert.equal(contained.out!.status, "completed");
   assert.equal(contained.read("out.txt"), "built\n");
   assert.equal(contained.requests[1].body.messages[2].content[0].content, "built");
 });
 
-test("the shell is still confined by step-exec: a command reaching outside the workspace is refused", async () => {
-  const r = await runStep([
+both("the shell is still confined by step-exec: a command reaching outside the workspace is refused", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("t1", "Bash", { command: "cat ../../../secrets.json" })] },
     { content: [say("refused")] },
   ], { allowed: ["Bash"], sandboxBash: false });
@@ -364,27 +383,27 @@ test("the shell is still confined by step-exec: a command reaching outside the w
   assert.match(result.content, /^Bash was denied/);
 });
 
-test("a timeout ends a running command and the step, with the cost of the turns it took", async () => {
+both("a timeout ends a running command and the step, with the cost of the turns it took", async ({ engine, step, loop }) => {
   const started = Date.now();
-  const r = await runStep([{ content: [use("t1", "Bash", { command: "sleep 60" })] }], { allowed: ["Bash"], sandboxBash: false, timeoutSec: 1 });
+  const r = await step([{ content: [use("t1", "Bash", { command: "sleep 60" })] }], { allowed: ["Bash"], sandboxBash: false, timeoutSec: 1 });
   assert.equal(r.out!.status, "failed");
   assert.ok(Date.now() - started < 10_000, "the step did not wait for the command");
   assert.ok(r.events.some((e) => e.type === "error" && /^timed out after 1s/.test(e.text)));
   assert.equal(r.out!.usage?.outputTokens, 5, "the turn it took is still counted");
 });
 
-test("what this engine cannot run yet is refused by name, not run without", () => {
+both("what this engine cannot run yet is refused by name, not run without", ({ engine, step, loop }) => {
   const base = { cwd: "/tmp", model: "m", env: {}, tools: [] as string[] };
-  assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, mcpServers: { crm: {} } } }), /does not connect MCP servers yet \(crm\)/);
-  assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, agents: { helper: {} } } }), /does not run sub-agents yet/);
-  assert.throws(() => foldrunQuery({ prompt: "p", options: { ...base, tools: ["Read", "TodoWrite"] } }), /no tool named TodoWrite yet/);
+  assert.throws(() => loop({ prompt: "p", options: { ...base, mcpServers: { crm: {} } } }), /does not connect MCP servers yet \(crm\)/);
+  assert.throws(() => loop({ prompt: "p", options: { ...base, agents: { helper: {} } } }), /does not run sub-agents yet/);
+  assert.throws(() => loop({ prompt: "p", options: { ...base, tools: ["Read", "TodoWrite"] } }), /no tool named TodoWrite yet/);
 });
 
-test("a call is checked just before it runs: a link made by an earlier command in the same turn does not open a way out", async () => {
+both("a call is checked just before it runs: a link made by an earlier command in the same turn does not open a way out", async ({ engine, step, loop }) => {
   // knowledge/ may not be written by an agent. Checked ahead of the turn,
   // the Write below named a path that did not exist yet; checked in its
   // turn, it names a link into knowledge/ and is refused.
-  const r = await runStep([
+  const r = await step([
     { content: [
       use("t1", "Bash", { command: "ln -s ../../knowledge outputs/link" }),
       use("t2", "Write", { file_path: "outputs/link/planted.md", content: "planted" }),
@@ -397,14 +416,14 @@ test("a call is checked just before it runs: a link made by an earlier command i
   assert.equal(write.is_error, true, JSON.stringify(write));
 });
 
-test("a stream cut part-way is a failure, never the model's answer", async () => {
-  const r = await runStep([{ content: [say("The answer is forty-")], cut: true }]);
+both("a stream cut part-way is a failure, never the model's answer", async ({ engine, step, loop }) => {
+  const r = await step([{ content: [say("The answer is forty-")], cut: true }]);
   assert.equal(r.out, null);
   assert.match(r.error!.message, /ended part-way through a reply/);
 });
 
-test("on a person's own machine the caller may say the shell runs unsandboxed", async () => {
-  const r = await runStep([
+both("on a person's own machine the caller may say the shell runs unsandboxed", async ({ engine, step, loop }) => {
+  const r = await step([
     { content: [use("t1", "Bash", { command: "echo local" })] },
     { content: [say("ok")] },
   ], { allowed: ["Bash"], engineHostShell: true });
@@ -412,15 +431,14 @@ test("on a person's own machine the caller may say the shell runs unsandboxed", 
   assert.equal(r.requests[1].body.messages[2].content[0].content, "local");
 });
 
-test("history: an earlier conversation goes before the prompt, as given; a broken one is refused before a model call", async () => {
-  const { foldrunQuery } = await import("../src/engine-loop.ts");
+both("history: an earlier conversation goes before the prompt, as given; a broken one is refused before a model call", async ({ engine, step, loop }) => {
   const model = await fakeModel([{ content: [say("Still 5.")] }]);
   try {
     const history = [
       { role: "user", content: [{ type: "text", text: "what is 2+3?" }] },
       { role: "assistant", content: [{ type: "text", text: "5." }] },
     ];
-    const q = foldrunQuery({ prompt: "and now?", options: { cwd: os.tmpdir(), model: "test-model", tools: [], history, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } });
+    const q = loop({ prompt: "and now?", options: { cwd: os.tmpdir(), model: "test-model", tools: [], history, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } });
     let result: any = null;
     for await (const m of q) if ((m as any).type === "result") result = m;
     assert.equal(result?.result, "Still 5.");
@@ -432,7 +450,7 @@ test("history: an earlier conversation goes before the prompt, as given; a broke
     for (const bad of [[{ role: "assistant", content: [say("x")] }], [{ role: "user", content: "text" }], [{ role: "user", content: [say("x")] }], "nope"]) {
       const before = model.requests.length;
       await assert.rejects(async () => {
-        for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], history: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
+        for await (const _ of loop({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], history: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
       });
       assert.equal(model.requests.length, before, "refused before any model call");
     }
@@ -441,12 +459,11 @@ test("history: an earlier conversation goes before the prompt, as given; a broke
   }
 });
 
-test("shellEnv: the tools get it, the model call keeps env's key", async () => {
-  const { foldrunQuery } = await import("../src/engine-loop.ts");
+both("shellEnv: the tools get it, the model call keeps env's key", async ({ engine, step, loop }) => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-shellenv-")));
   const model = await fakeModel([{ content: [use("b1", "Bash", { command: "echo key=${ANTHROPIC_AUTH_TOKEN:-none} own=$OWN > out.txt" })] }, { content: [say("ok")] }]);
   try {
-    const q = foldrunQuery({ prompt: "p", options: { cwd: dir, model: "m", tools: ["Bash"], engineHostShell: true, sandbox: { enabled: false }, env: { PATH: process.env.PATH, ANTHROPIC_BASE_URL: model.url, ANTHROPIC_AUTH_TOKEN: "secret-gw" }, shellEnv: { PATH: process.env.PATH, OWN: "mine" } } });
+    const q = loop({ prompt: "p", options: { cwd: dir, model: "m", tools: ["Bash"], engineHostShell: true, sandbox: { enabled: false }, env: { PATH: process.env.PATH, ANTHROPIC_BASE_URL: model.url, ANTHROPIC_AUTH_TOKEN: "secret-gw" }, shellEnv: { PATH: process.env.PATH, OWN: "mine" } } });
     for await (const _ of q) void _;
     assert.equal(fs.readFileSync(path.join(dir, "out.txt"), "utf8").trim(), "key=none own=mine");
     assert.equal(model.requests[0]!.headers.authorization, "Bearer secret-gw");
@@ -456,8 +473,7 @@ test("shellEnv: the tools get it, the model call keeps env's key", async () => {
   }
 });
 
-test("extraTools: a host's own tool is offered, asked through canUseTool, and run with the step's signal", async () => {
-  const { foldrunQuery } = await import("../src/engine-loop.ts");
+both("extraTools: a host's own tool is offered, asked through canUseTool, and run with the step's signal", async ({ engine, step, loop }) => {
   const model = await fakeModel([{ content: [use("c1", "cloud_agents", { tasks: ["fix the tests"] })] }, { content: [say("done")] }]);
   try {
     const asked: string[] = [];
@@ -475,7 +491,7 @@ test("extraTools: a host's own tool is offered, asked through canUseTool, and ru
         },
       },
     ];
-    const q = foldrunQuery({
+    const q = loop({
       prompt: "p",
       options: {
         cwd: os.tmpdir(),
@@ -497,10 +513,222 @@ test("extraTools: a host's own tool is offered, asked through canUseTool, and ru
     assert.equal(model.requests[1]!.body.messages[2].content[0].content, "1 agent finished");
     for (const bad of [[{ name: "Read", input_schema: {}, run: async () => ({ text: "" }) }], [{ name: "bad name", input_schema: {}, run: async () => ({ text: "" }) }], [{ name: "x", input_schema: {} }]]) {
       await assert.rejects(async () => {
-        for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: ["Read"], extraTools: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
+        for await (const _ of loop({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: ["Read"], extraTools: bad, env: { ANTHROPIC_BASE_URL: model.url } } })) void _;
       }, /extraTools/);
     }
   } finally {
     await model.close();
+  }
+});
+
+both("pause_turn: the conversation goes back as it stands and the model carries on", async ({ step }) => {
+  const r = await step([
+    { content: [say("Searching the long way round")], stop: "pause_turn" },
+    { content: [say("found it.")] },
+  ]);
+  assert.equal(r.out!.status, "completed");
+  assert.equal(r.requests.length, 2, "a paused turn is not the end");
+  const sent = r.requests[1].body.messages;
+  assert.equal(sent.at(-1).role, "assistant", "the paused turn is sent back for the model to carry on");
+  assert.match(JSON.stringify(sent.at(-1).content), /Searching the long way round/);
+});
+
+both("a reply cut off at the output limit mid-call: the call never runs and the step did not finish (FOL-211)", async ({ step }) => {
+  const r = await step([
+    { content: [say("Writing it"), use("w1", "Write", { file_path: "out.txt", content: "half" })], stop: "max_tokens" },
+    { content: [say("should not be asked")] },
+  ]);
+  assert.equal(r.out!.status, "failed");
+  assert.equal(r.requests.length, 1, "no further turn");
+  assert.equal(fs.existsSync(path.join(r.agentDir, "out.txt")), false, "a half-written call is not run");
+  assert.ok(r.events.some((e) => e.type === "error" && /cut off at the output limit/.test(e.text)));
+});
+
+
+// ---- What the Pi trial found (FOL-213, Codex): each held on foldrun's loop too.
+
+const collect = async (q: AsyncIterable<unknown>, stopAfter?: (m: any) => boolean) => {
+  const seen: any[] = [];
+  for await (const m of q) {
+    seen.push(m);
+    if (stopAfter?.(m)) {
+      await new Promise((r) => setTimeout(r, 30));
+      break;
+    }
+  }
+  return seen;
+};
+
+both("a tool block in a turn the model ended (end_turn) is not run, and the step finishes there", async ({ step }) => {
+  const r = await step([{ content: [say("done"), use("w", "Write", { file_path: "x.txt", content: "no" })], stop: "end_turn" }, { content: [say("again")] }]);
+  assert.equal(r.out!.status, "completed");
+  assert.equal(r.requests.length, 1);
+  assert.equal(fs.existsSync(path.join(r.agentDir, "x.txt")), false);
+});
+
+both("max_turns counts a paused turn", async ({ step }) => {
+  const r = await step([{ content: [say("a")], stop: "pause_turn" }, { content: [say("done")] }], { maxTurns: 1 });
+  assert.equal(r.out!.status, "failed");
+  assert.equal(r.requests.length, 1);
+});
+
+both("a stream whose blocks never closed, or that never sent message_stop, is a failure — not the answer", async ({ step }) => {
+  const open = await step([{ content: [say("The answer is 42.")], unclosed: true }]);
+  assert.equal(open.out, null);
+  assert.match(open.error!.message, /ended part-way through a reply/);
+  const noStop = await step([{ content: [say("The answer is 42.")], stop: "stop_sequence", noStop: true }]);
+  assert.equal(noStop.out, null);
+  assert.match(noStop.error!.message, /ended part-way through a reply/);
+});
+
+both("nothing runs after the reader stops reading: a call in a turn it never asked past is not made", async ({ loop }) => {
+  const model = await fakeModel([{ content: [use("w", "Write", { file_path: "late.txt", content: "x" })] }, { content: [say("done")] }]);
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-reader-")));
+  roots.push(dir);
+  try {
+    await collect(loop({ prompt: "p", options: { cwd: dir, model: "m", tools: ["Write"], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } }), (m) => m.type === "assistant");
+    assert.equal(fs.existsSync(path.join(dir, "late.txt")), false);
+    assert.equal(model.requests.length, 1);
+  } finally {
+    await model.close();
+  }
+});
+
+both("a PreToolUse hook that throws fails the step; the model is not asked again", async ({ loop }) => {
+  const model = await fakeModel([{ content: [use("g", "Glob", { pattern: "*" })] }, { content: [say("done")] }]);
+  try {
+    const hooks = { PreToolUse: [{ hooks: [() => { throw new Error("hook failed"); }] }] };
+    await assert.rejects(() => collect(loop({ prompt: "p", options: { cwd: "/nonexistent-foldrun", model: "m", tools: ["Glob"], hooks, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } })), /hook failed/);
+    assert.equal(model.requests.length, 1);
+  } finally {
+    await model.close();
+  }
+});
+
+both("usage: a closing count of 0 input does not undo the opening one; an unknown stop keeps its output count", async ({ loop }) => {
+  const model = await fakeModel([{ content: [say("hi")], deltaUsage: { input_tokens: 0 } }, { content: [say("x")], stop: "novel", usage: { output_tokens: 5 } }]);
+  try {
+    const a = (await collect(loop({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } }))).find((m) => m.type === "result");
+    assert.equal(a.usage.input_tokens, 10);
+    const b = (await collect(loop({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } }))).find((m) => m.type === "result");
+    assert.equal(b.subtype, "error_unknown_stop");
+    assert.equal(b.usage.output_tokens, 5);
+  } finally {
+    await model.close();
+  }
+});
+
+both("the output limit asked for is the one sent; partial events only when asked for", async ({ loop }) => {
+  const model = await fakeModel([{ content: [say("done")] }]);
+  try {
+    const seen = await collect(loop({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "200000" } } }));
+    assert.equal(model.requests[0]!.body.max_tokens, 200000);
+    assert.deepEqual(seen.filter((m) => m.type === "stream_event").map((m) => m.event.type), ["message_start", "message_delta"]);
+  } finally {
+    await model.close();
+  }
+});
+
+both("history: an image in an earlier tool result is sent again as an image", async ({ loop }) => {
+  const model = await fakeModel([{ content: [say("I see it")] }]);
+  try {
+    const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } };
+    const history = [
+      { role: "user", content: [{ type: "text", text: "look" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Read", input: { file_path: "a.png" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: [image] }] },
+      { role: "assistant", content: [{ type: "text", text: "a picture" }] },
+    ];
+    await collect(loop({ prompt: "again", options: { cwd: os.tmpdir(), model: "m", tools: ["Read"], history, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } }));
+    const sent = JSON.stringify(model.requests[0]!.body.messages[2]);
+    assert.match(sent, /"type":"image"/);
+    assert.match(sent, /iVBORw0KGgo=/);
+  } finally {
+    await model.close();
+  }
+});
+
+both("a cut-off tool turn yields no tool results; the record is what the model was sent", async ({ loop }) => {
+  const model = await fakeModel([{ content: [use("g", "Glob", { pattern: "*" })], stop: "max_tokens" }]);
+  try {
+    const seen = await collect(loop({ prompt: "p", options: { cwd: "/nonexistent-foldrun", model: "m", tools: ["Glob"], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } }));
+    assert.deepEqual(seen.map((m) => m.type).filter((t) => t !== "stream_event"), ["system", "assistant", "result"]);
+  } finally {
+    await model.close();
+  }
+  const ctxModel = await fakeModel([{ content: [use("g", "Glob", { pattern: "*" })] }, { content: [say("done")] }]);
+  try {
+    const hooks = { PostToolUse: [{ hooks: [() => ({ hookSpecificOutput: { additionalContext: "ctx" } })] }] };
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-ctx-")));
+    roots.push(dir);
+    fs.writeFileSync(path.join(dir, "a.txt"), "a");
+    const seen = await collect(loop({ prompt: "p", options: { cwd: dir, model: "m", tools: ["Glob"], hooks, env: { ANTHROPIC_BASE_URL: ctxModel.url, ANTHROPIC_API_KEY: "k" } } }));
+    const recorded = seen.find((m) => m.type === "user").message.content;
+    const sent = ctxModel.requests[1]!.body.messages.at(-1).content;
+    // Spelling aside (a cache mark, `is_error: false`, text as one string or blocks).
+    const strip = (c: any[]) => c.map(({ cache_control: _, is_error, ...b }: any) => ({ ...b, ...(is_error ? { is_error } : {}), content: Array.isArray(b.content) ? b.content.map((x: any) => x.text).join("\n") : b.content }));
+    assert.deepEqual(strip(sent), strip(recorded), "the record is what was sent");
+    assert.match(JSON.stringify(sent), /ctx/);
+  } finally {
+    await ctxModel.close();
+  }
+});
+
+
+test("a stream frame that is not JSON fails the step — a reply missing a piece is never taken as whole", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const send = (ev: Record<string, unknown>) => res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+    send({ type: "message_start", message: { id: "m1", model: "m", usage: { input_tokens: 1, output_tokens: 1 } } });
+    send({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    send({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "The answer is " } });
+    res.write("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"not\n\n");
+    send({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " 42." } });
+    send({ type: "content_block_stop", index: 0 });
+    send({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } });
+    send({ type: "message_stop" });
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    await assert.rejects(async () => {
+      for await (const _ of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], env: { ANTHROPIC_BASE_URL: url, ANTHROPIC_API_KEY: "k" } } })) void _;
+    }, /a frame that is not JSON/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test("SSE line endings: CRLF, LF and a bare CR all read, a CRLF split across chunks too; pings and comments pass", async () => {
+  const ev = (e: Record<string, unknown>, eol: string) => `event: ${e.type}${eol}data: ${JSON.stringify(e)}${eol}${eol}`;
+  const reply = (eol: string) =>
+    `event: ping${eol}data: {"type":"ping"}${eol}: keepalive${eol}${eol}` +
+    ev({ type: "message_start", message: { id: "m1", model: "m", usage: { input_tokens: 1, output_tokens: 1 } } }, eol) +
+    ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, eol) +
+    ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } }, eol) +
+    ev({ type: "content_block_stop", index: 0 }, eol) +
+    ev({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } }, eol) +
+    ev({ type: "message_stop" }, eol) + `data: [DONE]${eol}${eol}`;
+  for (const eol of ["\n", "\r\n", "\r"]) {
+    const body = reply(eol);
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      // Cut after every CR, so a CRLF lands across two chunks.
+      for (const piece of body.split(/(?<=\r)/)) res.write(piece);
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      let result: any = null;
+      for await (const m of foldrunQuery({ prompt: "p", options: { cwd: os.tmpdir(), model: "m", tools: [], env: { ANTHROPIC_BASE_URL: url, ANTHROPIC_API_KEY: "k" } } })) if ((m as any).type === "result") result = m;
+      assert.equal(result?.subtype, "success", JSON.stringify(eol));
+      assert.equal(result?.result, "ok");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   }
 });
