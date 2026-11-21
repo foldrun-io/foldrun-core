@@ -177,6 +177,7 @@ name: researcher
 description: Finds one thing worth writing about, and says why.
 model: fast
 effort: high
+size: small
 tools:
   - web
   - read
@@ -194,6 +195,7 @@ Do not write the article.
       content: `---
 name: writer
 description: Turns a brief into a short draft.
+size: small
 tools:
   - write
 ---
