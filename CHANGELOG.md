@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.8.1] — 2026-11-21
+
+- fix(engine): what the Pi trial found, held on foldrun's own loop (FOL-213) ([81436bf](https://github.com/foldrun-io/foldrun-core/commit/81436bf))
+
 ## [24.8.0] — 2026-11-21
 
 ### New in the public API
