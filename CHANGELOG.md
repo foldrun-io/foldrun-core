@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.9.1] — 2026-11-22
+
+- chore(lint): drop unused parameters; shellcheck the env file source ([58ffc0f](https://github.com/foldrun-io/foldrun-core/commit/58ffc0f))
+
 ## [24.9.0] — 2026-11-22
 
 ### Widened in the public API
