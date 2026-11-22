@@ -24,7 +24,7 @@ import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-contai
 type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[] };
 
 async function withAccount(
-  opts: { supply: SupplyAnswer; lease?: boolean; agentProvider?: string },
+  opts: { supply: SupplyAnswer; lease?: boolean; agentProvider?: string; ownKeys?: boolean },
   body: (c: Captured) => Promise<void>,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-supply-"));
@@ -42,8 +42,8 @@ async function withAccount(
     c.grants.push(args.grant);
     return { url: "http://egress.test/e/tok", commit: async () => {}, drainLog: async () => [], release: async () => {} } as unknown as EgressLease;
   };
-  const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress };
-  registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: () => opts.supply, egress: { lease } });
+  const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
+  registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: () => opts.supply, egress: { lease }, ownModelKeys: opts.ownKeys === undefined ? undefined : () => opts.ownKeys! });
   try {
     const ws = path.join(root, "acme/workspaces/desk");
     fs.mkdirSync(path.join(ws, "agents/worker"), { recursive: true });
@@ -52,7 +52,7 @@ async function withAccount(
     fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), `---\nname: worker\ndescription: works\n${opts.agentProvider ?? ""}---\n\nWork.\n`);
     await body(c);
   } finally {
-    registerPlatform({ isolation: prevHooks.isolation, platformKeyAllowed: prevHooks.allowed, modelSupply: prevHooks.supply, egress: prevHooks.egress });
+    registerPlatform({ isolation: prevHooks.isolation, platformKeyAllowed: prevHooks.allowed, modelSupply: prevHooks.supply, egress: prevHooks.egress, ownModelKeys: prevHooks.own });
     for (const [k, v] of [["FOLDRUN_DATA", prev.data], ["FOLDRUN_RUN_ISOLATION", prev.iso], ["ANTHROPIC_API_KEY", prev.key]] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -415,4 +415,63 @@ test("Z.ai, Qwen, MiniMax and MiMo are sent only what each documents (10 Nov 202
   assert.equal(effortRunsAs("qwen", "qwen3.8-flash", "max"), "xhigh");
   assert.equal(effortRunsAs("qwen", "qwen3.8-max", "medium"), "medium");
   assert.equal(effortRunsAs("qwen", "qwen3.7-plus", "high"), "high", "its other models: as written");
+});
+
+// ---------------------------------------------- own keys off (models.byok, 22 Nov 2026)
+
+test("own keys off: an agent that names its own provider: is refused before a sandbox — nothing runs on an endpoint the platform does not meter", async () => {
+  await withAccount(
+    { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, ownKeys: false, agentProvider: "provider:\n  name: anthropic\n  token: ${MINE}\n" },
+    async (c) => {
+      setSecret("acme", "MINE", "sk-ant-api03-written-in-the-block-22222");
+      const done = await run();
+      assert.equal(done.status, "failed");
+      assert.equal(c.calls.length, 0, "no sandbox");
+      assert.match(events(done.steps[0]), /cannot name its own model endpoint .*provider:/);
+      assert.doesNotMatch(events(done.steps[0]), /switch this account back to its own key/, "no way back offered where there is none");
+    },
+  );
+});
+
+test("own keys off: a stored key of the account's is never read — the step runs on foldrun's models", async () => {
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, ownKeys: false }, async (c) => {
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-the-customers-own-key-111111");
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(done.steps[0].supply, "foldrun");
+    assert.ok(!JSON.stringify(c.calls[0]).includes("the-customers-own-key"));
+  });
+});
+
+test("own keys off and no foldrun's models for this account: the stored key is still not used — the step fails, never on it", async () => {
+  await withAccount({ supply: { kind: "none" }, ownKeys: false }, async (c) => {
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-the-customers-own-key-111111");
+    const done = await run();
+    assert.equal(done.status, "failed", events(done.steps[0]));
+    assert.ok(!JSON.stringify(c.calls).includes("the-customers-own-key"), "the stored key reached nothing");
+  });
+});
+
+test("own keys on (the hook says yes, or no platform at all): a written provider: and a stored key work as before", async () => {
+  await withAccount({ supply: { kind: "none" }, ownKeys: true }, async (c) => {
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-the-customers-own-key-111111");
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(done.steps[0].supply, "own");
+  });
+});
+
+test("own keys off, outside a step (a judge, a grader): a written provider: is refused and the stored key is never read", async () => {
+  const { accountModelEnv, ModelKeyError } = await import("../src/model-env.ts");
+  await withAccount({ supply: { kind: "none" }, ownKeys: false }, async () => {
+    fs.writeFileSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/AGENTS.md"), "---\nname: desk\nprovider:\n  name: anthropic\n  token: ${MINE}\n---\n");
+    assert.throws(() => accountModelEnv("acme", "desk", () => ({})), (e: unknown) => e instanceof ModelKeyError && e.status === 403 && /cannot name its own model endpoint/.test(e.message));
+    fs.writeFileSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/AGENTS.md"), "---\nname: desk\n---\n");
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
+    setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-the-customers-own-key-111111");
+    // No foldrun's models and not the operator's account: refused, never on the stored key.
+    assert.throws(() => accountModelEnv("acme", "desk", () => ({})), (e: unknown) => e instanceof ModelKeyError);
+  });
 });

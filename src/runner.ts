@@ -24,7 +24,7 @@ import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, classDisk, type StepTiming } from "./run-container.ts";
 import { readResources, hasOverride, anyMemoryMi } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
-import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
+import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX, OWN_KEYS_OFF } from "./model-credential.ts";
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -1453,20 +1453,31 @@ export function agentContext(
   // agent's own block wins over the workspace's, like everything else here.
   // Then the account's own model key (Settings → Models), when it set one:
   // an account that brings its key need not write a block anywhere.
-  const fileBlock =
+  const writtenBlock =
     (front.provider as Record<string, unknown> | undefined) ?? workspaceFrontmatter(agentDir, tenant).provider;
+  // Own keys (BYOK) as the platform admin allows them (models.byok): off,
+  // a written provider: block refuses the step and a stored key is never
+  // read — every call goes through foldrun's models.
+  const ownKeys = platform.ownModelKeys?.(tenant) ?? true;
+  const fileBlock = ownKeys ? writtenBlock : undefined;
   // foldrun's models (3 Nov 2026): an account that chose the platform's key
   // for a provider runs on it here, between its written blocks (which still
   // win) and its stored key. Chosen but not to be had now — refused, and
   // the step fails with why (runStep); it never falls to the stored key.
-  const supply: SupplyAnswer = fileBlock ? { kind: "none" } : platform.modelSupply?.(tenant) ?? { kind: "none" };
+  const supply: SupplyAnswer = fileBlock
+    ? { kind: "none" }
+    : writtenBlock
+      ? { kind: "refused", reason: OWN_KEYS_OFF }
+      : platform.modelSupply?.(tenant) ?? { kind: "none" };
   const providerBlock =
     fileBlock ??
     (supply.kind === "foldrun"
       ? supplyProviderBlock(supply.provider, supply.tiers, supply.via)
       : supply.kind === "refused"
         ? undefined
-        : accountModelBlock((name) => getSecret(tenant, name)?.value ?? null));
+        : ownKeys
+          ? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null)
+          : undefined);
   let providerEnv: Record<string, string> = {};
   let providerLabel: string | null = null;
   // Secret values pulled into the provider block, name → value. Kept apart
@@ -2658,7 +2669,7 @@ async function runStepBody(
     // Chosen, but not to be had now: failed with why, before a sandbox —
     // never onto the account's stored key or the operator's.
     if (supply.kind === "refused") {
-      push("error", `foldrun's models: ${supply.reason} — or switch this account back to its own key (Settings → Models, \`foldrun account model use own\`)`);
+      push("error", platform.ownModelKeys?.(tenant) ?? true ? `foldrun's models: ${supply.reason} — or switch this account back to its own key (Settings → Models, \`foldrun account model use own\`)` : `foldrun's models: ${supply.reason}`);
       step.status = "failed";
       save();
       return;

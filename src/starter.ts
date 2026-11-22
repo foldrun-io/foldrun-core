@@ -520,7 +520,7 @@ secrets: [CRM_TOKEN]        # keys the agent uses itself; a tool's own come with
 limits: {web.search: 40, crm: 20, calls: 300}  # per step; a call past a limit is refused, never run
 network: [api.example.com]  # sites its sandbox may reach, added to the trusted list; open | trusted | none
 timezone: Australia/Sydney  # the calendar it works to — IANA name or UTC+10
-provider: {}                # BYOK for this agent; account-wide: \`foldrun account model set\`
+provider: {}                # BYOK for this agent, where the platform allows own keys (models.byok); account-wide: \`foldrun account model set\`
 permissionMode: plan        # plan first, act once approved
 runtime:                    # only if scripts need packages
   packages: [requests]

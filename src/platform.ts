@@ -165,6 +165,13 @@ export interface PlatformHooks {
    *  operator's accounts do so; every customer brings their own API key.
    *  Default: yes — a laptop or a self-hosted install is its own operator. */
   platformKeyAllowed(tenant: string): boolean;
+  /** May this account's steps run on a model key or endpoint of its own —
+   *  the account's stored key (Settings → Models) or a `provider:` block in
+   *  its files (BYOK)? A platform admin decides, for the whole install
+   *  (setting models.byok, 22 Nov 2026: off unless turned on). No: a stored
+   *  key is never used, and a step whose files name a provider: is refused
+   *  before it starts. Absent: yes — a laptop runs on what it is given. */
+  ownModelKeys?(tenant: string): boolean;
   /** foldrun's models (3 Nov 2026): whether this account chose to run on
    *  the platform's own key for a provider, and whether it can now. Asked
    *  only where no provider: block of the account's own says otherwise.

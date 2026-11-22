@@ -429,3 +429,15 @@ test("bidi marks keeping Latin in order inside Persian, and a Persian suffix aft
   const { stripHidden } = await import("../src/a2a-client.ts");
   assert.equal(stripHidden(`فارسی ${LRM}.js\nhello${LRM} world`).removed, 1, "per line: Persian above does not excuse a mark below");
 });
+
+test("config/own-model-key: where own keys are off, every provider: (an agent's, the project's) is an error — nothing said where they are allowed or offline (22 Nov 2026)", () => {
+  const files = [
+    { path: "AGENTS.md", content: "---\nname: desk\nprovider:\n  name: anthropic\n  token: ${MINE}\n---\n" },
+    { path: "agents/a/agent.md", content: "---\nname: a\nmodel: default\nprovider:\n  name: openai\n  token: ${OTHER}\n---\n\nWork.\n" },
+    { path: "agents/b/agent.md", content: "---\nname: b\n---\n\nWork.\n" },
+  ];
+  const off = scanFiles(files, { ownModelKeys: false }).filter((f) => f.rule === "config/own-model-key");
+  assert.deepEqual(off.map((f) => [f.file, f.line, f.level]).sort(), [["AGENTS.md", 3, "error"], ["agents/a/agent.md", 4, "error"]]);
+  assert.equal(scanFiles(files, { ownModelKeys: true }).filter((f) => f.rule === "config/own-model-key").length, 0);
+  assert.equal(scanFiles(files).filter((f) => f.rule === "config/own-model-key").length, 0, "offline: the CLI knows no platform's switch");
+});

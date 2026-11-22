@@ -10,7 +10,7 @@ import { accountDir, workspaceDir, parseProvider, providerEnvFor } from "./store
 import { readAgentsMd } from "./runner.ts";
 import { getSecret } from "./secrets.ts";
 import { platform, hostUrlProblem } from "./platform.ts";
-import { accountModelBlock, isClaudeLoginToken } from "./model-credential.ts";
+import { accountModelBlock, isClaudeLoginToken, OWN_KEYS_OFF } from "./model-credential.ts";
 import { providerPreset } from "./providers.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
 import { supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
@@ -50,9 +50,15 @@ export function accountModelEnv(
   translator: TranslatorSpec | null;
   tenant?: string;
 } {
-  const written =
+  const writtenBlock =
     (readAgentsMd(workspaceDir(tenant, workspace))?.data?.provider as Record<string, unknown> | undefined) ??
     (readAgentsMd(accountDir(tenant))?.data?.provider as Record<string, unknown> | undefined);
+  // Own keys as the platform admin allows them (models.byok), as a step
+  // takes them (runner.ts): off, a written block is refused and the stored
+  // key never read.
+  const ownKeys = platform.ownModelKeys?.(tenant) ?? true;
+  if (writtenBlock && !ownKeys) throw new ModelKeyError(OWN_KEYS_OFF, 403);
+  const written = writtenBlock;
   // foldrun's models, the same rung a step takes (runner.ts agentContext):
   // after the written blocks, before the account's stored key; chosen but
   // refused fails here, never onto the stored key or the operator's.
@@ -78,7 +84,7 @@ export function accountModelEnv(
       tenant,
     };
   }
-  const raw = written ?? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null);
+  const raw = written ?? (ownKeys ? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null) : undefined);
   const spec = parseProvider(raw);
   if (!spec?.baseUrl) {
     if (!platform.platformKeyAllowed(tenant)) throw new ModelKeyError(NO_MODEL_KEY);

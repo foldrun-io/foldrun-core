@@ -500,3 +500,24 @@ test("a path that names no file, or is both a file and a folder, is an issue —
     // The tree is as it was.
     assert.ok(fs.existsSync(path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk/flows/publish.md")));
   }));
+
+test("own keys off on the platform (models.byok): a deploy whose files name a provider: is refused, and goes through where they are allowed (22 Nov 2026)", async () => {
+  const { registerPlatform, platform } = await import("../src/platform.ts");
+  const { planDeploy } = await import("../src/deploy.ts");
+  const prev = platform.ownModelKeys;
+  withData(() => {
+    const files = workspace({ "agents/writer/agent.md": "---\nname: writer\ndescription: writes\nprovider:\n  name: anthropic\n  token: ${MINE}\n---\n\nWrite.\n" });
+    try {
+      registerPlatform({ ownModelKeys: () => false });
+      const refused = planDeploy("acme", "desk", files);
+      assert.equal(refused.issues.length, 1, JSON.stringify(refused.issues));
+      assert.match(refused.issues[0].where, /^agents\/writer\/agent\.md:4$/);
+      assert.match(refused.issues[0].message, /config\/own-model-key/);
+      assert.equal(planDeploy("acme", "desk", workspace()).issues.length, 0, "files with no provider: deploy as ever");
+      registerPlatform({ ownModelKeys: () => true });
+      assert.equal(planDeploy("acme", "desk", files).issues.length, 0);
+    } finally {
+      registerPlatform({ ownModelKeys: prev });
+    }
+  });
+});

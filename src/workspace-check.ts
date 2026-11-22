@@ -37,7 +37,11 @@ export function checkOptions(tenant: string, workspace: string): ScanOptions {
   // AGENTS.md, or the older project.md, as the runner reads it (Codex review).
   const accountKeys = readAgentsMdKeys(accountDir(tenant));
   const accountNetwork = accountKeys.network;
-  return { outwardTools, accountNetwork, ...effortCheck(tenant, accountKeys.provider) };
+  // Own keys as the platform admin set them (models.byok): off, a provider:
+  // in these files is an error, so the deploy, a save and the Checks page
+  // all refuse it as the runner would.
+  const ownModelKeys = platform.ownModelKeys?.(tenant) ?? true;
+  return { outwardTools, accountNetwork, ...effortCheck(tenant, accountKeys.provider), ...(ownModelKeys ? {} : { ownModelKeys: false }) };
 }
 
 /**

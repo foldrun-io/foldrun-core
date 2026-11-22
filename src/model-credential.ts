@@ -79,6 +79,11 @@ export function credentialLine(c: ModelCredential): { type: "info" | "error"; te
 // level still wins; this is what a step falls to when none names one, before
 // the platform's own credential.
 
+/** Why a step or a call that names its own model endpoint (`provider:`)
+ *  is refused where a platform admin turned own keys off (models.byok). */
+export const OWN_KEYS_OFF =
+  "this platform runs every model call on foldrun's models, so an agent or project cannot name its own model endpoint — remove `provider:` from the agent or AGENTS.md (a platform admin can allow own keys: setting models.byok)";
+
 /** The account vault names the account's own model key lives under. */
 export const ACCOUNT_MODEL_SECRETS = {
   provider: "FOLDRUN_MODEL_PROVIDER",

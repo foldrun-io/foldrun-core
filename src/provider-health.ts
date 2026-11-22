@@ -19,6 +19,7 @@
 // pass here means a run would reach the same place with the same key.
 
 import { accountModelBlock } from "./model-credential.ts";
+import { platform } from "./platform.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { configMatter } from "./matter.ts";
@@ -224,6 +225,9 @@ function frontmatterOf(file: string): Record<string, unknown> {
 export function providersInUse(tenant: string): ProviderInUse[] {
   const out: ProviderInUse[] = [];
   const seen = new Set<string>();
+  // Own keys off on this platform (models.byok): nothing of the account's
+  // is used, so nothing is probed (or spent) on its behalf.
+  if (!(platform.ownModelKeys?.(tenant) ?? true)) return out;
 
   const add = (raw: unknown, workspace: string | null, declaredIn: string) => {
     const spec = parseProvider(raw);

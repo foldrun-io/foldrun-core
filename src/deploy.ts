@@ -57,6 +57,7 @@ import { languageProblem } from "./language.ts";
 import { localeProblems } from "./locale.ts";
 import { entriesNoFollow } from "./paths.ts";
 import { filterIgnored, findingFingerprint, ruleForWhere, scanFiles, scanRule, STRICT_FRONTMATTER_PATH, type ScanFinding, type ScanOptions } from "./scan.ts";
+import { platform } from "./platform.ts";
 
 /** Directories a deploy never reads out of a source tree. */
 // `.cache` is what a run's tools leave in an agent's folder (HOME is that
@@ -370,6 +371,17 @@ function blockersFor(tenant: string, given: DeployFile[]): DeployIssue[] {
     .filter(([n, d]) => (d as { outward?: boolean }).outward === true && !ownTools.has(n))
     .map(([n]) => n);
   return deployBlockers(files, mode, { accountNetwork: account.network, outwardTools });
+}
+
+/** Own keys off on this platform (models.byok, 22 Nov 2026): every
+ *  `provider:` in the files is a refusal — nothing deploys that would run on
+ *  an endpoint the platform does not meter. Nothing where they are allowed. */
+export function ownKeyBlockers(tenant: string, files: DeployFile[]): DeployIssue[] {
+  if (platform.ownModelKeys?.(tenant) ?? true) return [];
+  return scanFiles(files, { only: ["config/own-model-key"], ownModelKeys: false }).map((f) => ({
+    where: `${f.file}${f.line ? `:${f.line}` : ""}`,
+    message: `${f.message} [${f.rule}]`,
+  }));
 }
 
 /** The findings `mode` turns into refusals, as deploy issues. */
@@ -783,7 +795,7 @@ export function planDeploy(tenant: string, workspace: string, files: DeployFile[
     // deploy_block: (FOL-58) turns the scanner's findings into refusals —
     // scanned with what the Checks page passes too: the account's network:
     // and the library's outward tools (Codex review).
-    issues: [...deployIssues(files), ...blockersFor(tenant, files)],
+    issues: [...deployIssues(files), ...blockersFor(tenant, files), ...ownKeyBlockers(tenant, files)],
     warnings: deployWarnings(files),
     blockedBy: runsInFlight(tenant, workspace),
   };

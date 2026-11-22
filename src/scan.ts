@@ -95,6 +95,11 @@ export interface ScanOptions {
    *  (a `model:` word or id) — the price list's ceiling on foldrun's
    *  models — or null when that is not known here. */
   outputCeiling?: (model: string) => { ceiling: number; model: string; on: string } | null;
+  /** May this account's files name their own model endpoint (`provider:`)?
+   *  False where a platform admin turned own keys off (models.byok): each
+   *  one is config/own-model-key, an error, so the deploy is refused.
+   *  Absent (the CLI offline, a laptop): yes. */
+  ownModelKeys?: boolean;
 }
 
 export const OWASP_URL = "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026";
@@ -342,6 +347,16 @@ export const SCAN_RULES: readonly ScanRule[] = [
       "Each model takes its own effort levels: GPT-6 and Claude take all five, Gemini stops at high, Kimi has low, high and max. " +
       "The step still runs, at the nearest level the model has, and the step's log says so. Write the level it has, or choose " +
       "a provider whose model has the one you want (Settings → Models).",
+  },
+  {
+    id: "config/own-model-key",
+    category: "config",
+    level: "error",
+    title: "A model endpoint of its own, where this platform runs every call on its own models",
+    help:
+      "This platform's admin turned own model keys off (setting models.byok), so every model call goes through foldrun's models. " +
+      "An agent's or a project's `provider:` block names an endpoint and key of its own, which would run unmetered. Remove the " +
+      "block: the agent then runs on the account's choice in Settings → Models.",
   },
   {
     id: "config/output-fitted",
@@ -1368,6 +1383,17 @@ export function scanFiles(files: ScanFile[], options: ScanOptions = {}): ScanFin
   // A workspace that names its own provider: does not run on the account's
   // choice, so the account's models say nothing about its efforts.
   const ownWorkspaceProvider = Boolean(workspaceMd && frontOf(workspaceMd.content, "AGENTS.md")?.provider);
+  // Own keys off on this platform (models.byok): every provider: is refused.
+  if (options.ownModelKeys === false) {
+    const lineOf = (content: string) => {
+      const i = content.split("\n").findIndex((l) => /^provider\s*:/.test(l));
+      return i >= 0 ? i + 1 : 1;
+    };
+    const say = (file: string, content: string) =>
+      push("config/own-model-key", file, lineOf(content), `config/own-model-key ${file}`, "provider: names a model endpoint of its own, and this platform runs every model call on its own models (own keys are off) — remove it; the agent runs on the account's choice in Settings → Models.");
+    for (const a of agents) if (a.data.provider) say(a.file, files.find((f) => f.path === a.file)?.content ?? "");
+    if (workspaceMd && ownWorkspaceProvider) say(workspaceMd.path, workspaceMd.content);
+  }
   if (options.effortRunsAs && !ownWorkspaceProvider) scanEfforts(agents, flows, options.effortRunsAs, push);
   if (options.outputCeiling && !ownWorkspaceProvider) scanOutputs(agents, flows, options.outputCeiling, push);
   for (const m of more.values()) {
