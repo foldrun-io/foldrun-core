@@ -70,6 +70,10 @@ function requestHeaders(env: Record<string, string | undefined>): Record<string,
  *  included, so a half-written answer passed as a finished step (FOL-211).
  *  The partial reply is still the result's text; `errors` says why it is not
  *  a finish, the way the SDK's error results do. */
+/** What this engine can do that a caller may ask about before relying on
+ *  it: `steer` — messages sent while a turn runs (FOL-213). */
+export const ENGINE_FEATURES = { steer: true } as const;
+
 export function endOf(stopReason: string | null, calls: number): { subtype: string; error?: string } {
   switch (stopReason) {
     case "end_turn":
@@ -258,6 +262,18 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   const sessionId = crypto.randomUUID();
   const startedAt = Date.now();
   const byName = new Map(o.tools.map((t) => [t.name, t]));
+  /** What the person sent meanwhile, as text blocks: each a string with
+   *  words in it, held to a sane size; anything else is dropped. */
+  // Taken only when the model will get it: not once the turn is stopped,
+  // nor when no request is left under maxTurns (Codex) — it stays with the
+  // caller, unsent.
+  const steered = (): Block[] => {
+    if (!o.steer || interrupted() || signal.aborted || (o.maxTurns !== null && turns >= o.maxTurns)) return [];
+    const taken = o.steer();
+    return (Array.isArray(taken) ? taken : [])
+      .filter((t): t is string => typeof t === "string" && t.trim() !== "")
+      .map((t) => ({ type: "text", text: t.slice(0, 20_000) }));
+  };
   const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set() };
   // An earlier conversation comes first (foldrun code's local turns carry
   // theirs, 19 Nov 2026); the prompt is always the newest user turn.
@@ -466,6 +482,19 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     if (turn.stopReason === "pause_turn" && !calls.length) continue;
     if (turn.stopReason !== "tool_use" || !calls.length) {
       const end = endOf(turn.stopReason, calls.length);
+      // About to finish with a message from the person waiting: it is the
+      // next user turn, and the model goes on. Not after a turn that failed
+      // (it stays with the caller, unsent).
+      if (end.subtype === "success") {
+        const more = steered();
+        if (more.length) {
+          // A new question: the answer to come is its own, not this one (Codex).
+          lastText = "";
+          messages.push({ role: "user", content: more });
+          yield { type: "user", message: { role: "user", content: more }, parent_tool_use_id: null, session_id: sessionId };
+          continue;
+        }
+      }
       // A turn that did not finish carries ITS text, empty included — not an
       // earlier turn's "I'll check" passed off as a refusal's words (Codex).
       yield end.error ? { ...result(end.subtype, turn.stopReason), result: text, errors: [end.error] } : result(end.subtype, turn.stopReason);
@@ -533,7 +562,8 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       return { type: "tool_result", tool_use_id: String(p.block.id), content, ...(isError ? { is_error: true } : {}) };
     });
     const context = done.flatMap((d) => d.context);
-    const content: Block[] = [...results, ...context.map((c) => ({ type: "text", text: c }))];
+    // After the results: what hooks add, then what the person sent meanwhile.
+    const content: Block[] = [...results, ...context.map((c) => ({ type: "text", text: c })), ...steered()];
     messages.push({ role: "user", content });
     yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null, session_id: sessionId };
   }

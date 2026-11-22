@@ -1371,3 +1371,103 @@ both("compaction round 2: a summary stream that breaks part-way is still counted
     await model.close();
   }
 });
+
+// ---- Steering (FOL-213): what a person sends while the turn runs.
+
+both("steering: a message sent mid-turn reaches the model after its calls; one waiting at the end keeps it going", async ({ loop }) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "steer-"));
+  fs.writeFileSync(path.join(dir, "a.txt"), "hello");
+  const model = await fakeModel([
+    { content: [use("r1", "Read", { file_path: path.join(dir, "a.txt") })], stop: "tool_use" },
+    { content: [say("done reading")] },
+    { content: [say("and the second thing too")] },
+  ]);
+  const queue: unknown[] = [];
+  let drained = 0;
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "read it", options: { cwd: dir, model: "m", tools: ["Read"], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, steer: () => { drained++; return queue.splice(0); } } })) {
+      seen.push(m);
+      // Sent while the first call runs: read with its result.
+      if (m.type === "assistant" && seen.filter((x) => x.type === "assistant").length === 1) queue.push("use British spelling", 42, "  ");
+      // Sent while the model writes what would be its last word.
+      if (m.type === "user" && seen.filter((x) => x.type === "user").length === 1) queue.push("also do the second thing");
+    }
+    const second = model.requests[1].body.messages.at(-1).content;
+    assert.equal(second[0].type, "tool_result");
+    const words = (bs: any[]) => bs.map((b) => ({ type: b.type, text: b.text }));
+    assert.deepEqual(words(second.slice(1)), [{ type: "text", text: "use British spelling" }], "only strings with words in them are sent");
+    assert.equal(model.requests.length, 3, "the waiting message kept the turn going");
+    const last = model.requests[2].body.messages.at(-1);
+    assert.equal(last.role, "user");
+    assert.deepEqual(words(last.content), [{ type: "text", text: "also do the second thing" }]);
+    assert.equal(seen.at(-1).subtype, "success");
+    assert.ok(seen.some((m) => m.type === "user" && m.message.content[0]?.text === "also do the second thing"), "the caller sees it as a user turn, to keep");
+    assert.ok(drained >= 2);
+  } finally {
+    await model.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+both("steering: a turn that fails leaves the waiting message with the caller", async ({ loop }) => {
+  const model = await fakeModel([{ content: [say("cut")], stop: "max_tokens" }]);
+  const queue: unknown[] = ["later"];
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "go", options: { cwd: "/tmp", model: "m", tools: [], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, steer: () => queue.splice(0) } })) seen.push(m);
+    assert.equal(seen.at(-1).subtype, "error_max_output");
+    assert.deepEqual(queue, ["later"], "not taken, so not lost");
+  } finally {
+    await model.close();
+  }
+});
+
+both("steering, Codex round 1: no message is taken when the model cannot get it — maxTurns spent, or the turn stopped", async ({ loop }) => {
+  const env = (url: string) => ({ ANTHROPIC_BASE_URL: url, ANTHROPIC_API_KEY: "k" });
+  {
+    const model = await fakeModel([{ content: [say("answer")] }]);
+    const queue: unknown[] = ["use metric"];
+    try {
+      const seen: any[] = [];
+      for await (const m of loop({ prompt: "go", options: { cwd: "/tmp", model: "m", tools: [], maxTurns: 1, env: env(model.url), steer: () => queue.splice(0) } })) seen.push(m);
+      assert.equal(seen.at(-1).subtype, "success", "the answer stands");
+      assert.deepEqual(queue, ["use metric"]);
+    } finally {
+      await model.close();
+    }
+  }
+  {
+    const model = await fakeModel([{ content: [say("answer")] }, { content: [say("more")] }]);
+    const queue: unknown[] = ["use metric"];
+    const abortController = new AbortController();
+    try {
+      for await (const m of loop({ prompt: "go", options: { cwd: "/tmp", model: "m", tools: [], abortController, env: env(model.url), steer: () => queue.splice(0) } })) {
+        if (m.type === "assistant") abortController.abort();
+      }
+    } catch {
+      /* a stop may end it either way */
+    } finally {
+      await model.close();
+    }
+    assert.deepEqual(queue, ["use metric"], "stopped: not taken");
+    assert.equal(model.requests.length, 1);
+  }
+});
+
+both("steering, Codex round 2: a steered follow-up's result is its own words, never the answer before it", async ({ loop }) => {
+  const model = await fakeModel([{ content: [say("first answer")] }, { content: [use("r", "Read", { file_path: "/nope" })], stop: "tool_use" }]);
+  const queue: unknown[] = [];
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "go", options: { cwd: "/tmp", model: "m", tools: ["Read"], maxTurns: 2, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" }, steer: () => queue.splice(0) } })) {
+      seen.push(m);
+      if (m.type === "assistant" && seen.filter((x) => x.type === "assistant").length === 1) queue.push("use metric");
+    }
+    const end = seen.at(-1);
+    assert.equal(end.subtype, "error_max_turns");
+    assert.notEqual(end.result, "first answer");
+  } finally {
+    await model.close();
+  }
+});

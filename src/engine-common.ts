@@ -70,6 +70,10 @@ export interface LoopOptions {
   /** Compaction (engine-compact.ts): the model's context window, and false
    *  when the caller turned it off (`compaction: false`). */
   compaction: { contextWindow: number; reserveTokens: number; keepRecentTokens: number } | false;
+  /** Steering (FOL-213): what a person sent while the turn runs, taken
+   *  (and so removed) each time it is called. The model reads it after the
+   *  calls it is making, or, about to finish, reads it and goes on. */
+  steer: (() => unknown[]) | null;
 }
 
 export function hookFns(hooks: unknown, event: string): HookFn[] {
@@ -140,6 +144,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     history: readHistory(options.history),
     mcpServers,
     mcpGranted: mcpTools,
+    steer: typeof options.steer === "function" ? (options.steer as () => unknown[]) : null,
     compaction: options.compaction === false ? false : compactionFor(
       typeof options.contextWindow === "number" && Number.isFinite(options.contextWindow) && options.contextWindow >= MIN_CONTEXT_WINDOW ? Math.floor(options.contextWindow) : COMPACTION_DEFAULTS.contextWindow,
     ),
