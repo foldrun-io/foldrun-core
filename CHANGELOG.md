@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.11.0] — 2026-11-22
+
+### New in the public API
+
+- `agentDisk` from `@foldrun/core`
+
+- feat(runtime): the runtime plan carries the most disk its agents may write ([aac3b71](https://github.com/foldrun-io/foldrun-core/commit/aac3b71))
+
 ## [24.10.0] — 2026-11-22
 
 ### New in the public API
