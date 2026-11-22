@@ -13,6 +13,42 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.12.0] — 2026-11-22
+
+### New in the public API
+
+- `@foldrun/core/local-sandbox`
+- `DENY_READ` from `@foldrun/core/local-sandbox`
+- `LAUNCHER` from `@foldrun/core/local-sandbox`
+- `SandboxBackend` from `@foldrun/core/local-sandbox`
+- `LocalSandboxPolicy` from `@foldrun/core/local-sandbox`
+- `LocalSandbox` from `@foldrun/core/local-sandbox`
+- `SandboxRefusal` from `@foldrun/core/local-sandbox`
+- `isRefusal` from `@foldrun/core/local-sandbox`
+- `realish` from `@foldrun/core/local-sandbox`
+- `trustedPath` from `@foldrun/core/local-sandbox`
+- `linkHops` from `@foldrun/core/local-sandbox`
+- `chainOutside` from `@foldrun/core/local-sandbox`
+- `helperFolder` from `@foldrun/core/local-sandbox`
+- `gitProtected` from `@foldrun/core/local-sandbox`
+- `shellWords` from `@foldrun/core/local-sandbox`
+- `remoteHelper` from `@foldrun/core/local-sandbox`
+- `fileRules` from `@foldrun/core/local-sandbox`
+- `appArmorRestrictsUserns` from `@foldrun/core/local-sandbox`
+- `APPARMOR_HINT` from `@foldrun/core/local-sandbox`
+- `killTree` from `@foldrun/core/local-sandbox`
+- `q` from `@foldrun/core/local-sandbox`
+- `bareEnv` from `@foldrun/core/local-sandbox`
+- `carry` from `@foldrun/core/local-sandbox`
+- `openLocalSandbox` from `@foldrun/core/local-sandbox`
+
+- test(local-sandbox): a merged-/usr /bin is /usr/bin in the trusted PATH ([3d2be8e](https://github.com/foldrun-io/foldrun-core/commit/3d2be8e))
+- feat(local-sandbox): walls for runs on a person's own machine (FOL-214, part 1) ([37f5f29](https://github.com/foldrun-io/foldrun-core/commit/37f5f29))
+
+### deps
+
+- sandbox-runtime uses the root zod (4.6.7), not its own 3.25.76 ([3e6183d](https://github.com/foldrun-io/foldrun-core/commit/3e6183d))
+
 ## [24.11.0] — 2026-11-22
 
 ### New in the public API
