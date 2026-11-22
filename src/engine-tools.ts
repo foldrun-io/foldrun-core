@@ -24,6 +24,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
+import { randomBytes } from "node:crypto";
+import { LAUNCHER } from "./local-sandbox.ts";
 
 export interface ToolContext {
   /** Relative paths resolve here: the agent's directory. */
@@ -38,6 +40,78 @@ export interface ToolContext {
    *  left something in the background has returned, but what it left is
    *  still the step's: the loop ends every group when the step ends. */
   groups: Set<number>;
+  /** On a person's machine, the walls (local-sandbox.ts): commands run
+   *  through `wrap`; the file tools refuse what canRead / canWrite refuse. */
+  sandbox?: import("./engine-common.ts").SandboxWalls | null;
+}
+
+/** A file's contents, read through the descriptor that was checked: inside
+ *  the walls, the open file must be the very file now at the path the rules
+ *  allow (same device and inode), so a path swapped between the check and
+ *  the open is refused, not read. A string is the refusal. */
+async function readChecked(ctx: ToolContext, file: string): Promise<Buffer | string> {
+  if (!ctx.sandbox) return fs.readFileSync(file);
+  // Inside the walls the read itself runs there (cat), so the OS holds it
+  // however the path changes between a check and the read.
+  const r = await runInside(ctx, `exec /bin/cat -- ${shq(file)}`, "");
+  if (r.code !== 0) return `${file} could not be read: ${r.err || "the sandbox refused it"}`;
+  return r.out;
+}
+
+/** Run a short helper inside the walls with nothing of the step's
+ *  environment: its stdout as bytes, the last line of its stderr. */
+async function runInside(ctx: ToolContext, script: string, input: string, ms = 60_000): Promise<{ code: number | null; out: Buffer; err: string }> {
+  // A plain PATH inside for the helper's own commands (mkdir, mv…): what
+  // they reach is the walls' business, not the PATH's.
+  const { line, env } = await ctx.sandbox!.launch(script, { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+  return new Promise((resolve) => {
+    const child = spawn(LAUNCHER, ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const chunks: Buffer[] = [];
+    let err = "";
+    let done = false;
+    const end = (code: number | null, why?: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ctx.signal.removeEventListener("abort", stop);
+      resolve({ code, out: Buffer.concat(chunks), err: why ?? (err.trim().split("\n").pop() || (code === 0 ? "" : `exit ${code}`)) });
+    };
+    const kill = () => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    };
+    const stop = () => {
+      kill();
+      end(null, "stopped");
+    };
+    const timer = setTimeout(() => {
+      kill();
+      end(null, `ran past ${ms / 1000} s`);
+    }, ms);
+    ctx.signal.addEventListener("abort", stop, { once: true });
+    child.stdout!.on("data", (c: Buffer) => chunks.push(c));
+    child.stderr!.on("data", (c: Buffer) => {
+      if (err.length < 4000) err += c.toString("utf8");
+    });
+    child.on("error", (e) => end(null, e.message));
+    child.on("close", (code) => end(code));
+    child.stdin!.on("error", () => undefined);
+    child.stdin!.end(input, "utf8");
+  });
+}
+
+/** The sandbox's answer for a path, as a tool's refusal — null when allowed. */
+function walled(ctx: ToolContext, file: string, write: boolean): ToolOutcome | null {
+  if (!ctx.sandbox) return null;
+  if (write ? ctx.sandbox.canWrite(file) : ctx.sandbox.canRead(file)) return null;
+  return fail(
+    write
+      ? `${file} is outside what this session may write (the project folder and its temp folder; never git hooks or config, never credentials)`
+      : `${file} holds credentials this session may not read`,
+  );
 }
 
 /** End everything the session's commands started and left running. */
@@ -125,6 +199,28 @@ function looksBinary(buf: Buffer): boolean {
   return buf.subarray(0, 8192).includes(0);
 }
 
+/** Write a file inside the walls: a small shell helper run there makes the
+ *  folders, writes a temp file and renames it into place, so the OS holds
+ *  the write wherever a path has been swapped meanwhile. */
+async function writeInside(file: string, content: string, ctx: ToolContext): Promise<void> {
+  // Folders, a temp file and the rename all happen inside the walls.
+  let mode = "";
+  try {
+    mode = (fs.statSync(file).mode & 0o7777).toString(8);
+  } catch {
+    // a new file takes the default mode
+  }
+  const d = shq(path.dirname(file));
+  const script =
+    `mkdir -p -- ${d} && t=$(mktemp ${shq(path.join(path.dirname(file), `.${path.basename(file)}.XXXXXXXX`))}) || exit 1\n` +
+    `if cat > "$t"${mode ? ` && chmod ${mode} "$t"` : ""} && mv -f -- "$t" ${shq(file)}; then exit 0; fi\n` +
+    `rm -f -- "$t"; exit 1`;
+  const r = await runInside(ctx, script, content);
+  if (r.code !== 0) throw new Error(r.err || `the sandbox refused the write`);
+}
+
+const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+
 function writeWhole(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let mode: number | undefined;
@@ -133,9 +229,11 @@ function writeWhole(file: string, content: string): void {
   } catch {
     // a new file takes the default mode
   }
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  // A name nobody can have planted (random), created only if it is not
+  // there (wx): a link left at a guessable name cannot redirect the write.
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(8).toString("hex")}.tmp`);
   try {
-    fs.writeFileSync(tmp, content, mode !== undefined ? { mode } : undefined);
+    fs.writeFileSync(tmp, content, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });
     fs.renameSync(tmp, file);
   } catch (err) {
     fs.rmSync(tmp, { force: true });
@@ -177,6 +275,8 @@ const read: EngineTool = {
     const given = str(input, "file_path");
     if (!given) return fail("Read needs file_path");
     const file = abs(ctx, given);
+    const no = walled(ctx, file, false);
+    if (no) return no;
     let stat: fs.Stats;
     try {
       stat = fs.statSync(file);
@@ -184,7 +284,8 @@ const read: EngineTool = {
       return fail(`${file} does not exist`);
     }
     if (stat.isDirectory()) return fail(`${file} is a directory — use Glob to list files`);
-    const buf = fs.readFileSync(file);
+    const buf = await readChecked(ctx, file);
+    if (typeof buf === "string") return fail(buf);
     if (looksBinary(buf)) return fail(`${file} is not a text file`);
     ctx.reads.set(file, stat.mtimeMs);
     const text = buf.toString("utf8");
@@ -223,6 +324,8 @@ const write: EngineTool = {
     const content = str(input, "content");
     if (!given || content === null) return fail("Write needs file_path and content");
     const file = abs(ctx, given);
+    const no = walled(ctx, file, true);
+    if (no) return no;
     try {
       if (fs.statSync(file).isDirectory()) return fail(`${file} is a directory`);
     } catch {
@@ -231,7 +334,12 @@ const write: EngineTool = {
     const stale = staleReason(ctx, file);
     if (stale) return fail(stale);
     const existed = fs.existsSync(file);
-    writeWhole(file, content);
+    try {
+      if (ctx.sandbox) await writeInside(file, content, ctx);
+      else writeWhole(file, content);
+    } catch (err) {
+      return fail(`${file} was not written: ${err instanceof Error ? err.message : String(err)}`);
+    }
     ctx.reads.set(file, fs.statSync(file).mtimeMs);
     return { text: `${existed ? "Wrote" : "Created"} ${file} (${content.length} characters)` };
   },
@@ -268,13 +376,16 @@ const edit: EngineTool = {
     const to = str(input, "new_string");
     if (!given || from === null || to === null) return fail("Edit needs file_path, old_string and new_string");
     const file = abs(ctx, given);
+    const no = walled(ctx, file, true);
+    if (no) return no;
     if (!fs.existsSync(file)) return fail(`${file} does not exist — use Write to create it`);
     if (fs.statSync(file).isDirectory()) return fail(`${file} is a directory`);
     const stale = staleReason(ctx, file);
     if (stale) return fail(stale);
     if (!from) return fail("old_string is empty — give the exact text to replace, or use Write for a whole file");
     if (from === to) return fail("old_string and new_string are the same — nothing to change");
-    const buf = fs.readFileSync(file);
+    const buf = await readChecked(ctx, file);
+    if (typeof buf === "string") return fail(buf);
     if (looksBinary(buf)) return fail(`${file} is not a text file`);
     const before = buf.toString("utf8");
     const count = occurrences(before, from);
@@ -291,7 +402,12 @@ const edit: EngineTool = {
     // split/join and slice, never String.replace: `$&` in new_string is text.
     const at = before.indexOf(from);
     const after = all ? before.split(from).join(to) : before.slice(0, at) + to + before.slice(at + from.length);
-    writeWhole(file, after);
+    try {
+      if (ctx.sandbox) await writeInside(file, after, ctx);
+      else writeWhole(file, after);
+    } catch (err) {
+      return fail(`${file} was not changed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     ctx.reads.set(file, fs.statSync(file).mtimeMs);
     return { text: `Edited ${file} (${all ? count : 1} replacement${(all ? count : 1) === 1 ? "" : "s"})` };
   },
@@ -422,7 +538,50 @@ export function globProblem(glob: string): string | null {
 }
 
 /** Every file under `root`, as paths relative to it. Bounded. */
-function walk(root: string): { files: string[]; cut: boolean } {
+// The listing half of Glob and Grep, as a node program inside the walls:
+// there the OS, not a check made before, decides which folders it may list.
+const WALK_CHILD = `
+const fs = process.getBuiltinModule("node:fs");
+const path = process.getBuiltinModule("node:path");
+const w = JSON.parse(fs.readFileSync(0, "utf8"));
+const skip = new Set(w.skip);
+const files = [];
+const stack = [""];
+let dirs = 0;
+let cut = false;
+outer: while (stack.length) {
+  if (++dirs > w.maxDirs) { cut = true; break; }
+  const rel = stack.pop();
+  let entries;
+  try { entries = fs.readdirSync(path.join(w.root, rel), { withFileTypes: true }); } catch { continue; }
+  for (const e of entries) {
+    const child = rel ? rel + "/" + e.name : e.name;
+    if (e.isDirectory()) { if (!skip.has(e.name)) stack.push(child); }
+    else if (e.isFile()) { files.push(child); if (files.length >= w.maxFiles) { cut = true; break outer; } }
+  }
+}
+process.stdout.write(JSON.stringify({ files, cut }));
+`;
+
+/** walk(), inside the walls when there are walls; what the rules deny is
+ *  left out again here, as a second net. */
+async function walkAny(root: string, ctx: ToolContext): Promise<{ files: string[]; cut: boolean } | ToolOutcome> {
+  if (!ctx.sandbox) return walk(root);
+  const r = await runInside(ctx, `exec ${shq(process.execPath)} -e ${shq(WALK_CHILD)}`, JSON.stringify({ root, skip: [...SKIP_DIRS], maxDirs: WALK_DIRS, maxFiles: WALK_FILES }));
+  if (r.code !== 0) return fail(`the folder could not be listed: ${r.err}`);
+  let got: { files: string[]; cut: boolean };
+  try {
+    got = JSON.parse(r.out.toString("utf8")) as { files: string[]; cut: boolean };
+  } catch {
+    return fail("the folder listing gave no readable answer");
+  }
+  return { files: got.files.filter((rel) => ctx.sandbox!.canRead(path.join(root, rel))), cut: got.cut };
+}
+
+function walk(root: string, ctx?: ToolContext): { files: string[]; cut: boolean } {
+  // Inside the walls, a folder or file the session may not read is neither
+  // entered nor listed: a search from the home folder skips ~/.ssh.
+  const hidden = ctx?.sandbox ? (rel: string) => !ctx.sandbox!.canRead(path.join(root, rel)) : () => false;
   const files: string[] = [];
   const stack = [""];
   let dirs = 0;
@@ -438,8 +597,9 @@ function walk(root: string): { files: string[]; cut: boolean } {
     for (const e of entries) {
       const child = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name)) stack.push(child);
+        if (!SKIP_DIRS.has(e.name) && !hidden(child)) stack.push(child);
       } else if (e.isFile()) {
+        if (hidden(child)) continue;
         files.push(child);
         if (files.length >= WALK_FILES) return { files, cut: true };
       }
@@ -451,6 +611,8 @@ function walk(root: string): { files: string[]; cut: boolean } {
 function searchRoot(input: Record<string, unknown>, ctx: ToolContext): { root: string } | ToolOutcome {
   const given = str(input, "path");
   const root = given ? abs(ctx, given) : ctx.cwd;
+  const no = walled(ctx, root, false);
+  if (no) return no;
   if (!fs.existsSync(root)) return fail(`${root} does not exist`);
   return { root: fs.realpathSync(root) };
 }
@@ -486,13 +648,20 @@ const glob: EngineTool = {
     const rest = segs.slice(fixed.length).join("/");
     if (fixed.length) {
       const deeper = path.join(where.root, ...fixed);
+      // The deny first, the same answer whether or not the path is there.
+      const denied = walled(ctx, deeper, false);
+      if (denied) return denied;
       if (!fs.existsSync(deeper)) return { text: `No files match ${pattern}` };
       where.root = fs.realpathSync(deeper);
+      const no = walled(ctx, where.root, false);
+      if (no) return no;
     }
     const re = { test: globMatcher(rest) };
     // A pattern with no folder in it matches at any depth, as people expect of `*.md`.
     const anyDepth = !pattern.includes("/");
-    const { files, cut } = walk(where.root);
+    const listed = await walkAny(where.root, ctx);
+    if ("text" in listed) return listed;
+    const { files, cut } = listed;
     const hits = files
       .filter((f) => re.test(anyDepth ? path.posix.basename(f) : f))
       .map((f) => {
@@ -521,11 +690,19 @@ const fs = process.getBuiltinModule("node:fs");
 const re = new RegExp(w.pattern, w.flags);
 const out = [];
 let total = 0;
+const seen = {};
 for (const full of w.files) {
   let buf;
   try {
-    if (fs.statSync(full).size > w.maxBytes) continue;
-    buf = fs.readFileSync(full);
+    const fd = fs.openSync(full, "r");
+    try {
+      const st = fs.fstatSync(fd, { bigint: true });
+      if (Number(st.size) > w.maxBytes) continue;
+      seen[full] = { id: st.dev + ":" + st.ino, n: 0 };
+      buf = fs.readFileSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     continue;
   }
@@ -540,15 +717,16 @@ for (const full of w.files) {
     }
   }
   if (!inFile) continue;
+  seen[full].n = w.mode === "content" ? inFile : 1;
   total += w.mode === "content" ? inFile : 1;
   if (w.mode === "files_with_matches" && out.length < w.limit) out.push(full);
   if (w.mode === "count" && out.length < w.limit) out.push(full + ":" + inFile);
 }
-parentPort.postMessage({ out, total });
+parentPort.postMessage({ out, total, seen });
 `;
 
 type MatchJob = { pattern: string; flags: string; files: string[]; mode: string; limit: number; maxBytes: number };
-type MatchResult = { out: string[]; total: number } | { timedOut: true } | { stopped: true } | { error: string };
+type MatchResult = { out: string[]; total: number; seen?: Record<string, { id: string; n: number }> } | { timedOut: true } | { stopped: true } | { error: string };
 
 /** Run MATCH_WORKER over `job.files`; end it at `ms` or when `signal` fires. */
 export function matchInWorker(job: MatchJob, signal: AbortSignal, ms: number): Promise<MatchResult> {
@@ -567,10 +745,30 @@ export function matchInWorker(job: MatchJob, signal: AbortSignal, ms: number): P
     const onAbort = () => finish({ stopped: true });
     const timer = setTimeout(() => finish({ timedOut: true }), ms);
     signal.addEventListener("abort", onAbort, { once: true });
-    worker.once("message", (m: { out: string[]; total: number }) => finish(m));
+    worker.once("message", (m: { out: string[]; total: number; seen?: Record<string, { id: string; n: number }> }) => finish(m));
     worker.once("error", (err: unknown) => finish({ error: err instanceof Error ? err.message : String(err) }));
     worker.once("exit", () => finish({ error: "the search ended without an answer" }));
   });
+}
+
+/** MATCH_WORKER as a node program inside the walls: the job on stdin, the
+ *  answer on stdout. The OS, not this process, decides what it may read. */
+const MATCH_CHILD = MATCH_WORKER.replace(
+  `const { parentPort, workerData: w } = process.getBuiltinModule("node:worker_threads");`,
+  `const w = JSON.parse(process.getBuiltinModule("node:fs").readFileSync(0, "utf8"));\nconst parentPort = { postMessage: (m) => process.stdout.write(JSON.stringify(m)) };`,
+);
+
+async function matchInside(job: MatchJob, ctx: ToolContext, ms: number): Promise<MatchResult> {
+  if (ctx.signal.aborted) return { stopped: true };
+  const r = await runInside(ctx, `exec ${shq(process.execPath)} -e ${shq(MATCH_CHILD)}`, JSON.stringify(job), ms);
+  if (r.err === "stopped") return { stopped: true };
+  if (r.code === null && /ran past/.test(r.err)) return { timedOut: true };
+  if (r.code !== 0) return { error: r.err || "the search ended without an answer" };
+  try {
+    return JSON.parse(r.out.toString("utf8")) as MatchResult;
+  } catch {
+    return { error: "the search gave no readable answer" };
+  }
 }
 
 const grep: EngineTool = {
@@ -611,7 +809,9 @@ const grep: EngineTool = {
     const filterRe = filter ? { test: globMatcher(filter.replace(/^\.\//, "")) } : null;
     const filterAnyDepth = filter ? !filter.includes("/") : false;
     const single = fs.statSync(where.root).isFile();
-    const { files, cut } = single ? { files: [""], cut: false } : walk(where.root);
+    const listed = single ? { files: [""], cut: false } : await walkAny(where.root, ctx);
+    if ("text" in listed) return listed;
+    const { files, cut } = listed;
     const chosen: string[] = [];
     for (const rel of files.sort()) {
       const full = single ? where.root : path.join(where.root, rel);
@@ -620,16 +820,33 @@ const grep: EngineTool = {
       if (filterRe && !filterRe.test(single || filterAnyDepth ? path.basename(full) : rel)) continue;
       chosen.push(full);
     }
-    const found = await matchInWorker(
-      { pattern, flags: re.flags, files: chosen, mode, limit, maxBytes: SEARCH_FILE_BYTES },
-      ctx.signal,
-      GREP_MS,
-    );
+    const job = { pattern, flags: re.flags, files: chosen, mode, limit, maxBytes: SEARCH_FILE_BYTES };
+    const found = ctx.sandbox ? await matchInside(job, ctx, GREP_MS) : await matchInWorker(job, ctx.signal, GREP_MS);
     if ("stopped" in found) return fail("the search was stopped");
     if ("timedOut" in found)
       return fail(`the search ran past ${GREP_MS / 1000} s and was ended: the pattern is too costly for this text. Use a simpler pattern or a narrower path or glob.`);
     if ("error" in found) return fail(`the search failed: ${found.error}`);
-    const { out, total } = found;
+    let { out, total } = found;
+    // Inside the walls the search ran there, so the OS held its reads; as a
+    // second net, a file now at a path the rules deny (or swapped since it
+    // was read) is left out of the answer, its count too.
+    if (ctx.sandbox && found.seen) {
+      const bad = new Set<string>();
+      for (const [full, { id }] of Object.entries(found.seen)) {
+        try {
+          const real = fs.realpathSync.native(full);
+          const st = fs.statSync(real, { bigint: true });
+          if (`${st.dev}:${st.ino}` !== id || !ctx.sandbox.canRead(real)) bad.add(full);
+        } catch {
+          bad.add(full);
+        }
+      }
+      if (bad.size) {
+        // Neither its lines nor its count: the total is over accepted files.
+        out = out.filter((line) => ![...bad].some((b) => line === b || line.startsWith(`${b}:`)));
+        total = Object.entries(found.seen).reduce((sum, [full, f]) => sum + (bad.has(full) ? 0 : f.n), 0);
+      }
+    }
     if (!out.length) return { text: `No matches for ${pattern}${cut ? ` (search stopped at ${WALK_FILES} files)` : ""}` };
     const more = total > out.length ? `\n\n[${total - out.length} more not shown — narrow the search or raise head_limit]` : "";
     return { text: capped(out.join("\n")) + more };
@@ -652,17 +869,32 @@ const bash: EngineTool = {
     required: ["command"],
   },
   readOnly: false,
-  run(input, ctx) {
+  async run(input, ctx) {
     const command = str(input, "command");
-    if (!command) return Promise.resolve(fail("Bash needs command"));
+    if (!command) return fail("Bash needs command");
     const ms = Math.max(1000, Math.min(BASH_MAX_MS, Number.isInteger(input.timeout) ? (input.timeout as number) : BASH_DEFAULT_MS));
+    // Inside the walls on a person's machine: the line that runs is the
+    // sandbox's wrapping of it. One that cannot be wrapped does not run.
+    let line = command;
+    let env: Record<string, string | undefined> = ctx.env;
+    if (ctx.sandbox) {
+      try {
+        // The launcher starts with the walls' own few variables; the
+        // command's environment is set again inside.
+        ({ line, env } = await ctx.sandbox.launch(command, ctx.env));
+      } catch (err) {
+        return fail(`the command was not run: the sandbox could not wrap it (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
     return new Promise<ToolOutcome>((resolve) => {
       if (ctx.signal.aborted) return resolve(fail("the step was stopped before the command ran"));
       // Its own process group, so a stop or a timeout ends what it started
       // too — a test runner's children, a server it left in the background.
-      const child = spawn("bash", ["-c", command], {
+      // Inside the walls the walls are put up by a fixed program, from an
+      // environment no command could have shaped.
+      const child = spawn(ctx.sandbox ? LAUNCHER : "bash", ["-c", line], {
         cwd: ctx.cwd,
-        env: ctx.env as NodeJS.ProcessEnv,
+        env: env as NodeJS.ProcessEnv,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });

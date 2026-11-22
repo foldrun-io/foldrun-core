@@ -99,7 +99,15 @@ export interface McpConnection {
   close(): Promise<void>;
 }
 
-function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string): { client: Transport; server?: Transport } {
+import { LAUNCHER, killTree } from "./local-sandbox.ts";
+import type { SandboxWalls } from "./engine-common.ts";
+
+/** A program and its arguments as one shell line, each word quoted. */
+export function shellLine(command: string, args: string[]): string {
+  return [command, ...args].map((w) => `'${w.replaceAll("'", `'\\''`)}'`).join(" ");
+}
+
+function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string, wrapped?: string): { client: Transport; server?: Transport } {
   if (s.type === "sdk") {
     const [client, server] = InMemoryTransport.createLinkedPair();
     return { client, server };
@@ -112,6 +120,15 @@ function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: 
     // process where the step has none: names a program needs, no secrets.
     const base: Record<string, string> = {};
     for (const [k, v] of Object.entries(env)) if (typeof v === "string") base[k] = v;
+    // Inside the walls (a person's machine), the server starts as the
+    // sandbox's wrapping of its command line, so it and what it starts
+    // stay inside them.
+    // Its variables, the spec's too, ride inside (launch); `env` here is
+    // the launcher's own few, so none of them touches the program that
+    // puts the walls up.
+    if (wrapped !== undefined) {
+      return { client: new StdioClientTransport({ command: LAUNCHER, args: ["-c", wrapped], env: base, cwd, stderr: "ignore" }) };
+    }
     return { client: new StdioClientTransport({ command: s.command!, args: s.args ?? [], env: { ...base, ...(s.env ?? {}) }, cwd, stderr: "ignore" }) };
   }
   const url = new URL(s.url!);
@@ -191,7 +208,7 @@ function bounded<T>(work: Promise<T>, ms: number, signal: AbortSignal, what: str
  *  read, as the SDK read it); `toolEnv` is what a tool's process starts
  *  from — the loop's shellEnv, which a caller keeps apart from the model's
  *  credentials. */
-export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal }): Promise<McpConnection> {
+export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
   const open: { client: Client; transport: Transport; server?: Transport }[] = [];
   const close = async () => {
     await Promise.all(open.map(async (o) => {
@@ -210,9 +227,40 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
   const envTimeout = Number(ctx.env.MCP_TOOL_TIMEOUT);
   try {
     for (const [name, s] of Object.entries(servers)) {
-      const t = transportFor(s, ctx.toolEnv, ctx.cwd);
+      let wrapped: { line: string; env: Record<string, string>; token?: string } | undefined;
+      if (ctx.sandbox && s.type === "stdio") {
+        // The server's environment (the step's, then what the spec names)
+        // is set again inside; the launcher starts with the walls' own.
+        wrapped = await ctx.sandbox.launch(shellLine(s.command!, s.args ?? []), { ...ctx.toolEnv, ...(s.env ?? {}) });
+        if (!wrapped?.line) throw new Error(`MCP server ${name}: the sandbox gave no command line`);
+        // A long-lived server inside the walls must be stoppable when they
+        // change: without a token and a way to check it, it does not start.
+        if (!wrapped.token || typeof ctx.sandbox.fresh !== "function" || typeof ctx.sandbox.onChange !== "function") throw new Error(`MCP server ${name}: this sandbox cannot tell a long-lived server when its rules change, so it is not started`);
+      } else if (ctx.sandbox && (s.type === "http" || s.type === "sse")) {
+        // This process would make that connection itself, past the walls'
+        // proxy and its address checks: not offered inside the walls.
+        throw new Error(`MCP server ${name}: a server over ${s.type === "sse" ? "SSE" : "HTTP"} is not available inside the local sandbox — run this in the cloud, or use a stdio server`);
+      }
+      const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd);
       const client = new Client({ name: "foldrun-engine", version: "1.0.0" });
       open.push({ client, transport: t.client, server: t.server });
+      const sandboxToken = wrapped?.token;
+      // Any launch that finds the protections changed stops this server at
+      // once, not only its own next call.
+      if (sandboxToken !== undefined && ctx.sandbox?.onChange) {
+        const transport = t.client as { pid?: number | null };
+        const stop = ctx.sandbox.onChange(async (now) => {
+          if (now === sandboxToken) return;
+          stop();
+          // Ended, with all it started, before the launch that saw the
+          // change goes ahead.
+          // The tree is read and ended while the server still holds it:
+          // closed first, its children would be orphaned out of reach.
+          const pid = transport.pid ?? null;
+          if (pid) killTree(pid);
+          await client.close().catch(() => undefined);
+        });
+      }
       let listed: { name: string; description?: string; inputSchema?: Json; annotations?: { readOnlyHint?: boolean } }[];
       if (ctx.signal.aborted) throw new Error(`the MCP server ${name} did not start: connect: stopped`);
       try {
@@ -267,6 +315,15 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
           // Run beside other reads only when the server says it changes nothing.
           readOnly: tool.annotations?.readOnlyHint === true,
           run: async (input, toolCtx) => {
+            // A server inside the walls holds the write rules it started
+            // under: once git's protections have changed it is stopped, and
+            // the call refused, rather than run with the old ones.
+            if (sandboxToken !== undefined && ctx.sandbox?.fresh && !ctx.sandbox.fresh(sandboxToken)) {
+              const pid = (t.client as { pid?: number | null }).pid ?? null;
+              if (pid) killTree(pid);
+              await client.close().catch(() => undefined);
+              return { text: `the MCP server ${name} was stopped: the files this session may not write changed after it started (a git hooks path or repository). It starts again on the next step.`, isError: true };
+            }
             const result = await client.callTool({ name: tool.name, arguments: input }, undefined, { signal: toolCtx.signal, timeout, maxTotalTimeout: timeout });
             return outcomeOf(result as Json);
           },

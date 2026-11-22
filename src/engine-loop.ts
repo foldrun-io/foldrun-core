@@ -274,7 +274,11 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       .filter((t): t is string => typeof t === "string" && t.trim() !== "")
       .map((t) => ({ type: "text", text: t.slice(0, 20_000) }));
   };
-  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set() };
+  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set(), sandbox: o.localSandbox };
+  // Inside the walls, what a command left running (a server in the
+  // background) holds the rules it started under: when a later launch finds
+  // them changed, it is ended before that launch goes ahead.
+  const unwatch = o.localSandbox?.onChange?.(() => killGroups(ctx));
   // An earlier conversation comes first (foldrun code's local turns carry
   // theirs, 19 Nov 2026); the prompt is always the newest user turn.
   if (o.history.length % 2 !== 0) throw new Error("history must end with the model's turn, so the prompt is the next user turn");
@@ -302,7 +306,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   let mcp: McpConnection | null = null;
   try {
   if (Object.keys(o.mcpServers).length) {
-    mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal });
+    mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal, sandbox: o.localSandbox });
     for (const t of mcp.tools) {
       if (byName.has(t.name)) throw new Error(`the MCP tool ${t.name} has the name of a tool the step already has`);
       byName.set(t.name, t);
@@ -572,6 +576,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     // away — nothing a command started outlives the step, and no MCP server
     // it started either.
     killGroups(ctx);
+    unwatch?.();
     await mcp?.close();
   }
 }

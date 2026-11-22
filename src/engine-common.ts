@@ -44,12 +44,30 @@ export type HookFn = (input: Json, toolUseId?: string, extra?: { signal: AbortSi
 export type CanUseTool = (name: string, input: Json, extra: { signal: AbortSignal; toolUseID: string }) =>
   Promise<{ behavior: "allow"; updatedInput?: Json } | { behavior: "deny"; message: string }>;
 
+/** What the loop needs of a local sandbox — LocalSandbox has it. */
+export interface SandboxWalls {
+  /** How to run `command` inside, with `env` as its environment: LAUNCHER
+   *  -c line, started with exactly the env given back. */
+  launch(command: string, env: Record<string, string | undefined>): Promise<{ line: string; env: Record<string, string>; token?: string }>;
+  /** Whether a long-lived process launched with `token` still runs under
+   *  the walls as they are now (false: stop it). */
+  fresh?(token: string): boolean;
+  /** Call `listener` with the new token whenever a launch finds the
+   *  protections changed; returns how to stop listening. */
+  onChange?(listener: (token: string) => void | Promise<void>): () => void;
+  canRead(file: string): boolean;
+  canWrite(file: string): boolean;
+}
+
 export interface LoopOptions {
   cwd: string;
   env: Record<string, string | undefined>;
   /** What the tools (Bash) get; `env` when not given. foldrun code passes
    *  the person's own environment here, so the model key stays with the loop. */
   shellEnv: Record<string, string | undefined>;
+  /** The walls on a person's own machine (local-sandbox.ts): every command
+   *  runs through `wrap`, the file tools ask canRead / canWrite. */
+  localSandbox: SandboxWalls | null;
   model: string;
   systemPrompt: string;
   tools: EngineTool[];
@@ -110,8 +128,17 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     throw new Error(`the ${engine} engine does not run sub-agents yet — run this agent on the default engine.`);
   }
   const sandbox = options.sandbox as { enabled?: boolean } | undefined;
+  const walls = options.localSandbox as Partial<SandboxWalls> | undefined;
+  const localSandbox =
+    walls && typeof walls.launch === "function" && typeof walls.canRead === "function" && typeof walls.canWrite === "function"
+      ? (walls as SandboxWalls)
+      : null;
+  if (walls && !localSandbox) throw new Error("localSandbox: needs launch, canRead and canWrite");
+  // Inside the walls the tools' environment is said outright: falling back
+  // to `env` would hand every command the model's key.
+  if (localSandbox && !(options.shellEnv && typeof options.shellEnv === "object")) throw new Error("localSandbox: give shellEnv, the environment commands run with");
   // Never read from `env`: that is where a tenant's secrets live.
-  if (names.includes("Bash") && sandbox?.enabled !== false && options.engineHostShell !== true) {
+  if (names.includes("Bash") && !localSandbox && sandbox?.enabled !== false && options.engineHostShell !== true) {
     throw new Error(`the ${engine} engine has no OS sandbox for the shell on this host — run the step in a container.`);
   }
   const model = String(options.model ?? "");
@@ -132,6 +159,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     cwd: String(options.cwd ?? process.cwd()),
     env,
     shellEnv: options.shellEnv && typeof options.shellEnv === "object" ? (options.shellEnv as Record<string, string | undefined>) : env,
+    localSandbox,
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
     tools: [...names.map((n) => ENGINE_TOOLS[n]), ...extra],
