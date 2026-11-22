@@ -191,7 +191,8 @@ test("the launcher's PATH holds no folder a command may write, and no relative e
   const proj = tmpProject();
   try {
     const got = trustedPath([path.join(proj, "node_modules/.bin"), "/usr/bin", ".", "", "bin", "/bin", path.join(proj, "bin")].join(path.delimiter), [proj]);
-    assert.deepEqual(got.split(path.delimiter), [realish("/usr/bin"), realish("/bin")]);
+    // Each by where it really is (on a merged-/usr Linux /bin is /usr/bin).
+    assert.deepEqual(got.split(path.delimiter), [...new Set([realish("/usr/bin"), realish("/bin")])]);
     // A link in the project to a system folder is kept as where it points.
     fs.symlinkSync("/usr/bin", path.join(proj, "sysbin"));
     assert.equal(trustedPath(path.join(proj, "sysbin"), [proj]), realish("/usr/bin"));
