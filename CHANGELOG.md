@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.9.0] — 2026-11-22
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `buildRequest` from `@foldrun/core/engine-loop`
+
+- feat(engine): compaction on foldrun's own loop, after Pi (FOL-213) ([9b35a19](https://github.com/foldrun-io/foldrun-core/commit/9b35a19))
+- feat(engine): MCP servers on foldrun's own loop (FOL-213) ([9f0d03d](https://github.com/foldrun-io/foldrun-core/commit/9f0d03d))
+
 ## [24.8.1] — 2026-11-21
 
 - fix(engine): what the Pi trial found, held on foldrun's own loop (FOL-213) ([81436bf](https://github.com/foldrun-io/foldrun-core/commit/81436bf))
