@@ -85,5 +85,10 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "@anthropic-ai/sandbox-runtime": {
+      "zod": "$zod"
+    }
   }
 }
