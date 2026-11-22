@@ -38,6 +38,7 @@ import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
 import { connectMcp, type McpConnection } from "./engine-mcp.ts";
+import { SUMMARIZATION_SYSTEM_PROMPT, compacted, cutPoints, estimateTokens, fileLists, findCut, isContextOverflow, previousSummary, summaryRequest } from "./engine-compact.ts";
 import { DEFAULT_MAX_TOKENS, readOptions, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
@@ -88,8 +89,9 @@ export function endOf(stopReason: string | null, calls: number): { subtype: stri
   }
 }
 
-export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[]): Json {
-  const mark = { cache_control: { type: "ephemeral" } };
+export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
+  // A one-off request (a summary) writes nothing to the cache.
+  const mark = cache ? { cache_control: { type: "ephemeral" } } : {};
   const tools = o.tools.map((t, i) => ({
     name: t.name,
     description: t.description,
@@ -104,7 +106,7 @@ export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "to
   const asked = Number(o.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS);
   return {
     model: o.model,
-    max_tokens: Number.isFinite(asked) && asked > 0 ? asked : DEFAULT_MAX_TOKENS,
+    max_tokens: Math.min(maxTokens ?? Infinity, Number.isFinite(asked) && asked > 0 ? asked : DEFAULT_MAX_TOKENS),
     ...(o.systemPrompt ? { system: [{ type: "text", text: o.systemPrompt, ...mark }] } : {}),
     ...(tools.length ? { tools } : {}),
     messages: sent,
@@ -138,7 +140,7 @@ async function openStream(o: LoopOptions, body: Json, signal: AbortSignal): Prom
       const text = (await res.text().catch(() => "")).slice(0, 500);
       lastError = `the model endpoint answered ${res.status}: ${text}`;
       const retryable = res.status === 408 || res.status === 409 || res.status === 429 || res.status >= 500;
-      if (!retryable) throw new Error(lastError);
+      if (!retryable) throw Object.assign(new Error(lastError), { status: res.status });
       const after = Number(res.headers.get("retry-after"));
       if (attempt < MODEL_TRIES) await sleep(Math.min(RETRY_AFTER_CAP_MS, Number.isFinite(after) && after > 0 ? after * 1000 : 1000 * 2 ** (attempt - 1)), signal);
     } else if (attempt < MODEL_TRIES) {
@@ -191,9 +193,12 @@ interface Turn {
 }
 
 /** One model call: yields the raw stream events, returns the whole turn. */
-async function* modelTurn(o: LoopOptions, messages: { role: string; content: Block[] }[], signal: AbortSignal): AsyncGenerator<Json, Turn> {
-  const res = await openStream(o, buildRequest(o, messages), signal);
+async function* modelTurn(o: LoopOptions, messages: { role: string; content: Block[] }[], signal: AbortSignal, cache = true, maxTokens?: number, track?: { turn?: Turn }): AsyncGenerator<Json, Turn> {
+  const res = await openStream(o, buildRequest(o, messages, cache, maxTokens), signal);
   const turn: Turn = { id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set() };
+  // A caller that must count what a stream that breaks part-way had
+  // already reported (a summary request) reads it here.
+  if (track) track.turn = turn;
   const partialJson = new Map<number, string>();
   const open = new Set<number>();
   let stopped = false;
@@ -298,10 +303,116 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
 
   yield { type: "system", subtype: "init", session_id: sessionId, cwd: o.cwd, model: o.model, tools: o.tools.map((t) => t.name), mcp_servers: mcp?.servers ?? [], engine: "foldrun" };
 
+  // ---- Compaction (engine-compact.ts). What the context holds is the last
+  // turn's own count (everything it was sent, and its reply) plus an
+  // estimate of what has been added since; before any turn, an estimate of
+  // it all.
+  let measured: { tokens: number; at: number } | null = null;
+  const filesRead = new Set<string>();
+  const filesChanged = new Set<string>();
+  let autoCompaction = o.compaction !== false;
+  const contextNow = (): number => {
+    if (measured) return measured.tokens + messages.slice(measured.at).reduce((n, m) => n + estimateTokens(m), 0);
+    const fixed = Math.ceil((o.systemPrompt.length + JSON.stringify(o.tools.map((t) => [t.name, t.description, t.input_schema])).length) / 4);
+    return fixed + messages.reduce((n, m) => n + estimateTokens(m), 0);
+  };
+  /** Summarise the older part and go on from the summary and the newest
+   *  part. False, with the reason, when there is nothing to cut or the
+   *  summary did not come back whole. */
+  // `asked`: a summary was asked for (and paid for) and did not come back.
+  async function* compactNow(trigger: "auto" | "overflow", before: number): AsyncGenerator<Json, { ok: boolean; asked?: boolean; why?: string }> {
+    if (o.compaction === false) return { ok: false, why: "compaction is off" };
+    const room = o.compaction.contextWindow - o.compaction.reserveTokens;
+    // The kept part leaves room for the summary (a few thousand tokens).
+    // After an overflow the real window is smaller than assumed: the kept
+    // part is held to the keep budget itself.
+    let cut = findCut(messages, o.compaction.keepRecentTokens, trigger === "overflow" ? o.compaction.keepRecentTokens : Math.max(0, room - 4_096));
+    if (cut < 1) return { ok: false, why: "there was nothing older to summarise" };
+    // A summary of a few words makes no room and is not worth paying for:
+    // a later cut is tried (the newest message is always kept).
+    const older = (c: number) => messages.slice(0, c).reduce((n, m) => n + estimateTokens(m), 0);
+    for (const later of cutPoints(messages)) if (later > cut && older(cut) < 1_024) cut = later;
+    if (older(cut) < 1_024) return { ok: false, why: "there was too little older to summarise" };
+    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false };
+    // The request itself must fit: the conversation's text is held to the
+    // window less the reply's reserve and the prompts, newest part kept.
+    const request = [{ role: "user", content: [{ type: "text", text: summaryRequest(messages.slice(0, cut), previousSummary(messages), Math.max(4_000, (room - 3_000) * 4)) }] }];
+    let reply: Turn;
+    const track: { turn?: Turn } = {};
+    try {
+      // Its reply is held to the window's reserve: input and output must fit.
+      const stream = modelTurn(ask, request, signal, false, o.compaction.reserveTokens, track);
+      for (;;) {
+        const step = await stream.next();
+        if (step.done) { reply = step.value; break; }
+      }
+    } catch (err) {
+      // What the endpoint had counted before the stream broke was paid for.
+      const spent = track.turn?.usage;
+      if (spent && Object.values(spent).some((n) => n > 0)) {
+        for (const k of Object.keys(total) as (keyof Usage)[]) total[k] += spent[k];
+        yield { type: "system", subtype: "compact_failed", session_id: sessionId, error: `the summary request failed: ${(err as Error).message}`, model: track.turn!.model, usage: { ...spent } };
+      }
+      if (signal.aborted) throw err;
+      return { ok: false, asked: true, why: `the summary request failed: ${(err as Error).message}` };
+    }
+    // Paid for like any turn: in the total, and reported with what it
+    // came to so the step's cost and budget count it (step-exec).
+    for (const k of Object.keys(total) as (keyof Usage)[]) total[k] += reply.usage[k];
+    const summary = reply.content.filter((b) => b.type === "text").map((b) => String(b.text ?? "")).join("\n").trim();
+    if (reply.stopReason !== "end_turn" || reply.content.some((b) => b.type === "tool_use") || !summary) {
+      const why = `the summary did not come back whole (stop reason ${reply.stopReason ?? "none"})`;
+      yield { type: "system", subtype: "compact_failed", session_id: sessionId, error: why, model: reply.model, usage: { ...reply.usage } };
+      return { ok: false, asked: true, why };
+    }
+    const next = compacted(summary + fileLists(filesRead, filesChanged), messages.slice(cut));
+    messages.splice(0, messages.length, ...next);
+    measured = null;
+    yield {
+      type: "system",
+      subtype: "compact_boundary",
+      session_id: sessionId,
+      compact_metadata: { trigger, pre_tokens: before, post_tokens: contextNow(), summarized_messages: cut },
+      model: reply.model,
+      usage: { ...reply.usage },
+      // The conversation as it now stands, so a caller that keeps one
+      // (foldrun code) goes on from it rather than the whole history.
+      conversation: messages.map((m) => ({ role: m.role, content: [...m.content] })),
+    };
+    return { ok: true };
+  }
+
+  // Set when a request was refused as too long and compacted: the same
+  // request is asked again once, not compacted again and again.
+  let overflowed = false;
   for (;;) {
     if (o.maxTurns !== null && turns >= o.maxTurns) {
       yield result("error_max_turns", null);
       return;
+    }
+    // Not on the retry after an overflow (that request is asked again as
+    // compacted), and not while the model's own turn is being continued
+    // (pause_turn): the conversation must end on a user turn to be cut.
+    if (autoCompaction && !overflowed && o.compaction !== false && messages.at(-1)?.role === "user") {
+      const now = contextNow();
+      if (now > o.compaction.contextWindow - o.compaction.reserveTokens) {
+        let done: { ok: boolean; asked?: boolean; why?: string };
+        try {
+          done = yield* compactNow("auto", now);
+        } catch (err) {
+          if (interrupted() || signal.aborted) return;
+          throw err;
+        }
+        if (interrupted() || signal.aborted) return;
+        // A summary asked for and not given is not asked for again before
+        // every turn after: the request goes as it is, and the endpoint says
+        // if it is too long. Nothing to cut yet costs nothing: looked at
+        // again next turn.
+        if (!done.ok && done.asked) autoCompaction = false;
+        // A summary that could not bring the context under the line will
+        // not by summarising again before every turn.
+        if (done.ok && contextNow() > o.compaction.contextWindow - o.compaction.reserveTokens) autoCompaction = false;
+      }
     }
     let turn: Turn;
     try {
@@ -318,9 +429,19 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       // An interrupt we were asked for ends the loop quietly: the caller
       // knows why and reports it. Anything else is the step's failure.
       if (interrupted() || signal.aborted) return;
+      // The endpoint said the prompt does not fit (a model with a smaller
+      // window than assumed): compact and ask again — once per request.
+      if (!overflowed && o.compaction !== false && messages.at(-1)?.role === "user" && isContextOverflow((err as { status?: number }).status, (err as Error).message)) {
+        overflowed = true;
+        const done = yield* compactNow("overflow", contextNow());
+        if (interrupted() || signal.aborted) return;
+        if (!done.ok) throw new Error(`${(err as Error).message} — and the conversation could not be compacted: ${done.why}`);
+        continue;
+      }
       throw err;
     }
     turns++;
+    overflowed = false;
     for (const k of Object.keys(total) as (keyof Usage)[]) total[k] += turn.usage[k];
     const text = turn.content.filter((b) => b.type === "text").map((b) => String(b.text ?? "")).join("\n").trim();
     if (text) lastText = text;
@@ -330,7 +451,13 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       parent_tool_use_id: null,
       session_id: sessionId,
     };
-    messages.push({ role: "assistant", content: turn.content });
+    // A paused turn's continuation is the same turn: joined to it, so the
+    // conversation still alternates (what foldrun code keeps, and a cut).
+    const prev = messages[messages.length - 1];
+    if (prev?.role === "assistant") prev.content = [...prev.content, ...turn.content];
+    else messages.push({ role: "assistant", content: turn.content });
+    // The turn's own count: all it was sent, and its reply.
+    measured = { tokens: turn.usage.input_tokens + turn.usage.cache_read_input_tokens + turn.usage.cache_creation_input_tokens + turn.usage.output_tokens, at: messages.length };
     if (interrupted()) return;
 
     const calls = turn.content.filter((b) => b.type === "tool_use");
@@ -366,6 +493,12 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
         outcome = await p.tool.run(p.decision.input, ctx);
       } catch (err) {
         outcome = { text: `${p.tool.name} failed: ${(err as Error).message}`, isError: true };
+      }
+      // For a summary's file lists: what ran, as the hooks left it, and did not fail.
+      const file = p.decision.input.file_path;
+      if (!outcome.isError && typeof file === "string") {
+        if (p.tool.name === "Read") filesRead.add(file);
+        else if (p.tool.name === "Write" || p.tool.name === "Edit") filesChanged.add(file);
       }
       const context = await after(o, p.tool.name, String(p.block.id), p.decision.input, outcome, sessionId, signal);
       return { outcome, context };

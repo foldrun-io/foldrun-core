@@ -18,6 +18,9 @@ import { buildRequest, foldrunQuery } from "../src/engine-loop.ts";
 import type { QueryFn } from "../src/step-exec.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
 import { checkMcpSpecs, outcomeOf, connectMcp } from "../src/engine-mcp.ts";
+import { SUMMARY_PREFIX, findCut, compacted, previousSummary, summaryRequest, serializeConversation, isContextOverflow } from "../src/engine-compact.ts";
+import { readOptions } from "../src/engine-common.ts";
+import { readHistory } from "../src/engine-common.ts";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
@@ -28,6 +31,8 @@ interface Scripted {
   cut?: boolean;
   stop?: string;
   status?: number;
+  /** The error message a `status` answer carries. */
+  error?: string;
   /** Leave the blocks open: the closing events come, the block stops do not. */
   unclosed?: boolean;
   /** End after message_delta, with no message_stop. */
@@ -50,7 +55,7 @@ async function fakeModel(turns: Scripted[]) {
       n++;
       if (turn.status) {
         res.writeHead(turn.status, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "busy" } }));
+        return res.end(JSON.stringify({ type: "error", error: { type: turn.status === 400 ? "invalid_request_error" : "overloaded_error", message: turn.error ?? "busy" } }));
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
       const send = (ev: Record<string, unknown>) => res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
@@ -1104,4 +1109,265 @@ test("an unattended script's stop ends what it started too (its process group)",
   let alive = true;
   for (let i = 0; i < 50 && alive; i++) { try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 50)); } catch { alive = false; } }
   assert.equal(alive, false, "the script's own child ended with it");
+});
+
+// ---- Compaction (FOL-213): Pi's approach on foldrun's loop.
+
+// Read returns ~30k characters of it (~7.7k tokens by the estimate); three
+// reads make a conversation with an older part worth summarising.
+const BIG = `${"x".repeat(99)}\n`.repeat(1000);
+// `last` is what the third turn counts as sent: past the line only then.
+const threeReads = (last = 10): Scripted[] => [1, 2, 3].map((n) => ({ content: [use(`t${n}`, "Read", { file_path: "big.txt" })], usage: { input_tokens: n === 3 ? last : 10 } }));
+
+both("near the context window, the older part is summarised before the next turn and the step goes on", async ({ step }) => {
+  const r = await step([
+    ...threeReads(50_000),
+    { content: [say("## Goal\nRead the big file.\n\n## Next Steps\n1. Answer.")] },
+    { content: [say("It is all x.")] },
+  ], { files: { "big.txt": BIG }, contextWindow: 60_000 } as never);
+  assert.equal(r.error, null);
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  // Three reads, the third counting 50k sent (past 60k less the 15k
+  // reserve); the summary; the answer.
+  const summaryAt = r.requests.findIndex((q) => /context summarization assistant/.test(JSON.stringify(q.body.system ?? "")));
+  assert.ok(summaryAt > 0, "a summary was asked for");
+  assert.equal(r.requests.length, summaryAt + 2);
+  // The summary request: its own system prompt, no tools, nothing cached.
+  const ask = r.requests[summaryAt].body;
+  assert.match(ask.system[0].text, /context summarization assistant/);
+  assert.equal(ask.tools, undefined);
+  assert.equal(JSON.stringify(ask).includes("cache_control"), false);
+  assert.match(ask.messages[0].content[0].text, /<conversation>\n\[User\]: do the task/);
+  // The next turn opens on the summary, then the kept part: a call and its result together.
+  const next = r.requests[summaryAt + 1].body.messages;
+  assert.equal(next[0].role, "user");
+  assert.ok(next[0].content[0].text.startsWith(SUMMARY_PREFIX));
+  assert.match(next[0].content[0].text, /## Goal\nRead the big file\.[\s\S]*<read-files>\nbig\.txt\n<\/read-files>/);
+  assert.equal(next[1].role, "assistant");
+  assert.equal(next[1].content[0].type, "tool_use");
+  assert.equal(next[2].content[0].type, "tool_result");
+  assert.ok(next.length < 7, "older turns were summarised away");
+  assert.ok(r.events.some((e) => e.type === "info" && /compacted the conversation from about/.test(e.text)));
+  // The summary was paid for, like every request.
+  assert.equal(r.out!.usage!.inputTokens, 10 + 10 + 50_000 + (r.requests.length - 3) * 10);
+});
+
+both("when the endpoint says the prompt is too long, the conversation is compacted and the turn asked again — once", async ({ step }) => {
+  const tooLong = { content: [], status: 400, error: "prompt is too long: 250000 tokens > 200000 maximum" };
+  const r = await step([
+    ...threeReads(),
+    tooLong,
+    { content: [say("## Goal\nsummary")] },
+    { content: [say("done")] },
+  ], { files: { "big.txt": BIG } });
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  assert.equal(r.requests.length, 6);
+  assert.ok(r.events.some((e) => e.type === "info" && /the model said it was too long/.test(e.text)));
+
+  // Too long again after compacting: the step fails, it does not loop.
+  const again = await step([
+    ...threeReads(),
+    tooLong,
+    { content: [say("## Goal\nsummary")] },
+    tooLong,
+    { content: [say("never")] },
+  ], { files: { "big.txt": BIG } });
+  assert.equal(again.requests.length, 6);
+  assert.notEqual(again.out?.status, "completed");
+});
+
+both("a summary that does not come back whole is not used: the turn goes on as it was, and compaction is not tried again", async ({ step }) => {
+  const r = await step([
+    ...threeReads(50_000),
+    { content: [say("## Goal\nhalf")], stop: "max_tokens" },
+    { content: [use("t4", "Read", { file_path: "big.txt" })], usage: { input_tokens: 30_000 } },
+    { content: [say("done")] },
+  ], { files: { "big.txt": BIG }, contextWindow: 60_000 } as never);
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  const summaries = r.requests.filter((q) => /context summarization assistant/.test(JSON.stringify(q.body.system ?? "")));
+  assert.equal(summaries.length, 1, "one summary request, not one before every turn");
+  assert.equal(r.requests.at(-1)!.body.messages[0].content[0].text, "do the task");
+});
+
+both("compaction: false leaves the conversation whole", async ({ step }) => {
+  const r = await step([
+    { content: [use("t1", "Read", { file_path: "big.txt" })], usage: { input_tokens: 30_000 } },
+    { content: [say("done")] },
+  ], { files: { "big.txt": BIG }, contextWindow: 60_000, compaction: false } as never);
+  assert.equal(r.requests.length, 2);
+});
+
+both("a history past the window is compacted before the first request, and what the loop hands back is a valid history", async ({ loop }) => {
+  const history = [];
+  for (let i = 0; i < 4; i++) history.push({ role: "user", content: [{ type: "text", text: `question ${i} ${BIG}` }] }, { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] });
+  const model = await fakeModel([{ content: [say("## Goal\nfour questions")] }, { content: [say("five")] }]);
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "question 4", options: { cwd: "/tmp", model: "m", tools: [], history, contextWindow: 60_000, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } })) seen.push(m);
+    const boundary = seen.find((m) => m.type === "system" && m.subtype === "compact_boundary");
+    assert.ok(boundary, "a compact_boundary message");
+    assert.equal(boundary.compact_metadata.trigger, "auto");
+    assert.ok(boundary.compact_metadata.pre_tokens > boundary.compact_metadata.post_tokens);
+    const conv = boundary.conversation;
+    assert.equal(conv.at(-1).content.at(-1).text, "question 4");
+    // As history for the next turn: alternating, ending on... the prompt, so with the reply it is whole.
+    readHistory([...conv, { role: "assistant", content: [{ type: "text", text: "five" }] }]);
+    assert.equal(seen.find((m) => m.type === "result").subtype, "success");
+    assert.ok(model.requests[1].body.messages.length < history.length + 1);
+  } finally {
+    await model.close();
+  }
+});
+
+test("compaction pieces: the cut never separates a call from its result; a second compaction updates the first summary", () => {
+  const big = (t: string) => ({ type: "text", text: t + "y".repeat(40_000) });
+  const msgs = [
+    { role: "user", content: [big("q")] },
+    { role: "assistant", content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: "f" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "z".repeat(90_000) }] },
+  ];
+  // The last message alone is past the budget: keep it with its call.
+  assert.equal(findCut(msgs, 20_000), 1);
+  const after = compacted("first summary", msgs.slice(1));
+  assert.equal(after[0].role, "user");
+  assert.equal(after[1].role, "assistant");
+  assert.equal(previousSummary(after), "first summary");
+  const asked = summaryRequest(after.slice(0, 1), previousSummary(after));
+  assert.match(asked, /<previous-summary>\nfirst summary\n<\/previous-summary>/);
+  assert.match(asked, /PRESERVE all existing information/);
+  assert.equal(asked.includes(SUMMARY_PREFIX), false, "the earlier summary is not summarised as conversation");
+  // Joined to a user turn rather than doubling it.
+  const joined = compacted("s", [{ role: "user", content: [{ type: "text", text: "next" }] }]);
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0].content[1].text, "next");
+});
+
+// ---- Compaction, Codex round 1 (each verified, then fixed).
+
+both("compaction round 1: only a 400/413 that says the prompt is too long compacts; the summary is in the step's cost", async ({ step }) => {
+  assert.equal(isContextOverflow(403, "context window metadata access denied"), false);
+  assert.equal(isContextOverflow(400, "prompt is too long: 250000 tokens > 200000 maximum"), true);
+  assert.equal(isContextOverflow(413, "request exceeds the model's context window"), true);
+  const denied = await step([...threeReads(), { content: [], status: 403, error: "context window metadata access denied" }, { content: [say("never")] }], { files: { "big.txt": BIG } });
+  assert.equal(denied.requests.length, 4, "no summary, no retry");
+  assert.notEqual(denied.out?.status, "completed");
+
+  // Priced at $1 a million in and out (TokenPrice is per token): the summary's tokens are in the cost.
+  const price = { input: 1e-6, output: 1e-6 };
+  const r = await step([
+    ...threeReads(50_000),
+    { content: [say("## Goal\nx")], usage: { input_tokens: 5_000, output_tokens: 1_000 } },
+    { content: [say("done")] },
+  ], { files: { "big.txt": BIG }, contextWindow: 60_000, price } as never);
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  assert.equal(r.requests.length, 5);
+  const expected = ((10 + 5) * 2 + (50_000 + 5) + (5_000 + 1_000) + (10 + 5)) / 1e6;
+  assert.ok(Math.abs(r.out!.costUsd! - expected) < 1e-9, `${r.out!.costUsd} vs ${expected}`);
+});
+
+both("compaction round 1: no compaction while the model's paused turn is being continued", async ({ step }) => {
+  const r = await step([
+    ...threeReads(50_000),
+    { content: [say("thinking it over")], stop: "pause_turn", usage: { input_tokens: 51_000 } },
+    { content: [say("## Goal\nx")] },
+    { content: [say("done")] },
+  ], { files: { "big.txt": BIG }, contextWindow: 60_000 } as never);
+  assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+  // The paused turn is continued before anything is summarised; every
+  // compacted conversation handed out ends on a user turn.
+  const sys = r.requests.map((q) => /context summarization assistant/.test(JSON.stringify(q.body.system ?? "")));
+  const pausedAt = 3;
+  assert.equal(sys[pausedAt + 1], false, "the request after the pause continues it");
+});
+
+test("compaction round 1: cuts, windows and the summary request", () => {
+  const u = (t: string) => ({ role: "user", content: [{ type: "text", text: t }] });
+  const a = (t: string) => ({ role: "assistant", content: [{ type: "text", text: t }] });
+  // A large first message with a short tail: it is what gets summarised.
+  assert.equal(findCut([u("y".repeat(200_000)), a("ok"), u("continue")], 20_000), 1);
+  // A kept part too large to leave room moves to a later cut.
+  assert.equal(findCut([u("hello"), a("z".repeat(164_000)), u("continue")], 20_000), 1);
+  assert.equal(findCut([u("hello"), a("z".repeat(164_000)), u("continue")], 20_000, 19_000), 2);
+  // The summary request is held to a size, newest part kept.
+  const asked = summaryRequest([u("first " + "y".repeat(50_000)), a("z".repeat(50_000)), u("newest words")], null, 30_000);
+  assert.ok(asked.length < 32_000, `${asked.length}`);
+  assert.match(asked, /left out[\s\S]*newest words/);
+  // A user's own text that looks like a summary is still the user's.
+  assert.match(serializeConversation([u("Hello"), a("hi"), u(SUMMARY_PREFIX + "literal example")]), /literal example/);
+  // A 32k window is honoured, with the reserve and keep scaled to it.
+  const small = readOptions({ model: "m", contextWindow: 32_768 }).compaction;
+  assert.deepEqual(small, { contextWindow: 32_768, reserveTokens: 8_192, keepRecentTokens: 9_830 });
+  assert.equal((readOptions({ model: "m", contextWindow: 1_000 }).compaction as { contextWindow: number }).contextWindow, 200_000);
+});
+
+both("compaction round 1: after an overflow, the compacted request is asked again at once — not summarised again first", async ({ loop }) => {
+  const history = [{ role: "user", content: [{ type: "text", text: "hello" }] }, { role: "assistant", content: [{ type: "text", text: "z".repeat(164_000) }] }];
+  const tooLong = { content: [], status: 400, error: "prompt is too long" };
+  const model = await fakeModel([tooLong, { content: [say("## Goal\nx")] }, { content: [say("done")] }]);
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "continue", options: { cwd: "/tmp", model: "m", tools: [], history, contextWindow: 400_000, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } })) seen.push(m);
+    const kinds = model.requests.map((q) => /context summarization assistant/.test(JSON.stringify(q.body.system ?? "")) ? "summary" : "normal");
+    assert.deepEqual(kinds, ["normal", "summary", "normal"]);
+    assert.equal(seen.find((m) => m.type === "result").subtype, "success");
+  } finally {
+    await model.close();
+  }
+});
+
+// ---- Compaction, Codex round 2 (each verified, then fixed).
+
+test("compaction round 2: overflow words; message and summary budgets; cut search stays linear", () => {
+  assert.equal(isContextOverflow(400, "unknown parameter: context_window"), false);
+  // Anthropic's own words when input and the reply's limit do not fit: compacting helps.
+  assert.equal(isContextOverflow(400, "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000"), true);
+  assert.equal(isContextOverflow(400, "This model's maximum context length is 32768 tokens"), true);
+  const u = (...t: string[]) => ({ role: "user", content: t.map((x) => ({ type: "text", text: x })) });
+  const a = (t: string) => ({ role: "assistant", content: [{ type: "text", text: t }] });
+  assert.ok(serializeConversation([u("a".repeat(20_000), "b".repeat(20_000))]).length < 20_100, "the cap is the message's, across its blocks");
+  const asked = summaryRequest([u("c".repeat(20_000))], "p".repeat(40_000), 12_576);
+  assert.ok(asked.length < 12_576 + 3_000, `${asked.length}`);
+  const many = Array.from({ length: 8_000 }, (_, i) => (i % 2 ? a("ok") : u("hi")));
+  const t0 = Date.now();
+  findCut(many, 20_000, 1);
+  assert.ok(Date.now() - t0 < 200, `${Date.now() - t0} ms`);
+  // A summary's reply is held to the reserve.
+  assert.equal(buildRequest({ model: "m", systemPrompt: "", tools: [], env: {} }, [u("x")], false, 2_048).max_tokens, 2_048);
+});
+
+both("compaction round 2: a paused turn's continuation joins it — the conversation alternates, through a compaction too", async ({ loop }) => {
+  const model = await fakeModel([
+    { content: [say("part one")], stop: "pause_turn" },
+    { content: [say(" part two")] },
+  ]);
+  try {
+    const seen: any[] = [];
+    for await (const m of loop({ prompt: "go", options: { cwd: "/tmp", model: "m", tools: [], env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } })) seen.push(m);
+    // The continuation was asked with the paused turn as the last message, once.
+    assert.equal(model.requests[1].body.messages.length, 2);
+    assert.equal(model.requests[1].body.messages[1].role, "assistant");
+    assert.equal(seen.find((m) => m.type === "result").subtype, "success");
+  } finally {
+    await model.close();
+  }
+});
+
+both("compaction round 2: a summary stream that breaks part-way is still counted; overflow moves the cut to summarise enough", async ({ loop }) => {
+  // The summary request answers a message_start counting 5,000 and then the stream ends.
+  const history = [{ role: "user", content: [{ type: "text", text: "hi" }] }, { role: "assistant", content: [{ type: "text", text: "x".repeat(12_000) }] }];
+  const model = await fakeModel([
+    { content: [], status: 400, error: "prompt is too long" },
+    { content: [say("partial summary")], cut: true, usage: { input_tokens: 5_000 } },
+  ]);
+  try {
+    const seen: any[] = [];
+    await assert.rejects(async () => {
+      for await (const m of loop({ prompt: "continue", options: { cwd: "/tmp", model: "m", tools: [], history, contextWindow: 32_768, env: { ANTHROPIC_BASE_URL: model.url, ANTHROPIC_API_KEY: "k" } } })) seen.push(m);
+    }, /could not be compacted: the summary request failed/);
+    assert.equal(model.requests.length, 2, "the cut moved to summarise the long reply, so a summary was asked for");
+    const failed = seen.find((m) => m.type === "system" && m.subtype === "compact_failed");
+    assert.equal(failed?.usage?.input_tokens, 5_000);
+  } finally {
+    await model.close();
+  }
 });

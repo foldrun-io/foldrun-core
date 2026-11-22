@@ -114,6 +114,12 @@ export interface ExecOptions {
    *  Only for a person's own machine, on their word; a run container is
    *  its own boundary and needs nothing said (`sandboxBash: false`). */
   engineHostShell?: boolean;
+  /** foldrun's loop: the model's context window in tokens, when it is not
+   *  the 200k the loop assumes — compaction starts 16k short of it. */
+  contextWindow?: number;
+  /** foldrun's loop: false turns compaction off (a step that must see its
+   *  whole conversation, or fail). */
+  compaction?: false;
   agentDir: string;
   workspaceRoot: string;
   libraryRoot: string;
@@ -503,6 +509,10 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       // path (the CLI on someone's laptop, and the host executor) keeps it,
       // because there a shell escape reaches the real machine.
       ...(opts.engineHostShell ? { engineHostShell: true } : {}),
+      // foldrun's loop only: the model's context window for compaction, or
+      // compaction off (engine-compact.ts). The SDK compacts by its own rules.
+      ...(opts.contextWindow ? { contextWindow: opts.contextWindow } : {}),
+      ...(opts.compaction === false ? { compaction: false } : {}),
       sandbox: {
         enabled: opts.sandboxBash !== false,
         // Must stay false. Auto-allowing bash because it's sandboxed skips
@@ -819,6 +829,32 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     // The session is up: the first model call is timed from here, not from
     // before the SDK and its MCP servers started.
     if (message.type === "system" && (message as { subtype?: string }).subtype === "init") loopStartedAt = Date.now();
+    if (message.type === "system" && (message as { subtype?: string }).subtype === "compact_boundary") {
+      // The conversation neared the model's context window; its older part
+      // was summarised (foldrun's loop: engine-compact.ts; the SDK: its own).
+      const meta = (message as { compact_metadata?: { trigger?: string; pre_tokens?: number; post_tokens?: number } }).compact_metadata;
+      emit("info", `compacted the conversation${meta?.pre_tokens ? ` from about ${meta.pre_tokens.toLocaleString("en")} tokens` : ""}${meta?.post_tokens ? ` to about ${meta.post_tokens.toLocaleString("en")}` : ""}${meta?.trigger === "overflow" ? " (the model said it was too long)" : ""}`);
+    }
+    if (message.type === "system" && (message as { subtype?: string }).subtype === "compact_failed") {
+      emit("info", `could not compact the conversation: ${String((message as { error?: unknown }).error ?? "no reason given")}`);
+    }
+    // A summary request (foldrun's loop) is a model call like any turn: its
+    // tokens are in the step's cost, and its budget, whether or not the
+    // summary was used.
+    const compactUsage = message.type === "system" && /^compact_(boundary|failed)$/.test(String((message as { subtype?: string }).subtype))
+      ? (message as { usage?: Record<string, number | undefined> }).usage
+      : undefined;
+    if (compactUsage) {
+      turns.set(`compaction-${anonymousTurns++}`, { u: compactUsage, price: priceOf(message) });
+      if (ceiling) {
+        spentUsd = turnsTotal();
+        if (spentUsd >= ceiling) {
+          emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
+          status = "failed";
+          break;
+        }
+      }
+    }
     if (message.type === "stream_event") {
       const ev = (message as { event?: { type?: string; message?: { id?: string }; usage?: { output_tokens?: number }; delta?: { stop_reason?: string | null } } }).event;
       const agentKey = (message as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? "";

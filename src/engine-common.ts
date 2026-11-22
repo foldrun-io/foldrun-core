@@ -7,6 +7,7 @@
 
 import { ENGINE_TOOLS, type EngineTool, type ToolOutcome } from "./engine-tools.ts";
 import { checkMcpSpecs, grantedServer, type McpSpec } from "./engine-mcp.ts";
+import { COMPACTION_DEFAULTS, MIN_CONTEXT_WINDOW, compactionFor } from "./engine-compact.ts";
 
 export const DEFAULT_MAX_TOKENS = 16_000;
 
@@ -66,6 +67,9 @@ export interface LoopOptions {
   /** MCP tools the step was granted by name, with the server each names:
    *  each must be offered by that server once connected, or the step is refused. */
   mcpGranted: { name: string; server: string }[];
+  /** Compaction (engine-compact.ts): the model's context window, and false
+   *  when the caller turned it off (`compaction: false`). */
+  compaction: { contextWindow: number; reserveTokens: number; keepRecentTokens: number } | false;
 }
 
 export function hookFns(hooks: unknown, event: string): HookFn[] {
@@ -136,6 +140,9 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     history: readHistory(options.history),
     mcpServers,
     mcpGranted: mcpTools,
+    compaction: options.compaction === false ? false : compactionFor(
+      typeof options.contextWindow === "number" && Number.isFinite(options.contextWindow) && options.contextWindow >= MIN_CONTEXT_WINDOW ? Math.floor(options.contextWindow) : COMPACTION_DEFAULTS.contextWindow,
+    ),
   };
 }
 
