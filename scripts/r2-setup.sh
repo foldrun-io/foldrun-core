@@ -26,7 +26,11 @@ CF_ENV="${CF_ENV:-$HOME/owner/owner-website/.env.local}"
 OUT="$(cd "$(dirname "$0")/.." && pwd)/infra/production/production.env"
 
 if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] && [ -f "$CF_ENV" ]; then
-  set -a; . "$CF_ENV"; set +a
+  # The env file is named at run time.
+  set -a
+  # shellcheck source=/dev/null
+  . "$CF_ENV"
+  set +a
 fi
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID, or point CF_ENV at a file holding it}"
 

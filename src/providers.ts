@@ -778,16 +778,16 @@ export function readBrowseSession(raw: unknown, key: "vendor_session" | "session
     return { error: `${at} is a block — what the vendor's own session is asked for: proxy, captcha, stealth, region, timeout, keep, record, block, options.` };
   }
   const out: BrowseSession = {};
-  const bool = (k: string, v: unknown) => (v === true || v === "true" ? true : v === false || v === "false" ? false : undefined);
+  const bool = (v: unknown) => (v === true || v === "true" ? true : v === false || v === "false" ? false : undefined);
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (!(SESSION_KEYS as readonly string[]).includes(k)) return { error: `${at}.${k}: is not a session setting. They are ${SESSION_KEYS.join(", ")}.` };
     if (v === undefined || v === null || v === "") continue;
     if (k === "captcha" || k === "stealth" || k === "record") {
-      const b = bool(k, v);
+      const b = bool(v);
       if (b === undefined) return { error: `${at}.${k} is true or false, not ${JSON.stringify(v)}.` };
       out[k] = b;
     } else if (k === "proxy") {
-      const b = bool(k, v);
+      const b = bool(v);
       if (b !== undefined) { out.proxy = b; continue; }
       if (typeof v !== "object" || Array.isArray(v)) return { error: `${at}.proxy is true, false, or a block: country, state, city — or own: a secret holding your proxy's URL.` };
       const p: { country?: string; state?: string; city?: string; own?: string } = {};

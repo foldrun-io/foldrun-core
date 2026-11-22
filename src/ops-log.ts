@@ -198,7 +198,7 @@ export function opsBoundaryInstalled(): boolean {
   return boundary() !== null;
 }
 
-function readable(level: OpsLevel, line: Record<string, unknown>, detail?: string): string {
+function readable(line: Record<string, unknown>, detail?: string): string {
   const parts = Object.entries(line)
     .filter(([k]) => k !== "ops" && k !== "level" && k !== "event")
     .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(",") : String(v)}`);
@@ -213,7 +213,7 @@ function emit(level: OpsLevel, line: Record<string, unknown>, detail?: string): 
   }
   // No boundary: a laptop, a test, `next dev` — the reader is the person
   // whose content it is, so the error's own words come along.
-  const text = readable(level, line, detail);
+  const text = readable(line, detail);
   if (level === "info") console.log(text);
   else if (level === "warn") console.warn(text);
   else console.error(text);
