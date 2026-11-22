@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.10.0] — 2026-11-22
+
+### New in the public API
+
+- `ENGINE_FEATURES` from `@foldrun/core/engine-loop`
+
+- feat(engine): steering — messages a person sends while the turn runs (FOL-213) ([6d6a2fd](https://github.com/foldrun-io/foldrun-core/commit/6d6a2fd))
+
 ## [24.9.1] — 2026-11-22
 
 - chore(lint): drop unused parameters; shellcheck the env file source ([58ffc0f](https://github.com/foldrun-io/foldrun-core/commit/58ffc0f))
