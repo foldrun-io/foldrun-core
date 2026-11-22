@@ -152,3 +152,23 @@ test("the plan groups agents by the environment they share and skips agents that
     },
   );
 });
+
+test("the plan carries the most disk any agent sharing the runtime may write", () => {
+  withWorkspace(
+    {
+      // Sorted by name: the small one opens the entry, the heavy one must raise it.
+      "agents/a-small/agent.md": agent("read", "size: small\nruntime:\n  packages: [manim]\n"),
+      "agents/z-heavy/agent.md": agent("read", "size: heavy\nruntime:\n  packages: [manim]\n"),
+      "agents/own/agent.md": agent("read", "size: small\nresources: { disk: 30Gi }\nruntime:\n  npm: [sharp]\n"),
+      "agents/guarded/agent.md": agent("read", "size: small\nguardrail: { resources: { disk: 12Gi } }\nruntime:\n  npm: [jimp]\n"),
+      "agents/plain/agent.md": agent("read", "runtime:\n  packages: [requests]\n"),
+    },
+    () => {
+      const plan = workspaceRuntimePlan("acme", "desk");
+      assert.equal(plan.find((p) => p.spec.packages.includes("manim"))!.disk, "20Gi");
+      assert.equal(plan.find((p) => p.spec.npm.includes("sharp"))!.disk, "30Gi");
+      assert.equal(plan.find((p) => p.spec.npm.includes("jimp"))!.disk, "12Gi");
+      assert.equal(plan.find((p) => p.spec.packages.includes("requests"))!.disk, "8Gi");
+    },
+  );
+});

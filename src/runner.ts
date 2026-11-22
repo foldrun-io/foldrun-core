@@ -22,7 +22,7 @@ import { resolveAgentPath } from "./confine.ts";
 import { browserPodLine, podLossDecision, RERAN_ON_FULL } from "./browser-pod.ts";
 import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, classDisk, type StepTiming } from "./run-container.ts";
-import { readResources, hasOverride } from "./resources.ts";
+import { readResources, hasOverride, anyMemoryMi } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX } from "./model-credential.ts";
 import { parseJudge } from "./judge-verdict.ts";
@@ -567,20 +567,41 @@ export function agentRuntimeSpec(tenant: string, workspace: string, agentDir: st
   return mergeRuntimes(ownRuntime(front, agentDir, tenant), ...tools);
 }
 
-/** Every distinct runtime a workspace's agents need, with who needs it. */
+/** The node disk one agent's steps may write: its `size:` class's, or its
+ *  own `resources: disk` over it — the figure the runner gives its pod. */
+export function agentDisk(agentDir: string): string {
+  const file = path.join(agentDir, "agent.md");
+  let front: Record<string, unknown> = {};
+  try {
+    // The step's own parser: it lifts `guardrail: { resources: … }` to the
+    // top, so both spellings of a disk override count here as they do there.
+    if (fs.existsSync(file)) front = configMatter(fs.readFileSync(file, "utf8")).data as Record<string, unknown>;
+  } catch {
+    /* frontmatter that does not parse: the class default, as `check` reports it */
+  }
+  const size: "small" | "large" | "heavy" = front.size === "small" ? "small" : front.size === "heavy" ? "heavy" : "large";
+  return resolveResources(size, readResources(front.resources).value).disk ?? classDisk(size);
+}
+
+/** Every distinct runtime a workspace's agents need, with who needs it and
+ *  `disk`, the most node disk any of those agents' steps may write (a
+ *  runtime built for them has at least that much room to be built in). */
 export function workspaceRuntimePlan(
   tenant: string,
   workspace: string,
-): { fingerprint: string; spec: RuntimeSpec; agents: string[] }[] {
-  const byFp = new Map<string, { fingerprint: string; spec: RuntimeSpec; agents: string[] }>();
+): { fingerprint: string; spec: RuntimeSpec; agents: string[]; disk: string }[] {
+  const byFp = new Map<string, { fingerprint: string; spec: RuntimeSpec; agents: string[]; disk: string }>();
   const agentsRoot = path.join(workspaceDir(tenant, workspace), "agents");
   if (!fs.existsSync(agentsRoot)) return [];
   for (const name of fs.readdirSync(agentsRoot).sort()) {
-    const spec = agentRuntimeSpec(tenant, workspace, path.join(agentsRoot, name));
+    const dir = path.join(agentsRoot, name);
+    const spec = agentRuntimeSpec(tenant, workspace, dir);
     if (!spec) continue;
     const fp = fingerprint(spec);
-    const entry = byFp.get(fp) ?? { fingerprint: fp, spec, agents: [] };
+    const disk = agentDisk(dir);
+    const entry = byFp.get(fp) ?? { fingerprint: fp, spec, agents: [], disk };
     entry.agents.push(name);
+    if (anyMemoryMi(disk) > anyMemoryMi(entry.disk)) entry.disk = disk;
     byFp.set(fp, entry);
   }
   return [...byFp.values()];
