@@ -13,6 +13,22 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [24.13.0] — 2026-11-22
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `PlatformHooks` from `@foldrun/core`
+- `ScanOptions` from `@foldrun/core/scan`
+
+### New in the public API
+
+- `OWN_KEYS_OFF` from `@foldrun/core`
+- `ownKeyBlockers` from `@foldrun/core`
+
+- feat(models): own model keys can be switched off by the platform (ownModelKeys hook) — a provider: is refused at run, deploy and check (config/own-model-key), a stored key is never read ([37c5a02](https://github.com/foldrun-io/foldrun-core/commit/37c5a02))
+
 ## [24.12.0] — 2026-11-22
 
 ### New in the public API
