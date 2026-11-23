@@ -13,6 +13,21 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [26.0.0] — 2026-11-23
+
+### Breaking changes
+
+- `buildSubagentSpecs` from `@foldrun/core` — parameter 1 changed
+- `PlatformHooks` from `@foldrun/core` — modelSupply changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `agentContext` from `@foldrun/core`
+
+- feat(model): a step may name any model behind foldrun's proxy (provider/model) ([6b28e2b](https://github.com/foldrun-io/foldrun-core/commit/6b28e2b))
+
 ## [25.1.0] — 2026-11-23
 
 - feat(engine): believe x-should-retry; name the caller in User-Agent ([a5f12e4](https://github.com/foldrun-io/foldrun-core/commit/a5f12e4))
