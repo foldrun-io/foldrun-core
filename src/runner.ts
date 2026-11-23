@@ -28,7 +28,7 @@ import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvNa
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
-import { SUPPLY_TITLES, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
+import { SUPPLY_TITLES, namedSupplyModel, providerOfModel, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
 import type { StepSupply } from "./store.ts";
 import { archiveRunOutputs, noteRefused } from "./run-outputs.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
@@ -74,6 +74,7 @@ import {
   whenRowsPath,
   parseApis,
   resolveModel,
+  resolveTier,
   parseProvider,
   providerEnvFor,
   resolveEffort,
@@ -707,6 +708,9 @@ export function buildSubagentSpecs(o: {
   flowTimezone?: string | null;
   parentAllowed: string[];
   push: (type: "info" | "error", text: string) => void;
+  /** The provider of foldrun's models this step runs on, or null when it
+   *  runs on an own key: a sub-agent runs inside it, on its provider. */
+  parentProvider?: string | null;
 }): SubagentSpec[] {
   const out: SubagentSpec[] = [];
   const { found, missing } = gatherSubagents(o.workspaceRoot, o.names);
@@ -750,13 +754,30 @@ export function buildSubagentSpecs(o: {
         }, { remotesWithheld }),
         tools,
         disallowedTools: refNames(own.front.disallowedTools),
-        model: own.front.model ? resolveModel(own.front.model) : "inherit",
+        model: subagentModel(own.front.model, sub.name, o.parentProvider ?? null, o.push),
       });
     } catch (err) {
       o.push("error", `subagents: "${sub.name}" could not be read — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return out;
+}
+
+/** A shared-sandbox sub-agent's model: it runs inside its parent's step, on
+ *  the parent's provider. A model naming that provider is sent as the id
+ *  the provider knows; one naming another provider of foldrun's models
+ *  cannot run here — the parent's model, said so (`sandbox: own` gives it
+ *  its own). On an own key a name is sent as written, as before. */
+function subagentModel(value: unknown, name: string, parentProvider: string | null, push: (type: "info" | "error", text: string) => void): string {
+  if (!value) return "inherit";
+  // A bare Claude id is Anthropic's too here: under a parent moved to
+  // another provider it cannot run as written (Codex review, round 2).
+  const raw = String(value).trim();
+  const named = parentProvider ? (namedSupplyModel(raw) ?? (/^claude-/i.test(raw) ? { provider: "anthropic" as const, model: raw } : null)) : null;
+  if (!named) return resolveModel(value);
+  if (named.provider === parentProvider) return named.model;
+  push("info", `subagents: "${name}" names ${String(value).trim()}, another provider than this step runs on — inside this step it runs on this step's model; give it sandbox: own to run on its own`);
+  return "inherit";
 }
 
 /**
@@ -1001,6 +1022,9 @@ export function agentContext(
   /** Only what the agent is granted — no runtime prepared. For a sub-agent,
    *  whose tools are cut to its parent's and run in the parent's runtime. */
   grantsOnly = false,
+  /** The step's or flow's `model:` over the agent's own, when one is set:
+   *  a model that names another provider of foldrun's models runs on it. */
+  stepModel?: string | null,
 ) {
   // agentDir is <data>/<tenant>/projects/<workspace>/agents/<agent>, so the
   // workspace a secret should resolve against is two levels up.
@@ -1464,11 +1488,29 @@ export function agentContext(
   // for a provider runs on it here, between its written blocks (which still
   // win) and its stored key. Chosen but not to be had now — refused, and
   // the step fails with why (runStep); it never falls to the stored key.
-  const supply: SupplyAnswer = fileBlock
+  let supply: SupplyAnswer = fileBlock
     ? { kind: "none" }
     : writtenBlock
       ? { kind: "refused", reason: OWN_KEYS_OFF }
       : platform.modelSupply?.(tenant) ?? { kind: "none" };
+  // A model named outright on foldrun's models (23 Nov 2026, `/model`): a
+  // `deepseek/deepseek-chat` runs on DeepSeek whatever provider the account
+  // runs on by default, as the gateway routes the same name — one
+  // subscription, every model behind foldrun's proxy. The platform answers
+  // for that provider on the same terms; refused, the step fails with why.
+  // Tier words and bare Claude ids stay on the account's provider.
+  // Asked for the account's own provider too (the answer then carries the
+  // named model's output ceiling), and when the account's own provider is
+  // refused now (another may still be had) — never past a provider: block
+  // the account wrote (Codex review).
+  const named = supply.kind === "foldrun" || (supply.kind === "refused" && !writtenBlock) ? namedSupplyModel(stepModel ?? front.model) : null;
+  if (named && platform.modelSupply) {
+    supply = platform.modelSupply(tenant, { provider: named.provider, model: named.model });
+  } else if (named && supply.kind === "foldrun" && named.provider !== supply.provider) {
+    supply = { kind: "refused", reason: `${SUPPLY_TITLES[named.provider]}'s models are not offered here` };
+  }
+  /** The id the provider knows, sent in place of `provider/model`. */
+  const modelRoute = named && supply.kind === "foldrun" && supply.provider === named.provider ? named : null;
   const providerBlock =
     fileBlock ??
     (supply.kind === "foldrun"
@@ -1965,6 +2007,9 @@ export function agentContext(
     clockEnv,
     /** foldrun's models: what the platform said for this account. */
     supply,
+    /** A model named outright on foldrun's models: its provider and the id
+     *  that provider knows (`deepseek/deepseek-chat` → `deepseek-chat`). */
+    modelRoute,
     /** The zone, where it came from, and anything unreadable on the way —
      *  reported by the step, not here, so it lands in the run's trace. */
     clock,
@@ -2372,7 +2417,7 @@ async function runStepBody(
   const capture: "metadata" | "full" = workspaceFrontmatter(agentDir, tenant).capture === "metadata" ? "metadata" : "full";
   // `judge:` (AGENTS.md): the model and effort every `verify: judge:` here
   // grades with — field by field, the workspace's else the account's.
-  const { judgeModel, judgeEffort } = (() => {
+  let { judgeModel, judgeEffort } = (() => {
     const ws = parseJudge(readAgentsMd(workspaceRootOf(agentDir))?.data?.judge);
     const account = parseJudge(readAgentsMd(accountDir(tenant))?.data?.judge);
     const model = ws.model ?? account.model;
@@ -2544,9 +2589,23 @@ async function runStepBody(
       translator, fallbackTranslator,
       outward,
       supply,
-    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone);
+      modelRoute,
+    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone, false, step.model ?? modelOverride ?? null);
     disposeRuntime = runtime.dispose;
     canActOutward = outward;
+    // A step moved to another provider by its model (modelRoute): a judge
+    // pinned to a full id of another provider would go to this step's
+    // endpoint and fail as a FAIL verdict — it grades with the step's own
+    // model instead, said so (Codex review). A tier word follows the step.
+    if (modelRoute && judgeModel && !resolveTier(judgeModel)) {
+      const j = providerOfModel(judgeModel);
+      if (j && j.provider === modelRoute.provider) judgeModel = j.model;
+      else {
+        push("info", `judge: ${judgeModel} is not on ${SUPPLY_TITLES[modelRoute.provider]}, which this step runs on — verify: judge: grades with the step's model (${modelRoute.model})`);
+        // Named, not left unset: unset is the judge's own default (fast).
+        judgeModel = modelRoute.model;
+      }
+    }
     // Sent again on every turn; with turns and the tools' result sizes, what
     // a token report reads to say where a step's input went.
     step.systemPromptChars = systemPrompt.length;
@@ -2769,7 +2828,7 @@ async function runStepBody(
     // goes in the trace — "why did this run on haiku" should be answerable
     // from the run, not by opening three files.
     const modelSource = step.model ? "step" : modelOverride ? "flow" : "agent";
-    const model = resolveModel(step.model ?? modelOverride ?? front.model);
+    const model = modelRoute?.model ?? resolveModel(step.model ?? modelOverride ?? front.model);
     const rawEffort = step.effort ?? effortOverride ?? front.effort;
     const effortSource = step.effort ? "step" : effortOverride ? "flow" : "agent";
     let effort = resolveEffort(rawEffort);
@@ -2966,6 +3025,7 @@ async function runStepBody(
     const subagents = buildSubagentSpecs({
       names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, flowTimezone,
       parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], push,
+      parentProvider: supply.kind === "foldrun" ? supply.provider : null,
     });
     if (subagents.length) {
       // The delegation tool itself, granted only when there is someone to

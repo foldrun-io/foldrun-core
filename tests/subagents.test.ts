@@ -298,6 +298,35 @@ test("buildSubagentSpecs: resolved from agent.md, cut to the parent, with every 
   }
 });
 
+test("buildSubagentSpecs: a child naming a model of foldrun's models runs on the parent's provider — the bare id for the same one, the parent's model (said so) for another; an own key sends it as written", () => {
+  const ws = workspaceDir("default", `sub-route-${process.pid}`);
+  const agent = (name: string, front: string) => {
+    fs.mkdirSync(path.join(ws, "agents", name), { recursive: true });
+    fs.writeFileSync(path.join(ws, "agents", name, "agent.md"), `---\nname: ${name}\n${front}---\n\nYou work.\n`);
+  };
+  try {
+    agent("lead", "tools: [read]\nsubagents: [same, other, claude]\n");
+    agent("claude", "description: Pinned to Claude\ntools: [read]\nmodel: claude-opus-5-5\n");
+    agent("same", "description: Same provider\ntools: [read]\nmodel: deepseek/deepseek-chat\n");
+    agent("other", "description: Another provider\ntools: [read]\nmodel: kimi/kimi-k2\n");
+    const build = (parentProvider: string | null) => {
+      const lines: string[] = [];
+      const specs = buildSubagentSpecs({ names: ["same", "other", "claude"], self: "lead", workspaceRoot: ws, tenant: "default", parentAllowed: ["Read"], push: (type, text) => lines.push(`${type}: ${text}`), parentProvider });
+      return { model: (n: string) => specs.find((s) => s.name === n)!.model, lines };
+    };
+    const onDeepseek = build("deepseek");
+    assert.equal(onDeepseek.model("same"), "deepseek-chat");
+    assert.equal(onDeepseek.model("other"), "inherit");
+    assert.ok(onDeepseek.lines.some((l) => /"other" names kimi\/kimi-k2, another provider .* sandbox: own/.test(l)));
+    assert.equal(onDeepseek.model("claude"), "inherit", "a bare Claude id cannot run on DeepSeek");
+    assert.equal(build("anthropic").model("claude"), "claude-opus-5-5");
+    const ownKey = build(null);
+    assert.equal(ownKey.model("other"), "kimi/kimi-k2", "an own key: as written");
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("gatherSubagents reports names that are not agents", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gather-"));
   fs.mkdirSync(path.join(root, "agents", "a"), { recursive: true });

@@ -24,7 +24,7 @@ import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-contai
 type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[] };
 
 async function withAccount(
-  opts: { supply: SupplyAnswer; lease?: boolean; agentProvider?: string; ownKeys?: boolean },
+  opts: { supply: SupplyAnswer; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
   body: (c: Captured) => Promise<void>,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-supply-"));
@@ -43,13 +43,17 @@ async function withAccount(
     return { url: "http://egress.test/e/tok", commit: async () => {}, drainLog: async () => [], release: async () => {} } as unknown as EgressLease;
   };
   const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
-  registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: () => opts.supply, egress: { lease }, ownModelKeys: opts.ownKeys === undefined ? undefined : () => opts.ownKeys! });
+  registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: (_t, want) => {
+    if (!want) return opts.supply;
+    opts.asked?.push(want);
+    return opts.supplyFor?.(want) ?? { kind: "refused", reason: "not asked for in this test" };
+  }, egress: { lease }, ownModelKeys: opts.ownKeys === undefined ? undefined : () => opts.ownKeys! });
   try {
     const ws = path.join(root, "acme/workspaces/desk");
     fs.mkdirSync(path.join(ws, "agents/worker"), { recursive: true });
     fs.mkdirSync(path.join(ws, "runs"), { recursive: true });
-    fs.writeFileSync(path.join(ws, "AGENTS.md"), "---\nname: desk\n---\n");
-    fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), `---\nname: worker\ndescription: works\n${opts.agentProvider ?? ""}---\n\nWork.\n`);
+    fs.writeFileSync(path.join(ws, "AGENTS.md"), `---\nname: desk\n${opts.wsFront ?? ""}---\n`);
+    fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), `---\nname: worker\ndescription: works\n${opts.agentModel ? `model: ${opts.agentModel}\n` : ""}${opts.agentProvider ?? ""}---\n\nWork.\n`);
     await body(c);
   } finally {
     registerPlatform({ isolation: prevHooks.isolation, platformKeyAllowed: prevHooks.allowed, modelSupply: prevHooks.supply, egress: prevHooks.egress, ownModelKeys: prevHooks.own });
@@ -474,4 +478,93 @@ test("own keys off, outside a step (a judge, a grader): a written provider: is r
     // No foldrun's models and not the operator's account: refused, never on the stored key.
     assert.throws(() => accountModelEnv("acme", "desk", () => ({})), (e: unknown) => e instanceof ModelKeyError);
   });
+});
+
+const sentModel = (c: Captured) => (c.calls[0] as unknown as { input: { model: string } }).input.model;
+
+test("a model named outright runs on its own provider of foldrun's models (23 Nov 2026, /model): the grant and the id follow it", async () => {
+  const asked: unknown[] = [];
+  await withAccount(
+    {
+      supply: { kind: "foldrun", provider: "anthropic", tiers: {}, via: "login" },
+      agentModel: "deepseek/deepseek-chat",
+      asked,
+      supplyFor: (w) => (w.provider === "deepseek" ? { kind: "foldrun", provider: "deepseek", tiers: { default: "deepseek-chat" } } : { kind: "refused", reason: "no" }),
+    },
+    async (c) => {
+      const done = await run();
+      assert.equal(done.status, "completed", events(done.steps[0]));
+      assert.deepEqual(asked, [{ provider: "deepseek", model: "deepseek-chat" }]);
+      assert.equal(done.steps[0].supplyProvider, "deepseek");
+      assert.equal(sentModel(c), "deepseek-chat", "the id DeepSeek knows, not provider/model");
+      assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY.supply, { provider: "deepseek" }, "DeepSeek's key, not the Claude login");
+    },
+  );
+});
+
+test("a bare name with another provider's prefix routes too; a tier word and a bare Claude id stay on the account's provider", async () => {
+  for (const [model, provider, sent] of [["gpt-5", "openai", "gpt-5"], ["default", "anthropic", "sonnet"], ["claude-opus-5-5", "anthropic", "claude-opus-5-5"], ["anthropic/claude-opus-5-5", "anthropic", "claude-opus-5-5"]] as const) {
+    const asked: unknown[] = [];
+    await withAccount(
+      { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: model, asked, supplyFor: (w) => ({ kind: "foldrun", provider: w.provider as "openai", tiers: {} }) },
+      async (c) => {
+        const done = await run();
+        assert.equal(done.status, "completed", `${model}: ${events(done.steps[0])}`);
+        assert.equal(done.steps[0].supplyProvider, provider, model);
+        assert.equal(sentModel(c), sent, model);
+        assert.equal(asked.length, model.includes("/") || provider !== "anthropic" ? 1 : 0, `${model}: the platform is asked for a model named outright (its ceiling), never for a tier word or a bare Claude id`);
+      },
+    );
+  }
+});
+
+test("a named provider that cannot be had now fails the step with why — never quietly on the account's own provider", async () => {
+  await withAccount(
+    { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: "kimi/kimi-k2", supplyFor: () => ({ kind: "refused", reason: "moonshot is not available on this platform right now" }) },
+    async (c) => {
+      const done = await run();
+      assert.equal(done.status, "failed");
+      assert.equal(c.calls.length, 0, "no sandbox");
+      assert.match(events(done.steps[0]), /moonshot is not available/);
+    },
+  );
+});
+
+test("an account on its own key: a provider/model is sent as written, the platform never asked", async () => {
+  const asked: unknown[] = [];
+  await withAccount(
+    { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: "deepseek/deepseek-chat", asked, agentProvider: "provider:\n  name: anthropic\n  token: ${MINE}\n" },
+    async (c) => {
+      setSecret("acme", "MINE", "sk-ant-api03-written-in-the-block-22222");
+      const done = await run();
+      assert.equal(done.status, "completed", events(done.steps[0]));
+      assert.equal(asked.length, 0);
+      assert.equal(sentModel(c), "deepseek/deepseek-chat");
+    },
+  );
+});
+
+test("the account's own provider refused now: a step naming another, available one still runs on it", async () => {
+  await withAccount(
+    { supply: { kind: "refused", reason: "openai is not available on this platform right now" }, agentModel: "deepseek/deepseek-chat", supplyFor: () => ({ kind: "foldrun", provider: "deepseek", tiers: {} }) },
+    async (c) => {
+      const done = await run();
+      assert.equal(done.status, "completed", events(done.steps[0]));
+      assert.equal(sentModel(c), "deepseek-chat");
+    },
+  );
+});
+
+test("a judge pinned to another provider's id grades with the switched step's own model, said so; one on the same provider gets the bare id", async () => {
+  for (const [judge, want] of [["claude-opus-5-5", "deepseek-chat"], ["deepseek/deepseek-reasoner", "deepseek-reasoner"]] as const) {
+    await withAccount(
+      { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: "deepseek/deepseek-chat", wsFront: `judge:\n  model: ${judge}\n`, supplyFor: () => ({ kind: "foldrun", provider: "deepseek", tiers: {} }) },
+      async (c) => {
+        const done = await run();
+        assert.equal(done.status, "completed", events(done.steps[0]));
+        assert.equal((c.calls[0] as unknown as { input: { judgeModel?: string } }).input.judgeModel, want, judge);
+        if (judge === "claude-opus-5-5") assert.match(events(done.steps[0]), /judge: claude-opus-5-5 is not on DeepSeek, .* the step's model \(deepseek-chat\)/);
+      },
+    );
+  }
 });

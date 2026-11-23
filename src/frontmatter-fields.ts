@@ -76,7 +76,7 @@ const AGENT: FieldSpec[] = [
   { key: "name", type: "string", help: "kebab-case; the folder is the identity" },
   { key: "description", type: "string", help: "what it does and when — other agents and people read it" },
   { key: "owner", type: "string", help: "the person accountable for it — an email or a name; else the project's, else the account's" },
-  { key: "model", type: "string", help: "fast | default | max, an alias, or a full model id" },
+  { key: "model", type: "string", help: "fast | default | max, an alias, a full model id, or provider/model (any model behind foldrun's proxy)" },
   { key: "effort", type: "string", values: EFFORT_LEVELS, help: "how long it thinks" },
   { key: "max_output_tokens", type: ["number", "string"], help: "the most tokens one model reply may have, 1 to 1048576; on foldrun's models the price list's ceiling applies too" },
   { key: "size", type: "string", values: ["small", "large", "heavy"], help: "the sandbox it rents; anything else becomes large" },

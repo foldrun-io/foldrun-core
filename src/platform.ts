@@ -12,7 +12,7 @@
 // and calls registerPlatform() once at boot. A process that forgets to is a
 // local install — which is exactly the failure that is safe.
 
-import type { SupplyAnswer } from "./model-supply.ts";
+import type { SupplyAnswer, SupplyProviderName } from "./model-supply.ts";
 import type { FlowInfo, FlowStep, RunRecord } from "./store.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.ts";
 import type { EgressHooks } from "./egress.ts";
@@ -175,8 +175,14 @@ export interface PlatformHooks {
   /** foldrun's models (3 Nov 2026): whether this account chose to run on
    *  the platform's own key for a provider, and whether it can now. Asked
    *  only where no provider: block of the account's own says otherwise.
-   *  Absent: nobody can (a laptop, a self-hosted install). */
-  modelSupply?(tenant: string): SupplyAnswer;
+   *  Absent: nobody can (a laptop, a self-hosted install).
+   *
+   *  `want` (23 Nov 2026): a step whose `model:` names another provider of
+   *  foldrun's models (`deepseek/deepseek-chat`) — the answer for THAT
+   *  provider, on the same terms (the account's standing, the provider
+   *  offered, a Claude subscription's login for Anthropic). Asked only when
+   *  the account already runs on foldrun's models. */
+  modelSupply?(tenant: string, want?: { provider: SupplyProviderName; model?: string }): SupplyAnswer;
   /**
    * Does this isolation mode wall a step's network to the egress proxy and
    * DNS when its `network:` is restricted and enforced — and is browsing

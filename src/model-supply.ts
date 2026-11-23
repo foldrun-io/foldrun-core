@@ -233,6 +233,77 @@ export function isSupplyProvider(name: unknown): name is SupplyProviderName {
   return typeof name === "string" && Object.hasOwn(SUPPLY_PROVIDERS, name);
 }
 
+/** A provider name as a caller may write it in `provider/model`. One list
+ *  for the gateway (foldrun-platform gateway-door.ts) and a step's own
+ *  `model:` (runner.ts), so a name routes the same everywhere. */
+export const PROVIDER_ALIASES: Readonly<Record<string, SupplyProviderName>> = {
+  anthropic: "anthropic",
+  claude: "anthropic",
+  deepseek: "deepseek",
+  moonshot: "moonshot",
+  kimi: "moonshot",
+  openai: "openai",
+  gemini: "gemini",
+  google: "gemini",
+  zai: "zai",
+  "z-ai": "zai",
+  glm: "zai",
+  zhipu: "zai",
+  qwen: "qwen",
+  alibaba: "qwen",
+  minimax: "minimax",
+  mimo: "mimo",
+  xiaomi: "mimo",
+};
+
+/** A bare model name's provider by its prefix, or null when the name says
+ *  none (a Claude id, or one this list does not know). */
+function prefixProvider(model: string): SupplyProviderName | null {
+  const m = model.toLowerCase();
+  if (m.startsWith("deepseek-")) return "deepseek";
+  if (m.startsWith("kimi-") || m.startsWith("moonshot-")) return "moonshot";
+  if (m.startsWith("gpt-") || /^o\d/.test(m)) return "openai";
+  if (m.startsWith("gemini-")) return "gemini";
+  if (m.startsWith("glm-")) return "zai";
+  if (m.startsWith("qwen")) return "qwen";
+  if (m.startsWith("minimax-")) return "minimax";
+  if (m.startsWith("mimo-")) return "mimo";
+  return null;
+}
+
+/** The provider a model name names, and the name the provider knows:
+ *  `provider/model`, else a bare name's known prefix, else Anthropic. Null:
+ *  a `provider/` this list does not know. */
+export function providerOfModel(model: string): { provider: SupplyProviderName; model: string } | null {
+  const slash = model.indexOf("/");
+  if (slash > 0) {
+    const p = PROVIDER_ALIASES[model.slice(0, slash).toLowerCase()];
+    return p ? { provider: p, model: model.slice(slash + 1) } : null;
+  }
+  return { provider: prefixProvider(model) ?? "anthropic", model };
+}
+
+/**
+ * The provider a step's `model:` asks for by name, on foldrun's models
+ * (23 Nov 2026: `/model` picks any model behind foldrun's proxy, and a
+ * cloud step runs it as the gateway would). Only a name that says so: a
+ * `provider/model`, or a bare name with another provider's prefix
+ * (`deepseek-chat`, `gpt-5`). Null for a tier word (the account's provider
+ * serves it), a bare Claude id or an unknown name (sent as written, as
+ * before), and a `foo/bar` whose provider is unknown.
+ */
+export function namedSupplyModel(value: unknown): { provider: SupplyProviderName; model: string } | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw || !/^[A-Za-z0-9][\w.:/-]{0,199}$/.test(raw)) return null;
+  if (raw.includes("/")) {
+    const r = providerOfModel(raw);
+    return r && r.model ? r : null;
+  }
+  const p = prefixProvider(raw);
+  return p ? { provider: p, model: raw } : null;
+}
+
 /** The placeholder name a supply grant is filed under in a step's lease. */
 export const SUPPLY_KEY_NAME = "FOLDRUN_SUPPLY_KEY";
 
