@@ -13,6 +13,24 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.1.0] — 2026-11-23
+
+### New in the public API
+
+- `@foldrun/core/engine-mcp`
+- `grantedServer` from `@foldrun/core/engine-mcp`
+- `McpSpec` from `@foldrun/core/engine-mcp`
+- `ENGINE_MCP_FEATURES` from `@foldrun/core/engine-mcp`
+- `checkMcpSpecs` from `@foldrun/core/engine-mcp`
+- `McpConnection` from `@foldrun/core/engine-mcp`
+- `shellLine` from `@foldrun/core/engine-mcp`
+- `outcomeOf` from `@foldrun/core/engine-mcp`
+- `connectMcp` from `@foldrun/core/engine-mcp`
+- `treePids` from `@foldrun/core/local-sandbox`
+
+- feat(engine-mcp): public for a host that keeps servers for a session; killOnClose, maxTools, redirect: error, kill() ([7fccc5d](https://github.com/foldrun-io/foldrun-core/commit/7fccc5d))
+- fix(models): with own keys off, a no-plan account is told it needs a plan, not an API key ([1c57947](https://github.com/foldrun-io/foldrun-core/commit/1c57947))
+
 ## [27.0.0] — 2026-11-23
 
 ### Breaking changes
