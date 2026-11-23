@@ -8,10 +8,10 @@ import assert from "node:assert/strict";
 import { browseNetworkLine, browseVerdict, VENDOR_DOOR_HOSTS, vendorDoorFor } from "../src/browse-egress.ts";
 import { resolveNetwork } from "../src/network.ts";
 
-const on = { FOLDRUN_VENDOR_EGRESS: "1", FOLDRUN_VENDOR_EGRESS_URL: "https://vendor-egress.dev.foldrun.io:8443/", FOLDRUN_VENDOR_EGRESS_VENDORS: "steel, Browserless" };
+const on = { FOLDRUN_VENDOR_EGRESS: "1", FOLDRUN_VENDOR_EGRESS_URL: "https://vendor-egress.foldrun.dev:8443/", FOLDRUN_VENDOR_EGRESS_VENDORS: "steel, Browserless" };
 
 test("the door is on only where the install says so, for the vendors it lists", () => {
-  assert.deepEqual(vendorDoorFor("steel", on), { vendor: "steel", server: "https://vendor-egress.dev.foldrun.io:8443" });
+  assert.deepEqual(vendorDoorFor("steel", on), { vendor: "steel", server: "https://vendor-egress.foldrun.dev:8443" });
   assert.deepEqual(vendorDoorFor("browserless", on)?.vendor, "browserless");
   assert.equal(vendorDoorFor("browserbase", on), null, "not listed: not qualified, nothing changes");
   assert.equal(vendorDoorFor("steel", { ...on, FOLDRUN_VENDOR_EGRESS: "0" }), null, "the switch off");

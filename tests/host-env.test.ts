@@ -111,7 +111,7 @@ test("a verify: shell starts from the same base", () =>
   }));
 
 // A desk that reads its own run history wrote the host into its files, so the
-// same workspace would have called dev.foldrun.io after moving to production.
+// same workspace would have called the dev address after moving to production.
 test("a step learns its own API's address from the install, never from the desk", async () => {
   const { platformApiUrl, expandPlatformVars } = await import("../src/host-env.ts");
   const { parseApis } = await import("../src/store.ts");

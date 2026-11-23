@@ -202,8 +202,8 @@ test("bash may still read knowledge and write everywhere it should", () => {
 // the platform's own API (`…/runs/<id>`) was refused as a journal read.
 test("bash may call a URL whose path says runs/, but not reach the journal by file://", () => {
   for (const cmd of [
-    'curl -sS -H "authorization: Bearer $KEY" https://dev.foldrun.io/v1/workspaces/gbp/runs/run-1',
-    "curl 'https://dev.foldrun.io/v1/workspaces/gbp/runs?limit=200' | jq .",
+    'curl -sS -H "authorization: Bearer $KEY" https://api.foldrun.dev/v1/workspaces/gbp/runs/run-1',
+    "curl 'https://api.foldrun.dev/v1/workspaces/gbp/runs?limit=200' | jq .",
     "wget -qO- http://127.0.0.1:18080/v1/workspaces/x/runs/",
   ]) {
     assert.equal(checkBash(cmd).ok, true, cmd);
