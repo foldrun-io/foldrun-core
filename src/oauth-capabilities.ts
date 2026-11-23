@@ -8,7 +8,7 @@
 //
 // The roles:
 //   client   an agent reaches Google, Slack, a bank — foldrun holds the token
-//   server   an AI app signs in to /api/mcp — foldrun issues the token
+//   server   an AI app signs in to /v1/mcp — foldrun issues the token
 
 export type OAuthRole = "client" | "server";
 export type OAuthStatus = "supported" | "planned" | "refused" | "not-needed";
@@ -136,10 +136,10 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
     id: "client.ciba", role: "client", title: "Client-initiated backchannel authentication", spec: "OpenID CIBA",
     status: "not-needed", note: "No provider an agent needs uses it.",
   },
-  // ------------------------------------------------------------ server (/api/mcp)
+  // ------------------------------------------------------------ server (/v1/mcp)
   {
     id: "server.authorization-code-pkce", role: "server", title: "Authorization code with PKCE (S256)", spec: "OAuth 2.1, MCP authorization",
-    status: "supported", note: "How claude.ai and other AI apps sign in to /api/mcp.",
+    status: "supported", note: "How claude.ai and other AI apps sign in to /v1/mcp.",
     proof: [web("tests/mcp-oauth.test.ts", "the code: PKCE, once, for its own app and redirect"), web("tests/mcp-sdk-oauth.test.ts", "the MCP SDK: 401 → discovery → registration")],
   },
   {
@@ -164,8 +164,8 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "server.resource-indicators", role: "server", title: "Resource indicators", spec: "RFC 8707",
-    status: "supported", note: "Tokens are bound to /api/mcp.",
-    proof: [web("tests/mcp-oauth.test.ts", "the access token opens /api/mcp and its tools")],
+    status: "supported", note: "Tokens are bound to /v1/mcp.",
+    proof: [web("tests/mcp-oauth.test.ts", "the access token opens /v1/mcp and its tools")],
   },
   {
     id: "server.iss-parameter", role: "server", title: "Issuer in the authorization response", spec: "RFC 9207",
@@ -174,7 +174,7 @@ export const OAUTH_CAPABILITIES: OAuthCapability[] = [
   },
   {
     id: "server.revocation", role: "server", title: "Revocation endpoint", spec: "RFC 7009",
-    status: "supported", note: "`POST /api/mcp/oauth/revoke`: an app ends its own connection.",
+    status: "supported", note: "`POST /v1/mcp/oauth/revoke`: an app ends its own connection.",
     proof: [web("tests/mcp-oauth.test.ts", "revocation (RFC 7009): advertised")],
   },
   {

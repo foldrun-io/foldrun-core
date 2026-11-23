@@ -79,7 +79,7 @@ test("the RFC 8058 pair, only when the install knows its address", () => {
     assert.deepEqual(unsubscribeHeaders({ tenant: "acme", email: "a@example.test", category: "run-alerts", workspace: "w" }), {});
     process.env.FOLDRUN_PUBLIC_URL = "https://app.example.test/";
     const h = unsubscribeHeaders({ tenant: "acme", email: "a@example.test", category: "run-alerts", workspace: "w" });
-    assert.match(h["List-Unsubscribe"], /^<https:\/\/app\.example\.test\/api\/unsubscribe\?token=[^>]+>$/);
+    assert.match(h["List-Unsubscribe"], /^<https:\/\/app\.example\.test\/v1\/unsubscribe\?token=[^>]+>$/);
     assert.equal(h["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
   } finally {
     if (prev === undefined) delete process.env.FOLDRUN_PUBLIC_URL;

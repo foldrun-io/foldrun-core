@@ -197,7 +197,7 @@ export function unsubscribeLinks(claim: Omit<UnsubscribeClaim, "expiresAt">, now
   const base = publicUrl();
   if (!base) return null;
   const token = encodeURIComponent(unsubscribeToken(claim, now));
-  return { page: `${base}/unsubscribe?token=${token}`, oneClick: `${base}/api/unsubscribe?token=${token}` };
+  return { page: `${base}/unsubscribe?token=${token}`, oneClick: `${base}/v1/unsubscribe?token=${token}` };
 }
 
 /** The RFC 8058 pair, for a mail whose category may be turned off. */

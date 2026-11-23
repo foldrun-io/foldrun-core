@@ -480,7 +480,7 @@ const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
  * A web address, which names a place on a server rather than in the workspace.
  *
  * The protected-path patterns match a bare `runs/`, so an agent calling the
- * platform's own API — `curl https://…/api/workspaces/x/runs/<id>` — was told
+ * platform's own API — `curl https://…/v1/workspaces/x/runs/<id>` — was told
  * it was reading the run journal. The weekly retros read their week through
  * that API and were refused on 9 Oct 2026. Only http(s): a `file://` URL is a
  * path, and stays checked.

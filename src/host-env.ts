@@ -57,19 +57,20 @@ export function hostSafeEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.Proce
 
 /**
  * Where this install's own API answers, for a step to call: `FOLDRUN_API_URL`
- * when the operator set it, else `FOLDRUN_PUBLIC_URL` + `/api`. Undefined on a
- * laptop with neither.
+ * when the operator set it, else the API host (`FOLDRUN_PUBLIC_API_URL`) or
+ * the install's own address (`FOLDRUN_PUBLIC_URL`), + `/v1` (23 Nov 2026:
+ * every route is /v1). Undefined on a laptop with none.
  *
  * A desk that reads its own run history used to write the host into its
- * files (`https://dev.foldrun.io/api`), so the same workspace pointed at the
+ * files (`https://dev.foldrun.io/api`, an address since retired), so the same workspace pointed at the
  * wrong server the day it moved. Now a script reads `$FOLDRUN_API_URL` and an
  * `apis:` entry writes `base: ${FOLDRUN_API_URL}`.
  */
 export function platformApiUrl(from: NodeJS.ProcessEnv = process.env): string | undefined {
   const explicit = from.FOLDRUN_API_URL?.trim();
   if (explicit) return explicit.replace(/\/+$/, "");
-  const origin = from.FOLDRUN_PUBLIC_URL?.trim();
-  return origin ? `${origin.replace(/\/+$/, "")}/api` : undefined;
+  const origin = from.FOLDRUN_PUBLIC_API_URL?.trim() || from.FOLDRUN_PUBLIC_URL?.trim();
+  return origin ? `${origin.replace(/\/+$/, "")}/v1` : undefined;
 }
 
 /** The install's own addresses an `apis:` base may name. Not secrets: they

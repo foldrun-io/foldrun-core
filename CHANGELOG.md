@@ -1167,7 +1167,7 @@ Declarations that only widened — optional members or trailing parameters added
 
 ## [9.2.1] — 2026-11-01
 
-- docs(starter): name /api/mcp and `foldrun mcp` in the account CLAUDE.md ([ca325d4](https://github.com/foldrun-io/foldrun-core/commit/ca325d4))
+- docs(starter): name /v1/mcp and `foldrun mcp` in the account CLAUDE.md ([ca325d4](https://github.com/foldrun-io/foldrun-core/commit/ca325d4))
 
 ## [9.2.0] — 2026-11-01
 
@@ -2503,14 +2503,14 @@ The public API is declared from this release on; the versions after it are measu
 
 ### starter
 
-- /api/version and /api/changelog in the shipped CLAUDE.md's route list ([083f312](https://github.com/foldrun-io/foldrun-core/commit/083f312))
+- /v1/version and /v1/changelog in the shipped CLAUDE.md's route list ([083f312](https://github.com/foldrun-io/foldrun-core/commit/083f312))
 - answer/message routes and the ask tool in the shipped CLAUDE.md ([6daa3b6](https://github.com/foldrun-io/foldrun-core/commit/6daa3b6))
 - the canvas and CLI pattern verbs, and where a secret is declared, in every new account's CLAUDE.md ([5f775f0](https://github.com/foldrun-io/foldrun-core/commit/5f775f0))
 
 ### starter CLAUDE.md
 
-- /restore, /api/account/backups and /api/me/onboarding in the route tables ([1f2da4c](https://github.com/foldrun-io/foldrun-core/commit/1f2da4c))
-- the API conventions every call shares — Foldrun-Version, X-RateLimit-*, Idempotency-Key, /api/openapi.json ([3b84005](https://github.com/foldrun-io/foldrun-core/commit/3b84005))
+- /restore, /v1/account/backups and /v1/me/onboarding in the route tables ([1f2da4c](https://github.com/foldrun-io/foldrun-core/commit/1f2da4c))
+- the API conventions every call shares — Foldrun-Version, X-RateLimit-*, Idempotency-Key, /v1/openapi.json ([3b84005](https://github.com/foldrun-io/foldrun-core/commit/3b84005))
 - a deploy that would delete stops; a coding agent tells the person, never adds --yes on its own ([13b1a41](https://github.com/foldrun-io/foldrun-core/commit/13b1a41))
 
 ### step-exec

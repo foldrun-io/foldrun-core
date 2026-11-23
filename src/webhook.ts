@@ -93,7 +93,7 @@ export function webhookToken(tenant: string, workspace: string, flow: string): s
 }
 
 export function webhookPath(tenant: string, workspace: string, flow: string): string {
-  return `/api/hooks/${tenant}/${workspace}/${flow}?token=${webhookToken(tenant, workspace, flow)}`;
+  return `/v1/hooks/${tenant}/${workspace}/${flow}?token=${webhookToken(tenant, workspace, flow)}`;
 }
 
 // ---------- one-click approval ----------
@@ -149,7 +149,7 @@ export function eventToken(tenant: string, workspace: string, runId: string, gat
  *  knows its origin, a path otherwise. With `gate`, that step's own URL
  *  (`&step=<index>`); the route finds the park's moment on the record. */
 export function eventUrl(tenant: string, workspace: string, runId: string, gate?: EventGate): string {
-  const p = `/api/events/${tenant}/${workspace}/${runId}?token=${eventToken(tenant, workspace, runId, gate)}${gate ? `&step=${gate.step}` : ""}`;
+  const p = `/v1/events/${tenant}/${workspace}/${runId}?token=${eventToken(tenant, workspace, runId, gate)}${gate ? `&step=${gate.step}` : ""}`;
   const base = publicUrl();
   return base ? `${base}${p}` : p;
 }

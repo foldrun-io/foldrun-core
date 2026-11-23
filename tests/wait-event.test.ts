@@ -68,7 +68,7 @@ test("wait: event parses beside wait: durations", () => {
 test("tokens: the event family is distinct from the approval family, and the URL carries it", () => {
   assert.notEqual(eventToken("acme", "desk", "r1"), approveToken("acme", "desk", "r1"));
   assert.notEqual(eventToken("acme", "desk", "r1"), eventToken("acme", "desk", "r2"));
-  assert.match(eventUrl("acme", "desk", "r1"), /\/api\/events\/acme\/desk\/r1\?token=[0-9a-f]{32}$/);
+  assert.match(eventUrl("acme", "desk", "r1"), /\/v1\/events\/acme\/desk\/r1\?token=[0-9a-f]{32}$/);
 });
 
 test("a step parks on the event, and what is POSTed reaches it", async () => {
@@ -79,7 +79,7 @@ test("a step parks on the event, and what is POSTed reaches it", async () => {
     const parked = readRun("acme", "desk", run.id)!;
     const chaser = parked.steps.find((s) => s.agent === "chaser")!;
     assert.equal(chaser.status, "awaiting-approval");
-    assert.ok(chaser.events.some((e) => /external event/.test(e.text) && /\/api\/events\//.test(e.text)));
+    assert.ok(chaser.events.some((e) => /external event/.test(e.text) && /\/v1\/events\//.test(e.text)));
 
     const { steps } = await deliverEvent("acme", "desk", run.id, "Customer replied: yes, go ahead");
     assert.deepEqual(steps, [1]);

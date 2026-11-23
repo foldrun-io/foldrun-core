@@ -107,7 +107,7 @@ export function approveLinkPath(
   runId: string,
   link: { step: number; expiresAt: number; approver?: string | null },
 ): string {
-  return `/api/approve/${tenant}/${workspace}/${runId}?token=${approveLinkToken(tenant, workspace, runId, link)}`;
+  return `/v1/approve/${tenant}/${workspace}/${runId}?token=${approveLinkToken(tenant, workspace, runId, link)}`;
 }
 
 const same = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));

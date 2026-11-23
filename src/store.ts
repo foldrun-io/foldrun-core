@@ -3017,7 +3017,7 @@ export function writeWorkspaceFile(
   // recursive, so until 30 Oct 2026 a write to a name that did not exist
   // created that workspace — with workspace:write alone, past the
   // workspace:manage role and the plan's workspace count that POST
-  // /api/workspaces, deploy and import apply. Those create through
+  // /v1/workspaces, deploy and import apply. Those create through
   // saveWorkspace / applyImport, not through here.
   if (!fs.existsSync(dir)) throw Object.assign(new Error(`project ${workspace} not found`), { status: 404 });
   const p = path.join(dir, assertEditablePath(rel));

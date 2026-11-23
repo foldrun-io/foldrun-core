@@ -1470,7 +1470,7 @@ export function userAgentDrift(ua: string | undefined, chrome: string | null | u
  * `check` prints these as warnings and the deploy reports them beside its
  * outward-gate warnings. `opts.chrome` / `opts.chromium`: the runner image's
  * Google Chrome and Playwright Chromium versions, when known
- * (FOLDRUN_RUNNER_ENGINES on the platform, /api/version from the CLI); an
+ * (FOLDRUN_RUNNER_ENGINES on the platform, /v1/version from the CLI); an
  * engine whose version is unknown is not compared.
  */
 export function webWarnings(front: Record<string, unknown>, opts: { chrome?: string | null; chromium?: string | null } = {}): string[] {

@@ -91,7 +91,7 @@ test("a step link round-trips: step, expiry, approver — and one flipped charac
     // The step number is signed: editing it in the URL does not move the link.
     const moved = token.replace(/^1\./, "0.");
     assert.equal(readApproveLink(T.tenant, T.ws, "run-1", moved).status, 401);
-    assert.match(approveLinkPath(T.tenant, T.ws, "run-1", { step: 0, expiresAt: soon() }), /^\/api\/approve\/acme\/desk\/run-1\?token=0\.\d+\.-\.[0-9a-f]{32}$/);
+    assert.match(approveLinkPath(T.tenant, T.ws, "run-1", { step: 0, expiresAt: soon() }), /^\/v1\/approve\/acme\/desk\/run-1\?token=0\.\d+\.-\.[0-9a-f]{32}$/);
   }));
 
 test("a link expires: a week by default, the flow's approve_within: when it has one", () =>

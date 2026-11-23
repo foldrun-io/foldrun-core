@@ -48,7 +48,7 @@ authorization server (Keycloak) and against recorded provider answers.
 
 ${table(client)}
 
-## When an AI app signs in to foldrun (\`/api/mcp\`)
+## When an AI app signs in to foldrun (\`/v1/mcp\`)
 
 ${table(server)}
 

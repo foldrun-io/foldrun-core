@@ -98,7 +98,7 @@ test("a first write into a new, empty workspace under a linked data folder is no
   process.env.FOLDRUN_DATA = linked;
   try {
     // 30 Oct 2026: a write never makes the workspace — that is POST
-    // /api/workspaces, deploy or import. A name that is not there is a 404,
+    // /v1/workspaces, deploy or import. A name that is not there is a 404,
     // and nothing is created.
     assert.ok(!fs.existsSync(workspaceDir(TENANT, "fresh")));
     assert.throws(

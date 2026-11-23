@@ -196,7 +196,7 @@ test("a parked run's notification carries a step-bound approve and reject link, 
         const before = Date.now();
         assert.equal(await sendRunNotification("acme", "desk", run), true);
         const payload = JSON.parse(received.body!);
-        const prefix = "https://app.example.test/api/approve/acme/desk/run-n?token=";
+        const prefix = "https://app.example.test/v1/approve/acme/desk/run-n?token=";
         assert.ok(payload.approveUrl.startsWith(prefix), payload.approveUrl);
         const token = payload.approveUrl.slice(prefix.length);
         assert.notEqual(token, approveToken("acme", "desk", "run-n"), "the legacy run-bound token is not what a mail carries any more");

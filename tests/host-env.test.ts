@@ -115,10 +115,11 @@ test("a verify: shell starts from the same base", () =>
 test("a step learns its own API's address from the install, never from the desk", async () => {
   const { platformApiUrl, expandPlatformVars } = await import("../src/host-env.ts");
   const { parseApis } = await import("../src/store.ts");
-  assert.equal(platformApiUrl({ FOLDRUN_PUBLIC_URL: "https://app.foldrun.io/" }), "https://app.foldrun.io/api");
+  assert.equal(platformApiUrl({ FOLDRUN_PUBLIC_URL: "https://app.foldrun.io/" }), "https://app.foldrun.io/v1");
+  assert.equal(platformApiUrl({ FOLDRUN_PUBLIC_API_URL: "https://api.foldrun.io", FOLDRUN_PUBLIC_URL: "https://app.foldrun.io" }), "https://api.foldrun.io/v1");
   assert.equal(platformApiUrl({ FOLDRUN_API_URL: "https://api.foldrun.io/", FOLDRUN_PUBLIC_URL: "https://x" }), "https://api.foldrun.io");
   assert.equal(platformApiUrl({}), undefined);
-  assert.equal(expandPlatformVars("${FOLDRUN_API_URL}/v1", { FOLDRUN_PUBLIC_URL: "https://app.foldrun.io" }), "https://app.foldrun.io/api/v1");
+  assert.equal(expandPlatformVars("${FOLDRUN_API_URL}/runs", { FOLDRUN_PUBLIC_URL: "https://app.foldrun.io" }), "https://app.foldrun.io/v1/runs");
   // Only the install's addresses: a secret named in a base stays unexpanded,
   // because the base is printed in the prompt.
   assert.equal(expandPlatformVars("https://${CRM_TOKEN}@x", { CRM_TOKEN: "s3cret" }), "https://${CRM_TOKEN}@x");
@@ -126,7 +127,7 @@ test("a step learns its own API's address from the install, never from the desk"
   const before = process.env.FOLDRUN_PUBLIC_URL;
   process.env.FOLDRUN_PUBLIC_URL = "https://app.foldrun.io";
   try {
-    assert.equal(parseApis([{ name: "self", base: "${FOLDRUN_API_URL}/" }])[0].base, "https://app.foldrun.io/api");
+    assert.equal(parseApis([{ name: "self", base: "${FOLDRUN_API_URL}/" }])[0].base, "https://app.foldrun.io/v1");
   } finally {
     if (before === undefined) delete process.env.FOLDRUN_PUBLIC_URL; else process.env.FOLDRUN_PUBLIC_URL = before;
   }

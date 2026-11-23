@@ -356,8 +356,8 @@ on a server, use the HTTP API — every route takes the same API key
 session, and refuses without one.
 
 \`\`\`sh
-export FOLDRUN_TOKEN=...   FOLDRUN_URL=https://your-server   WS=my-workspace
-api() { p=$1; shift; curl -sS -H "authorization: Bearer $FOLDRUN_TOKEN" "$FOLDRUN_URL/api/$p" "$@"; }
+export FOLDRUN_TOKEN=...   FOLDRUN_URL=https://your-api-server   WS=my-workspace
+api() { p=$1; shift; curl -sS -H "authorization: Bearer $FOLDRUN_TOKEN" "$FOLDRUN_URL/v1/$p" "$@"; }
 
 api workspaces/$WS/runs                       # recent runs, newest first
 api workspaces/$WS/runs/<id>                  # the full trail of one
@@ -365,7 +365,7 @@ api workspaces/$WS/runs/<id>/stream           # follow a live one (SSE)
 api workspaces/$WS/flows/<flow>/run -X POST   # start one
 \`\`\`
 
-All of it, \`/api/workspaces/<workspace>\` unless noted:
+All of it, \`/v1/workspaces/<workspace>\` unless noted:
 
 | Route | Methods | For |
 |---|---|---|
@@ -401,21 +401,21 @@ All of it, \`/api/workspaces/<workspace>\` unless noted:
 | \`/check\` | GET | what \`foldrun check\` says about the deployed copy, as findings with rule ids (\`?security=1\`) |
 | \`/assistant\` | POST | ask the assistant, or have it write agents, flows, tools and skills — from the docs only; proposals come back, nothing is written |
 
-Account-level, outside \`/workspaces\`: \`/api/secrets\`, \`/api/keys\`, \`/api/schedule\`,
-\`/api/approvals\`, \`/api/issues\` (what went wrong, open until resolved), \`/api/usage\`, \`/api/library/<kind>\`, \`/api/team\`, \`/api/billing\`,
-\`/api/me/notifications\` (what mail you get; a key acts for whoever minted it),
-\`/api/me/inbox\` (what waits on you: gates, questions, issues, proposed fixes, your failed runs),
-\`/api/mcp\` (this account as MCP tools for an AI app such as Claude Desktop or Cursor — an API key; \`foldrun mcp\` serves the same over stdio, \`foldrun docs mcp\`),
-\`/api/account/backups\` (snapshots, restore requests), \`/api/me/onboarding\` (getting started),
-\`/api/healthz\` and \`/api/version\` (open), \`/api/changelog\` (release notes)
-and \`/api/metrics\` (Prometheus). Outside \`/api\`: \`/a2a/<account>/<ws>/flows/<flow>\`
+Account-level, outside \`/workspaces\`: \`/v1/secrets\`, \`/v1/keys\`, \`/v1/schedule\`,
+\`/v1/approvals\`, \`/v1/issues\` (what went wrong, open until resolved), \`/v1/account/usage\`, \`/v1/library/<kind>\`, \`/v1/team\`, \`/v1/billing\`,
+\`/v1/me/notifications\` (what mail you get; a key acts for whoever minted it),
+\`/v1/me/inbox\` (what waits on you: gates, questions, issues, proposed fixes, your failed runs),
+\`/v1/mcp\` (this account as MCP tools for an AI app such as Claude Desktop or Cursor — an API key; \`foldrun mcp\` serves the same over stdio, \`foldrun docs mcp\`),
+\`/v1/account/backups\` (snapshots, restore requests), \`/v1/me/onboarding\` (getting started),
+\`/v1/healthz\` and \`/v1/version\` (open), \`/v1/changelog\` (release notes)
+and \`/v1/metrics\` (Prometheus). Outside \`/v1\`: \`/a2a/<account>/<ws>/flows/<flow>\`
 (a published flow's agent card and A2A 1.0 JSON-RPC endpoint — an A2A key only, \`foldrun docs a2a\`).
 
 Every call answers — and the CLI sends — \`Foldrun-Version: YYYY-MM-DD\` (dated API
 versions; an account pin in Settings → API keys → API), \`X-RateLimit-*\` headers (a \`429\`
 carries \`Retry-After\`), and writes that start work take an \`Idempotency-Key\`
 (a retry with the same key replays the first answer). The whole surface as
-OpenAPI 3.1: \`/api/openapi.json\` (open), or \`foldrun api spec --out openapi.json\`.
+OpenAPI 3.1: \`/v1/openapi.json\` (open), or \`foldrun api spec --out openapi.json\`.
 
 Debugging a failed run is usually: \`runs\` to find it, \`runs/<id>\` to read which
 step failed and what it cost, fix the markdown, \`deploy\`, then \`rerun\`.

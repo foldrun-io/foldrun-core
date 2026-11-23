@@ -75,7 +75,7 @@ export function credentialLine(c: ModelCredential): { type: "info" | "error"; te
 //
 // An account brings its own model key without writing a provider: block:
 // three secrets in the ACCOUNT vault (set from Settings → Models, the API's
-// /api/account/model, or `foldrun account model set`). A provider: block at any
+// /v1/account/model, or `foldrun account model set`). A provider: block at any
 // level still wins; this is what a step falls to when none names one, before
 // the platform's own credential.
 
