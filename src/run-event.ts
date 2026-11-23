@@ -38,7 +38,7 @@
 import crypto from "node:crypto";
 import { isSplicedRecord, runFailure, type RunRecord, type StepRecord } from "./store.ts";
 import { ERROR_CLASSES, opsLine, type ErrorClass, type OpsFields } from "./ops-log.ts";
-import { explainFailure, NO_MODEL_KEY, type FailureExplained, type FailureKind, type LimitScope } from "./failure.ts";
+import { explainFailure, NO_MODEL_KEY, NO_PLAN, type FailureExplained, type FailureKind, type LimitScope } from "./failure.ts";
 import { startupBreakdown, type StartupPhase } from "./startup.ts";
 
 /** The funnel's marks, in order. */
@@ -238,7 +238,7 @@ export function sloOutcome(run: RunRecord, failure = terminalFailure(run)): { sl
     case "credential":
       // An account with no model key of its own is refused before a sandbox
       // is rented: its setting, never foldrun's (customer bench, 20 Nov 2026).
-      if (failure.step?.supply === "own" || NO_MODEL_KEY.test(failure.text ?? "")) return excluded("customer_credential");
+      if (failure.step?.supply === "own" || NO_MODEL_KEY.test(failure.text ?? "") || NO_PLAN.test(failure.text ?? "")) return excluded("customer_credential");
       return bad("model");
     case "memory":
     case "cpu":

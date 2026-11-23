@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { explainFailure, failureFactsOf, securityStopEvent, SECURITY_STOP, FAILURE_KINDS } from "../src/failure.ts";
+import { explainFailure, NO_PLAN, failureFactsOf, securityStopEvent, SECURITY_STOP, FAILURE_KINDS } from "../src/failure.ts";
 import { parseDriverLine } from "../src/run-container.ts";
 import { ERROR_CLASSES } from "../src/ops-log.ts";
 import { runFailure, summarizeRun, runFromSummary, type RunRecord, type StepRecord } from "../src/store.ts";
@@ -210,6 +210,16 @@ test("a run that failed with no failed step still says why: a stop, or a budget 
   assert.deepEqual([runFailure(stopped)!.kind, runFailure(stopped)!.class, runFailure(stopped)!.reason], ["stopped", "cancelled", "stopped by a person"]);
   // Nothing to say: still null, as before.
   assert.equal(runFailure(run(step({ status: "completed" }))), null);
+});
+
+test("where own keys are off the refusal says the account needs a plan, never to add an API key", () => {
+  const text = "no plan: this platform runs every model call on its own models, and this account has no plan — pick one in Billing → Plans";
+  assert.ok(NO_PLAN.test(text));
+  const e = explainFailure(text);
+  assert.deepEqual([e.class, e.kind], ["policy_denied", "credential"]);
+  assert.match(e.fix ?? "", /Billing → Plans/);
+  assert.doesNotMatch(`${e.message} ${e.fix}`, /API key|Settings → Models/);
+  assert.equal(NO_PLAN.test("no plan: something a step said"), false);
 });
 
 test("no model key is the account's setting, not a platform error (customer bench, 20 Nov 2026)", () => {

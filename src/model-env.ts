@@ -29,6 +29,15 @@ export const NO_MODEL_KEY =
   "no model key: this account runs on its own API key, and none is set — add one in Settings → Models " +
   "(or `foldrun account model set <provider> --key …`), or write a provider: block in AGENTS.md";
 
+/** The same refusal where own keys are off (models.byok): the account has no
+ *  key to add, so it is told what it can do — get a plan. Never "add an API
+ *  key" to a customer who is not allowed to. */
+export const NO_PLAN =
+  "no plan: this platform runs every model call on its own models, and this account has no plan — pick one in Billing → Plans";
+
+/** The refusal for an account with no way to pay for a model call. */
+export const noModelKeyMessage = (ownKeys: boolean): string => (ownKeys ? NO_MODEL_KEY : NO_PLAN);
+
 /**
  * `platform` is a function: the caller's own way to build the platform's env
  * (a step's, or the SDK's host env), called only when this account may use
@@ -87,7 +96,7 @@ export function accountModelEnv(
   const raw = written ?? (ownKeys ? accountModelBlock((name) => getSecret(tenant, name)?.value ?? null) : undefined);
   const spec = parseProvider(raw);
   if (!spec?.baseUrl) {
-    if (!platform.platformKeyAllowed(tenant)) throw new ModelKeyError(NO_MODEL_KEY);
+    if (!platform.platformKeyAllowed(tenant)) throw new ModelKeyError(noModelKeyMessage(platform.ownModelKeys?.(tenant) ?? true));
     // One door (23 Nov 2026): where the platform's egress proxy answers
     // foldrun's door, a host job on the operator's credential goes there as
     // a step does — through a job lease, the door holding the credential and
