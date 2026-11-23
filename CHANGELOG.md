@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [25.0.1] — 2026-11-23
+
+### chore
+
+- old dev names out of tests and comments ([49cc02b](https://github.com/foldrun-io/foldrun-core/commit/49cc02b))
+
 ## [25.0.0] — 2026-11-23
 
 ### Breaking changes
