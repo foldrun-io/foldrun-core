@@ -356,10 +356,17 @@ const VIA_LOGIN = "+login";
  *  this account may use it; the marker alone grants nothing. */
 const VIA_OPERATOR = "+operator";
 export type SupplyVia = "login" | "operator";
+/** `+operator+metered`: the operator's credential, metered at foldrun's door
+ *  — the door is the step's one meter (store.ts meteredAtDoor). A lease with
+ *  the plain `+operator` (a worker from before) is served unmetered, its
+ *  step's tokens billed instead: never both (Codex review, 23 Nov 2026). */
+const METERED = "+metered";
+export const OPERATOR_DOOR_TOKEN = `${MARKER}anthropic${VIA_OPERATOR}${METERED}`;
 export const supplyToken = (provider: SupplyProviderName, via?: SupplyVia) => `${MARKER}${provider}${via === "login" ? VIA_LOGIN : via === "operator" ? VIA_OPERATOR : ""}`;
 export function supplyProviderOfToken(value: string | null | undefined): SupplyProviderName | null {
   if (typeof value !== "string" || !value.startsWith(MARKER)) return null;
   let p = value.slice(MARKER.length);
+  if (p.endsWith(VIA_OPERATOR + METERED)) p = p.slice(0, -METERED.length);
   for (const suffix of [VIA_LOGIN, VIA_OPERATOR]) {
     if (p.endsWith(suffix)) {
       p = p.slice(0, -suffix.length);
@@ -373,8 +380,10 @@ export function supplyProviderOfToken(value: string | null | undefined): SupplyP
 export function supplyViaOfToken(value: string | null | undefined): SupplyVia | null {
   if (supplyProviderOfToken(value) === null) return null;
   const v = String(value);
-  return v.endsWith(VIA_LOGIN) ? "login" : v.endsWith(VIA_OPERATOR) ? "operator" : null;
+  return v.endsWith(VIA_LOGIN) ? "login" : v.endsWith(VIA_OPERATOR) || v.endsWith(VIA_OPERATOR + METERED) ? "operator" : null;
 }
+/** Is it the operator's marker the door meters (OPERATOR_DOOR_TOKEN)? */
+export const supplyMeteredOfToken = (value: string | null | undefined): boolean => typeof value === "string" && value === OPERATOR_DOOR_TOKEN;
 
 /** The model env a step on the operator's own credential runs with when
  *  its calls go through foldrun's door (one door): the door and the
@@ -383,7 +392,7 @@ export function supplyViaOfToken(value: string | null | undefined): SupplyVia | 
 export function operatorDoorEnv(platformEnv: Record<string, string | undefined>): Record<string, string | undefined> {
   return {
     ANTHROPIC_BASE_URL: SUPPLY_DOOR,
-    ANTHROPIC_API_KEY: supplyToken("anthropic", "operator"),
+    ANTHROPIC_API_KEY: OPERATOR_DOOR_TOKEN,
     ANTHROPIC_AUTH_TOKEN: "",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: platformEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL: platformEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,

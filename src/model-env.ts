@@ -13,7 +13,7 @@ import { platform, hostUrlProblem } from "./platform.ts";
 import { accountModelBlock, OWN_KEYS_OFF } from "./model-credential.ts";
 import { providerPreset } from "./providers.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
-import { supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
+import { operatorDoorEnv, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
 import { MODEL_KEY_NAME, grantModelKey, hostOf, type EgressGrant } from "./egress.ts";
 
 /** Refused for want of a usable key; `status` is what an HTTP layer answers. */
@@ -88,6 +88,11 @@ export function accountModelEnv(
   const spec = parseProvider(raw);
   if (!spec?.baseUrl) {
     if (!platform.platformKeyAllowed(tenant)) throw new ModelKeyError(NO_MODEL_KEY);
+    // One door (23 Nov 2026): where the platform's egress proxy answers
+    // foldrun's door, a host job on the operator's credential goes there as
+    // a step does — through a job lease, the door holding the credential and
+    // metering the call (withSupply). Never sent from here with the key.
+    if (platform.operatorDoor?.(tenant)) return { env: operatorDoorEnv(platformEnv()), supply: "foldrun", format: "anthropic", translator: null, tenant };
     return { env: platformEnv(), supply: "platform", format: "anthropic", translator: null };
   }
   // A host-side call to a URL the tenant wrote: on a platform, https only

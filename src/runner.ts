@@ -2200,6 +2200,7 @@ export function recordAttempt(
     ...(typeof step.turns === "number" ? { turns: step.turns } : {}),
     computeSecs: step.computeSecs ?? null,
     ...(step.supply ? { supply: step.supply } : {}),
+    ...(step.meteredAtDoor ? { meteredAtDoor: true } : {}),
     startedAt: step.podLostTry?.finishedAt ?? startedAt,
     finishedAt: step.finishedAt ?? new Date().toISOString(),
     ...(status === "failed" && lastError ? { error: lastError.slice(0, 500) } : {}),
@@ -2726,6 +2727,11 @@ async function runStepBody(
         : `foldrun models · ${SUPPLY_TITLES[supply.provider]}`
       : credential ? credential.label : noKey ? "none — this account has no model key" : `provider: ${providerLabel}`;
     step.supply = onSupply ? "foldrun" : primaryOnPlatform ? "operator" : "own";
+    // Set where the operator's door is handed out (isolatedArgs), per attempt
+    // — not on a reattach to a live sandbox (step.sandbox), which keeps the
+    // lease it started with, and so the meter it was given (Codex review).
+    const reattaching = Boolean(step.sandbox);
+    if (!reattaching) delete step.meteredAtDoor;
     if (onSupply) step.supplyProvider = supply.provider;
     else delete step.supplyProvider;
     // A credential of the account's own — a written provider: block, its
@@ -3565,7 +3571,35 @@ async function runStepBody(
       // Set once the first sandbox call has run (see room.mayDefer below).
       let executed = false;
       const runIsolated = isolation === "container" ? runStepInContainer : platform.isolation[isolation!]!;
-      const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
+      // The operator's credential through foldrun's door (one door): the
+      // door meters every call, so the step is marked and its own tokens are
+      // not billed again (store.ts billedTokenCost).
+      // The resumed sandbox keeps the lease it started with, and so its
+      // meter: the first attachment only. Every launch after it — a retry,
+      // a fallback — is stamped from its own lease (Codex review).
+      let resumedOnce = reattaching;
+      // Whether the args a launch was built with send to the metered door —
+      // read back for a launch that copies them (the slim-to-full re-run).
+      let lastOn = false;
+      const operatorAtDoorFor = (keyName: string): boolean => {
+        const on = Boolean(lease && keyName === MODEL_KEY_NAME && platform.operatorDoor?.(tenant));
+        lastOn = on;
+        if (resumedOnce) {
+          resumedOnce = false;
+          return on;
+        }
+        if (on) step.meteredAtDoor = true;
+        else delete step.meteredAtDoor;
+        return on;
+      };
+      const isolatedArgs = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => {
+        lastOn = false;
+        const a = isolatedArgsOf(modelEnv, keyName);
+        // On the args themselves, under a symbol: a copy ({ ...args }) keeps
+        // it, and the sandbox never sees it.
+        return Object.assign(a, { [METERED_AT_DOOR]: lastOn });
+      };
+      const isolatedArgsOf = (modelEnv: Record<string, string | undefined>, keyName = MODEL_KEY_NAME) => ({
         workspaceRoot,
         ...(snapshotId ? { snapshot: { id: snapshotId } } : {}),
         ...(stepInputs && runId ? { inputs: { runId, files: stepInputs } } : {}),
@@ -3640,7 +3674,7 @@ async function runStepBody(
             // platform says so (one door, 23 Nov 2026): foldrun's door and the
             // operator's marker — the door holds the credential, the lease
             // never does. Not the declared second supply (its own name).
-            ...proxied(Object.keys(providerEnv).length === 0 ? (lease && keyName === MODEL_KEY_NAME && platform.operatorDoor?.(tenant) ? operatorDoorEnv(modelEnv) : modelEnv) : providerEnv, keyName),
+            ...proxied(Object.keys(providerEnv).length === 0 ? (operatorAtDoorFor(keyName) ? operatorDoorEnv(modelEnv) : modelEnv) : providerEnv, keyName),
             ...outputEnv,
             ...(lease ? { [EGRESS_ENV]: lease.url } : {}),
             // Every program's HTTP(S) through the proxy's forward door, and
@@ -3937,8 +3971,12 @@ async function runStepBody(
             error: decision.note.slice(0, 500),
             image: "slim",
             browserPod: browserPodLine(first.browserPod!),
+            ...(step.meteredAtDoor ? { meteredAtDoor: true } : {}),
           };
           const again = { ...lastArgs, input: { ...lastArgs.input, image: "full" as const }, resume: null };
+          // A fresh pod on the same args: its meter is theirs.
+          if ((lastArgs as { [METERED_AT_DOOR]?: boolean })[METERED_AT_DOOR]) step.meteredAtDoor = true;
+          else delete step.meteredAtDoor;
           await lease?.commit();
           // Before the call, not after: a re-run that throws (the full
           // sandbox never started) is still the full go on the record — its
@@ -5000,6 +5038,9 @@ export function resolvePreview(storageDir: string, patterns: string[], cap = 12)
  * steps this copy still shows as asking are touched: everything else on the
  * record is this driver's own, and newer in memory than on disk.
  */
+/** Whether a launch's args send its model calls to foldrun's metered door. */
+const METERED_AT_DOOR = Symbol("meteredAtDoor");
+
 export function adoptDecisions(run: RunRecord, disk: RunRecord | null): boolean {
   if (!disk) return false;
   let any = false;

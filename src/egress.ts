@@ -43,7 +43,7 @@
 // platform's (it needs a long-lived process and a Service); the pod side is
 // here in core, because it is what the runner image runs.
 
-import { supplyProviderOfToken, supplyViaOfToken } from "./model-supply.ts";
+import { supplyMeteredOfToken, supplyProviderOfToken, supplyViaOfToken } from "./model-supply.ts";
 import type { DelegationResult, PeerInfo } from "./operator.ts";
 import { trimSlashes } from "./paths.ts";
 import type { TestEffect } from "./test-mode.ts";
@@ -275,7 +275,7 @@ export function proxyModelEnv(
  *  the call), else the value itself. */
 export function grantModelKey(grant: EgressGrant, name: string, value: string, host: string): void {
   const supply = supplyProviderOfToken(value);
-  if (supply) addSupplyGrant(grant, name, supply, host, supplyViaOfToken(value) ?? undefined);
+  if (supply) addSupplyGrant(grant, name, supply, host, supplyViaOfToken(value) ?? undefined, supplyMeteredOfToken(value));
   else addGrant(grant, name, value, host);
 }
 
@@ -311,20 +311,23 @@ export interface SupplyGrant {
    *  after checking the account still holds a plan; nothing is metered on
    *  an API key. Absent: the platform's API key for `provider`, metered. */
   via?: "login" | "operator";
+  /** With via "operator": the door meters every call (one meter); absent,
+   *  a lease from an older worker, served unmetered as it was. */
+  metered?: boolean;
 }
 
 /** Grant the platform's key for `provider` under `name`, to its host. */
-export function addSupplyGrant(grant: EgressGrant, name: string, provider: string, host: string, via?: "login" | "operator"): void {
+export function addSupplyGrant(grant: EgressGrant, name: string, provider: string, host: string, via?: "login" | "operator", metered?: boolean): void {
   const h = host.toLowerCase();
   const existing = grant.secrets[name];
   // A name already granted as an ordinary secret is never turned into the
   // platform's key, nor the other way round: two meanings under one name
   // is how a value would be filled where it was not meant to be. Nor is a
   // subscription grant the API key's, or the other way round.
-  if (existing && (existing.supply?.provider !== provider || existing.supply?.via !== via)) throw new Error(`egress: ${name} is already granted as another credential`);
+  if (existing && (existing.supply?.provider !== provider || existing.supply?.via !== via || (existing.supply?.metered === true) !== (metered === true))) throw new Error(`egress: ${name} is already granted as another credential`);
   if (existing) {
     if (!existing.hosts.includes(h)) existing.hosts.push(h);
-  } else grant.secrets[name] = { value: "", hosts: [h], supply: { provider, ...(via ? { via } : {}) } };
+  } else grant.secrets[name] = { value: "", hosts: [h], supply: { provider, ...(via ? { via } : {}), ...(metered ? { metered: true } : {}) } };
 }
 
 export function addGrant(grant: EgressGrant, name: string, value: string, host: string): void {

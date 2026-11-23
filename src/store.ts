@@ -3607,6 +3607,9 @@ export interface StepAttempt {
   /** Whose key this attempt ran on (StepRecord.supply): a retry may run on
    *  another, and the meter bills each attempt by its own. */
   supply?: StepSupply;
+  /** Its model calls went through foldrun's door, which metered and billed
+   *  each one (one door, 23 Nov 2026): its own tokens are not billed again. */
+  meteredAtDoor?: boolean;
   /** Model turns this attempt took; absent before 18 Oct 2026. */
   turns?: number | null;
   computeSecs: number | null;
@@ -3732,6 +3735,9 @@ export interface StepRecord {
    *  step's tokens; "foldrun" — foldrun's models, billed per call by the
    *  model gateway, never from the step. Absent on older records. */
   supply?: StepSupply;
+  /** Its model calls went through foldrun's door, which metered and billed
+   *  each one (one door, 23 Nov 2026): its own tokens are not billed again. */
+  meteredAtDoor?: boolean;
   /** With supply "foldrun": which provider's key. */
   supplyProvider?: string;
   /** Slim browsing through the account's pod (browser-pod.ts): reconnect
@@ -4841,7 +4847,8 @@ export function runCost(run: RunRecord): number {
  *  a provider: block, or Settings → Models), which the provider bills. The
  *  meter, the Usage page and the ledger split all ask this one question, so
  *  what a page shows is what was charged. */
-export function stepBillsTokens(s: Pick<StepRecord, "credential" | "supply">): boolean {
+export function stepBillsTokens(s: Pick<StepRecord, "credential" | "supply" | "meteredAtDoor">): boolean {
+  if (s.meteredAtDoor) return false;
   if (s.supply) return supplyBillsTokens(s.supply);
   return !(s.credential ?? "").startsWith("provider:");
 }
@@ -4855,14 +4862,14 @@ export const supplyBillsTokens = (supply: StepSupply) => supply === "operator";
 
 /** The step's tokens the platform bills, attempt by attempt where the
  *  attempts say whose key they ran on. */
-export function billedTokenCost(s: { credential?: string; supply?: StepSupply; costUsd?: number | null; tries?: StepAttempt[] }): number {
+export function billedTokenCost(s: { credential?: string; supply?: StepSupply; meteredAtDoor?: boolean; costUsd?: number | null; tries?: StepAttempt[] }): number {
   const tries = s.tries ?? [];
   if (!tries.some((t) => t.supply)) return stepBillsTokens(s) ? s.costUsd ?? 0 : 0;
   // Each attempt by its own supply — a lost slim go spent its tokens too,
   // as the step's total says (sumAttempts) — and a row from before the
   // field by the step's older rule (its credential).
   const legacy = !(s.credential ?? "").startsWith("provider:");
-  return tries.reduce((n, t) => n + ((t.supply ? supplyBillsTokens(t.supply) : legacy) ? t.costUsd ?? 0 : 0), 0);
+  return tries.reduce((n, t) => n + (!t.meteredAtDoor && (t.supply ? supplyBillsTokens(t.supply) : legacy) ? t.costUsd ?? 0 : 0), 0);
 }
 
 /**

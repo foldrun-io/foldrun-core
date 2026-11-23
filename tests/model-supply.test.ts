@@ -578,18 +578,20 @@ test("a judge pinned to another provider's id grades with the switched step's ow
   }
 });
 
-test("one door (23 Nov 2026): a step on the operator's own credential sends its calls to foldrun's door with the operator's marker — the credential never in the lease or the pod — and its tokens are still the step's to bill", async () => {
+test("one door (23 Nov 2026): a step on the operator's own credential sends its calls to foldrun's door with the operator's marker — the credential never in the lease or the pod — and the door is its one meter: its own tokens are not billed again", async () => {
   await withAccount({ supply: { kind: "none" } }, async (c) => {
     registerPlatform({ platformKeyAllowed: () => true, operatorDoor: () => true });
     try {
       const done = await run();
       assert.equal(done.status, "completed", events(done.steps[0]));
-      assert.equal(done.steps[0].supply, "operator", "billed from the step's tokens, as before");
+      assert.equal(done.steps[0].supply, "operator");
+      assert.equal(done.steps[0].meteredAtDoor, true);
+      assert.equal(billedTokenCost({ ...done.steps[0], costUsd: 1 }), 0, "the door billed each call");
       const env = c.calls[0].env as Record<string, string>;
       assert.match(env.ANTHROPIC_BASE_URL, /\/e\/tok\/https:\/\/models\.foldrun\.internal$/);
       assert.equal(env.ANTHROPIC_API_KEY, "${FOLDRUN_MODEL_KEY}");
       assert.ok(!JSON.stringify(c.calls[0]).includes("sk-ant-api03-the-operators-own-key"), "the operator's key is not in the pod");
-      assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["models.foldrun.internal"], supply: { provider: "anthropic", via: "operator" } }, "nor in the lease");
+      assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["models.foldrun.internal"], supply: { provider: "anthropic", via: "operator", metered: true } }, "nor in the lease");
     } finally {
       registerPlatform({ platformKeyAllowed: () => false, operatorDoor: undefined });
     }
@@ -598,8 +600,10 @@ test("one door (23 Nov 2026): a step on the operator's own credential sends its 
   await withAccount({ supply: { kind: "none" } }, async (c) => {
     registerPlatform({ platformKeyAllowed: () => true });
     try {
-      await run();
+      const done = await run();
       assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY.hosts, ["api.anthropic.com"]);
+      assert.equal(done.steps[0].meteredAtDoor, undefined);
+      assert.ok(billedTokenCost({ ...done.steps[0], costUsd: 1 }) > 0, "billed from the step's tokens, as before");
     } finally {
       registerPlatform({ platformKeyAllowed: () => false });
     }
@@ -630,4 +634,30 @@ test("a provider: block or stored key carrying one of foldrun's markers is refus
     assert.equal(c.calls.length, 0);
     assert.match(events(done.steps[0]), /may not carry a foldrun-supply: token/);
   });
+});
+
+test("a step metered at the door bills none of its tokens, attempt by attempt", () => {
+  assert.equal(billedTokenCost({ supply: "operator", meteredAtDoor: true, costUsd: 2 }), 0);
+  assert.equal(billedTokenCost({ supply: "operator", costUsd: 2, tries: [{ n: 1, supply: "operator", meteredAtDoor: true, costUsd: 1 }, { n: 2, supply: "operator", costUsd: 1 }] as never }), 1);
+});
+
+test("one door: a host job on the operator's credential goes through foldrun's door on a job lease, never with the key from the host", async () => {
+  const { accountModelEnv } = await import("../src/model-env.ts");
+  registerPlatform({ platformKeyAllowed: () => true, operatorDoor: () => true, ownModelKeys: () => false, modelSupply: () => ({ kind: "none" }) });
+  try {
+    const m = accountModelEnv("acme", "desk", () => ({ ANTHROPIC_API_KEY: "sk-operator-host" }));
+    assert.equal(m.supply, "foldrun", "through a lease (withSupply)");
+    assert.equal(m.env.ANTHROPIC_BASE_URL, "https://models.foldrun.internal");
+    assert.equal(m.env.ANTHROPIC_API_KEY, "foldrun-supply:anthropic+operator+metered");
+    assert.ok(!JSON.stringify(m.env).includes("sk-operator-host"));
+  } finally {
+    registerPlatform({ platformKeyAllowed: () => false, operatorDoor: undefined, ownModelKeys: undefined, modelSupply: undefined });
+  }
+});
+
+test("the metered operator marker: read as the operator's, metered; the plain one is not", () => {
+  assert.equal(supplyProviderOfToken("foldrun-supply:anthropic+operator+metered"), "anthropic");
+  assert.equal(supplyViaOfToken("foldrun-supply:anthropic+operator+metered"), "operator");
+  assert.equal(supplyProviderOfToken("foldrun-supply:deepseek+operator+metered"), null);
+  assert.equal(supplyProviderOfToken("foldrun-supply:anthropic+metered"), null);
 });
