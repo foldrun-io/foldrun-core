@@ -49,13 +49,19 @@ const API_VERSION = "2023-06-01";
 const MODEL_TRIES = 4;
 const RETRY_AFTER_CAP_MS = 30_000;
 
-function requestHeaders(env: Record<string, string | undefined>): Record<string, string> {
-  const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": API_VERSION };
+function requestHeaders(env: Record<string, string | undefined>, userAgent: string): Record<string, string> {
+  // Who is calling, as the caller names itself (LoopOptions.userAgent: the
+  // CLI passes `foldrun-cli/<version>`), else foldrun's engine — never the
+  // runtime's own default.
+  const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": API_VERSION, "user-agent": userAgent };
   if (env.ANTHROPIC_API_KEY) headers["x-api-key"] = env.ANTHROPIC_API_KEY;
   else if (env.ANTHROPIC_AUTH_TOKEN) headers.authorization = `Bearer ${env.ANTHROPIC_AUTH_TOKEN}`;
   for (const line of (env.ANTHROPIC_CUSTOM_HEADERS ?? "").split("\n")) {
     const at = line.indexOf(":");
-    if (at > 0) headers[line.slice(0, at).trim().toLowerCase()] = line.slice(at + 1).trim();
+    const name = line.slice(0, at).trim().toLowerCase();
+    // The caller's name is the option's alone: a custom header does not
+    // replace it (Codex, 23 Nov 2026), so the claude-… refusal holds.
+    if (at > 0 && name !== "user-agent") headers[name] = line.slice(at + 1).trim();
   }
   return headers;
 }
@@ -134,7 +140,7 @@ async function openStream(o: LoopOptions, body: Json, signal: AbortSignal): Prom
   for (let attempt = 1; attempt <= MODEL_TRIES; attempt++) {
     let res: Response | null = null;
     try {
-      res = await fetch(`${base}/v1/messages`, { method: "POST", headers: requestHeaders(o.env), body: JSON.stringify(body), signal });
+      res = await fetch(`${base}/v1/messages`, { method: "POST", headers: requestHeaders(o.env, o.userAgent), body: JSON.stringify(body), signal });
     } catch (err) {
       if (signal.aborted) throw err;
       lastError = `the model endpoint could not be reached: ${(err as Error).message}`;
@@ -143,7 +149,11 @@ async function openStream(o: LoopOptions, body: Json, signal: AbortSignal): Prom
     if (res) {
       const text = (await res.text().catch(() => "")).slice(0, 500);
       lastError = `the model endpoint answered ${res.status}: ${text}`;
-      const retryable = res.status === 408 || res.status === 409 || res.status === 429 || res.status >= 500;
+      // A server that says a retry will not help (x-should-retry: false — a
+      // provider with no usable key, a plan the account does not have) is
+      // believed: asking three more times only delays the answer.
+      const told = res.headers.get("x-should-retry");
+      const retryable = told === "false" ? false : told === "true" || res.status === 408 || res.status === 409 || res.status === 429 || res.status >= 500;
       if (!retryable) throw Object.assign(new Error(lastError), { status: res.status });
       const after = Number(res.headers.get("retry-after"));
       if (attempt < MODEL_TRIES) await sleep(Math.min(RETRY_AFTER_CAP_MS, Number.isFinite(after) && after > 0 ? after * 1000 : 1000 * 2 ** (attempt - 1)), signal);

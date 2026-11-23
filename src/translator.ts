@@ -1304,9 +1304,11 @@ export async function startTranslator(spec: TranslatorSpec): Promise<RunningTran
         // reads as one to the SDK — and to the fallback decision upstream.
         // A refusal that says not to retry (the platform's gateway does)
         // says so to the SDK too, or it retries a decision for minutes.
+        // Its retry-after crosses with it: a "try again in 5 s" keeps its 5 s.
         const noRetry = upstream.headers.get("x-should-retry");
         if (noRetry) {
-          res.writeHead(upstream.status, { "content-type": "application/json", "x-should-retry": noRetry });
+          const after = upstream.headers.get("retry-after");
+          res.writeHead(upstream.status, { "content-type": "application/json", "x-should-retry": noRetry, ...(after ? { "retry-after": after } : {}) });
           return void res.end(errorBody(upstream.status, message));
         }
         return send(upstream.status, errorBody(upstream.status, message));

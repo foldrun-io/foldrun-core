@@ -68,6 +68,11 @@ export interface LoopOptions {
   /** The walls on a person's own machine (local-sandbox.ts): every command
    *  runs through `wrap`, the file tools ask canRead / canWrite. */
   localSandbox: SandboxWalls | null;
+  /** The User-Agent the model calls carry: the caller's own name
+   *  (`userAgent`, e.g. foldrun-cli/27.8.0), else foldrun-engine. An option,
+   *  never an environment name — a step's env holds the tenant's secrets
+   *  under names it chose. Never another product's name (claude-…). */
+  userAgent: string;
   model: string;
   systemPrompt: string;
   tools: EngineTool[];
@@ -160,6 +165,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     env,
     shellEnv: options.shellEnv && typeof options.shellEnv === "object" ? (options.shellEnv as Record<string, string | undefined>) : env,
     localSandbox,
+    userAgent: typeof options.userAgent === "string" && /^[!-~]{1,100}$/.test(options.userAgent) && !/^claude[-_/]/i.test(options.userAgent) ? options.userAgent : "foldrun-engine",
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
     tools: [...names.map((n) => ENGINE_TOOLS[n]), ...extra],

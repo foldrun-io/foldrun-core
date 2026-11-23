@@ -33,6 +33,8 @@ interface Scripted {
   status?: number;
   /** The error message a `status` answer carries. */
   error?: string;
+  /** Headers a `status` answer carries. */
+  headers?: Record<string, string>;
   /** Leave the blocks open: the closing events come, the block stops do not. */
   unclosed?: boolean;
   /** End after message_delta, with no message_stop. */
@@ -54,7 +56,7 @@ async function fakeModel(turns: Scripted[]) {
       const turn = turns[Math.min(n, turns.length - 1)];
       n++;
       if (turn.status) {
-        res.writeHead(turn.status, { "content-type": "application/json" });
+        res.writeHead(turn.status, { "content-type": "application/json", ...(turn.headers ?? {}) });
         return res.end(JSON.stringify({ type: "error", error: { type: turn.status === 400 ? "invalid_request_error" : "overloaded_error", message: turn.error ?? "busy" } }));
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -355,6 +357,39 @@ test("endOf: each stop reason, and the result keeps the partial reply", async ()
   } finally {
     await late.close();
   }
+});
+
+test("x-should-retry is believed (23 Nov 2026): false stops at the first answer, true retries a status that would not be; the engine names itself", async () => {
+  const run = async (turns: Scripted[], extra: Record<string, unknown> = {}, env: Record<string, string> = {}) => {
+    const server = await fakeModel(turns);
+    const out: any[] = [];
+    let error: Error | null = null;
+    try {
+      for await (const m of foldrunQuery({ prompt: "go", options: { cwd: os.tmpdir(), model: "test-model", tools: [], env: { ANTHROPIC_BASE_URL: server.url, ANTHROPIC_API_KEY: "k", ...env }, ...extra } })) out.push(m);
+    } catch (err) {
+      error = err as Error;
+    } finally {
+      await server.close();
+    }
+    return { out, error, requests: server.requests };
+  };
+  const once = await run([{ status: 503, content: [], error: "anthropic has no usable key on this platform", headers: { "x-should-retry": "false" } }]);
+  assert.equal(once.requests.length, 1, "no retry of a 503 the server says will not change");
+  assert.match(String(once.error?.message), /no usable key/);
+  const again = await run([{ status: 400, content: [], headers: { "x-should-retry": "true" } }, { content: [say("ok")] }]);
+  assert.equal(again.requests.length, 2);
+  assert.equal(once.requests[0].headers["user-agent"], "foldrun-engine");
+  const named = await run([{ content: [say("hi")] }], { userAgent: "foldrun-cli/9.9.9" });
+  assert.equal(named.requests[0].headers["user-agent"], "foldrun-cli/9.9.9");
+  // Not from the environment (a tenant's secret could be named anything),
+  // and never another product's name.
+  const fromEnv = await run([{ content: [say("hi")] }], {}, { FOLDRUN_USER_AGENT: "claude-cli/1.0.0" });
+  assert.equal(fromEnv.requests[0].headers["user-agent"], "foldrun-engine");
+  const posing = await run([{ content: [say("hi")] }], { userAgent: "claude-cli/2.0.0 (external, cli)" });
+  assert.equal(posing.requests[0].headers["user-agent"], "foldrun-engine");
+  const custom = await run([{ content: [say("hi")] }], { userAgent: "foldrun-cli/9.9.9" }, { ANTHROPIC_CUSTOM_HEADERS: "User-Agent: claude-cli/2.0.0\nx-team: blue" });
+  assert.equal(custom.requests[0].headers["user-agent"], "foldrun-cli/9.9.9", "a custom header does not replace the caller's name");
+  assert.equal(custom.requests[0].headers["x-team"], "blue", "other custom headers still go");
 });
 
 both("an overloaded endpoint is retried; a refused request is not", async ({ engine, step, loop }) => {
