@@ -165,6 +165,11 @@ export interface PlatformHooks {
    *  operator's accounts do so; every customer brings their own API key.
    *  Default: yes — a laptop or a self-hosted install is its own operator. */
   platformKeyAllowed(tenant: string): boolean;
+  /** One door (23 Nov 2026): a step on the operator's own credential sends
+   *  its calls to foldrun's door, which holds the credential, instead of
+   *  carrying it in its lease. Absent or false: the credential goes in the
+   *  lease as before (self-hosting, core's own container). */
+  operatorDoor?(tenant: string): boolean;
   /** May this account's steps run on a model key or endpoint of its own —
    *  the account's stored key (Settings → Models) or a `provider:` block in
    *  its files (BYOK)? A platform admin decides, for the whole install

@@ -302,15 +302,19 @@ export function unsubstitute(text: string, knownSecrets: Record<string, string>,
  *  not from what the step reports. */
 export interface SupplyGrant {
   provider: string;
+  /** "operator": the operator's own credential (one door, 23 Nov 2026) —
+   *  served only at foldrun's door, which reads the credential itself and
+   *  asks the platform whether the account may use it; not metered (the
+   *  step's own tokens are billed, store.ts supplyBillsTokens). */
   /** "login": the account's Claude subscription — the proxy sends the call
    *  on one of the platform's Claude logins (the gateway's login path),
    *  after checking the account still holds a plan; nothing is metered on
    *  an API key. Absent: the platform's API key for `provider`, metered. */
-  via?: "login";
+  via?: "login" | "operator";
 }
 
 /** Grant the platform's key for `provider` under `name`, to its host. */
-export function addSupplyGrant(grant: EgressGrant, name: string, provider: string, host: string, via?: "login"): void {
+export function addSupplyGrant(grant: EgressGrant, name: string, provider: string, host: string, via?: "login" | "operator"): void {
   const h = host.toLowerCase();
   const existing = grant.secrets[name];
   // A name already granted as an ordinary secret is never turned into the

@@ -335,6 +335,11 @@ export type SupplyAnswer =
        *  login path (pool, windows, extra usage), not metered on an API key.
        *  Anthropic only. Absent: the platform's API key, metered. */
       via?: "login";
+      /** One door (23 Nov 2026): the platform's egress proxy answers foldrun's
+       *  door (SUPPLY_DOOR), so the step's calls go there, in Anthropic's
+       *  format, by door names. Absent: the provider's own endpoint, as
+       *  before — what a platform whose proxy does not know the door gets. */
+      door?: boolean;
     }
   | { kind: "refused"; reason: string };
 
@@ -345,39 +350,109 @@ export type SupplyAnswer =
 const MARKER = "foldrun-supply:";
 /** `+login` after the provider: the subscription's marker (SupplyAnswer.via). */
 const VIA_LOGIN = "+login";
-export const supplyToken = (provider: SupplyProviderName, via?: "login") => `${MARKER}${provider}${via === "login" ? VIA_LOGIN : ""}`;
+/** `+operator`: the operator's own model credential, for an account the
+ *  operator runs on it (one door, 23 Nov 2026) — served at foldrun's door,
+ *  which reads the credential itself and asks the platform again whether
+ *  this account may use it; the marker alone grants nothing. */
+const VIA_OPERATOR = "+operator";
+export type SupplyVia = "login" | "operator";
+export const supplyToken = (provider: SupplyProviderName, via?: SupplyVia) => `${MARKER}${provider}${via === "login" ? VIA_LOGIN : via === "operator" ? VIA_OPERATOR : ""}`;
 export function supplyProviderOfToken(value: string | null | undefined): SupplyProviderName | null {
   if (typeof value !== "string" || !value.startsWith(MARKER)) return null;
   let p = value.slice(MARKER.length);
-  if (p.endsWith(VIA_LOGIN)) {
-    p = p.slice(0, -VIA_LOGIN.length);
-    // A subscription is Claude's alone.
-    if (p !== "anthropic") return null;
+  for (const suffix of [VIA_LOGIN, VIA_OPERATOR]) {
+    if (p.endsWith(suffix)) {
+      p = p.slice(0, -suffix.length);
+      // A subscription, and the operator's credential, are Claude's alone.
+      if (p !== "anthropic") return null;
+    }
   }
   return isSupplyProvider(p) ? p : null;
 }
-/** "login" when the marker is the subscription's, else null. */
-export function supplyViaOfToken(value: string | null | undefined): "login" | null {
-  return supplyProviderOfToken(value) !== null && String(value).endsWith(VIA_LOGIN) ? "login" : null;
+/** "login" or "operator" when the marker says so, else null. */
+export function supplyViaOfToken(value: string | null | undefined): SupplyVia | null {
+  if (supplyProviderOfToken(value) === null) return null;
+  const v = String(value);
+  return v.endsWith(VIA_LOGIN) ? "login" : v.endsWith(VIA_OPERATOR) ? "operator" : null;
 }
 
-/** The provider block a step on foldrun's models runs with: the preset's
- *  endpoint and format, the operator's tier map, and the key as a
- *  placeholder only. */
-export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial<Record<"fast" | "default" | "max", string>>, via?: "login"): Record<string, unknown> {
-  const p = SUPPLY_PROVIDERS[provider];
-  const preset = p.preset ? providerPreset(p.preset) : undefined;
-  const baseUrl = p.baseUrl ?? preset?.baseUrl;
-  if (!baseUrl) throw new Error(`model supply: no endpoint for ${provider}`);
+/** The model env a step on the operator's own credential runs with when
+ *  its calls go through foldrun's door (one door): the door and the
+ *  operator's marker in place of the credential, the operator's tier ids
+ *  kept. The credential itself never enters the lease or the pod. */
+export function operatorDoorEnv(platformEnv: Record<string, string | undefined>): Record<string, string | undefined> {
   return {
-    // A provider the runtime has no preset for is spelled out whole: its
-    // address, format and auth, no name to look up.
-    ...(preset ? { name: p.preset } : {}),
-    base_url: baseUrl,
-    format: p.format,
-    auth: p.auth,
+    ANTHROPIC_BASE_URL: SUPPLY_DOOR,
+    ANTHROPIC_API_KEY: supplyToken("anthropic", "operator"),
+    ANTHROPIC_AUTH_TOKEN: "",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: platformEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: platformEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: platformEnv.ANTHROPIC_DEFAULT_OPUS_MODEL,
+  };
+}
+
+/**
+ * The one door every call on foldrun's models goes through (owner, 23 Nov
+ * 2026: "one door for everything, local or in cloud"): a name the egress
+ * proxy answers itself, in-process, with the API door's own code
+ * (gateway-door.ts serveModelCall) — the same provider routing, credential,
+ * translation and metering a call from a computer gets at api.foldrun.*.
+ * Never resolved and never reached unproxied: a step on foldrun's models
+ * runs only behind the proxy (runner.ts refuses it elsewhere).
+ */
+export const SUPPLY_DOOR_HOST = "models.foldrun.internal";
+export const SUPPLY_DOOR = `https://${SUPPLY_DOOR_HOST}`;
+export function isSupplyDoor(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).host === SUPPLY_DOOR_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/** The name the door routes a provider's model by: Claude's bare, every
+ *  other provider's as `provider/model` (gateway-door.ts routeOf). */
+export function supplyModelName(provider: SupplyProviderName, model: string): string {
+  if (provider === "anthropic") return model;
+  return model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
+}
+/** The id the provider itself knows, for a door name (the price list's
+ *  key): `deepseek/deepseek-v4` → `deepseek-v4`. */
+export function supplyModelId(name: string): string {
+  const at = name.indexOf("/");
+  return at > 0 && isSupplyProvider(name.slice(0, at)) ? name.slice(at + 1) : name;
+}
+
+/** The provider block a step on foldrun's models runs with. Through the
+ *  door (`door`): Anthropic's format whatever the provider (the door
+ *  translates), the operator's tier map as door names. Else the preset's
+ *  endpoint and format and the tier map as the provider's ids. The key is a
+ *  placeholder only, either way. */
+export function supplyProviderBlock(provider: SupplyProviderName, tiers: Partial<Record<"fast" | "default" | "max", string>>, via?: "login", door?: boolean): Record<string, unknown> {
+  if (!door) {
+    const p = SUPPLY_PROVIDERS[provider];
+    const preset = p.preset ? providerPreset(p.preset) : undefined;
+    const baseUrl = p.baseUrl ?? preset?.baseUrl;
+    if (!baseUrl) throw new Error(`model supply: no endpoint for ${provider}`);
+    return {
+      // A provider the runtime has no preset for is spelled out whole: its
+      // address, format and auth, no name to look up.
+      ...(preset ? { name: p.preset } : {}),
+      base_url: baseUrl,
+      format: p.format,
+      auth: p.auth,
+      token: supplyToken(provider, via),
+      ...(Object.keys(tiers).length ? { models: tiers } : {}),
+    };
+  }
+  const models = Object.fromEntries(Object.entries(tiers).filter(([, id]) => typeof id === "string" && id).map(([tier, id]) => [tier, supplyModelName(provider, id as string)]));
+  return {
+    base_url: SUPPLY_DOOR,
+    format: "anthropic",
+    auth: "x-api-key",
     token: supplyToken(provider, via),
-    ...(Object.keys(tiers).length ? { models: tiers } : {}),
+    ...(Object.keys(models).length ? { models } : {}),
   };
 }
 

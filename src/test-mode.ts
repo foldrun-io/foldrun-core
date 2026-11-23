@@ -117,6 +117,9 @@ const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
  */
 export const READ_SAFE_HOSTS: string[] = [
   // model providers
+  // foldrun's models: the door the egress proxy answers itself
+  // (model-supply.ts SUPPLY_DOOR_HOST)
+  "models.foldrun.internal",
   "api.anthropic.com",
   "openrouter.ai",
   "api.openai.com",

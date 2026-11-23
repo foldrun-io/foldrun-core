@@ -65,7 +65,7 @@ export function accountModelEnv(
   const supply: SupplyAnswer = written ? { kind: "none" } : platform.modelSupply?.(tenant) ?? { kind: "none" };
   if (supply.kind === "refused") throw new ModelKeyError(`foldrun's models: ${supply.reason}`, 403);
   if (supply.kind === "foldrun") {
-    const s = parseProvider(supplyProviderBlock(supply.provider, supply.tiers, supply.via))!;
+    const s = parseProvider(supplyProviderBlock(supply.provider, supply.tiers, supply.via, supply.door))!;
     const preset = providerPreset(s.name);
     return {
       env: providerEnvFor({ baseUrl: s.baseUrl!, token: s.token, auth: s.auth, models: s.models, headers: {} }),

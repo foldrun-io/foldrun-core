@@ -24,7 +24,7 @@ import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-contai
 type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[] };
 
 async function withAccount(
-  opts: { supply: SupplyAnswer; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
+  opts: { supply: SupplyAnswer; noDoor?: boolean; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
   body: (c: Captured) => Promise<void>,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-supply-"));
@@ -43,10 +43,13 @@ async function withAccount(
     return { url: "http://egress.test/e/tok", commit: async () => {}, drainLog: async () => [], release: async () => {} } as unknown as EgressLease;
   };
   const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
+  // The platform's egress proxy answers foldrun's door (one door, 23 Nov
+  // 2026) unless a test says it does not.
+  const withDoor = (a: SupplyAnswer): SupplyAnswer => (a.kind === "foldrun" && !opts.noDoor ? { ...a, door: true } : a);
   registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: (_t, want) => {
-    if (!want) return opts.supply;
+    if (!want) return withDoor(opts.supply);
     opts.asked?.push(want);
-    return opts.supplyFor?.(want) ?? { kind: "refused", reason: "not asked for in this test" };
+    return withDoor(opts.supplyFor?.(want) ?? { kind: "refused", reason: "not asked for in this test" });
   }, egress: { lease }, ownModelKeys: opts.ownKeys === undefined ? undefined : () => opts.ownKeys! });
   try {
     const ws = path.join(root, "acme/workspaces/desk");
@@ -85,9 +88,10 @@ test("an account on foldrun's models runs on the platform's key — as a supply 
     assert.ok(!env.includes("sk-ant-api03"), "neither the operator's key nor the customer's reaches the pod");
     assert.ok(!env.includes("foldrun-supply:"), "nor the marker: the pod holds a placeholder");
     assert.match(env, /"ANTHROPIC_API_KEY":"\$\{FOLDRUN_MODEL_KEY\}"/);
-    assert.match(env, /egress\.test\/e\/tok\/https:\/\/api\.anthropic\.com/);
+    // One door (23 Nov 2026): to foldrun's door, which the proxy answers itself.
+    assert.match(env, /egress\.test\/e\/tok\/https:\/\/models\.foldrun\.internal/);
     const g = c.grants[0].secrets.FOLDRUN_MODEL_KEY;
-    assert.deepEqual(g, { value: "", hosts: ["api.anthropic.com"], supply: { provider: "anthropic" } }, "a supply grant: no value in the lease");
+    assert.deepEqual(g, { value: "", hosts: ["models.foldrun.internal"], supply: { provider: "anthropic" } }, "a supply grant: no value in the lease");
     assert.equal(done.steps[0].tries?.[0].supply, "foldrun");
   });
 });
@@ -100,18 +104,21 @@ test("an account on its Claude subscription (16 Nov 2026): a subscription grant 
     assert.equal(done.steps[0].credential, "Claude subscription");
     const env = JSON.stringify(c.calls[0].env);
     assert.ok(!env.includes("sk-ant-api03") && !env.includes("foldrun-supply:"), "no key and no marker in the pod");
-    assert.match(env, /egress\.test\/e\/tok\/https:\/\/api\.anthropic\.com/);
-    assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["api.anthropic.com"], supply: { provider: "anthropic", via: "login" } });
+    assert.match(env, /egress\.test\/e\/tok\/https:\/\/models\.foldrun\.internal/);
+    assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["models.foldrun.internal"], supply: { provider: "anthropic", via: "login" } });
   });
 });
 
-test("an OpenAI-format provider goes through the translator, the key a placeholder there too", async () => {
+test("an OpenAI-format provider: Anthropic's format to foldrun's door, which translates — no translator in the pod, the tier a door name, the key a placeholder", async () => {
   await withAccount({ supply: { kind: "foldrun", provider: "openai", tiers: { default: "gpt-x" } } }, async (c) => {
     const done = await run();
     assert.equal(done.status, "completed", events(done.steps[0]));
-    const t = (c.calls[0] as unknown as { input: { translator: import("../src/translator.ts").TranslatorSpec } }).input.translator;
-    assert.equal(t.upstreamKey, "${FOLDRUN_MODEL_KEY}");
-    assert.equal(t.egress, "http://egress.test/e/tok");
+    const t = (c.calls[0] as unknown as { input: { translator?: unknown } }).input.translator;
+    assert.equal(t ?? null, null);
+    const env = c.calls[0].env as Record<string, string>;
+    assert.match(env.ANTHROPIC_BASE_URL, /\/e\/tok\/https:\/\/models\.foldrun\.internal$/);
+    assert.equal(env.ANTHROPIC_API_KEY, "${FOLDRUN_MODEL_KEY}");
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, "openai/gpt-x");
     assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY.supply, { provider: "openai" });
     assert.ok(!JSON.stringify(c.calls[0]).includes("foldrun-supply:"));
   });
@@ -239,7 +246,7 @@ test("outside a step (a judge, a grader, a draft): the same rung, through a host
       );
       assert.match(seen, /^http:\/\/127\.0\.0\.1:\d+/, "the SDK talks to loopback; the translator sends through the lease");
       assert.equal(got.length, 1, "the call went through the proxy (Codex review: the passthrough had ignored it)");
-      assert.equal(got[0].url, "/e/tok/https://api.anthropic.com/v1/messages");
+      assert.equal(got[0].url, "/e/tok/https://models.foldrun.internal/v1/messages");
       assert.equal(got[0].key, "${FOLDRUN_MODEL_KEY}", "a placeholder, filled by the proxy");
       assert.equal(leases[0].runId, "grade:quality");
       assert.deepEqual(leases[0].job, { kind: "grade", name: "quality" });
@@ -336,7 +343,7 @@ test("max_output_tokens: the runtime is told its limit — the agent's, a step's
   });
 });
 
-test("Claude Code's attribution line is switched off for a provider that is not Anthropic, and kept for Anthropic (3 Nov 2026)", async () => {
+test("Claude Code's attribution line is switched off on foldrun's door, whatever the provider: the door sends what the provider takes (3 Nov 2026; one door, 23 Nov)", async () => {
   const attr = (c: Captured) => (c.calls[0].env as Record<string, string>).CLAUDE_CODE_ATTRIBUTION_HEADER;
   await withAccount({ supply: { kind: "foldrun", provider: "deepseek", tiers: { default: "deepseek-v4-pro" } } }, async (c) => {
     const done = await run();
@@ -345,7 +352,7 @@ test("Claude Code's attribution line is switched off for a provider that is not 
   });
   await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} } }, async (c) => {
     await run();
-    assert.equal(attr(c), undefined);
+    assert.equal(attr(c), "0");
   });
 });
 
@@ -392,10 +399,12 @@ test("Z.ai, Qwen, MiniMax and MiMo are sent only what each documents (10 Nov 202
     assert.ok(!("service_tier" in b), `${name}: no tier that bills more (MiniMax's priority is 1.5x)`);
     assert.deepEqual((b.tools as { name: string }[]).map((t) => t.name), ["Read"], `${name}: the deferred-tool placeholder is dropped`);
     assert.ok(SUPPLY_TITLES[name]);
-    // The step's provider block points at the one host the key is granted to.
-    const block = supplyProviderBlock(name, { default: "x" });
-    assert.equal(new URL(String(block.base_url)).host, p.host, name);
-    assert.ok(p.metered.every((m) => m.startsWith(new URL(String(block.base_url)).pathname)), `${name}: metered under the base URL`);
+    // The step's provider block points at foldrun's door, in Anthropic's
+    // format, the tier a door name the door routes to this provider.
+    const block = supplyProviderBlock(name, { default: "x" }, undefined, true);
+    assert.equal(new URL(String(block.base_url)).host, "models.foldrun.internal", name);
+    assert.equal(block.format, "anthropic");
+    assert.deepEqual(block.models, { default: `${name}/x` });
   }
   const z: Record<string, unknown> = sdk();
   shapeRequest(SUPPLY_PROVIDERS.zai, z);
@@ -496,14 +505,14 @@ test("a model named outright runs on its own provider of foldrun's models (23 No
       assert.equal(done.status, "completed", events(done.steps[0]));
       assert.deepEqual(asked, [{ provider: "deepseek", model: "deepseek-chat" }]);
       assert.equal(done.steps[0].supplyProvider, "deepseek");
-      assert.equal(sentModel(c), "deepseek-chat", "the id DeepSeek knows, not provider/model");
+      assert.equal(sentModel(c), "deepseek/deepseek-chat", "the door's name: the door routes it to DeepSeek");
       assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY.supply, { provider: "deepseek" }, "DeepSeek's key, not the Claude login");
     },
   );
 });
 
 test("a bare name with another provider's prefix routes too; a tier word and a bare Claude id stay on the account's provider", async () => {
-  for (const [model, provider, sent] of [["gpt-5", "openai", "gpt-5"], ["default", "anthropic", "sonnet"], ["claude-opus-5-5", "anthropic", "claude-opus-5-5"], ["anthropic/claude-opus-5-5", "anthropic", "claude-opus-5-5"]] as const) {
+  for (const [model, provider, sent] of [["gpt-5", "openai", "openai/gpt-5"], ["default", "anthropic", "sonnet"], ["claude-opus-5-5", "anthropic", "claude-opus-5-5"], ["anthropic/claude-opus-5-5", "anthropic", "claude-opus-5-5"]] as const) {
     const asked: unknown[] = [];
     await withAccount(
       { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: model, asked, supplyFor: (w) => ({ kind: "foldrun", provider: w.provider as "openai", tiers: {} }) },
@@ -550,13 +559,13 @@ test("the account's own provider refused now: a step naming another, available o
     async (c) => {
       const done = await run();
       assert.equal(done.status, "completed", events(done.steps[0]));
-      assert.equal(sentModel(c), "deepseek-chat");
+      assert.equal(sentModel(c), "deepseek/deepseek-chat");
     },
   );
 });
 
-test("a judge pinned to another provider's id grades with the switched step's own model, said so; one on the same provider gets the bare id", async () => {
-  for (const [judge, want] of [["claude-opus-5-5", "deepseek-chat"], ["deepseek/deepseek-reasoner", "deepseek-reasoner"]] as const) {
+test("a judge pinned to another provider's id grades with the switched step's own model, said so; one on the same provider gets its door name", async () => {
+  for (const [judge, want] of [["claude-opus-5-5", "deepseek/deepseek-chat"], ["deepseek/deepseek-reasoner", "deepseek/deepseek-reasoner"]] as const) {
     await withAccount(
       { supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentModel: "deepseek/deepseek-chat", wsFront: `judge:\n  model: ${judge}\n`, supplyFor: () => ({ kind: "foldrun", provider: "deepseek", tiers: {} }) },
       async (c) => {
@@ -567,4 +576,58 @@ test("a judge pinned to another provider's id grades with the switched step's ow
       },
     );
   }
+});
+
+test("one door (23 Nov 2026): a step on the operator's own credential sends its calls to foldrun's door with the operator's marker — the credential never in the lease or the pod — and its tokens are still the step's to bill", async () => {
+  await withAccount({ supply: { kind: "none" } }, async (c) => {
+    registerPlatform({ platformKeyAllowed: () => true, operatorDoor: () => true });
+    try {
+      const done = await run();
+      assert.equal(done.status, "completed", events(done.steps[0]));
+      assert.equal(done.steps[0].supply, "operator", "billed from the step's tokens, as before");
+      const env = c.calls[0].env as Record<string, string>;
+      assert.match(env.ANTHROPIC_BASE_URL, /\/e\/tok\/https:\/\/models\.foldrun\.internal$/);
+      assert.equal(env.ANTHROPIC_API_KEY, "${FOLDRUN_MODEL_KEY}");
+      assert.ok(!JSON.stringify(c.calls[0]).includes("sk-ant-api03-the-operators-own-key"), "the operator's key is not in the pod");
+      assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY, { value: "", hosts: ["models.foldrun.internal"], supply: { provider: "anthropic", via: "operator" } }, "nor in the lease");
+    } finally {
+      registerPlatform({ platformKeyAllowed: () => false, operatorDoor: undefined });
+    }
+  });
+  // Without the platform's word: the credential in the lease, to Anthropic, as before.
+  await withAccount({ supply: { kind: "none" } }, async (c) => {
+    registerPlatform({ platformKeyAllowed: () => true });
+    try {
+      await run();
+      assert.deepEqual(c.grants[0].secrets.FOLDRUN_MODEL_KEY.hosts, ["api.anthropic.com"]);
+    } finally {
+      registerPlatform({ platformKeyAllowed: () => false });
+    }
+  });
+});
+
+test("the operator's marker: Claude's alone, and read back as such", () => {
+  assert.equal(supplyToken("anthropic", "operator"), "foldrun-supply:anthropic+operator");
+  assert.equal(supplyProviderOfToken("foldrun-supply:anthropic+operator"), "anthropic");
+  assert.equal(supplyViaOfToken("foldrun-supply:anthropic+operator"), "operator");
+  assert.equal(supplyProviderOfToken("foldrun-supply:deepseek+operator"), null);
+});
+
+test("a platform whose proxy does not know the door: the provider's own endpoint, format and ids, as before", async () => {
+  await withAccount({ supply: { kind: "foldrun", provider: "deepseek", tiers: { default: "deepseek-v4" } }, noDoor: true }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    const env = c.calls[0].env as Record<string, string>;
+    assert.match(env.ANTHROPIC_BASE_URL, /\/e\/tok\/https:\/\/api\.deepseek\.com/);
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, "deepseek-v4");
+  });
+});
+
+test("a provider: block or stored key carrying one of foldrun's markers is refused, before a sandbox: only the platform grants those", async () => {
+  await withAccount({ supply: { kind: "none" }, ownKeys: true, agentProvider: "provider:\n  name: anthropic\n  token: foldrun-supply:anthropic+operator\n" }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "failed");
+    assert.equal(c.calls.length, 0);
+    assert.match(events(done.steps[0]), /may not carry a foldrun-supply: token/);
+  });
 });

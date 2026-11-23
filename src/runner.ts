@@ -28,7 +28,7 @@ import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvNa
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
-import { SUPPLY_TITLES, namedSupplyModel, providerOfModel, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
+import { SUPPLY_TITLES, isSupplyDoor, namedSupplyModel, operatorDoorEnv, providerOfModel, supplyModelId, supplyModelName, supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
 import type { StepSupply } from "./store.ts";
 import { archiveRunOutputs, noteRefused } from "./run-outputs.ts";
 import { explainRefusal, isRefusalStatus, refusalFromLine, supplyNote, type SupplyState } from "./refusal.ts";
@@ -1514,7 +1514,7 @@ export function agentContext(
   const providerBlock =
     fileBlock ??
     (supply.kind === "foldrun"
-      ? supplyProviderBlock(supply.provider, supply.tiers, supply.via)
+      ? supplyProviderBlock(supply.provider, supply.tiers, supply.via, supply.door)
       : supply.kind === "refused"
         ? undefined
         : ownKeys
@@ -2597,13 +2597,16 @@ async function runStepBody(
     // pinned to a full id of another provider would go to this step's
     // endpoint and fail as a FAIL verdict — it grades with the step's own
     // model instead, said so (Codex review). A tier word follows the step.
+    // Through foldrun's door (one door, 23 Nov 2026) the names are the
+    // door's (`provider/model`); the lease is still for this step's provider.
     if (modelRoute && judgeModel && !resolveTier(judgeModel)) {
+      const named = (m: string) => (supply.kind === "foldrun" && supply.door ? supplyModelName(modelRoute.provider, m) : m);
       const j = providerOfModel(judgeModel);
-      if (j && j.provider === modelRoute.provider) judgeModel = j.model;
+      if (j && j.provider === modelRoute.provider) judgeModel = named(j.model);
       else {
         push("info", `judge: ${judgeModel} is not on ${SUPPLY_TITLES[modelRoute.provider]}, which this step runs on — verify: judge: grades with the step's model (${modelRoute.model})`);
         // Named, not left unset: unset is the judge's own default (fast).
-        judgeModel = modelRoute.model;
+        judgeModel = named(modelRoute.model);
       }
     }
     // Sent again on every turn; with turns and the tools' result sizes, what
@@ -2725,6 +2728,17 @@ async function runStepBody(
     step.supply = onSupply ? "foldrun" : primaryOnPlatform ? "operator" : "own";
     if (onSupply) step.supplyProvider = supply.provider;
     else delete step.supplyProvider;
+    // A credential of the account's own — a written provider: block, its
+    // stored key — may never carry one of foldrun's markers: those stand for
+    // the platform's keys, the operator's credential or the subscription,
+    // and only the platform's own answer grants one (Codex review, 23 Nov
+    // 2026: a marker typed into a block would choose the payer).
+    if (!onSupply && [...Object.values(providerEnv), ...Object.values(fallbackEnv ?? {})].some((v) => typeof v === "string" && v.includes("foldrun-supply:"))) {
+      push("error", "a provider: block or model key may not carry a foldrun-supply: token — it stands for the platform's own credentials, which only the platform grants");
+      step.status = "failed";
+      save();
+      return;
+    }
     // Chosen, but not to be had now: failed with why, before a sandbox —
     // never onto the account's stored key or the operator's.
     if (supply.kind === "refused") {
@@ -2828,7 +2842,9 @@ async function runStepBody(
     // goes in the trace — "why did this run on haiku" should be answerable
     // from the run, not by opening three files.
     const modelSource = step.model ? "step" : modelOverride ? "flow" : "agent";
-    const model = modelRoute?.model ?? resolveModel(step.model ?? modelOverride ?? front.model);
+    // A model named outright goes to foldrun's door by its door name (one
+    // door, 23 Nov 2026: the door routes `provider/model`).
+    const model = modelRoute ? (supply.kind === "foldrun" && supply.door ? supplyModelName(modelRoute.provider, modelRoute.model) : modelRoute.model) : resolveModel(step.model ?? modelOverride ?? front.model);
     const rawEffort = step.effort ?? effortOverride ?? front.effort;
     const effortSource = step.effort ? "step" : effortOverride ? "flow" : "agent";
     let effort = resolveEffort(rawEffort);
@@ -2875,7 +2891,9 @@ async function runStepBody(
       { haiku: rideEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
         sonnet: rideEnv.ANTHROPIC_DEFAULT_SONNET_MODEL,
         opus: rideEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }[model] ?? model;
-    if (rideEnv.ANTHROPIC_BASE_URL && !translator) {
+    // foldrun's door is answered by the egress proxy alone, never from here:
+    // no catalogue to fetch — the name's own price below.
+    if (rideEnv.ANTHROPIC_BASE_URL && !translator && !isSupplyDoor(rideEnv.ANTHROPIC_BASE_URL)) {
       catalog = await loadCatalog(rideEnv.ANTHROPIC_BASE_URL);
       const needsTools = allowed.length > 0 || mcpNames.length > 0;
       const verdict = checkModel(catalog, wireModel, { tools: needsTools });
@@ -2908,7 +2926,7 @@ async function runStepBody(
     // list's ceiling for the model it runs, so the runtime knows its real
     // limit up front instead of the gateway cutting it short (3 Nov 2026).
     const askedOut = step.maxOutputTokens ?? parseMaxOutputTokens(front.max_output_tokens);
-    const outCeiling = onSupply && supply.kind === "foldrun" ? supply.ceilings?.[wireModel] : undefined;
+    const outCeiling = onSupply && supply.kind === "foldrun" ? supply.ceilings?.[wireModel] ?? supply.ceilings?.[supplyModelId(wireModel)] : undefined;
     const maxOut = askedOut && outCeiling ? Math.min(askedOut, outCeiling) : (askedOut ?? outCeiling);
     if (askedOut && outCeiling && askedOut > outCeiling) {
       push("info", `max_output_tokens: ${askedOut} runs as ${outCeiling} — the price list's ceiling for ${wireModel} on foldrun's models`);
@@ -3618,7 +3636,11 @@ async function runStepBody(
             // process holds one key, and every isolated run borrows it.
             // A provider: block still wins, because providerEnv is spread
             // after and carries the agent's chosen endpoint + token.
-            ...proxied(Object.keys(providerEnv).length === 0 ? modelEnv : providerEnv, keyName),
+            // On the operator's own credential behind a lease, where the
+            // platform says so (one door, 23 Nov 2026): foldrun's door and the
+            // operator's marker — the door holds the credential, the lease
+            // never does. Not the declared second supply (its own name).
+            ...proxied(Object.keys(providerEnv).length === 0 ? (lease && keyName === MODEL_KEY_NAME && platform.operatorDoor?.(tenant) ? operatorDoorEnv(modelEnv) : modelEnv) : providerEnv, keyName),
             ...outputEnv,
             ...(lease ? { [EGRESS_ENV]: lease.url } : {}),
             // Every program's HTTP(S) through the proxy's forward door, and
