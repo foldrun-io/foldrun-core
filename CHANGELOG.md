@@ -13,6 +13,18 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [25.0.0] — 2026-11-23
+
+### Breaking changes
+
+- links core builds (webhooks, events, approvals, (9c727e2)
+
+- feat(platform)!: platform links are /v1 — one URL format ([9c727e2](https://github.com/foldrun-io/foldrun-core/commit/9c727e2))
+
+### feat
+
+- accept an account's own Claude subscription token as a model key ([cabaaba](https://github.com/foldrun-io/foldrun-core/commit/cabaaba))
+
 ## [24.13.0] — 2026-11-22
 
 ### Widened in the public API
