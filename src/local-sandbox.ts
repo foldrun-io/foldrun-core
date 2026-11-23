@@ -773,9 +773,8 @@ function installHint(platform: NodeJS.Platform): string {
   return "Install bubblewrap, socat and ripgrep: sudo apt-get install bubblewrap socat ripgrep (dnf / pacman: the same names)";
 }
 
-/** End a process and every process below it (SIGKILL), found from the
- *  process table: a server's children do not outlive it. */
-export function killTree(pid: number): void {
+/** A process and everything it started, the root first. */
+export function treePids(pid: number): number[] {
   const table = spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" });
   const kids = new Map<number, number[]>();
   for (const line of (table.stdout ?? "").split("\n")) {
@@ -789,6 +788,13 @@ export function killTree(pid: number): void {
     for (const c of kids.get(p) ?? []) walk(c);
   };
   walk(pid);
+  return all;
+}
+
+/** End a process and every process below it (SIGKILL), found from the
+ *  process table: a server's children do not outlive it. */
+export function killTree(pid: number): void {
+  const all = treePids(pid);
   for (const p of all.reverse()) {
     try {
       process.kill(p, "SIGKILL");

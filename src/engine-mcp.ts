@@ -55,7 +55,14 @@ export interface McpSpec {
   timeout?: number;
   /** The SDK's per-tool permission policy — refused here (checkMcpSpecs). */
   tools?: unknown;
+  /** `"error"`: a remote server that answers with a redirect is refused, so
+   *  the headers a person approved for one address never follow to another. */
+  redirect?: "error";
 }
+
+/** What a host may rely on from this connector: a host that keeps servers
+ *  for a session (foldrun code) refuses to start any on a build without them. */
+export const ENGINE_MCP_FEATURES = { killOnClose: true, maxTools: true, redirectError: true, kill: true } as const;
 
 /** Longest a call may run when its server names no timeout: the step's own
  *  timeout ends it sooner (the loop's signal). */
@@ -97,9 +104,12 @@ export interface McpConnection {
   instructions: { server: string; text: string }[];
   servers: { name: string; status: "connected" }[];
   close(): Promise<void>;
+  /** Ends every stdio server and what it started, at once and without
+   *  waiting: for a host that is itself exiting. */
+  kill(): void;
 }
 
-import { LAUNCHER, killTree } from "./local-sandbox.ts";
+import { LAUNCHER, killTree, treePids } from "./local-sandbox.ts";
 import type { SandboxWalls } from "./engine-common.ts";
 
 /** A program and its arguments as one shell line, each word quoted. */
@@ -132,7 +142,7 @@ function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: 
     return { client: new StdioClientTransport({ command: s.command!, args: s.args ?? [], env: { ...base, ...(s.env ?? {}) }, cwd, stderr: "ignore" }) };
   }
   const url = new URL(s.url!);
-  const requestInit = { headers: s.headers ?? {} };
+  const requestInit: RequestInit = { headers: s.headers ?? {}, ...(s.redirect === "error" ? { redirect: "error" as const } : {}) };
   // SSE is the older MCP transport (deprecated in the SDK); still accepted,
   // because an agent may name a server that has nothing newer.
   return { client: s.type === "sse" ? new SSEClientTransport(url, { requestInit }) : new StreamableHTTPClientTransport(url, { requestInit }) };
@@ -208,7 +218,7 @@ function bounded<T>(work: Promise<T>, ms: number, signal: AbortSignal, what: str
  *  read, as the SDK read it); `toolEnv` is what a tool's process starts
  *  from — the loop's shellEnv, which a caller keeps apart from the model's
  *  credentials. */
-export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
+export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
   const open: { client: Client; transport: Transport; server?: Transport }[] = [];
   const close = async () => {
     await Promise.all(open.map(async (o) => {
@@ -217,8 +227,20 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
       if (o.transport instanceof StreamableHTTPClientTransport && o.transport.sessionId) {
         await bounded(o.transport.terminateSession(), 5_000, new AbortController().signal, "end session").catch(() => undefined);
       }
+      // A host that keeps servers for a whole session (foldrun code) asks
+      // that what a stdio server started goes with it: read while the
+      // server still holds its children, ended after it was asked to close.
+      const pid = ctx.killOnClose ? ((o.transport as { pid?: number | null }).pid ?? null) : null;
+      const started = pid ? treePids(pid).filter((p) => p !== pid) : [];
       await o.client.close().catch(() => undefined);
       await o.server?.close().catch(() => undefined);
+      for (const p of [...started, ...(pid ? [pid] : [])]) {
+        try {
+          process.kill(p, "SIGKILL");
+        } catch {
+          /* gone already */
+        }
+      }
     }));
   };
   const tools: EngineTool[] = [];
@@ -283,6 +305,8 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
               throw err;
             }
             found.push(...(page.tools as typeof listed));
+            // Refused while it is still arriving, not after every page is held.
+            if (ctx.maxTools !== undefined && found.length > ctx.maxTools) throw new Error(`it offers more than ${ctx.maxTools} tools`);
             cursor = page.nextCursor;
           } while (cursor);
           // Each page replaced the client's output-schema checks with its
@@ -334,5 +358,11 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
     await close();
     throw err;
   }
-  return { tools, owner, instructions, servers: Object.keys(servers).map((name) => ({ name, status: "connected" as const })), close };
+  const kill = () => {
+    for (const o of open) {
+      const pid = (o.transport as { pid?: number | null }).pid ?? null;
+      if (pid) killTree(pid);
+    }
+  };
+  return { tools, owner, instructions, servers: Object.keys(servers).map((name) => ({ name, status: "connected" as const })), close, kill };
 }

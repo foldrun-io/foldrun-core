@@ -1506,3 +1506,52 @@ both("steering, Codex round 2: a steered follow-up's result is its own words, ne
     await model.close();
   }
 });
+
+test("killOnClose: a stdio server kept for a session goes with everything it started; without it only the server is closed", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-kill-")));
+  const spec = stdioServer(dir);
+  // The server leaves a child running, as a launcher script or a dev server would.
+  fs.appendFileSync(path.join(dir, "server.mjs"), `
+import { spawn } from "node:child_process";
+const kid = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(path.join(dir, "kid"))}, String(kid.pid));
+`);
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const c = await connectMcp({ own: { type: "stdio", ...spec } }, { env: {}, toolEnv: {}, cwd: dir, signal: new AbortController().signal, killOnClose: true });
+  assert.deepEqual(c.tools.map((t) => t.name), ["mcp__own__env"]);
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(dir, "kid")); i++) await new Promise((r) => setTimeout(r, 50));
+  const kid = Number(fs.readFileSync(path.join(dir, "kid"), "utf8"));
+  const server = Number(fs.readFileSync(path.join(dir, "pid"), "utf8"));
+  assert.ok(alive(kid) && alive(server));
+  await c.close();
+  for (let i = 0; i < 60 && (alive(kid) || alive(server)); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(alive(server), false, "the server");
+  assert.equal(alive(kid), false, "what it started");
+});
+
+test("maxTools refuses a server while its list is still arriving; kill() ends a stdio server at once", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-mcp-max-")));
+  const spec = stdioServer(dir);
+  await assert.rejects(connectMcp({ own: { type: "stdio", ...spec } }, { env: {}, toolEnv: {}, cwd: dir, signal: new AbortController().signal, maxTools: 0 }), /the MCP server own did not start: it offers more than 0 tools/);
+  const c = await connectMcp({ own: { type: "stdio", ...spec } }, { env: {}, toolEnv: {}, cwd: dir, signal: new AbortController().signal, maxTools: 5 });
+  const server = Number(fs.readFileSync(path.join(dir, "pid"), "utf8"));
+  c.kill();
+  let alive = true;
+  for (let i = 0; i < 60 && alive; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    try {
+      process.kill(server, 0);
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(alive, false);
+  await c.close();
+});

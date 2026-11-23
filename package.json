@@ -36,6 +36,7 @@
       "./scan",
       "./snapshot-archive",
       "./engine-loop",
+      "./engine-mcp",
       "./local-sandbox"
     ]
   },
