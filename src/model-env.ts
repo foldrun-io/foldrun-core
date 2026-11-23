@@ -10,7 +10,7 @@ import { accountDir, workspaceDir, parseProvider, providerEnvFor } from "./store
 import { readAgentsMd } from "./runner.ts";
 import { getSecret } from "./secrets.ts";
 import { platform, hostUrlProblem } from "./platform.ts";
-import { accountModelBlock, isClaudeLoginToken, OWN_KEYS_OFF } from "./model-credential.ts";
+import { accountModelBlock, OWN_KEYS_OFF } from "./model-credential.ts";
 import { providerPreset } from "./providers.ts";
 import { startTranslator, translatorSpecFor, type TranslatorSpec } from "./translator.ts";
 import { supplyProviderBlock, type SupplyAnswer } from "./model-supply.ts";
@@ -100,9 +100,6 @@ export function accountModelEnv(
     text.replace(/\$\{([A-Z][A-Z0-9_]*)\}/g, (whole, name) => getSecret(tenant, name, workspace)?.value ?? whole);
   const token = sub(spec.token);
   if (token.includes("${")) throw new ModelKeyError("the provider's token secret is not set — `foldrun secrets` sets it", 422);
-  if (!platform.platformKeyAllowed(tenant) && isClaudeLoginToken(token)) {
-    throw new ModelKeyError("model key: a Claude login token (sk-ant-oat…) cannot be used here — use an API key from your provider", 422);
-  }
   const headers = Object.fromEntries(Object.entries(spec.headers).map(([k, v]) => [k, sub(v)]));
   const preset = providerPreset(spec.name);
   return {

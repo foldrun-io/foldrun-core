@@ -82,14 +82,15 @@ test("a customer's own API key, set in the account vault, is what its steps run 
   });
 });
 
-test("a Claude login token is refused as a customer's key", async () => {
+test("a Claude login token (the account's own subscription) is what its steps run on", async () => {
   await withAccount({ allowed: false }, async (calls) => {
     setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
     setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-oat01-a-claude-login-token-222222");
     const done = await run();
-    assert.equal(done.status, "failed");
-    assert.equal(calls.length, 0);
-    assert.ok(done.steps[0].events.some((e) => /Claude login token .* cannot be used here/.test(e.text)));
+    assert.equal(done.status, "completed", done.steps[0].events.map((e) => e.text).join("\n"));
+    assert.equal(calls.length, 1);
+    assert.match(done.steps[0].credential ?? "", /^provider: anthropic https:\/\/api\.anthropic\.com/);
+    assert.ok(!done.steps[0].events.some((e) => /cannot be used here/.test(e.text)), "no login-token refusal");
   });
 });
 
@@ -121,7 +122,7 @@ test("the account block and the login-token test", () => {
 // Work outside a step — an eval's judge, drafting a flow with AI — resolves
 // its key the same way (model-env.ts) and is refused, not billed to the
 // operator, for a customer with no key.
-test("outside a step: the account's own key, the platform's only when allowed, a login token refused", async () => {
+test("outside a step: the account's own key, the platform's only when allowed, a login token too", async () => {
   const { accountModelEnv, ModelKeyError } = await import("../src/model-env.ts");
   await withAccount({ allowed: false }, async () => {
     let platformAsked = 0;
@@ -138,7 +139,9 @@ test("outside a step: the account's own key, the platform's only when allowed, a
     assert.equal(m.env.ANTHROPIC_BASE_URL, "https://api.anthropic.com");
     assert.match(JSON.stringify(m.env), /customer-333333/);
     setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-oat01-login-444444");
-    assert.throws(() => accountModelEnv("acme", "desk", platformEnv), /Claude login token/);
+    const login = accountModelEnv("acme", "desk", platformEnv);
+    assert.equal(login.supply, "provider");
+    assert.match(JSON.stringify(login.env), /login-444444/);
   });
   await withAccount({ allowed: true }, async () => {
     const m = accountModelEnv("acme", "desk", () => ({ ANTHROPIC_API_KEY: "operator" }));

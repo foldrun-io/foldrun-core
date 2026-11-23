@@ -24,7 +24,7 @@ import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, classDisk, type StepTiming } from "./run-container.ts";
 import { readResources, hasOverride, anyMemoryMi } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
-import { resolveModelCredential, credentialLine, accountModelBlock, isClaudeLoginToken, isModelEnvName, DECLARED_ENV_PREFIX, OWN_KEYS_OFF } from "./model-credential.ts";
+import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvName, DECLARED_ENV_PREFIX, OWN_KEYS_OFF } from "./model-credential.ts";
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -2694,19 +2694,12 @@ async function runStepBody(
     // before a sandbox is rented, with what to do about it — not run on the
     // operator's key, and not failed later by a provider.
     if (!platform.platformKeyAllowed(tenant)) {
-      const own = Object.values(providerSecrets).concat(Object.values(providerEnv));
       if (primaryOnPlatform) {
         push(
           "error",
           `no model key: this account runs on its own API key, and none is set. Add one in Settings → Models ` +
             `(or \`foldrun account model set <provider> --key …\`), or write a provider: block in AGENTS.md`,
         );
-        step.status = "failed";
-        save();
-        return;
-      }
-      if (own.some((v) => isClaudeLoginToken(v))) {
-        push("error", "model key: a Claude login token (sk-ant-oat…) cannot be used here — use an API key from your provider");
         step.status = "failed";
         save();
         return;

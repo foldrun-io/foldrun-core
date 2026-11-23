@@ -109,9 +109,8 @@ export function accountModelBlock(read: (name: string) => string | null): Record
 }
 
 /** A Claude login token (`claude setup-token`, sk-ant-oat…), not an API key.
- *  Anthropic's terms do not let a third-party product run customers on
- *  claude.ai logins, so on a hosted platform only the operator's own
- *  accounts may; a customer's key must be an API key. */
+ *  An account may set one as its model key — its own claude.ai subscription —
+ *  the same as any provider key. */
 export function isClaudeLoginToken(value: string | null | undefined): boolean {
   return typeof value === "string" && /^sk-ant-oat\d*-/.test(value.trim());
 }
