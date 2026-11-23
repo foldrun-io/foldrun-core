@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [25.1.0] — 2026-11-23
+
+- feat(engine): believe x-should-retry; name the caller in User-Agent ([a5f12e4](https://github.com/foldrun-io/foldrun-core/commit/a5f12e4))
+
 ## [25.0.1] — 2026-11-23
 
 ### chore
