@@ -132,6 +132,14 @@ test("outside a step: the account's own key, the platform's only when allowed, a
     };
     assert.throws(() => accountModelEnv("acme", "desk", platformEnv), (e: unknown) => e instanceof ModelKeyError && /no model key/.test((e as Error).message));
     assert.equal(platformAsked, 0, "the operator's env is never even built for a customer");
+    // Own keys off (models.byok): the account may not add a key, so it is told to get a plan.
+    const prevOwn = platform.ownModelKeys;
+    registerPlatform({ ownModelKeys: () => false });
+    try {
+      assert.throws(() => accountModelEnv("acme", "desk", platformEnv), (e: unknown) => e instanceof ModelKeyError && /^no plan: .*Billing → Plans/.test((e as Error).message) && !/API key/.test((e as Error).message));
+    } finally {
+      registerPlatform({ ownModelKeys: prevOwn });
+    }
     setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
     setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-customer-333333");
     const m = accountModelEnv("acme", "desk", platformEnv);

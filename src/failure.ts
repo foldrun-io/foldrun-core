@@ -235,6 +235,10 @@ const NODE_PRESSURE = /\bEvicted\b[^\n]*\bThe node (was|had) (low on|condition)|
  *  is not mistaken for it (Codex). */
 export const NO_MODEL_KEY = /^no model key: this account runs on its own API key, and none is set\b/;
 
+/** The same refusal where own keys are off (model-env.ts NO_PLAN): the
+ *  account needs a plan, not a key. */
+export const NO_PLAN = /^no plan: this platform runs every model call on its own models, and this account has no plan\b/;
+
 export function explainFailure(reason: string, step?: FailedStepLike | null): FailureExplained {
   const facts = step?.failureFacts;
   const text = String(reason ?? "");
@@ -328,6 +332,15 @@ export function explainFailure(reason: string, step?: FailedStepLike | null): Fa
       kind: "credential",
       message: "This account has no model key for this run, and foldrun's models are not open to it.",
       fix: "Add one in Settings → Models (or `foldrun account model set <provider> --key …`), or a provider: block in AGENTS.md, then rerun.",
+    };
+  }
+
+  if (NO_PLAN.test(text)) {
+    return {
+      class: "policy_denied",
+      kind: "credential",
+      message: "This account needs a plan: bringing your own model key is turned off on this platform.",
+      fix: "Pick a plan in Billing → Plans, then rerun.",
     };
   }
 

@@ -136,6 +136,7 @@ import { inputsNote, type RunInputFile } from "./run-inputs.ts";
 import { textCandidates } from "./input-text.ts";
 import { resolveClock, localDate, type ClockChoice } from "./clock.ts";
 import { restoreTestWrites, saveTestWrites } from "./test-writes-store.ts";
+import { NO_PLAN } from "./model-env.ts";
 
 export { localDate } from "./clock.ts";
 
@@ -2776,8 +2777,10 @@ async function runStepBody(
       if (primaryOnPlatform) {
         push(
           "error",
-          `no model key: this account runs on its own API key, and none is set. Add one in Settings → Models ` +
-            `(or \`foldrun account model set <provider> --key …\`), or write a provider: block in AGENTS.md`,
+          (platform.ownModelKeys?.(tenant) ?? true)
+            ? `no model key: this account runs on its own API key, and none is set. Add one in Settings → Models ` +
+                `(or \`foldrun account model set <provider> --key …\`), or write a provider: block in AGENTS.md`
+            : NO_PLAN,
         );
         step.status = "failed";
         save();
