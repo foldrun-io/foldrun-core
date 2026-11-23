@@ -168,7 +168,10 @@ async function withSupply<T>(
   const spec = m.translator ?? anthropicPassthrough(m.env);
   const host = spec ? hostOf(spec.upstreamBase) : null;
   if (!spec || !host || !m.tenant) throw new ModelKeyError("foldrun's models: no endpoint for this call", 500);
-  const grant: EgressGrant = { secrets: {} };
+  // enforce: a host job only calls its model, so the proxy's forward door
+  // refuses any other site for this lease (it has no network: list), rather
+  // than only naming it — the pod that asked may be walled to its model host.
+  const grant: EgressGrant = { secrets: {}, enforce: true };
   grantModelKey(grant, MODEL_KEY_NAME, spec.upstreamKey, host);
   const lease = await platform.egress.lease({ tenant: m.tenant, runId: `${job.kind}:${job.name ?? "-"}`, grant, job });
   if (!lease) throw new ModelKeyError("foldrun's models need the platform's egress proxy, and this install has none", 503);

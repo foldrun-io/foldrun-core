@@ -251,6 +251,7 @@ test("outside a step (a judge, a grader, a draft): the same rung, through a host
       assert.equal(leases[0].runId, "grade:quality");
       assert.deepEqual(leases[0].job, { kind: "grade", name: "quality" });
       assert.deepEqual(leases[0].grant.secrets.FOLDRUN_MODEL_KEY.supply, { provider: "anthropic" });
+      assert.equal(leases[0].grant.enforce, true, "the lease reaches its model and nothing else through the forward door");
     } finally {
       registerPlatform({ egress: prev });
       proxy.close();
