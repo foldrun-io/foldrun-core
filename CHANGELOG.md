@@ -13,6 +13,25 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.0.0] — 2026-11-23
+
+### Breaking changes
+
+- `stepBillsTokens` from `@foldrun/core` — parameter 1 changed
+- `billedTokenCost` from `@foldrun/core` — parameter 1 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepAttempt` from `@foldrun/core`
+- `StepRecord` from `@foldrun/core`
+- `PlatformHooks` from `@foldrun/core`
+
+- fix(model-env): a host job's lease reaches its model and nothing else ([a7bf3ca](https://github.com/foldrun-io/foldrun-core/commit/a7bf3ca))
+- feat(supply): the door is the one meter for the operator's credential; host jobs through it ([131d86a](https://github.com/foldrun-io/foldrun-core/commit/131d86a))
+- feat(supply): steps can call foldrun's one door instead of the provider's host ([2cfe1cf](https://github.com/foldrun-io/foldrun-core/commit/2cfe1cf))
+
 ## [26.0.0] — 2026-11-23
 
 ### Breaking changes
