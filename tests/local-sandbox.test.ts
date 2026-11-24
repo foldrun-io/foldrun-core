@@ -137,6 +137,31 @@ test("inside the walls: the shell writes the project, not the home folder; crede
   }
 });
 
+test("what the walls do is said in plain words: no backend names, and every writable folder listed (FOL-271)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const box = await openLocalSandbox({ cwd: proj, sites: ["registry.npmjs.org", "github.com"] });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    const said = box.describe();
+    assert.doesNotMatch(said, /seatbelt|bubblewrap|bwrap|seccomp|landlock|sandbox-runtime|gvisor/i, said);
+    assert.match(said, /changes stay in this folder/);
+    assert.match(said, /internet limited to 2 approved sites/);
+    assert.ok(said.length <= 140, `one short line: ${said.length} characters`);
+    const w = box.writable();
+    assert.equal(w[0], proj);
+    assert.ok(w.includes(box.tmp), "its temp folder is listed");
+    assert.ok(w.length > 2, "the runtime's own folders are listed too");
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("inside the walls a listed site answers (skipped offline)", { skip: process.env.FOLDRUN_TEST_OFFLINE === "1" ? "offline" : false }, async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
   const proj = tmpProject();

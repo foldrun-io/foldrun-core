@@ -8,7 +8,7 @@
  *
  * One policy everywhere:
  *   - write: the project folder and a private temp folder (plus the few the
- *     runtime itself keeps writable, named in describe()), never the git
+ *     runtime itself keeps writable, named by writable()), never the git
  *     hooks or config that run code on the next git command — the project's
  *     repository's, core.hooksPath's, and every nested repository's;
  *   - read: everything but the person's credentials (DENY_READ);
@@ -93,8 +93,8 @@ export const DENY_READ: readonly string[] = [
 ];
 
 /** What the runtime keeps writable for every command on its own (its
- *  SANDBOX_OWN_WRITE_PATHS and home conveniences, 0.0.83): named so
- *  describe() tells the truth. The file tools do not get these. */
+ *  SANDBOX_OWN_WRITE_PATHS and home conveniences, 0.0.83): named by
+ *  writable() so the person is told the truth. The file tools do not get these. */
 const RUNTIME_OWN_WRITES = ["/tmp/claude", "~/.npm/_logs", "~/.claude/debug"];
 
 /** The shell the walls are put up from: a fixed program, never a `bash`
@@ -147,8 +147,10 @@ export interface LocalSandbox {
    *  for everything once this handle is closed). */
   canRead(file: string): boolean;
   canWrite(file: string): boolean;
-  /** For the session's record and the CLI. */
+  /** For the session's record and the CLI: what the walls do, in plain words. */
   describe(): string;
+  /** Every folder a command may write to: the project, its temp folder and the runtime's own. */
+  writable(): string[];
   /** Give this handle back; the walls come down when the last one is. */
   close(): Promise<void>;
 }
@@ -882,6 +884,7 @@ interface Walls {
   backend: SandboxBackend;
   tmp: string;
   describe: string;
+  writable: string[];
   teardown(): Promise<void>;
 }
 let walls: Walls | null = null;
@@ -948,6 +951,7 @@ function handleOf(w: Walls): LocalSandbox {
     canRead: (file) => live() && w.rules.canRead(file),
     canWrite: (file) => live() && w.rules.canWrite(file),
     describe: () => w.describe,
+    writable: () => [...w.writable],
     close: async () => {
       if (released) return;
       released = true;
@@ -1205,9 +1209,13 @@ async function bringUp(
     rules: fileRules({ ...policy, cwd }, tmp, protectedWrites, platform),
     backend,
     tmp,
+    // What the walls do, in a person's words: never what they are built on
+    // (owner, 24 Nov 2026, FOL-271: "dont call about the tech we use under
+    // the hood"). The backend stays in `backend` for the record and tests.
     describe:
-      `${backend === "seatbelt" ? "macOS Seatbelt" : "bubblewrap + seccomp"} — writes: ${cwd}, its temp folder and the runtime's own (${RUNTIME_OWN_WRITES.join(", ")}); ` +
-      `never git hooks or config; credentials unreadable; network: ${policy.sites.length} sites through the sandbox's proxy`,
+      `changes stay in this folder; keys and passwords can't be read; git hooks and settings can't be changed; ` +
+      `internet limited to ${policy.sites.length} approved site${policy.sites.length === 1 ? "" : "s"}`,
+    writable: [cwd, tmp, ...RUNTIME_OWN_WRITES],
     teardown: async () => {
       if (w.down) return;
       w.down = true;
