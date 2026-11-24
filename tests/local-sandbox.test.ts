@@ -436,6 +436,12 @@ test("kept git answers are not used when another git program would answer (Codex
     fs.appendFileSync(path.join(bin, "git"), "# another build\n");
     gitProtected(proj, pathVar, env, [proj], cache);
     assert.notEqual([...cache.values()][0], kept, "another git: asked again");
+    // A git that cannot say where its system config is (2.39 has no `var GIT_CONFIG_SYSTEM`): nothing kept (Codex round 30).
+    fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = GIT_CONFIG_SYSTEM ] && { echo "usage: git var (-l | <variable>)" >&2; exit 129; }; done\nexec ${real} "$@"\n`, { mode: 0o755 });
+    const old: GitCache = new Map();
+    await new Promise((r) => setTimeout(r, 1100));
+    gitProtected(proj, pathVar, { ...env, GIT_CONFIG_NOSYSTEM: "" }, [proj], old);
+    assert.equal(old.size, 0, "an older git's answer is not kept");
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }

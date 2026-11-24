@@ -532,6 +532,7 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       continue;
     }
     const start = out.length;
+    let unsure = false;
     // Pinned to what the probe found (cleared after this repository, below).
     if (found) {
       const [bareLine, gd] = found.split("\0")[0]!.split("\n");
@@ -604,6 +605,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     }
     for (const v of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) {
       const r = git(dir, ["var", v]);
+      // An older git that cannot say where these are (2.39 has no `var GIT_CONFIG_SYSTEM`): a file made
+      // there later would not be watched, so this answer is not kept (Codex round 30).
+      // Exit 1 with nothing said is "none" (GIT_CONFIG_NOSYSTEM): an answer. A usage error (129) is not.
+      if (r.status !== 0 && !(r.status === 1 && !r.err)) unsure = true;
       if (r.status === 0) for (const f of r.out.split("\n").map((x) => x.trim()).filter(Boolean)) files.add(textJoin(dir, expand(f)));
     }
     const queue = [...files];
@@ -768,6 +773,9 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       // (Codex round 28). Git writes in them on every commit: a launch right after one is just not kept.
       // And the work tree's folders themselves: one swapped and put back meanwhile likewise (Codex round 29);
       // a launch right after a file is made where it was asked is just not kept.
+      // Not the folders that hold the top: they change whenever anything is made beside the project, which
+      // would keep nothing in a busy folder, and only the person can rename one and put it back within the
+      // second the repository is asked — the sandbox writes none of them (accepted, Codex round 30).
       const aged = [...new Set([dir, top, ...above, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
       const ids: string[] = [];
       const deps = [...new Set([...pointers, ...mine])];
@@ -777,7 +785,7 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       // pointer files changed meanwhile are refused by the racy rule above.
       const aboveSig = idSig(aged, asked - 1000);
       pin = [];
-      if (files !== null && found && aboveSig !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, above: aged, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
+      if (files !== null && found && !unsure && aboveSig !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, above: aged, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
       else cache.delete(dir);
     }
   }
