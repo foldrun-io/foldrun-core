@@ -5,6 +5,7 @@ import type { RecordsPort } from "../src/records.ts";
 import type { RunRecord, RunSummary } from "../src/store.ts";
 import type { TriggerEvent } from "../src/trigger-log.ts";
 import type { FileRecord } from "../src/storage.ts";
+import { sessionsFromSummaries } from "../src/conversation.ts";
 
 interface Row {
   run: RunRecord;
@@ -136,6 +137,7 @@ export function fakeRecords(opts: { callsOn?: () => boolean } = {}): RecordsPort
         .sort(newest)
         .slice(0, limit)
         .map((r) => structuredClone(r.run)),
+    sessionsOf: (t, w, limit) => sessionsFromSummaries(inWs(t, w).map((r) => structuredClone(r.summary)), limit),
     openRunsOfCustomer: (t, customer) => [...runs.entries()].filter(([key, r]) => key.startsWith(`${t}\0`) && r.live && r.summary.customer === customer).length,
     runStamp: (t, w, id) => runs.get(k(t, w, id))?.stamp ?? null,
     triggerAppend(t, w, e) {

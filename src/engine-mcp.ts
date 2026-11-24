@@ -168,7 +168,14 @@ function bounded<T>(work: Promise<T>, ms: number, signal: AbortSignal, what: str
  *  read, as the SDK read it); `toolEnv` is what a tool's process starts
  *  from — the loop's shellEnv, which a caller keeps apart from the model's
  *  credentials. */
-export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange" | "fetch"> | null }): Promise<McpConnection> {
+/** The walls' own fetch, when the handle has one (FOL-222). Read here rather than named in connectMcp's type,
+ *  so that type stays as it was: a handle without one is still accepted, and a remote server is then refused. */
+function wallsFetch(sandbox: object): typeof fetch | undefined {
+  const f = (sandbox as { fetch?: unknown }).fetch;
+  return typeof f === "function" ? (f as typeof fetch) : undefined;
+}
+
+export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
   const open: { client: Client; transport: Transport; server?: Transport }[] = [];
   const close = async () => {
     await Promise.all(open.map(async (o) => {
@@ -208,12 +215,12 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
         // A long-lived server inside the walls must be stoppable when they
         // change: without a token and a way to check it, it does not start.
         if (!wrapped.token || typeof ctx.sandbox.fresh !== "function" || typeof ctx.sandbox.onChange !== "function") throw new Error(`MCP server ${name}: this sandbox cannot tell a long-lived server when its rules change, so it is not started`);
-      } else if (ctx.sandbox && (s.type === "http" || s.type === "sse") && typeof ctx.sandbox.fetch !== "function") {
+      } else if (ctx.sandbox && (s.type === "http" || s.type === "sse") && typeof wallsFetch(ctx.sandbox) !== "function") {
         // This process makes that connection itself: only through the walls'
         // site proxy. A sandbox that has none refuses the server.
         throw new Error(`MCP server ${name}: a server over ${s.type === "sse" ? "SSE" : "HTTP"} needs the sandbox's site proxy, which this sandbox does not offer — run this in the cloud, or use a stdio server`);
       }
-      const remoteInWalls = ctx.sandbox && (s.type === "http" || s.type === "sse") ? ctx.sandbox.fetch : undefined;
+      const remoteInWalls = ctx.sandbox && (s.type === "http" || s.type === "sse") ? wallsFetch(ctx.sandbox) : undefined;
       const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd, undefined, remoteInWalls);
       const client = new Client({ name: "foldrun-engine", version: "1.0.0" });
       open.push({ client, transport: t.client, server: t.server });

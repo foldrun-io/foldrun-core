@@ -171,14 +171,15 @@ export interface LocalSandbox {
   canWrite(file: string): boolean;
   /** For the session's record and the CLI: what the walls do, in plain words. */
   describe(): string;
-  /** Every folder a command may write to: the project, its temp folder, the package cache and the runtime's own. */
-  writable(): string[];
-  /** The package managers' cache folder (policy.cache, or one in the temp folder). */
-  cache: string;
+  /** Every folder a command may write to: the project, its temp folder, the package cache and the runtime's own.
+   *  Optional so a handle made before it existed still fits (added, not changed). */
+  writable?(): string[];
+  /** The package managers' cache folder (policy.cache, or one in the temp folder). Optional in the type: added, not changed. */
+  cache?: string;
   /** A fetch that goes out only through the walls' site proxy (FOL-222): a
    *  remote MCP server is reached this way, so the same site list decides.
    *  Refuses once this handle is closed, or when the proxy is not up. */
-  fetch: typeof fetch;
+  fetch?: typeof fetch;
   /** Give this handle back; the walls come down when the last one is. */
   close(): Promise<void>;
 }
