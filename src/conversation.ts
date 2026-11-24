@@ -37,6 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { records } from "./records.ts";
 import { docRows, docStore, quietly } from "./workspace-docs.ts";
+import { lockFileExclusive } from "./secrets.ts";
 
 /** A context id as a caller writes it: A2A's id rule — printable ASCII, no spaces. */
 export const CONTEXT_ID = /^[\x21-\x7e]{1,200}$/;
@@ -224,14 +225,20 @@ export function setSessionName(tenant: string, workspace: string, context: strin
     store.put(tenant, workspace, SESSION_NAME_KIND, key, value ?? { cleared: true, at });
     return value;
   }
-  const all = readNamesFile(tenant, workspace);
-  if (value) all[key] = value;
-  else delete all[key];
   const file = namesFile(tenant, workspace);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(all, null, 2));
-  fs.renameSync(tmp, file);
+  // Read, change and write under one lock: two renames at once both stay (Codex).
+  const release = lockFileExclusive(file, "the project's conversation names are being saved by another change — try again");
+  try {
+    const all = readNamesFile(tenant, workspace);
+    if (value) all[key] = value;
+    else delete all[key];
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(all, null, 2));
+    fs.renameSync(tmp, file);
+  } finally {
+    release();
+  }
   return value;
 }
 

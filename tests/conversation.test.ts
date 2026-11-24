@@ -286,3 +286,18 @@ test("a conversation's name (FOL-264): set, listed, changed, taken away; one nam
   assert.match(sessionNameProblem("evil‮name")!, /control or direction/);
   assert.match(sessionNameProblem(42)!, /a few words/);
 });
+
+test("two names written at once from two processes both stay (Codex round 10)", async () => {
+  const { spawn } = await import("node:child_process");
+  finished("w1", "2026-11-22T01:00:00.000Z", "2026-11-22T01:01:00.000Z", { ctx: "race-a" });
+  finished("w2", "2026-11-22T02:00:00.000Z", "2026-11-22T02:01:00.000Z", { ctx: "race-b" });
+  const src = new URL("../src/conversation.ts", import.meta.url).href;
+  const one = (ctx: string) => new Promise<number>((done) => {
+    const code = `const m = await import(${JSON.stringify(src)}); for (let i = 0; i < 30; i++) m.setSessionName("acme", "desk", ${JSON.stringify(ctx)}, ${JSON.stringify(ctx)} + " " + i);`;
+    spawn(process.execPath, ["--input-type=module", "-e", code], { env: process.env, stdio: "inherit" }).on("close", (c) => done(c ?? 1));
+  });
+  assert.deepEqual(await Promise.all([one("race-a"), one("race-b")]), [0, 0]);
+  const names = sessionNames("acme", "desk");
+  assert.equal(names.get(contextKey("race-a"))!.name, "race-a 29");
+  assert.equal(names.get(contextKey("race-b"))!.name, "race-b 29");
+});
