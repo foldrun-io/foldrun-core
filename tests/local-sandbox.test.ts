@@ -454,6 +454,26 @@ test("kept git answers do not miss a folder becoming a repository, a hook added 
     fs.rmSync(path.join(outside, "pager"));
     fs.symlinkSync(path.join(proj, "evil-pager"), path.join(outside, "pager"));
     assert.ok(gitProtected(proj, undefined, env, [proj], cache).includes(path.join(proj, "evil-pager")), "a program link moved into the project is seen");
+    // 4. A program path whose leaf is missing, and whose folder is then made a link into the project.
+    await wait();
+    git("-C", proj, "config", "diff.external", path.join(outside, "tools", "differ"));
+    fs.mkdirSync(path.join(outside, "tools"));
+    await wait();
+    gitProtected(proj, undefined, env, [proj], cache);
+    fs.rmSync(path.join(outside, "tools"), { recursive: true });
+    fs.mkdirSync(path.join(proj, "planted"));
+    fs.symlinkSync(path.join(proj, "planted"), path.join(outside, "tools"));
+    assert.ok(gitProtected(proj, undefined, env, [proj], cache).includes(path.join(proj, "planted", "differ")), "a folder made a link into the project is seen");
+    // 5. Started below the top: a nearer repository made between them is seen.
+    const deep = path.join(proj, "a", "b");
+    fs.mkdirSync(deep, { recursive: true });
+    const c2: GitCache = new Map();
+    await wait();
+    gitProtected(deep, undefined, env, [deep], c2);
+    assert.equal(c2.size, 1);
+    git("init", "-q", path.join(proj, "a"));
+    git("-C", path.join(proj, "a"), "config", "core.hooksPath", "b/nearer-hooks");
+    assert.ok(gitProtected(deep, undefined, env, [deep], c2).includes(path.join(proj, "a", "b", "nearer-hooks")), "a nearer repository is seen");
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }

@@ -708,7 +708,20 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       } catch {
         /* none: counted by identity below */
       }
-      const ids = [...new Set([dir, top, ...gitDirs, ...(dotGitFile ? [] : [dotGit])])];
+      // Each folder from here up to the top, and a .git in it: a nearer repository made between them
+      // changes which one git reads (Codex round 19). And every folder above a path looked at and not
+      // protected: one made a link into the project would lead that path there (Codex round 19).
+      const between: string[] = [];
+      for (let a = path.resolve(dir); ; a = path.dirname(a)) {
+        between.push(a, path.join(a, ".git"));
+        if (fold(realish(a)) === fold(realish(top)) || path.dirname(a) === a) break;
+      }
+      const above = looked.flatMap((x) => {
+        const up: string[] = [];
+        for (let a = path.dirname(path.resolve(x)); path.dirname(a) !== a; a = path.dirname(a)) up.push(a);
+        return up;
+      });
+      const ids = [...new Set([dir, top, ...gitDirs, ...between, ...above].filter((x) => !(dotGitFile && x === dotGit)))];
       const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])].filter((x) => !ids.includes(x));
       const files = statSig(deps, asked - 1000);
       if (files !== null) cache.set(dir, { ctx, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
