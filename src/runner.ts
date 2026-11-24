@@ -1061,7 +1061,12 @@ export function agentContext(
   if (languageSet || regionSet) {
     parts.add("locale",
       `# Locale\n\n${localeProse(locale, languageName(language.language), regionName(region.region))} ` +
-        `Write in ${languageName(language.language)} unless the step you are given says otherwise; ` +
+        // The setting is for what the agent produces. A person who writes to
+        // it is answered in the language they wrote in (owner, 24 Nov 2026:
+        // "we don't force any languages") — an English question to an
+        // account set to Persian was answered in Persian.
+        `When a person writes to you, answer them in the language they wrote in, whatever this setting says. ` +
+        `What you produce on your own account — a document, a page, a report nobody asked for in another language — is in ${languageName(language.language)} unless the step you are given says otherwise; ` +
         `use these currency, units and calendar conventions in anything you produce. ` +
         `Your tools already know: a search asks in it and for this country, the browser reports it, a fetch requests it.`,
     );
