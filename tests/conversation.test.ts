@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { contextKey, contextIdProblem, conversationBlock, earlierTurns, escapeXml, messagesBlock, runContext, CONVERSATION_LIMITS, SESSION_MESSAGE_LIMITS } from "../src/conversation.ts";
+import { contextKey, contextIdProblem, conversationBlock, earlierTurns, escapeXml, listSessions, messagesBlock, runContext, CONVERSATION_LIMITS, SESSION_MESSAGE_LIMITS } from "../src/conversation.ts";
 import { startFlowRun, createFlowRun, waitForRun } from "../src/runner.ts";
 import { readRun, writeRun, type FlowStep, type RunRecord } from "../src/store.ts";
 
@@ -249,4 +249,23 @@ test("createFlowRun: session messages are on the record from its first write, on
   assert.deepEqual(withCtx.sessionMessages, msg);
   const without = createFlowRun("t-sm", "w", step, "adhoc:a", "queued", [], null, {}, undefined, undefined, undefined, undefined, undefined, msg);
   assert.equal(without.sessionMessages, undefined);
+});
+
+test("a project's conversations, newest first: turns counted, the last turn's agent, status and run; test runs and outside agents' conversations not listed (FOL-236)", () => {
+  finished("s1", "2026-11-20T01:00:00.000Z", "2026-11-20T01:01:00.000Z", { ctx: "sess-a" });
+  finished("s2", "2026-11-20T02:00:00.000Z", "2026-11-20T02:01:00.000Z", { ctx: "sess-a", status: "failed" });
+  finished("s3", "2026-11-20T03:00:00.000Z", "2026-11-20T03:01:00.000Z", { ctx: "sess-b" });
+  finished("s4", "2026-11-20T04:00:00.000Z", "2026-11-20T04:01:00.000Z", { ctx: "sess-test", test: true });
+  finished("s5", "2026-11-20T05:00:00.000Z", "2026-11-20T05:01:00.000Z", { ctx: "sess-ext", key: contextKey("sess-ext", "k9"), a2a: true });
+  const all = listSessions("acme", "desk", 200);
+  const a = all.find((x) => x.context === "sess-a")!;
+  const b = all.find((x) => x.context === "sess-b")!;
+  assert.equal(a.turns, 2);
+  assert.equal(a.lastRun, "s2");
+  assert.equal(a.lastStatus, "failed");
+  assert.equal(a.agent, "asker");
+  assert.ok(all.indexOf(b) < all.indexOf(a), "the most recently used first");
+  assert.ok(!all.some((x) => x.context === "sess-test"), "test runs are not a conversation to list");
+  assert.ok(!all.some((x) => x.context === "sess-ext"), "an outside agent's conversation is its caller's");
+  assert.equal(listSessions("acme", "desk", 1).length, 1, "the limit holds");
 });

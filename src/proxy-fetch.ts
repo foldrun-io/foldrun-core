@@ -40,28 +40,41 @@ export function proxyFetch(proxy: SiteProxy): typeof fetch {
     if (body) out["content-length"] = String(body.length);
     return new Promise<Response>((resolve, reject) => {
       let settled = false;
+      const unlisten = () => signal?.removeEventListener("abort", abort);
       const fail = (err: unknown) => {
+        unlisten();
         if (settled) return;
         settled = true;
         // A failed dial to every address is an AggregateError with no message of its own: say its parts.
         reject(err instanceof AggregateError && !err.message ? new Error(err.errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ") || "the connection failed") : err);
       };
       const onResponse = (res: http.IncomingMessage) => {
-        if (settled) return;
+        if (settled) return void res.destroy();
         settled = true;
+        response = res;
         const h = new Headers();
         for (const [k, v] of Object.entries(res.headers)) {
           if (v === undefined) continue;
           for (const one of Array.isArray(v) ? v : [v]) h.append(k, one);
         }
         const status = res.statusCode ?? 502;
-        const noBody = method === "HEAD" || status === 204 || status === 304;
+        // Statuses a Response may not have a body for (Response throws on one with a body — Codex).
+        const noBody = method === "HEAD" || status === 101 || status === 204 || status === 205 || status === 304;
         if (noBody) res.resume();
-        resolve(new Response(noBody ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), { status, statusText: res.statusMessage ?? "", headers: h }));
+        // The stop still reaches a body being read; once it has ended, nothing holds on to this request.
+        res.on("close", unlisten);
+        try {
+          resolve(new Response(noBody ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), { status: status < 200 || status > 599 ? 502 : status, statusText: res.statusMessage ?? "", headers: h }));
+        } catch (err) {
+          res.destroy();
+          reject(err);
+        }
       };
       let req: http.ClientRequest;
+      let response: http.IncomingMessage | null = null;
       const abort = () => {
         req?.destroy();
+        response?.destroy(signal?.reason instanceof Error ? signal.reason : undefined);
         fail(signal?.reason ?? new DOMException("aborted", "AbortError"));
       };
       signal?.addEventListener("abort", abort, { once: true });
@@ -96,12 +109,13 @@ export function proxyFetch(proxy: SiteProxy): typeof fetch {
     });
   };
   return (async (input: string | URL | Request, init?: RequestInit) => {
-    const request = new Request(input, init);
+    // Read the request without letting a Request object follow the caller's signal: it would stay subscribed to it (Codex).
+    const request = new Request(input instanceof Request ? input.clone() : input, { ...init, signal: null });
     let url = new URL(request.url);
     let method = request.method.toUpperCase();
     let body: Buffer | null = request.body ? Buffer.from(await request.arrayBuffer()) : null;
     const headers = new Headers(request.headers);
-    const signal = init?.signal ?? request.signal;
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
     const redirect = init?.redirect ?? request.redirect;
     for (let hop = 0; ; hop++) {
       const res = await once(url, method, headers, body, signal);

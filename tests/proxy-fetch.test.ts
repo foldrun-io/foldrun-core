@@ -103,3 +103,26 @@ test("inside the walls an MCP server over HTTP is connected through the walls' f
   await assert.rejects(connectMcp({ old: { type: "sse", url: "https://ok.example.com/sse" } }, { env: {}, toolEnv: {}, cwd: process.cwd(), signal, sandbox: viaWalls }));
   assert.ok(asked.some((u) => u.startsWith("https://ok.example.com/sse")), "SSE's stream too");
 });
+
+test("a 205 answer is a Response without a body, not a crash; a finished request leaves no listener on the caller's signal (Codex)", async () => {
+  const { getEventListeners } = await import("node:events");
+  const site = http.createServer((req, res) => {
+    if (req.url === "/reset") return void res.writeHead(205).end();
+    res.writeHead(200).end("ok");
+  });
+  const sitePort = await listen(site);
+  const p = await fakeProxy(["localhost"]);
+  try {
+    const f = proxyFetch({ host: "127.0.0.1", port: p.port, user: "srt", token: "tok" });
+    const r = await f(`http://localhost:${sitePort}/reset`);
+    assert.equal(r.status, 205);
+    assert.equal(r.body, null);
+    const ac = new AbortController();
+    for (let i = 0; i < 5; i++) assert.equal(await (await f(`http://localhost:${sitePort}/`, { signal: ac.signal })).text(), "ok");
+    await new Promise((done) => setTimeout(done, 50));
+    assert.equal(getEventListeners(ac.signal, "abort").length, 0, "no listener left per request");
+  } finally {
+    p.close();
+    site.close();
+  }
+});

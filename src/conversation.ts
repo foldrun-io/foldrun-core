@@ -121,6 +121,59 @@ export function runContext(id: string, a2aPrincipal?: string): RunContext {
   return { id, key: contextKey(id, a2aPrincipal), ...(a2aPrincipal ? { a2a: true as const } : {}) };
 }
 
+/** One conversation of a project, as a list shows it (FOL-236). */
+export interface SessionSummary {
+  /** The conversation's id: what `context` names on a run, and what foldrun code resumes. */
+  context: string;
+  /** Its turns that became runs (a turn on a person's own computer makes none). */
+  turns: number;
+  /** The agent its last turn ran. */
+  agent: string | null;
+  lastAt: string;
+  lastStatus: string;
+  lastRun: string;
+  /** Who started its last turn (`user:<id>`, `key:<id>`…), when the run says. */
+  startedBy: string | null;
+  /** The last turn's own short summary, cut. */
+  lastSummary: string | null;
+}
+
+export const SESSIONS_LIMIT = 200;
+
+/**
+ * A project's conversations, the most recently used first: every run that
+ * carries a context, grouped by it. Test runs and outside agents' (A2A)
+ * conversations are not listed — those belong to their caller.
+ */
+export function listSessions(tenant: string, workspace: string, limit = 50): SessionSummary[] {
+  const n = Math.max(1, Math.min(SESSIONS_LIMIT, Math.floor(limit)));
+  const port = records(tenant, workspace);
+  if (port?.sessionsOf) return port.sessionsOf(tenant, workspace, n);
+  const by = new Map<string, SessionSummary>();
+  const rows = listRunSummaries(tenant, workspace)
+    .filter((s) => s.context && s.context.a2a !== true && s.test !== true)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
+  for (const s of rows) {
+    const key = s.context!.key;
+    const had = by.get(key);
+    if (had) {
+      had.turns++;
+      continue;
+    }
+    by.set(key, {
+      context: s.context!.id,
+      turns: 1,
+      agent: s.steps[0]?.agent ?? null,
+      lastAt: s.startedAt,
+      lastStatus: s.status,
+      lastRun: s.id,
+      startedBy: s.startedBy ?? null,
+      lastSummary: s.summary ? s.summary.slice(0, 200) : null,
+    });
+  }
+  return [...by.values()].slice(0, n);
+}
+
 const FINISHED = new Set(["completed", "failed"]);
 
 /** The earlier runs of this run's context, newest first, at most `limit`. */
