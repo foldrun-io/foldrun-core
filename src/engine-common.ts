@@ -105,6 +105,45 @@ export interface LoopOptions {
    *  which shapes `thinking` per provider (model-supply.ts); an endpoint
    *  that serves another model under a Claude name is not known from here. */
   thinkingDisplay?: "summarized" | null;
+  /** How hard the model works, the agent's `effort:` (low … max): sent as
+   *  `output_config.effort`, the field a cloud step's runtime sends, on a
+   *  model that takes one (takesEffort). Null leaves the request as it was
+   *  and the model at its own default. */
+  effort?: string | null;
+}
+
+/** foldrun's effort words (frontmatter-fields EFFORT_LEVELS), low to high. */
+const EFFORT_WORDS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The effort a model is sent for a foldrun word, or null to send none.
+ * The Claude 5 models take all five words. Of the Claude 4 models (Claude
+ * API docs, 24 Nov 2026): `max` is supported on Opus 4.6 and later and
+ * Sonnet 4.6, `xhigh` is new on Opus 4.7, Opus 4.5 takes low to high; a
+ * word a model lacks runs as the nearest below it has. An older Claude
+ * (Sonnet 4.5, Haiku 4.5: no `effort` parameter) is sent none. Another provider's
+ * model, or a tier the gateway resolves, is sent the word: foldrun's
+ * gateway fits it to what that provider runs (model-supply.ts
+ * shapeRequest), and a provider's own endpoint is fitted by the caller
+ * (fitEffortFor in engine-loop.ts).
+ */
+export function effortFor(model: string, word: string | null | undefined): string | null {
+  if (!word || !EFFORT_WORDS.includes(word)) return null;
+  const id = String(model).split("/").pop() ?? "";
+  if (!/^claude-/.test(id) || showsThinking(id)) return word;
+  const four = /^claude-(opus|sonnet)-4-(\d+)(?:-|$)/.exec(id);
+  if (!four) return null;
+  const minor = Number(four[2]);
+  const has = four[1] === "opus"
+    ? minor >= 7 ? EFFORT_WORDS : minor === 6 ? ["low", "medium", "high", "max"] : minor === 5 ? ["low", "medium", "high"] : []
+    : minor >= 6 ? ["low", "medium", "high", "max"] : [];
+  for (let i = EFFORT_WORDS.indexOf(word); i >= 0; i--) if (has.includes(EFFORT_WORDS[i]!)) return EFFORT_WORDS[i]!;
+  return null;
+}
+
+/** Whether a model is sent an effort at all (effortFor). */
+export function takesEffort(model: string): boolean {
+  return effortFor(model, "low") !== null;
 }
 
 /**
@@ -199,6 +238,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     mcpGranted: mcpTools,
     steer: typeof options.steer === "function" ? (options.steer as () => unknown[]) : null,
     thinkingDisplay: options.thinkingDisplay === "summarized" ? "summarized" : null,
+    effort: typeof options.effort === "string" && EFFORT_WORDS.includes(options.effort) ? options.effort : null,
     compaction: options.compaction === false ? false : compactionFor(
       typeof options.contextWindow === "number" && Number.isFinite(options.contextWindow) && options.contextWindow >= MIN_CONTEXT_WINDOW ? Math.floor(options.contextWindow) : COMPACTION_DEFAULTS.contextWindow,
     ),

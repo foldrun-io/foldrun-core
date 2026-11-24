@@ -38,12 +38,14 @@ import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
 import { connectMcp, type McpConnection } from "./engine-mcp.ts";
+import { SUPPLY_PROVIDERS } from "./model-supply.ts";
+import { providerPreset } from "./providers.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT, compacted, cutPoints, estimateTokens, fileLists, findCut, isContextOverflow, previousSummary, summaryRequest } from "./engine-compact.ts";
-import { DEFAULT_MAX_TOKENS, readOptions, showsThinking, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
+import { DEFAULT_MAX_TOKENS, readOptions, showsThinking, takesEffort, effortFor, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
 export type Engine = "sdk" | "foldrun";
-export { showsThinking };
+export { showsThinking, takesEffort, effortFor };
 
 const DEFAULT_BASE = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
@@ -79,7 +81,7 @@ function requestHeaders(env: Record<string, string | undefined>, userAgent: stri
  *  a finish, the way the SDK's error results do. */
 /** What this engine can do that a caller may ask about before relying on
  *  it: `steer` — messages sent while a turn runs (FOL-213). */
-export const ENGINE_FEATURES = { steer: true, thinking: true } as const;
+export const ENGINE_FEATURES = { steer: true, thinking: true, effort: true } as const;
 
 export function endOf(stopReason: string | null, calls: number): { subtype: string; error?: string } {
   switch (stopReason) {
@@ -132,6 +134,52 @@ export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "to
  */
 export function thinkingParam(o: Pick<LoopOptions, "model" | "thinkingDisplay">): Json | null {
   return o.thinkingDisplay === "summarized" && showsThinking(o.model) ? { type: "adaptive", display: "summarized" } : null;
+}
+
+/**
+ * The `output_config` of a turn's request, or null to leave it out: the
+ * agent's effort, on a model that takes one.
+ */
+export function effortParam(o: Pick<LoopOptions, "model" | "effort"> & { env?: Record<string, string | undefined> }): Json | null {
+  const word = effortFor(o.model, o.effort);
+  if (!word) return null;
+  const fitted = fitEffortFor(o.env?.ANTHROPIC_BASE_URL, word);
+  return fitted ? { effort: fitted } : null;
+}
+
+/**
+ * A word as a provider's own endpoint takes it, when the request goes
+ * straight there: what foldrun's gateway applies on the way out
+ * (model-supply.ts `send`) — its effort table (Moonshot takes low | high |
+ * max), and its list of fields (MiMo's has no `output_config`) — so a
+ * step that names that endpoint itself is not refused for what the
+ * gateway would have changed. Null: that endpoint is sent no effort.
+ * Anything else (Anthropic's API, foldrun's gateway, an endpoint with no
+ * table) gets the word as it is.
+ */
+export function fitEffortFor(base: string | undefined, word: string): string | null {
+  if (!base) return word;
+  let at: URL;
+  try {
+    at = new URL(base);
+  } catch {
+    return word;
+  }
+  for (const p of Object.values(SUPPLY_PROVIDERS)) {
+    if (!p.send) continue;
+    const own = p.baseUrl ?? (p.preset ? providerPreset(p.preset)?.baseUrl : undefined);
+    let host = p.host;
+    try {
+      if (own) host = new URL(own).host;
+    } catch {
+      /* the host as listed */
+    }
+    if (!host || at.host !== host) continue;
+    if (p.send.fields && !p.send.fields.includes("output_config")) return null;
+    if (p.send.drop?.includes("output_config")) return null;
+    return p.send.effort ? (p.send.effort[word] ?? null) : word;
+  }
+  return word;
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -219,7 +267,8 @@ interface Turn {
 /** One model call: yields the raw stream events, returns the whole turn. */
 async function* modelTurn(o: LoopOptions, messages: { role: string; content: Block[] }[], signal: AbortSignal, cache = true, maxTokens?: number, track?: { turn?: Turn }): AsyncGenerator<Json, Turn> {
   const thinking = thinkingParam(o);
-  const res = await openStream(o, { ...buildRequest(o, messages, cache, maxTokens), ...(thinking ? { thinking } : {}) }, signal);
+  const output = effortParam(o);
+  const res = await openStream(o, { ...buildRequest(o, messages, cache, maxTokens), ...(thinking ? { thinking } : {}), ...(output ? { output_config: output } : {}) }, signal);
   const turn: Turn = { id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set() };
   // A caller that must count what a stream that breaks part-way had
   // already reported (a summary request) reads it here.
@@ -375,7 +424,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     for (const later of cutPoints(messages)) if (later > cut && older(cut) < 1_024) cut = later;
     if (older(cut) < 1_024) return { ok: false, why: "there was too little older to summarise" };
     // No thinking summary on this one: nobody reads it (Codex).
-    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false, thinkingDisplay: null };
+    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false, thinkingDisplay: null, effort: null };
     // The request itself must fit: the conversation's text is held to the
     // window less the reply's reserve and the prompts, newest part kept.
     const request = [{ role: "user", content: [{ type: "text", text: summaryRequest(messages.slice(0, cut), previousSummary(messages), Math.max(4_000, (room - 3_000) * 4)) }] }];

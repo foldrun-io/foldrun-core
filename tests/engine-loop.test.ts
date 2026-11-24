@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { executeStep, type ExecOptions } from "../src/step-exec.ts";
-import { buildRequest, foldrunQuery, showsThinking, thinkingParam } from "../src/engine-loop.ts";
+import { buildRequest, foldrunQuery, showsThinking, thinkingParam, effortParam, takesEffort, ENGINE_FEATURES } from "../src/engine-loop.ts";
 import type { QueryFn } from "../src/step-exec.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
 import { checkMcpSpecs, outcomeOf, connectMcp } from "../src/engine-mcp.ts";
@@ -1567,3 +1567,49 @@ test("thinkingDisplay: the summary is asked only of a model that answers it; the
   }
   for (const model of ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"]) assert.equal(showsThinking(model), true, model);
 });
+
+test("effort: the agent's level goes out as output_config.effort, on a model that takes one; none asked, the request is as it was", async () => {
+  assert.equal(ENGINE_FEATURES.effort, true);
+  assert.deepEqual(effortParam({ model: "claude-sonnet-5-5", effort: "xhigh" }), { effort: "xhigh" });
+  assert.equal(effortParam({ model: "claude-sonnet-5-5" }), null);
+  assert.equal(effortParam({ model: "claude-sonnet-5-5", effort: null }), null);
+  // The Claude 5 models take all five words; a Claude from before them has no such parameter and would refuse it.
+  for (const model of ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5", "anthropic/claude-sonnet-5-5"]) assert.equal(takesEffort(model), true, model);
+  for (const model of ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-1", "anthropic/claude-haiku-4-5"]) {
+    assert.equal(takesEffort(model), false, model);
+    assert.equal(effortParam({ model, effort: "high" }), null, model);
+  }
+  // The Claude 4 models that take one, each at the levels it has (max from Opus 4.6 and Sonnet 4.6, xhigh from Opus 4.7).
+  assert.deepEqual(effortParam({ model: "claude-sonnet-4-6", effort: "medium" }), { effort: "medium" });
+  assert.deepEqual(effortParam({ model: "claude-sonnet-4-6", effort: "xhigh" }), { effort: "high" });
+  assert.deepEqual(effortParam({ model: "claude-sonnet-4-6", effort: "max" }), { effort: "max" });
+  assert.deepEqual(effortParam({ model: "claude-opus-4-8", effort: "xhigh" }), { effort: "xhigh" });
+  assert.deepEqual(effortParam({ model: "claude-opus-4-7", effort: "max" }), { effort: "max" });
+  assert.deepEqual(effortParam({ model: "claude-opus-4-6", effort: "max" }), { effort: "max" });
+  assert.deepEqual(effortParam({ model: "claude-opus-4-6", effort: "xhigh" }), { effort: "high" });
+  assert.deepEqual(effortParam({ model: "claude-opus-4-5-20251101", effort: "max" }), { effort: "high" });
+  // Straight to a provider's own endpoint: its table, as foldrun's gateway applies it (Moonshot: low | high | max).
+  const moonshot = { ANTHROPIC_BASE_URL: "https://api.moonshot.ai/anthropic" };
+  assert.deepEqual(effortParam({ model: "kimi-k3", effort: "medium", env: moonshot }), { effort: "high" });
+  assert.deepEqual(effortParam({ model: "kimi-k3", effort: "max", env: moonshot }), { effort: "max" });
+  assert.deepEqual(effortParam({ model: "kimi-k3", effort: "medium", env: { ANTHROPIC_BASE_URL: "https://api.foldrun.dev" } }), { effort: "medium" }, "the gateway fits it itself");
+  // An endpoint whose fields have no output_config is sent none.
+  assert.equal(effortParam({ model: "mimo-v2", effort: "high", env: { ANTHROPIC_BASE_URL: "https://api.xiaomimimo.com/anthropic" } }), null);
+  // Another provider's model, or a tier the gateway resolves: sent the word, which the gateway fits to what it runs.
+  for (const model of ["deepseek/deepseek-chat", "gpt-6-sol", "foldrun/default", "m"]) assert.deepEqual(effortParam({ model, effort: "max" }), { effort: "max" }, model);
+
+  const sent = async (model: string, effort: unknown) => {
+    const server = await fakeModel([{ content: [say("ok")] }]);
+    try {
+      for await (const _ of foldrunQuery({ prompt: "go", options: { cwd: os.tmpdir(), model, tools: [], ...(effort === undefined ? {} : { effort }), env: { ANTHROPIC_BASE_URL: server.url, ANTHROPIC_API_KEY: "k" } } })) void _;
+      return server.requests[0].body;
+    } finally {
+      await server.close();
+    }
+  };
+  assert.deepEqual((await sent("claude-sonnet-5-5", "low")).output_config, { effort: "low" });
+  assert.equal("output_config" in (await sent("claude-sonnet-5-5", undefined)), false, "none asked: the field is not sent");
+  assert.equal("output_config" in (await sent("claude-haiku-4-5", "high")), false, "a model with no such parameter is not sent it");
+  assert.equal("output_config" in (await sent("claude-sonnet-5-5", "extreme")), false, "a word that is not a level is not sent");
+});
+
