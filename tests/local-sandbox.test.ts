@@ -349,10 +349,21 @@ test("a deep node_modules does not refuse the sandbox; repositories at its packa
     assert.ok(got.includes(realish(path.join(proj, "node_modules/plain/.git/hooks"))), got.join(", "));
     assert.ok(got.includes(realish(path.join(proj, "node_modules/@scope/pkg/.git/hooks"))), got.join(", "));
     // A .git folder git does not read as a repository (a folder of bare ones) is passed over, its paths still kept from writes.
-    fs.mkdirSync(path.join(proj, "data/.git/old.git"), { recursive: true });
+    assert.equal(spawnSync("git", ["init", "-q", "--bare", path.join(proj, "data/.git/old.git")]).status, 0);
     const inert = gitProtected(proj);
     assert.ok(inert.includes(path.join(proj, "data/.git/hooks")), inert.join(", "));
-    fs.mkdirSync(path.join(proj, "src", ...Array.from({ length: 14 }, (_, i) => `s${i}`)), { recursive: true });
+    // The bare repository inside it is asked about: its own hooks are kept from writes (Codex).
+    assert.ok(inert.some((x) => x.endsWith(path.join("data", ".git", "old.git", "hooks"))), inert.join(", "));
+    // A package's own node_modules is searched too.
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/plain/node_modules/deep")]).status, 0);
+    assert.ok(gitProtected(proj).includes(realish(path.join(proj, "node_modules/plain/node_modules/deep/.git/hooks"))));
+    // A cache folder is not a package folder: a checkout deep in it is still found.
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, ".cache/checkouts/pkg")]).status, 0);
+    assert.ok(gitProtected(proj).includes(realish(path.join(proj, ".cache/checkouts/pkg/.git/hooks"))));
+    // A build folder deeper than the old cap of 10 (Next's .next is 12) does not refuse; one past 64 still does.
+    fs.mkdirSync(path.join(proj, ".next", ...Array.from({ length: 14 }, (_, i) => `n${i}`)), { recursive: true });
+    gitProtected(proj);
+    fs.mkdirSync(path.join(proj, "src", ...Array.from({ length: 70 }, (_, i) => `s${i}`)), { recursive: true });
     assert.throws(() => gitProtected(proj), /deeper than/);
   } finally {
     fs.rmSync(proj, { recursive: true, force: true });
