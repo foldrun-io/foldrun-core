@@ -411,12 +411,16 @@ function statSig(paths: string[]): string;
 function statSig(paths: string[], notAfter?: number): string | null {
   const parts: string[] = [];
   for (const p of paths) {
-    try {
-      const s = fs.lstatSync(p, { bigint: true });
-      if (notAfter !== undefined && (Number(s.ctimeMs) >= notAfter || Number(s.mtimeMs) >= notAfter)) return null;
-      parts.push(`${s.dev}:${s.ino}:${s.ctimeNs}:${s.mtimeNs}:${s.size}:${s.mode}`);
-    } catch (err) {
-      parts.push(`-${(err as NodeJS.ErrnoException).code ?? "?"}`);
+    // The path itself and, through any links, what it leads to: a hooks folder reached by a link gains a
+    // hook in the folder, not in the link (Codex round 18).
+    for (const st of [fs.lstatSync, fs.statSync]) {
+      try {
+        const s = st(p, { bigint: true });
+        if (notAfter !== undefined && (Number(s.ctimeMs) >= notAfter || Number(s.mtimeMs) >= notAfter)) return null;
+        parts.push(`${s.dev}:${s.ino}:${s.ctimeNs}:${s.mtimeNs}:${s.size}:${s.mode}`);
+      } catch (err) {
+        parts.push(`-${(err as NodeJS.ErrnoException).code ?? "?"}`);
+      }
     }
   }
   return parts.join("|");
@@ -492,6 +496,9 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     }
     const start = out.length;
     const asked = Date.now();
+    // Paths looked at whose answer was "not to protect" (a program outside the writable folders): kept
+    // against too, so one made to lead into the project later is asked again (Codex round 18).
+    const looked: string[] = [];
     const probe = git(dir, ["rev-parse", "--is-bare-repository"]);
     // Only the project folder may be no repository (a nested one has a .git,
     // or is a bare one); its global and system config are still read below.
@@ -577,7 +584,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         // In a writable folder by its name, by where it leads, or by a
         // link on the way: each of those can be swapped.
         const hops = linkHops(at);
-        if (!hops.some((h) => inRoots(fold(h))) && !inRoots(fold(path.resolve(at)))) continue;
+        if (!hops.some((h) => inRoots(fold(h))) && !inRoots(fold(path.resolve(at)))) {
+          looked.push(at, ...hops);
+          continue;
+        }
         if (/[*?[]/.test(x)) throw new Error(`the git setting ${key} names files in the project by a pattern (${x}), and which ones it runs cannot be told`);
         out.push(at, ...hops);
       }
@@ -677,7 +687,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         }
       }
     }
-    if (cache) {
+    // A folder that is no repository could become one (a bare one: HEAD, config and objects where it
+    // stands) with nothing below changing: that answer is asked every time (Codex round 18).
+    if (cache && !isRepo) cache.delete(dir);
+    else if (cache) {
       // Kept against every path this answer came from: each file git read (config, includes, the global and
       // system ones, there or not), the hooks folders and what is in them, each link on the way — all of
       // them kept from writes by the answer itself, so only the person can change one, and a change moves
@@ -696,7 +709,7 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         /* none: counted by identity below */
       }
       const ids = [...new Set([dir, top, ...gitDirs, ...(dotGitFile ? [] : [dotGit])])];
-      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine])].filter((x) => !ids.includes(x));
+      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])].filter((x) => !ids.includes(x));
       const files = statSig(deps, asked - 1000);
       if (files !== null) cache.set(dir, { ctx, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
       else cache.delete(dir);

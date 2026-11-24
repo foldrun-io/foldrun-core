@@ -415,6 +415,50 @@ test("git's answers are kept per repository, and asked again when anything they 
   }
 });
 
+test("kept git answers do not miss a folder becoming a repository, a hook added through a linked hooks folder, or a program link moved into the project (Codex round 18)", async () => {
+  const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache2-")));
+  const proj = path.join(base, "proj");
+  const outside = path.join(base, "outside");
+  fs.mkdirSync(proj);
+  fs.mkdirSync(outside);
+  const git = (...a: string[]) => assert.equal(spawnSync("git", a, { encoding: "utf8" }).status, 0, a.join(" "));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(outside, "global"), GIT_CONFIG_NOSYSTEM: "1" };
+  const wait = () => new Promise((r) => setTimeout(r, 1100));
+  try {
+    // 1. Not a repository, then a bare one where it stands: asked every time.
+    const cache: GitCache = new Map();
+    await wait();
+    gitProtected(proj, undefined, env, [proj], cache);
+    assert.equal(cache.size, 0, "a folder that is no repository is not kept");
+    // 2. A hooks folder that is a link to a folder outside: a hook added there (a link into the project) is seen.
+    git("init", "-q", proj);
+    const hooksReal = path.join(outside, "hooks-real");
+    fs.mkdirSync(hooksReal);
+    fs.rmSync(path.join(proj, ".git", "hooks"), { recursive: true, force: true });
+    fs.symlinkSync(hooksReal, path.join(proj, ".git", "hooks"));
+    // 3. A program named by a path outside, itself a link to a file outside.
+    fs.writeFileSync(path.join(outside, "pager-real"), "#!/bin/sh\n");
+    fs.symlinkSync(path.join(outside, "pager-real"), path.join(outside, "pager"));
+    git("-C", proj, "config", "core.pager", path.join(outside, "pager"));
+    await wait();
+    const first = gitProtected(proj, undefined, env, [proj], cache);
+    assert.equal(cache.size, 1, "the repository is kept");
+    assert.ok(!first.includes(path.join(proj, "evil-pager")));
+    await wait();
+    fs.writeFileSync(path.join(proj, "evil-hook"), "#!/bin/sh\n");
+    fs.symlinkSync(path.join(proj, "evil-hook"), path.join(hooksReal, "pre-commit"));
+    assert.ok(gitProtected(proj, undefined, env, [proj], cache).includes(path.join(proj, "evil-hook")), "a hook added through the linked folder is seen");
+    await wait();
+    gitProtected(proj, undefined, env, [proj], cache);
+    fs.writeFileSync(path.join(proj, "evil-pager"), "#!/bin/sh\n");
+    fs.rmSync(path.join(outside, "pager"));
+    fs.symlinkSync(path.join(proj, "evil-pager"), path.join(outside, "pager"));
+    assert.ok(gitProtected(proj, undefined, env, [proj], cache).includes(path.join(proj, "evil-pager")), "a program link moved into the project is seen");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("a deep node_modules or build folder does not refuse the sandbox; repositories anywhere in it are found, and a folder past 64 levels still refuses", () => {
   const proj = tmpProject();
   try {
