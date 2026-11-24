@@ -1039,7 +1039,19 @@ async function openNow(policy: LocalSandboxPolicy, opts: { platform?: NodeJS.Pla
   // While the walls are up this process looks programs up only where no
   // command can write: the runtime starts its helpers by name from here.
   const ownWrites = RUNTIME_OWN_WRITES.map(expand);
-  const early = [cwd, ...ownWrites].map(realish);
+  // The package cache a command may write (policy.cache), placed and checked
+  // before anything else counts the folders a command may write (Codex,
+  // FOL-272): never in or around the project, never reached through a link,
+  // never around a credential folder — a cache a command can write that the
+  // person's own npx or pip also reads would run what the sandbox planted.
+  let ownCache: string | null = null;
+  if (policy.cache) {
+    const asked = path.resolve(expand(policy.cache));
+    const why = cacheProblem(asked, cwd, denies, platform);
+    if (why) return { refused: `the package cache ${asked} ${why}`, hint: "Set XDG_CACHE_HOME to a folder outside the project, or unset it." };
+    ownCache = asked;
+  }
+  const early = [cwd, ...ownWrites, ...(ownCache ? [ownCache] : [])].map(realish);
   // The code that keeps the walls may not sit where a command can write,
   // nor hold such a folder — checked before any of the runtime is loaded.
   for (const { what, dir } of installTrees()) {
@@ -1066,12 +1078,38 @@ async function openNow(policy: LocalSandboxPolicy, opts: { platform?: NodeJS.Pla
   for (const k of loaderVars) delete process.env[k];
   let up: LocalSandbox | SandboxRefusal;
   try {
-    up = await bringUp(policy, { ...opts, platform }, cwd, key, ownWrites, restoreEnv, personEnv);
+    up = await bringUp(policy, { ...opts, platform }, cwd, key, ownWrites, restoreEnv, personEnv, ownCache);
   } catch (err) {
     up = { refused: `the sandbox could not start: ${err instanceof Error ? err.message : String(err)}` };
   }
   if (isRefusal(up)) restoreEnv();
   return up;
+}
+
+/** Why a package cache folder may not be made writable, or null: inside,
+ *  around or equal to the project; reached through a symbolic link anywhere
+ *  on its path (the person's own ~/.npm/_npx behind a link would become
+ *  writable); or overlapping a credential folder. `denies` are folded,
+ *  resolved credential folders. */
+export function cacheProblem(cache: string, cwd: string, denies: string[], platform: NodeJS.Platform = process.platform): string | null {
+  const fold = foldCase(platform);
+  if (!path.isAbsolute(cache)) return "is not an absolute path.";
+  const projects = [fold(path.resolve(cwd)), fold(realish(cwd))];
+  const spellings = [fold(path.resolve(cache)), fold(realish(cache))];
+  if (spellings.some((c) => projects.some((p) => overlaps(c, p)))) return "is inside or around the project folder, which a command can change.";
+  // Every part of the path that exists must be a real folder, not a link.
+  let at = path.parse(path.resolve(cache)).root;
+  for (const part of path.resolve(cache).slice(at.length).split(path.sep).filter(Boolean)) {
+    at = path.join(at, part);
+    let st: fs.Stats;
+    try { st = fs.lstatSync(at); } catch { break; }
+    // The system's own links above the home (macOS /var, /tmp) are not a
+    // command's to make; a link at or below the home is refused.
+    if (st.isSymbolicLink() && within(fold(at), fold(os.homedir()))) return `goes through a symbolic link (${at}).`;
+    if (!st.isSymbolicLink() && !st.isDirectory()) return `has a file where a folder should be (${at}).`;
+  }
+  if (spellings.some((c) => denies.some((d) => within(c, d) || within(d, c)))) return "overlaps a folder that holds credentials.";
+  return null;
 }
 
 async function bringUp(
@@ -1082,6 +1120,8 @@ async function bringUp(
   ownWrites: string[],
   restoreEnv: () => void,
   personEnv: NodeJS.ProcessEnv,
+  /** policy.cache, checked by cacheProblem in openNow; null: one in the temp folder. */
+  ownCache: string | null,
 ): Promise<LocalSandbox | SandboxRefusal> {
   const personPath = personEnv.PATH;
   const platform = opts.platform;
@@ -1098,7 +1138,7 @@ async function bringUp(
   // This process's PATH is the helper folder now; the Linux helpers are
   // also pinned to their real files.
   const trusted = process.env.PATH!;
-  const early = [cwd, ...ownWrites];
+  const early = [cwd, ...ownWrites, ...(ownCache ? [ownCache] : [])];
   const pinned = platform === "linux" ? { rg: which("rg", trusted, early), bwrap: which("bwrap", trusted, early), socat: which("socat", trusted, early) } : { rg: null, bwrap: null, socat: null };
   const deps = M.checkDependencies(pinned.rg ? { command: pinned.rg } : undefined);
   const userns = () => platform === "linux" && appArmorRestrictsUserns();
@@ -1115,13 +1155,16 @@ async function bringUp(
     return { refused: `the temp folder ${tmp} is inside a folder that holds credentials.` };
   }
   // Checked against the credential folders before anything is made there.
-  let cache = policy.cache ? path.resolve(expand(policy.cache)) : path.join(tmp, "cache");
-  if (denies.some((d) => within(fold(realish(cache)), d) || within(d, fold(realish(cache))))) {
-    rmTmp();
-    return { refused: `the package cache ${cache} overlaps a folder that holds credentials.` };
-  }
+  let cache = ownCache ?? path.join(tmp, "cache");
   try {
     fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+    // Made now: checked once more as it stands, so a link put in its place
+    // between the check and the mkdir is refused, not followed.
+    const again = ownCache ? cacheProblem(cache, cwd, denies, platform) : null;
+    if (again) {
+      rmTmp();
+      return { refused: `the package cache ${cache} ${again}` };
+    }
     cache = realish(cache);
   } catch (err) {
     rmTmp();
@@ -1254,7 +1297,7 @@ async function bringUp(
     // (owner, 24 Nov 2026, FOL-271: "dont call about the tech we use under
     // the hood"). The backend stays in `backend` for the record and tests.
     describe:
-      `changes stay in this folder; keys and passwords can't be read; git hooks and settings can't be changed; ` +
+      `changes stay here and in a package cache; keys and passwords can't be read; git hooks can't be changed; ` +
       `internet limited to ${policy.sites.length} approved site${policy.sites.length === 1 ? "" : "s"}`,
     writable: [cwd, tmp, ...(within(fold(cache), fold(tmp)) ? [] : [cache]), ...RUNTIME_OWN_WRITES],
     cache,

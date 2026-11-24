@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { APPARMOR_HINT, appArmorRestrictsUserns, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
+import { APPARMOR_HINT, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
 import { readOptions } from "../src/engine-common.ts";
 import { connectMcp } from "../src/engine-mcp.ts";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
@@ -149,7 +149,7 @@ test("what the walls do is said in plain words: no backend names, and every writ
   try {
     const said = box.describe();
     assert.doesNotMatch(said, /seatbelt|bubblewrap|bwrap|seccomp|landlock|sandbox-runtime|gvisor/i, said);
-    assert.match(said, /changes stay in this folder/);
+    assert.match(said, /changes stay here and in a package cache/);
     assert.match(said, /internet limited to 2 approved sites/);
     assert.ok(said.length <= 140, `one short line: ${said.length} characters`);
     const w = box.writable();
@@ -200,6 +200,49 @@ test("a package cache inside a credential folder is refused", async () => {
     assert.equal(fs.existsSync(path.join(os.homedir(), ".ssh", "foldrun-cache")), false, "nothing made there");
   } finally {
     fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("a package cache in or around the project, or behind a link under the home, is refused before it is made writable (Codex)", async () => {
+  const proj = tmpProject();
+  const home = fs.mkdtempSync(path.join(os.homedir(), ".foldrun-cache-test-"));
+  try {
+    // Inside the project, and the project inside it.
+    assert.match(cacheProblem(path.join(proj, ".cache", "pkgs"), proj, []) ?? "", /project folder/);
+    assert.match(cacheProblem(path.dirname(proj), proj, []) ?? "", /project folder/);
+    // A link under the home anywhere on the way: the person's own npx cache behind it would become writable.
+    const real = path.join(home, "npx");
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, path.join(home, "link"));
+    assert.match(cacheProblem(path.join(home, "link"), proj, []) ?? "", /symbolic link/);
+    assert.match(cacheProblem(path.join(home, "link", "deeper"), proj, []) ?? "", /symbolic link/);
+    // A file in the way, and a relative path.
+    fs.writeFileSync(path.join(home, "file"), "");
+    assert.match(cacheProblem(path.join(home, "file", "x"), proj, []) ?? "", /file where a folder/);
+    assert.match(cacheProblem("relative/cache", proj, []) ?? "", /absolute/);
+    // A plain folder of its own is fine.
+    assert.equal(cacheProblem(path.join(home, "packages", "proj-1"), proj, []), null);
+    // And the open itself refuses a cache in the project, making nothing there.
+    const box = await openLocalSandbox({ cwd: proj, sites: [], cache: path.join(proj, "cache") }, { platform: process.platform === "linux" ? "linux" : "darwin" });
+    assert.ok(isRefusal(box), "refused");
+    assert.equal(fs.existsSync(path.join(proj, "cache")), false, "nothing made there");
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a helper this process would run by name may not sit in the package cache either (Codex)", () => {
+  const cache = tmpProject();
+  const bin = tmpProject();
+  try {
+    fs.writeFileSync(path.join(cache, "rg"), "#!/bin/sh\n", { mode: 0o755 });
+    fs.symlinkSync(path.join(cache, "rg"), path.join(bin, "rg"));
+    const bad = helperFolder([bin, "/usr/bin", "/bin"].join(path.delimiter), [cache]);
+    assert.ok("refused" in bad, JSON.stringify(bad));
+  } finally {
+    fs.rmSync(cache, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
   }
 });
 
