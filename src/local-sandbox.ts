@@ -733,6 +733,13 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       const above = looked.flatMap((x) => {
         const up: string[] = [];
         for (let a = path.dirname(path.resolve(x)); path.dirname(a) !== a; a = path.dirname(a)) up.push(a);
+        // And each folder as written, before `..` takes it away: the kernel walks into it first, so one
+        // made a link later leads the rest elsewhere (Codex round 23).
+        const parts = x.split(path.sep);
+        for (let k = 1; k < parts.length; k++) {
+          const pre = parts.slice(0, k).join(path.sep);
+          if (pre && path.isAbsolute(pre)) up.push(pre);
+        }
         return up;
       });
       // A path may be both (a hooks folder that is also on PATH): both checks then (Codex round 20).

@@ -554,6 +554,18 @@ test("kept git answers do not miss a folder becoming a repository, a hook added 
     fs.mkdirSync(path.join(proj, "planted"));
     fs.symlinkSync(path.join(proj, "planted"), path.join(outside, "tools"));
     assert.ok(gitProtected(proj, undefined, env, [proj], cache).includes(path.join(proj, "planted", "differ")), "a folder made a link into the project is seen");
+    // 4b. A program path that goes into a folder and back out with `..`: that folder made a link later.
+    await wait();
+    fs.mkdirSync(path.join(outside, "via"));
+    fs.mkdirSync(path.join(outside, "bin2"));
+    git("-C", proj, "config", "gpg.program", `${path.join(outside, "via")}${path.sep}..${path.sep}bin2${path.sep}signer`);
+    await wait();
+    gitProtected(proj, undefined, env, [proj], cache);
+    fs.rmSync(path.join(outside, "via"), { recursive: true });
+    fs.mkdirSync(path.join(proj, "x", "bin2"), { recursive: true });
+    fs.symlinkSync(path.join(proj, "x", "y"), path.join(outside, "via"));
+    fs.mkdirSync(path.join(proj, "x", "y"));
+    assert.ok(gitProtected(proj, undefined, env, [proj], cache).some((p) => p.startsWith(path.join(proj, "x", "bin2", "signer")) || p.includes(`via${path.sep}..${path.sep}bin2${path.sep}signer`)), "a folder walked through before .. is seen");
     // 5. Started below the top: a nearer repository made between them is seen.
     const deep = path.join(proj, "a", "b");
     fs.mkdirSync(deep, { recursive: true });
