@@ -13,6 +13,43 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.5.0] — 2026-11-24
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `LocalSandboxPolicy` from `@foldrun/core/local-sandbox`
+- `LocalSandbox` from `@foldrun/core/local-sandbox`
+
+### New in the public API
+
+- `replyLineFor` from `@foldrun/core`
+- `packageCacheEnv` from `@foldrun/core/local-sandbox`
+- `cacheProblem` from `@foldrun/core/local-sandbox`
+
+- fix(core): writable() on LocalSandbox and the sandbox's fetch for connectMcp are optional — added, not changed, so no major (FOL-222, FOL-271) ([4c2a0c2](https://github.com/foldrun-io/foldrun-core/commit/4c2a0c2))
+- feat(conversation): turnsMore on a listed conversation whose count was capped; the names lock's remaining limit said (FOL-236, Codex round 12) ([c6ee606](https://github.com/foldrun-io/foldrun-core/commit/c6ee606))
+- fix(conversation): a names write whose lock another writer took over is refused, not written over theirs; proxy-fetch.ts in the raw-fetch list (FOL-264, FOL-222, Codex round 11) ([ba4549d](https://github.com/foldrun-io/foldrun-core/commit/ba4549d))
+- fix(conversation): conversation names on files are written under a lock — two renames at once both stay (FOL-264, Codex round 10) ([f0ff8c6](https://github.com/foldrun-io/foldrun-core/commit/f0ff8c6))
+- feat(conversation): a conversation has a name, kept with the project by its key; listSessions shows it (FOL-264) ([5fc0d70](https://github.com/foldrun-io/foldrun-core/commit/5fc0d70))
+- fix(proxy-fetch): 205 and other bodiless statuses, a Response that cannot be made, no listener left on the caller's signal; feat(conversation): listSessions (FOL-222, FOL-236) ([49ab21b](https://github.com/foldrun-io/foldrun-core/commit/49ab21b))
+- feat(local-sandbox): a remote MCP server (HTTP or SSE) inside the walls goes through their site proxy (FOL-222) ([ee72693](https://github.com/foldrun-io/foldrun-core/commit/ee72693))
+- fix(engine): Bash returns when the shell ends, even if a background job keeps its output open (FOL-273) ([eed3175](https://github.com/foldrun-io/foldrun-core/commit/eed3175))
+- feat(runner): a Reply language line ahead of a person's message when language: is set (FOL-275) ([42e28ad](https://github.com/foldrun-io/foldrun-core/commit/42e28ad))
+- fix(local-sandbox): a macOS access list that lets others write a folder on the cache's path is refused too ([46b392a](https://github.com/foldrun-io/foldrun-core/commit/46b392a))
+- fix(local-sandbox): no folder others can write on a package cache's path, unless sticky ([9f268e8](https://github.com/foldrun-io/foldrun-core/commit/9f268e8))
+- fix(local-sandbox): no link but the system's on a package cache's path, anywhere; no folder another user owns ([67e645d](https://github.com/foldrun-io/foldrun-core/commit/67e645d))
+- fix(local-sandbox): the package cache is checked before it is writable — not in the project, not behind a link, counted for helpers (FOL-272, Codex) ([aeac82f](https://github.com/foldrun-io/foldrun-core/commit/aeac82f))
+- feat(local-sandbox): a package cache per project, named to npm, yarn, pnpm, bun, pip, uv and go (FOL-272) ([08b1821](https://github.com/foldrun-io/foldrun-core/commit/08b1821))
+- fix(local-sandbox): say what the walls do in plain words, list writable folders apart (FOL-271) ([bfc6e1d](https://github.com/foldrun-io/foldrun-core/commit/bfc6e1d))
+
+### fix
+
+- Bash's timeout stops at the shell's exit; reply language takes code out of the whole message before reading its end ([15c624a](https://github.com/foldrun-io/foldrun-core/commit/15c624a))
+- reply language reads in linear time and keeps a question above an error line; Bash keeps reading a background job's output instead of closing it ([ce2d90b](https://github.com/foldrun-io/foldrun-core/commit/ce2d90b))
+- reply language passes over file names, pasted errors, negated and quoted asks, a rescuer's failure note; ACLs checked on root-owned folders too ([e0eb655](https://github.com/foldrun-io/foldrun-core/commit/e0eb655))
+
 ## [27.4.0] — 2026-11-24
 
 ### New in the public API
