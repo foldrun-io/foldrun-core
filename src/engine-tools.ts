@@ -853,6 +853,9 @@ const grep: EngineTool = {
   },
 };
 
+/** After the shell exits, how long its output may still arrive before the command counts as returned. */
+const EXIT_GRACE_MS = 300;
+
 const bash: EngineTool = {
   name: "Bash",
   description:
@@ -938,13 +941,31 @@ const bash: EngineTool = {
         resolve({ text, ...(isError ? { isError: true } : {}) });
       };
       child.on("error", (err) => done(`the command could not start: ${err.message}`, true));
-      child.on("close", (code, signal) => {
-        const body = capped(out.trimEnd()) + (dropped ? `\n[${dropped} characters of output dropped while it ran]` : "");
+      // The shell has ended, but something it started in the background
+      // (`server &`) still holds its output open: "close" would wait for
+      // that, up to the timeout (FOL-273). A moment for the last output,
+      // then the command has returned; what it left runs on and ends with
+      // the step (killGroups).
+      let left = false;
+      let finish: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = null;
+      child.on("exit", (code, signal) => {
+        setTimeout(() => {
+          if (!finish) return;
+          left = true;
+          child.stdout!.destroy();
+          child.stderr!.destroy();
+          finish(code, signal);
+        }, EXIT_GRACE_MS).unref();
+      });
+      finish = (code, signal) => {
+        finish = null;
+        const body = capped(out.trimEnd()) + (dropped ? `\n[${dropped} characters of output dropped while it ran]` : "") + (left ? "\n[it left something running in the background, which goes on until the turn ends; its output after this is not shown]" : "");
         if (why === "timeout") return done(`${body}\n[stopped after ${ms} ms — the command did not finish]`.trim(), true);
         if (why === "stopped") return done(`${body}\n[stopped with the step]`.trim(), true);
         if (code === 0) return done(body || "(no output)", false);
         done(`${body}\n[exit code ${code ?? `none, signal ${signal}`}]`.trim(), true);
-      });
+      };
+      child.on("close", (code, signal) => finish?.(code, signal));
     });
   },
 };

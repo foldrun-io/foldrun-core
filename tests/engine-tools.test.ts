@@ -242,3 +242,16 @@ test("what a command left in the background is ended when the session ends", () 
     await new Promise((done) => setTimeout(done, 2500));
     assert.equal(fs.existsSync(marker), false, "the background job did not outlive the session");
   }));
+
+test("a background job that keeps the output open does not hold the command: it returns when the shell ends, and says so (FOL-273)", () =>
+  withDir(async (dir, ctx) => {
+    const started = Date.now();
+    const r = await Bash.run({ command: "sleep 30 & echo started" }, ctx);
+    assert.ok(Date.now() - started < 5000, `returned in ${Date.now() - started} ms, not at the timeout`);
+    assert.match(r.text, /^started\n\[it left something running in the background/);
+    assert.equal(r.isError, undefined);
+    killGroups(ctx);
+    // And a plain command's output still arrives whole.
+    const big = await Bash.run({ command: "seq 1 20000 | tail -1" }, ctx);
+    assert.equal(big.text, "20000");
+  }));
