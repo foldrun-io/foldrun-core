@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.2.0] — 2026-11-24
+
+### New in the public API
+
+- `showsThinking` from `@foldrun/core/engine-loop`
+- `thinkingParam` from `@foldrun/core/engine-loop`
+
+- fix(engine): keep buildRequest as it was — the thinking field is added by the turn ([da42ff6](https://github.com/foldrun-io/foldrun-core/commit/da42ff6))
+- feat(engine): thinkingDisplay — ask the model for a summary of its thinking ([414f681](https://github.com/foldrun-io/foldrun-core/commit/414f681))
+
 ## [27.1.1] — 2026-11-24
 
 - fix(language): a person is answered in the language they wrote in; language: is for what the agent produces ([e8a248e](https://github.com/foldrun-io/foldrun-core/commit/e8a248e))
