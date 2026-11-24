@@ -750,10 +750,10 @@ function hasGitAbove(dir: string): boolean {
 function nestedRepos(cwd: string): string[] {
   const found: string[] = [];
   const stack: { dir: string; depth: number }[] = [{ dir: cwd, depth: 0 }];
-  let seen = 0;
+  const count = { seen: 0 };
   while (stack.length) {
     const { dir, depth } = stack.pop()!;
-    if (++seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders to search for nested git repositories`);
+    if (++count.seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders to search for nested git repositories`);
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -771,7 +771,7 @@ function nestedRepos(cwd: string): string[] {
       const sub = path.join(dir, e.name);
       if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
       if (PACKAGE_DIRS.has(e.name)) {
-        found.push(...packageRepos(sub));
+        found.push(...packageRepos(sub, count));
         continue;
       }
       if (depth + 1 >= GIT_SEARCH_DEPTH) {
@@ -786,7 +786,7 @@ function nestedRepos(cwd: string): string[] {
 
 /** The repositories at a package folder's package roots: `<dir>/<name>`, `<dir>/@scope/<name>`, and the
  *  same in each package's own node_modules. At most GIT_SEARCH_DIRS package roots, then an error. */
-function packageRepos(top: string): string[] {
+function packageRepos(top: string, count: { seen: number }): string[] {
   const found: string[] = [];
   const list = (d: string): fs.Dirent[] => {
     try {
@@ -796,9 +796,9 @@ function packageRepos(top: string): string[] {
     }
   };
   const queue = [top];
-  let seen = 0;
+  // One count with the search around it: the bound is the whole project's, not each node_modules' (Codex).
   const visit = (pkg: string) => {
-    if (++seen > GIT_SEARCH_DIRS) throw new Error(`${top} has more than ${GIT_SEARCH_DIRS} packages to search for nested git repositories`);
+    if (++count.seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders and packages to search for nested git repositories`);
     if (fs.existsSync(path.join(pkg, ".git")) || looksBare(pkg)) found.push(pkg);
     for (const name of PACKAGE_DIRS) {
       const inner = path.join(pkg, name);
@@ -814,6 +814,19 @@ function packageRepos(top: string): string[] {
     for (const e of list(dir)) {
       if (!e.isDirectory() || e.name === ".git" || e.name === ".bin") continue;
       const sub = path.join(dir, e.name);
+      if (e.name === ".pnpm") {
+        // pnpm's store: node_modules/.pnpm/<name@version>/node_modules/<pkg> (Codex).
+        for (const v of list(sub)) {
+          if (!v.isDirectory()) continue;
+          const inner = path.join(sub, v.name, "node_modules");
+          try {
+            if (fs.lstatSync(inner).isDirectory()) queue.push(inner);
+          } catch {
+            /* none */
+          }
+        }
+        continue;
+      }
       if (e.name.startsWith("@")) {
         for (const s of list(sub)) if (s.isDirectory() && s.name !== ".git") visit(path.join(sub, s.name));
       } else visit(sub);

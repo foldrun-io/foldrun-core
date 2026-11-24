@@ -357,6 +357,9 @@ test("a deep node_modules does not refuse the sandbox; repositories at its packa
     // A package's own node_modules is searched too.
     assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/plain/node_modules/deep")]).status, 0);
     assert.ok(gitProtected(proj).includes(realish(path.join(proj, "node_modules/plain/node_modules/deep/.git/hooks"))));
+    // pnpm's store is searched too (Codex round 15).
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/.pnpm/pkg@1.0.0/node_modules/pkg")]).status, 0);
+    assert.ok(gitProtected(proj).includes(realish(path.join(proj, "node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/.git/hooks"))));
     // A cache folder is not a package folder: a checkout deep in it is still found.
     assert.equal(spawnSync("git", ["init", "-q", path.join(proj, ".cache/checkouts/pkg")]).status, 0);
     assert.ok(gitProtected(proj).includes(realish(path.join(proj, ".cache/checkouts/pkg/.git/hooks"))));
