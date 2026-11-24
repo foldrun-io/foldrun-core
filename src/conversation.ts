@@ -228,16 +228,40 @@ export function setSessionName(tenant: string, workspace: string, context: strin
   const file = namesFile(tenant, workspace);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // Read, change and write under one lock: two renames at once both stay (Codex).
-  const release = lockFileExclusive(file, "the project's conversation names are being saved by another change — try again");
+  const busy = "the project's conversation names are being saved by another change — try again";
+  const release = lockFileExclusive(file, busy);
+  const lock = `${file}.lock`;
+  const mine = (() => {
+    try {
+      return fs.readFileSync(lock, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  let ours = true;
   try {
     const all = readNamesFile(tenant, workspace);
     if (value) all[key] = value;
     else delete all[key];
     const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(all, null, 2));
+    // A writer stalled past the lock's stale time may have lost it to another: then it does not write over
+    // that one's change (Codex). Checked just before the rename, the only step that publishes.
+    let still: string | null = null;
+    try {
+      still = fs.readFileSync(lock, "utf8");
+    } catch {
+      /* gone: taken over and released */
+    }
+    if (mine === null || still !== mine) {
+      ours = false;
+      fs.rmSync(tmp, { force: true });
+      throw new Error(busy);
+    }
     fs.renameSync(tmp, file);
   } finally {
-    release();
+    // Never release a lock another writer took over.
+    if (ours) release();
   }
   return value;
 }

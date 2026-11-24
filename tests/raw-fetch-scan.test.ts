@@ -31,6 +31,7 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
   "api-tools.ts": { count: 1, why: "an http tool's call inside the step, through the lease's egress proxy on a platform" },
   "run-container.ts": { count: 3, why: "the in-pod driver's /identity call to the egress proxy, and two curl install snippets — sandbox, not host" },
   "storage.ts": { count: 2, why: "S3: FOLDRUN_S3_ENDPOINT and the AWS container-credential endpoint, both operator env" },
+  "proxy-fetch.ts": { count: 3, why: "not a fetch: the name of the fetch it builds (comments and its signature) — every request it makes goes over node's http to the local sandbox's site proxy, which decides by the sandbox's list (FOL-222)" },
   "mail.ts": { count: 1, why: "Resend, a fixed host (api.resend.com)" },
   "untrusted-fetch.ts": { count: 1, why: "a laptop's own client-certificate request (mutual TLS) through node's https — only when no platform guards fetches; a platform's fetchUntrusted presents the certificate itself" },
 };
