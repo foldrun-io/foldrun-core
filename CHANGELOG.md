@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.1.1] — 2026-11-24
+
+- fix(language): a person is answered in the language they wrote in; language: is for what the agent produces ([e8a248e](https://github.com/foldrun-io/foldrun-core/commit/e8a248e))
+
 ## [27.1.0] — 2026-11-23
 
 ### New in the public API
