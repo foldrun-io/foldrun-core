@@ -233,6 +233,15 @@ test("a package cache in or around the project, or behind a link that is not the
     assert.match(cacheProblem(path.join(shared, "proj-1"), proj, []) ?? "", /others can write/);
     fs.chmodSync(shared, 0o1777);
     assert.equal(cacheProblem(path.join(shared, "proj-1"), proj, []), null);
+    // macOS: 755, but an access list lets everyone add and remove entries.
+    if (process.platform === "darwin") {
+      const acl = path.join(home, "acl");
+      fs.mkdirSync(acl, { mode: 0o755 });
+      spawnSync("/bin/chmod", ["+a", "everyone allow add_file,add_subdirectory,delete_child", acl]);
+      assert.match(cacheProblem(path.join(acl, "proj-1"), proj, []) ?? "", /access list/);
+      // The home's own "everyone deny delete" is not a way in.
+      assert.equal(cacheProblem(path.join(home, "plain", "proj-1"), proj, []), null);
+    }
     // A file in the way, and a relative path.
     fs.writeFileSync(path.join(home, "file"), "");
     assert.match(cacheProblem(path.join(home, "file", "x"), proj, []) ?? "", /file where a folder/);
