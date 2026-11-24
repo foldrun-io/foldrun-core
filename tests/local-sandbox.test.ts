@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { APPARMOR_HINT, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
+import { APPARMOR_HINT, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
 import { readOptions } from "../src/engine-common.ts";
 import { connectMcp } from "../src/engine-mcp.ts";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
@@ -334,6 +334,84 @@ test("the launcher's PATH holds no folder a command may write, and no relative e
     assert.equal(trustedPath(path.join(proj, "bin"), [proj]), "/usr/bin:/bin:/usr/sbin:/sbin");
   } finally {
     fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("git's answers are kept per repository, and asked again when anything they came from changes", async () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache-"));
+  const git = (...a: string[]) => assert.equal(spawnSync("git", a, { encoding: "utf8" }).status, 0, a.join(" "));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(proj, "..", path.basename(proj) + "-global"), GIT_CONFIG_NOSYSTEM: "1" };
+  const wait = () => new Promise((r) => setTimeout(r, 1100)); // past the "racy" second
+  try {
+    git("init", "-q", proj);
+    git("init", "-q", path.join(proj, "sub"));
+    await wait();
+    const cache: GitCache = new Map();
+    const ask = () => gitProtected(proj, undefined, env, [proj], cache).sort();
+    const first = ask();
+    assert.equal(cache.size, 2, "both repositories kept");
+    assert.deepEqual(ask(), first, "unchanged: the same answer");
+    // A hooks path set in a nested repository's config: seen at once.
+    git("-C", path.join(proj, "sub"), "config", "core.hooksPath", "tools/hooks");
+    const hooks = path.join(realish(path.join(proj, "sub")), "tools/hooks");
+    assert.ok(ask().includes(hooks), "a config change is asked again");
+    // Changed within the racy second: not kept, so a later change in that second is still seen.
+    git("-C", path.join(proj, "sub"), "config", "core.hooksPath", "tools/hooks2");
+    assert.ok(ask().includes(path.join(realish(path.join(proj, "sub")), "tools/hooks2")));
+    assert.equal(cache.has(realish(path.join(proj, "sub"))) || cache.has(path.join(proj, "sub")), false, "a just-changed repository is not kept");
+    await wait();
+    ask();
+    // An include file that appears where the config points: the config names it, so it is watched, there or not.
+    git("-C", proj, "config", "include.path", "extra.gitconfig");
+    await wait();
+    ask();
+    fs.writeFileSync(path.join(proj, ".git", "extra.gitconfig"), "[core]\n\thooksPath = from-include\n");
+    assert.ok(ask().some((x) => x.endsWith(`${path.sep}from-include`)), "an include file that appeared is read");
+    // The global config is every repository's: a change there is seen for all.
+    await wait();
+    ask();
+    fs.writeFileSync(env.GIT_CONFIG_GLOBAL, "[core]\n\tpager = ./pager-in-project\n");
+    assert.ok(ask().some((x) => x.endsWith(`${path.sep}pager-in-project`)), "a global config change is seen");
+    // Edited in place (same inode: an editor that writes over the file, `>>`): seen by its times and size.
+    await wait();
+    ask();
+    const ino = fs.statSync(env.GIT_CONFIG_GLOBAL).ino;
+    fs.appendFileSync(env.GIT_CONFIG_GLOBAL, "[diff]\n\texternal = ./differ-in-project\n");
+    assert.equal(fs.statSync(env.GIT_CONFIG_GLOBAL).ino, ino, "the same file");
+    assert.ok(ask().some((x) => x.endsWith(`${path.sep}differ-in-project`)), "an in-place edit is seen");
+    await wait();
+    ask();
+    const subConfig = path.join(proj, "sub", ".git", "config");
+    fs.appendFileSync(subConfig, "[core]\n\tfsmonitor = ./monitor-in-project\n");
+    assert.ok(ask().some((x) => x.endsWith(`${path.sep}monitor-in-project`)), "an in-place edit of a repository's config is seen");
+    // A new repository made by a command: found by the walk, asked in full.
+    await wait();
+    ask();
+    git("init", "-q", path.join(proj, "made", "later"));
+    assert.ok(ask().some((x) => x.includes(`made${path.sep}later${path.sep}.git${path.sep}hooks`)), "a new repository is found");
+    // A .git swapped for another: by identity, asked again.
+    await wait();
+    ask();
+    fs.renameSync(path.join(proj, "sub", ".git"), `${proj}-old-sub-git`);
+    git("init", "-q", path.join(proj, "sub"));
+    git("-C", path.join(proj, "sub"), "config", "core.hooksPath", "swapped");
+    assert.ok(ask().includes(path.join(realish(path.join(proj, "sub")), "swapped")), "a swapped .git is asked again");
+    // Commits and new files in the work tree change nothing asked: still kept (the point of it).
+    await wait();
+    ask();
+    const kept = cache.get([...cache.keys()].find((k) => k.endsWith(`${path.sep}sub`))!);
+    fs.writeFileSync(path.join(proj, "sub", "f.txt"), "x");
+    git("-C", path.join(proj, "sub"), "add", "f.txt");
+    git("-C", path.join(proj, "sub"), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x");
+    ask();
+    assert.equal(cache.get([...cache.keys()].find((k) => k.endsWith(`${path.sep}sub`))!), kept, "a commit does not throw the answer away");
+    // Asked with other settings (another PATH, environment or writable folders): nothing kept counts.
+    const other = gitProtected(proj, undefined, { ...env, GIT_CONFIG_GLOBAL: path.join(proj, "elsewhere") }, [proj], cache);
+    assert.ok(!other.some((x) => x.endsWith(`${path.sep}pager-in-project`)), "another environment is asked, not answered from the cache");
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+    fs.rmSync(path.join(proj, "..", path.basename(proj) + "-global"), { force: true });
+    fs.rmSync(`${proj}-old-sub-git`, { recursive: true, force: true });
   }
 });
 

@@ -398,6 +398,44 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
   return { dir: realish(dir) };
 }
 
+/** Answers gitProtected gave for each repository, with what each depends on — one per sandbox. */
+export type GitCache = Map<string, { ctx: string; deps: string[]; ids: string[]; sig: string; out: string[] }>;
+
+/**
+ * Every path's inode, change and modify times, size and mode (or why it cannot be read), as one string:
+ * null when one changed at or after `notAfter` (milliseconds), so a change git may not have seen is never
+ * taken for one it did.
+ */
+function statSig(paths: string[], notAfter?: number): string | null;
+function statSig(paths: string[]): string;
+function statSig(paths: string[], notAfter?: number): string | null {
+  const parts: string[] = [];
+  for (const p of paths) {
+    try {
+      const s = fs.lstatSync(p, { bigint: true });
+      if (notAfter !== undefined && (Number(s.ctimeMs) >= notAfter || Number(s.mtimeMs) >= notAfter)) return null;
+      parts.push(`${s.dev}:${s.ino}:${s.ctimeNs}:${s.mtimeNs}:${s.size}:${s.mode}`);
+    } catch (err) {
+      parts.push(`-${(err as NodeJS.ErrnoException).code ?? "?"}`);
+    }
+  }
+  return parts.join("|");
+}
+
+/** Which file each path is — device, inode, type — or why it cannot be read: its times and size left out. */
+function idSig(paths: string[]): string {
+  return paths
+    .map((p) => {
+      try {
+        const s = fs.lstatSync(p, { bigint: true });
+        return `${s.dev}:${s.ino}:${s.mode & BigInt(0o170000)}`;
+      } catch (err) {
+        return `-${(err as NodeJS.ErrnoException).code ?? "?"}`;
+      }
+    })
+    .join("|");
+}
+
 /**
  * The git paths that run code on a later git command: the hooks (or the
  * folder core.hooksPath names) and every config file git reads (config,
@@ -407,8 +445,10 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
  * no git to ask, or a project too large to search, is an error, never an
  * empty answer: a hooks folder dropped by a failed lookup would be writable.
  */
-export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH, [cwd]), hostEnv: NodeJS.ProcessEnv = process.env, writeRoots: string[] = [cwd]): string[] {
+export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH, [cwd]), hostEnv: NodeJS.ProcessEnv = process.env, writeRoots: string[] = [cwd], cache?: GitCache): string[] {
   const out: string[] = [];
+  // What every answer below depends on besides the files: asked with other settings, nothing cached counts.
+  const ctx = cache ? JSON.stringify([pathVar, writeRoots, Object.entries(hostEnv).sort(([a], [b]) => (a < b ? -1 : 1))]) : "";
   const fold = foldCase(process.platform);
   const repos = [cwd, ...nestedRepos(cwd)];
   const inRepo = repos.length > 1 || hasGitAbove(cwd) || looksBare(cwd);
@@ -443,6 +483,15 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     // someone named .git, the report): git runs nothing from it and would answer for the repository
     // around it. Its paths are still kept from writes (above); there is nothing to ask git.
     if (dir !== cwd && inertGit(dir)) continue;
+    // A repository asked before, none of whose files changed since: the same answer (FOL-214 follow-up —
+    // asking git is ~20 programs a repository, seconds a launch in a folder of repositories).
+    const hit = cache?.get(dir);
+    if (hit && hit.ctx === ctx && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
+      out.push(...hit.out);
+      continue;
+    }
+    const start = out.length;
+    const asked = Date.now();
     const probe = git(dir, ["rev-parse", "--is-bare-repository"]);
     // Only the project folder may be no repository (a nested one has a .git,
     // or is a bare one); its global and system config are still read below.
@@ -627,6 +676,30 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
           consider((nl < 0 ? entry : entry.slice(0, nl)).toLowerCase(), nl < 0 ? "" : entry.slice(nl + 1), path.dirname(f));
         }
       }
+    }
+    if (cache) {
+      // Kept against every path this answer came from: each file git read (config, includes, the global and
+      // system ones, there or not), the hooks folders and what is in them, each link on the way — all of
+      // them kept from writes by the answer itself, so only the person can change one, and a change moves
+      // its inode, ctime, mtime, size or mode. The folders — the repository, its top, its .git and git
+      // folders — by which they are (device, inode, type) only: git writes in them on every commit, a new
+      // file lands in them, and neither changes an answer; a folder swapped for another does. A .git that
+      // is a file (a worktree's pointer) is read by git, so in full. A file changed since this repository
+      // was asked is not trusted to have been seen ("racy git", as git's index does it): nothing is cached
+      // then, and it is asked again next time.
+      const mine = out.slice(start);
+      const dotGit = path.join(dir, ".git");
+      let dotGitFile = false;
+      try {
+        dotGitFile = fs.lstatSync(dotGit).isFile();
+      } catch {
+        /* none: counted by identity below */
+      }
+      const ids = [...new Set([dir, top, ...gitDirs, ...(dotGitFile ? [] : [dotGit])])];
+      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine])].filter((x) => !ids.includes(x));
+      const files = statSig(deps, asked - 1000);
+      if (files !== null) cache.set(dir, { ctx, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
+      else cache.delete(dir);
     }
   }
   // Each by the name git uses, by every link on the way and by where it
@@ -1242,12 +1315,14 @@ async function bringUp(
   }
   const credWrites = [...DENY_READ, ...(policy.denyRead ?? [])].flatMap((p) => [path.resolve(expand(p)), realish(expand(p))]);
   let protectedWrites: string[];
+  // One per sandbox: its settings (PATH, environment, writable folders) are fixed for its life.
+  const gitCache: GitCache = new Map();
   try {
     // Asked with the person's own PATH (the helper folder is only this
     // process's): a bare program name in git's settings is found on it.
     // The person's whole environment as it was (their GIT_EXEC_PATH,
     // GIT_SSH_COMMAND, PAGER…): what their own next git command will have.
-    protectedWrites = gitProtected(cwd, hostPATH, personEnv, writeRoots);
+    protectedWrites = gitProtected(cwd, hostPATH, personEnv, writeRoots, gitCache);
   } catch (err) {
     rmTmp();
     return { refused: `the git paths to protect could not be found: ${err instanceof Error ? err.message : String(err)}` };
@@ -1323,7 +1398,7 @@ async function bringUp(
       const step = w.gate.then(async () => {
         let now: string[];
         try {
-          now = gitProtected(cwd, hostPATH, personEnv, writeRoots);
+          now = gitProtected(cwd, hostPATH, personEnv, writeRoots, gitCache);
         } catch (err) {
           w.last = "\0unverifiable";
           await revoke(w.last).catch(() => undefined);
@@ -1350,7 +1425,7 @@ async function bringUp(
     listeners: new Set(),
     last: "",
     gate: Promise.resolve(),
-    fingerprint: () => [...new Set([...gitProtected(cwd, hostPATH, personEnv, writeRoots), ...credWrites])].sort().join("\0"),
+    fingerprint: () => [...new Set([...gitProtected(cwd, hostPATH, personEnv, writeRoots, gitCache), ...credWrites])].sort().join("\0"),
     hostEnv: launcherEnv,
     personPath,
     rules: fileRules({ ...policy, cwd }, tmp, protectedWrites, platform),
