@@ -766,6 +766,8 @@ function nestedRepos(cwd: string): string[] {
       const sub = path.join(dir, e.name);
       if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
       if (depth + 1 >= GIT_SEARCH_DEPTH) {
+        // Counted like any folder read (Codex): the cap is on every read, the boundary's too.
+        if (++count.seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders to search for nested git repositories`);
         if (fs.readdirSync(sub, { withFileTypes: true }).some((x) => x.isDirectory())) throw new Error(`the project's folders go deeper than ${GIT_SEARCH_DEPTH} levels (${sub})`);
         continue;
       }
