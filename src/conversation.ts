@@ -133,6 +133,8 @@ export interface SessionSummary {
   name: string | null;
   /** Its turns that became runs (a turn on a person's own computer makes none). */
   turns: number;
+  /** True when it has more turns than were counted: `turns` is then a lower bound (a very long conversation). */
+  turnsMore?: boolean;
   /** The agent its last turn ran. */
   agent: string | null;
   lastAt: string;
@@ -154,12 +156,13 @@ export const SESSIONS_LIMIT = 200;
 export function listSessions(tenant: string, workspace: string, limit = 50): SessionSummary[] {
   const n = Math.max(1, Math.min(SESSIONS_LIMIT, Math.floor(limit)));
   const port = records(tenant, workspace);
-  const groups = port?.sessionsOf ? port.sessionsOf(tenant, workspace, n) : sessionsFromSummaries(listRunSummaries(tenant, workspace), n);
+  const groups: Array<{ turns: number; turnsMore?: boolean; last: RunSummary }> = port?.sessionsOf ? port.sessionsOf(tenant, workspace, n) : sessionsFromSummaries(listRunSummaries(tenant, workspace), n);
   const names = sessionNames(tenant, workspace);
-  return groups.map(({ turns, last }) => ({
+  return groups.map(({ turns, turnsMore, last }) => ({
     context: last.context!.id,
     name: names.get(last.context!.key)?.name ?? null,
     turns,
+    ...(turnsMore ? { turnsMore: true } : {}),
     agent: last.steps[0]?.agent ?? null,
     lastAt: last.startedAt,
     lastStatus: last.status,
@@ -246,7 +249,9 @@ export function setSessionName(tenant: string, workspace: string, context: strin
     const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(all, null, 2));
     // A writer stalled past the lock's stale time may have lost it to another: then it does not write over
-    // that one's change (Codex). Checked just before the rename, the only step that publishes.
+    // that one's change (Codex). Checked just before the rename, the only step that publishes. A writer paused
+    // for more than the stale time between this check and the rename can still lose one rename: a limit of a
+    // lock file, accepted for this laptop-only fallback (the platform keeps names in its database rows).
     let still: string | null = null;
     try {
       still = fs.readFileSync(lock, "utf8");

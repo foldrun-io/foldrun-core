@@ -119,7 +119,7 @@ export interface RecordsPort {
    *  conversation.ts filters the run summaries itself. */
   runsInContext?(tenant: string, workspace: string, key: string, before: string, test: boolean, limit: number): RunRecord[];
   /** FOL-236: a project's conversations, newest first (conversation.ts listSessions says what counts). */
-  sessionsOf?(tenant: string, workspace: string, limit: number): import("./conversation.ts").SessionSummary[];
+  sessionsOf?(tenant: string, workspace: string, limit: number): Array<{ turns: number; turnsMore?: boolean; last: RunSummary }>;
   /** FOL-168: how many runs of this end customer are open (queued, running
    *  or parked at a gate) across every workspace of the account. Optional:
    *  without it customer.ts counts the run summaries itself. */
