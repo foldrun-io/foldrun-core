@@ -4,6 +4,7 @@
 // and everything it reaches (FOL-265: foldrun code loaded all of core, about
 // 67 MB, for resolveTier and resolveEffort on every turn).
 import { EFFORT_LEVELS } from "./frontmatter-fields.ts";
+export { EFFORT_LEVELS } from "./frontmatter-fields.ts";
 
 // Model selection. Tiers are the portable default — they keep working as
 // models are renamed. An explicit alias or full model id is passed straight
@@ -69,7 +70,6 @@ export function resolveModel(value: unknown): string {
 // model is which brain, effort is how long it thinks before answering. The
 // five levels are the SDK's own union — we neither invent our own scale nor
 // narrow theirs, so a level added upstream is one line here.
-export { EFFORT_LEVELS };
 export type Effort = (typeof EFFORT_LEVELS)[number];
 
 const EFFORT_ALIASES: Record<string, Effort> = {

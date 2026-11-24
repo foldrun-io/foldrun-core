@@ -1103,7 +1103,8 @@ const ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 // Model and effort words live in model-names.ts (FOL-265); exported from
 // here too, as before.
-export { MODEL_TIERS, resolveTier, resolveModel, EFFORT_LEVELS, resolveEffort, isEffortWord } from "./model-names.ts";
+export { MODEL_TIERS, resolveTier, resolveModel, resolveEffort, isEffortWord } from "./model-names.ts";
+export { EFFORT_LEVELS } from "./frontmatter-fields.ts";
 export type { Tier, Effort } from "./model-names.ts";
 import { MODEL_TIERS, resolveTier, resolveEffort, type Tier } from "./model-names.ts";
 
