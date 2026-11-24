@@ -489,7 +489,8 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
   const must = (dir: string, args: string[], what: string) => {
     const r = git(dir, args);
     if (r.status !== 0) throw new Error(`git could not say ${what} for ${dir}: ${r.err || `exit ${r.status}`}`);
-    return r.out.trim();
+    // Only git's own newline: a folder's name may end in a space (Codex round 29).
+    return r.out.replace(/\n$/, "");
   };
   // Which git answers is part of every answer too (its own system config, its defaults): by path and by
   // file (Codex round 21).
@@ -765,8 +766,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       }
       // The git folders too: one swapped and put back while this was asked would leave the other's answer
       // (Codex round 28). Git writes in them on every commit: a launch right after one is just not kept.
-      const aged = [...new Set([...above, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
-      const ids = [...new Set([dir, top])].filter((x) => !pointers.includes(x) && !aged.includes(x));
+      // And the work tree's folders themselves: one swapped and put back meanwhile likewise (Codex round 29);
+      // a launch right after a file is made where it was asked is just not kept.
+      const aged = [...new Set([dir, top, ...above, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
+      const ids: string[] = [];
       const deps = [...new Set([...pointers, ...mine])];
       const files = statSig(deps, asked - 1000);
       // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
