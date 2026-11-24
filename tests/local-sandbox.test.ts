@@ -226,6 +226,13 @@ test("a package cache in or around the project, or behind a link that is not the
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
+    // A folder of this person's that others may write, without the sticky bit: refused; with it (as /tmp), fine.
+    const shared = path.join(home, "shared");
+    fs.mkdirSync(shared);
+    fs.chmodSync(shared, 0o775);
+    assert.match(cacheProblem(path.join(shared, "proj-1"), proj, []) ?? "", /others can write/);
+    fs.chmodSync(shared, 0o1777);
+    assert.equal(cacheProblem(path.join(shared, "proj-1"), proj, []), null);
     // A file in the way, and a relative path.
     fs.writeFileSync(path.join(home, "file"), "");
     assert.match(cacheProblem(path.join(home, "file", "x"), proj, []) ?? "", /file where a folder/);

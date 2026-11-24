@@ -1111,6 +1111,9 @@ export function cacheProblem(cache: string, cwd: string, denies: string[], platf
     if (st.isSymbolicLink() && st.uid !== 0) return `goes through a symbolic link (${at}).`;
     if (!st.isSymbolicLink() && !st.isDirectory()) return `has a file where a folder should be (${at}).`;
     if (uid !== null && st.isDirectory() && st.uid !== 0 && st.uid !== uid) return `goes through a folder another user owns (${at}).`;
+    // Owning it is not enough: a folder others may write (without the sticky
+    // bit, as /tmp has) lets them rename what is in it after this check (Codex).
+    if (uid !== null && st.isDirectory() && (st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return `goes through a folder others can write (${at}).`;
   }
   if (spellings.some((c) => denies.some((d) => within(c, d) || within(d, c)))) return "overlaps a folder that holds credentials.";
   return null;
