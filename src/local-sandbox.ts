@@ -104,14 +104,9 @@ export const LAUNCHER = fs.existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
 
 /** How deep nested repositories are looked for (the runtime's own scan goes
  *  as deep), and how many folders: past either, the open is refused. */
+/** Deep enough for any real project (a Next.js build is 12 levels; 10 refused one): GIT_SEARCH_DIRS is the bound on the work. */
 const GIT_SEARCH_DEPTH = 64;
 const GIT_SEARCH_DIRS = 100_000;
-/** Folders of installed packages, laid out by a package manager: a repository in one sits at a package's
- *  root (`node_modules/x/.git`, `node_modules/@scope/x/.git`, and the same under a package's own
- *  node_modules), so only package roots are searched — a dependency tree deeper than GIT_SEARCH_DEPTH no
- *  longer refuses the sandbox (a person's folder of repos did). Only these names: a cache or build folder
- *  can hold a real checkout anywhere, so it is searched like any other (Codex). */
-const PACKAGE_DIRS = new Set(["node_modules", "bower_components"]);
 
 /** The variables the launcher itself starts with: plain ones a program
  *  needs, none that makes a program load or run something. */
@@ -770,10 +765,6 @@ function nestedRepos(cwd: string): string[] {
       }
       const sub = path.join(dir, e.name);
       if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
-      if (PACKAGE_DIRS.has(e.name)) {
-        found.push(...packageRepos(sub, count));
-        continue;
-      }
       if (depth + 1 >= GIT_SEARCH_DEPTH) {
         if (fs.readdirSync(sub, { withFileTypes: true }).some((x) => x.isDirectory())) throw new Error(`the project's folders go deeper than ${GIT_SEARCH_DEPTH} levels (${sub})`);
         continue;
@@ -784,56 +775,6 @@ function nestedRepos(cwd: string): string[] {
   return found;
 }
 
-/** The repositories at a package folder's package roots: `<dir>/<name>`, `<dir>/@scope/<name>`, and the
- *  same in each package's own node_modules. At most GIT_SEARCH_DIRS package roots, then an error. */
-function packageRepos(top: string, count: { seen: number }): string[] {
-  const found: string[] = [];
-  const list = (d: string): fs.Dirent[] => {
-    try {
-      return fs.readdirSync(d, { withFileTypes: true });
-    } catch (err) {
-      throw new Error(`${d} could not be searched for nested git repositories (${(err as NodeJS.ErrnoException).code ?? String(err)})`);
-    }
-  };
-  const queue = [top];
-  // One count with the search around it: the bound is the whole project's, not each node_modules' (Codex).
-  const visit = (pkg: string) => {
-    if (++count.seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders and packages to search for nested git repositories`);
-    if (fs.existsSync(path.join(pkg, ".git")) || looksBare(pkg)) found.push(pkg);
-    for (const name of PACKAGE_DIRS) {
-      const inner = path.join(pkg, name);
-      try {
-        if (fs.lstatSync(inner).isDirectory()) queue.push(inner);
-      } catch {
-        /* none */
-      }
-    }
-  };
-  while (queue.length) {
-    const dir = queue.pop()!;
-    for (const e of list(dir)) {
-      if (!e.isDirectory() || e.name === ".git" || e.name === ".bin") continue;
-      const sub = path.join(dir, e.name);
-      if (e.name === ".pnpm") {
-        // pnpm's store: node_modules/.pnpm/<name@version>/node_modules/<pkg> (Codex).
-        for (const v of list(sub)) {
-          if (!v.isDirectory()) continue;
-          const inner = path.join(sub, v.name, "node_modules");
-          try {
-            if (fs.lstatSync(inner).isDirectory()) queue.push(inner);
-          } catch {
-            /* none */
-          }
-        }
-        continue;
-      }
-      if (e.name.startsWith("@")) {
-        for (const s of list(sub)) if (s.isDirectory() && s.name !== ".git") visit(path.join(sub, s.name));
-      } else visit(sub);
-    }
-  }
-  return found;
-}
 
 /** A `.git/hooks`, `.git/config` or `.git/config.worktree` anywhere below:
  *  a repository made later. */

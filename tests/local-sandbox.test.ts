@@ -337,7 +337,7 @@ test("the launcher's PATH holds no folder a command may write, and no relative e
   }
 });
 
-test("a deep node_modules does not refuse the sandbox; repositories at its package roots are still found, and a deep folder elsewhere still refuses", () => {
+test("a deep node_modules or build folder does not refuse the sandbox; repositories anywhere in it are found, and a folder past 64 levels still refuses", () => {
   const proj = tmpProject();
   try {
     fs.mkdirSync(path.join(proj, "node_modules", ...Array.from({ length: 14 }, (_, i) => `d${i}`)), { recursive: true });
@@ -360,6 +360,9 @@ test("a deep node_modules does not refuse the sandbox; repositories at its packa
     // pnpm's store is searched too (Codex round 15).
     assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/.pnpm/pkg@1.0.0/node_modules/pkg")]).status, 0);
     assert.ok(gitProtected(proj).includes(realish(path.join(proj, "node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/.git/hooks"))));
+    // Anywhere in node_modules, not only at a package's root (Codex round 16).
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/library/vendor/dep")]).status, 0);
+    assert.ok(gitProtected(proj).includes(realish(path.join(proj, "node_modules/library/vendor/dep/.git/hooks"))));
     // A cache folder is not a package folder: a checkout deep in it is still found.
     assert.equal(spawnSync("git", ["init", "-q", path.join(proj, ".cache/checkouts/pkg")]).status, 0);
     assert.ok(gitProtected(proj).includes(realish(path.join(proj, ".cache/checkouts/pkg/.git/hooks"))));
