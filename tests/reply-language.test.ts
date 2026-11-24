@@ -43,6 +43,12 @@ test("an ask in so many words wins, and the last ask wins", () => {
   assert.equal(askedLanguage("این را به انگلیسی جواب بده"), "en");
   assert.equal(askedLanguage("written in English"), null, "describing text is not an ask");
   assert.equal(replyLanguage("explain this file, reply in Persian"), "fa");
+  // Not an ask: negated, or quoted (a label the person is asking about) — Codex.
+  assert.equal(askedLanguage("Do not reply in Persian"), null);
+  assert.equal(askedLanguage("don't answer in English here"), null);
+  assert.equal(askedLanguage("دکمه‌ی “continue in English mode” چه می‌کند؟"), null);
+  assert.equal(replyLanguage("دکمه‌ی “continue in English mode” چه می‌کند؟"), "fa");
+  assert.equal(askedLanguage("به انگلیسی جواب نده"), null);
 });
 
 test("a message is read from its end: a client's English notes ahead of a Persian question do not decide it", () => {
@@ -51,6 +57,10 @@ test("a message is read from its end: a client's English notes ahead of a Persia
   assert.equal(replyLanguage(`(قبلاً: تست را درست کردی)\n\nnow run the tests`), "en");
   // The last paragraph says nothing (a pasted command): the one before it does.
   assert.equal(replyLanguage("این خطا را ببین\n\n```\nTypeError: x is undefined\n```"), "fa");
+  // A pasted error after a Persian question: the question decides (Codex).
+  assert.equal(replyLanguage("چرا این خطا می‌آید؟\n\nTypeError: Cannot read properties of undefined (reading 'x')\n    at run (src/a.ts:3:9)"), "fa");
+  // A file name in Persian letters does not make an English message Persian.
+  assert.equal(replyLanguage("Fix گزارش.ts please"), "en");
   assert.equal(replyLanguageLine("test if this task is in cloud"), "Reply language: English (en)");
   assert.equal(replyLanguageLine("این تست را درست کن"), "Reply language: Persian (fa)");
   assert.equal(replyLanguageLine("ok"), "Reply language: English (en)");
@@ -105,4 +115,13 @@ test("a whole run: account language fa, an English message → the line says Eng
     else process.env.FOLDRUN_STUB_STEP = prevStub;
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a rescuer answers in the person's language: the English failure appended to its instruction does not count (Codex)", async () => {
+  const { replyLineFor } = await import("../src/runner.ts");
+  const fa = { language: "fa", from: "account" as const, lines: [] };
+  const instruction = "این تست را درست کن\n\n<rescue>\nYou are taking this step over: [[coder]] attempted it and failed. Its failure, for whatever it is worth:\nThe step timed out after 900 seconds.\n</rescue>";
+  assert.equal(replyLineFor({ conversationTurn: true, instruction }, fa), "Reply language: Persian (fa)");
+  assert.equal(replyLineFor({ conversationTurn: false, instruction }, fa), null, "not a person's turn");
+  assert.equal(replyLineFor({ conversationTurn: true, instruction }, { language: "en", from: "default", lines: [] }), null, "no language set");
 });

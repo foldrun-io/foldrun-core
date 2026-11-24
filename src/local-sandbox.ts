@@ -1124,8 +1124,8 @@ export function cacheProblem(cache: string, cwd: string, denies: string[], platf
     // Owning it is not enough: a folder others may write (without the sticky
     // bit, as /tmp has) lets them rename what is in it after this check (Codex).
     if (uid !== null && st.isDirectory() && (st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return `goes through a folder others can write (${at}).`;
-    // On macOS an ACL can give that right with the mode bits saying 755 (Codex).
-    if (platform === "darwin" && st.isDirectory() && st.uid !== 0 && aclLetsOthersWrite(at)) return `goes through a folder an access list lets others write (${at}).`;
+    // On macOS an ACL can give that right with the mode bits saying 755 — a root-owned folder's too (Codex).
+    if (platform === "darwin" && st.isDirectory() && aclLetsOthersWrite(at)) return `goes through a folder an access list lets others write (${at}).`;
   }
   if (spellings.some((c) => denies.some((d) => within(c, d) || within(d, c)))) return "overlaps a folder that holds credentials.";
   return null;

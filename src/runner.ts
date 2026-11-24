@@ -674,7 +674,8 @@ export function agentLanguage(agentDir: string, tenant: string, agentFront: Reco
 export function replyLineFor(step: { conversationTurn?: boolean; instruction?: string | null }, language: LanguageChoice): string | null {
   if (step.conversationTurn !== true || !step.instruction) return null;
   if (language.from === "default" || language.from === "env") return null;
-  return replyLanguageLine(step.instruction, language.language);
+  // A rescuer's instruction is the person's, then the failure in English: only the person's words count (Codex).
+  return replyLanguageLine(step.instruction.replace(/\n\n<rescue>\n[\s\S]*<\/rescue>\s*$/, ""), language.language);
 }
 
 /**

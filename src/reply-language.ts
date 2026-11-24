@@ -21,8 +21,20 @@ function prose(text: string): string {
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`[^`\n]*`/g, " ")
     .replace(/\bhttps?:\/\/\S+/gi, " ")
-    .replace(/(?:^|\s)[~.]?\/[^\s]+/g, " ");
+    .replace(/(?:^|\s)[~.]?\/[^\s]+/g, " ")
+    // A file name says nothing either, whatever letters it has ("Fix گزارش.ts" — Codex).
+    .replace(/\S+\.[A-Za-z][A-Za-z0-9]{0,7}\b/g, " ");
 }
+
+/** Text a program printed — an error, a stack frame, a log line, a prompt — not the person writing. */
+const MACHINE_LINE = /^\s*(?:[A-Z][A-Za-z]*(?:Error|Exception|Warning)\b|Traceback\b|at\s+\S+|npm (?:ERR|WARN)|error(?:\[|:)|warning(?:\[|:)|fatal:|\$ |> |\d{4}-\d\d-\d\d[T ]\d\d:)/;
+function printed(paragraph: string): boolean {
+  const lines = paragraph.split("\n").filter((l) => l.trim());
+  return lines.length > 0 && lines.filter((l) => MACHINE_LINE.test(l)).length * 2 >= lines.length;
+}
+
+/** Quoted text is someone else's words (a label, a message), not an ask. */
+const unquoted = (text: string) => text.replace(/"[^"\n]*"|“[^”\n]*”|«[^»\n]*»|'[^'\n]{3,}'/g, " ");
 
 const SCRIPTS: Array<[RegExp, (s: string, hint: string | null) => string]> = [
   // Persian has پ چ ژ گ and its own ی and ک; Urdu its own letters; Arabic
@@ -84,14 +96,18 @@ export function detectLanguage(text: string, hint: string | null = null): string
 // "answer in English", "reply in Persian please", "به فارسی جواب بده".
 const NAMES: Record<string, string> = { farsi: "fa", persian: "fa", english: "en", arabic: "ar", german: "de", french: "fr", spanish: "es", portuguese: "pt", italian: "it", dutch: "nl", turkish: "tr", russian: "ru", ukrainian: "uk", chinese: "zh", japanese: "ja", korean: "ko", hindi: "hi", urdu: "ur", hebrew: "he", greek: "el", thai: "th" };
 const ASK_EN = /\b(?:reply|answer|respond|write|talk|speak|continue)(?:\s+(?:to\s+me|back|only))?\s+in\s+([a-z]+)\b/gi;
+/** "do not reply in", "don't answer in", "never write in": not an ask. */
+const NEGATED_EN = /\b(?:not|don't|dont|never|no)\s+(?:\w+\s+){0,2}$/i;
 const PERSIAN_NAMES: Record<string, string> = { "فارسی": "fa", "انگلیسی": "en", "عربی": "ar" };
-const ASK_FA = /(?:به|با)\s*(فارسی|انگلیسی|عربی)\s*(?:جواب|پاسخ|بنویس|حرف)|(فارسی|انگلیسی|عربی)\s*(?:جواب|پاسخ)\s*بده/g;
+// "جواب نده" / "ننویس" is the opposite of an ask.
+const ASK_FA = /(?:به|با)\s*(فارسی|انگلیسی|عربی)\s*(?:جواب|پاسخ|بنویس|حرف)(?!\s*(?:نده|نزن|ندهید))|(فارسی|انگلیسی|عربی)\s*(?:جواب|پاسخ)\s*بده/g;
 
 /** A language the person asked to be answered in, in so many words; the last ask wins. */
 export function askedLanguage(text: string): string | null {
-  const p = prose(text);
+  const p = unquoted(prose(text));
   let found: { at: number; tag: string } | null = null;
   for (const m of p.matchAll(ASK_EN)) {
+    if (NEGATED_EN.test(p.slice(Math.max(0, m.index! - 40), m.index!))) continue;
     const tag = NAMES[m[1]!.toLowerCase()];
     if (tag && (!found || m.index! >= found.at)) found = { at: m.index!, tag };
   }
@@ -114,6 +130,8 @@ export function replyLanguage(message: string, hint: string | null = null): stri
   if (asked) return asked;
   const parts = prose(message).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
+    // What a program printed (a pasted error) is passed over: the person's own words before it decide.
+    if (printed(parts[i]!)) continue;
     const tag = detectLanguage(parts[i]!, hint);
     if (tag) return tag;
   }
