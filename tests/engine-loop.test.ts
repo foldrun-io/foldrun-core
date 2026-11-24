@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { executeStep, type ExecOptions } from "../src/step-exec.ts";
-import { buildRequest, foldrunQuery, showsThinking } from "../src/engine-loop.ts";
+import { buildRequest, foldrunQuery, showsThinking, thinkingParam } from "../src/engine-loop.ts";
 import type { QueryFn } from "../src/step-exec.ts";
 import { ENGINE_TOOLS } from "../src/engine-tools.ts";
 import { checkMcpSpecs, outcomeOf, connectMcp } from "../src/engine-mcp.ts";
@@ -1556,15 +1556,13 @@ test("maxTools refuses a server while its list is still arriving; kill() ends a 
   await c.close();
 });
 
-test("thinkingDisplay: the summary is asked only of a model that answers it; the request is otherwise as it was", () => {
-  const base = { systemPrompt: "", tools: [], env: {} };
-  const said = [{ role: "user", content: [{ type: "text", text: "x" }] }];
-  assert.deepEqual(buildRequest({ ...base, model: "claude-sonnet-5-5", thinkingDisplay: "summarized" }, said).thinking, { type: "adaptive", display: "summarized" });
-  assert.equal("thinking" in buildRequest({ ...base, model: "claude-sonnet-5-5" }, said), false);
-  assert.equal("thinking" in buildRequest({ ...base, model: "claude-sonnet-5-5", thinkingDisplay: null }, said), false);
+test("thinkingDisplay: the summary is asked only of a model that answers it; the request is otherwise as it was", async () => {
+  assert.deepEqual(thinkingParam({ model: "claude-sonnet-5-5", thinkingDisplay: "summarized" }), { type: "adaptive", display: "summarized" });
+  assert.equal(thinkingParam({ model: "claude-sonnet-5-5" }), null);
+  assert.equal(thinkingParam({ model: "claude-sonnet-5-5", thinkingDisplay: null }), null);
   // An older Claude would refuse the field or start thinking; another provider has no such field.
   for (const model of ["claude-haiku-4-5", "claude-opus-4-8", "claude-sonnet-4-6", "deepseek-chat", "gpt-5", "m"]) {
-    assert.equal("thinking" in buildRequest({ ...base, model, thinkingDisplay: "summarized" }, said), false, model);
+    assert.equal(thinkingParam({ model, thinkingDisplay: "summarized" }), null, model);
     assert.equal(showsThinking(model), false, model);
   }
   for (const model of ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5-5"]) assert.equal(showsThinking(model), true, model);

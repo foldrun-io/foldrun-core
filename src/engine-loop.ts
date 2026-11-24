@@ -100,7 +100,7 @@ export function endOf(stopReason: string | null, calls: number): { subtype: stri
   }
 }
 
-export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env" | "thinkingDisplay">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
+export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
   // A one-off request (a summary) writes nothing to the cache.
   const mark = cache ? { cache_control: { type: "ephemeral" } } : {};
   const tools = o.tools.map((t, i) => ({
@@ -121,11 +121,17 @@ export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "to
     ...(o.systemPrompt ? { system: [{ type: "text", text: o.systemPrompt, ...mark }] } : {}),
     ...(tools.length ? { tools } : {}),
     messages: sent,
-    // Asked for, and only of a model that answers it: the summary of its
-    // thinking, in the thinking blocks it already sends empty.
-    ...(o.thinkingDisplay === "summarized" && showsThinking(o.model) ? { thinking: { type: "adaptive", display: "summarized" } } : {}),
     stream: true,
   };
+}
+
+/**
+ * The `thinking` field of a turn's request, or null to leave it out: asked
+ * for (thinkingDisplay), and only of a model that answers it — the summary
+ * of its thinking, in the thinking blocks it already sends empty.
+ */
+export function thinkingParam(o: Pick<LoopOptions, "model" | "thinkingDisplay">): Json | null {
+  return o.thinkingDisplay === "summarized" && showsThinking(o.model) ? { type: "adaptive", display: "summarized" } : null;
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -212,7 +218,8 @@ interface Turn {
 
 /** One model call: yields the raw stream events, returns the whole turn. */
 async function* modelTurn(o: LoopOptions, messages: { role: string; content: Block[] }[], signal: AbortSignal, cache = true, maxTokens?: number, track?: { turn?: Turn }): AsyncGenerator<Json, Turn> {
-  const res = await openStream(o, buildRequest(o, messages, cache, maxTokens), signal);
+  const thinking = thinkingParam(o);
+  const res = await openStream(o, { ...buildRequest(o, messages, cache, maxTokens), ...(thinking ? { thinking } : {}) }, signal);
   const turn: Turn = { id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set() };
   // A caller that must count what a stream that breaks part-way had
   // already reported (a summary request) reads it here.
