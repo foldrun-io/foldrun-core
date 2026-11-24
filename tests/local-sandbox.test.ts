@@ -415,6 +415,70 @@ test("git's answers are kept per repository, and asked again when anything they 
   }
 });
 
+test("kept git answers ask git which repository each time: a folder made bare between, a .git file pointed elsewhere, a hooks folder on PATH (Codex round 20)", async () => {
+  const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache3-")));
+  const outside = path.join(base, "outside");
+  fs.mkdirSync(outside);
+  const git = (...a: string[]) => assert.equal(spawnSync("git", a, { encoding: "utf8" }).status, 0, a.join(" "));
+  const wait = () => new Promise((r) => setTimeout(r, 1100));
+  try {
+    // 1. Started below the top; the folder between is made a bare repository with hooks in the project.
+    const proj = path.join(base, "proj");
+    const deep = path.join(proj, "a", "b");
+    fs.mkdirSync(deep, { recursive: true });
+    git("init", "-q", proj);
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(outside, "global"), GIT_CONFIG_NOSYSTEM: "1" };
+    const cache: GitCache = new Map();
+    await wait();
+    gitProtected(deep, undefined, env, [deep], cache);
+    assert.equal(cache.size, 1);
+    git("init", "-q", "--bare", path.join(proj, "a"));
+    git("--git-dir", path.join(proj, "a"), "config", "core.hooksPath", path.join(deep, "bare-hooks"));
+    const r1 = spawnSync("git", ["-C", deep, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
+    if (r1.status === 0 && r1.stdout.trim() === path.join(proj, "a")) {
+      assert.ok(gitProtected(deep, undefined, env, [deep], cache).includes(path.join(deep, "bare-hooks")), "a folder made bare between is seen");
+    }
+    // 2. A worktree's .git file pointed at another repository, edited in place.
+    const main1 = path.join(base, "main1");
+    const main2 = path.join(base, "main2");
+    for (const m of [main1, main2]) {
+      git("init", "-q", m);
+      git("-C", m, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x");
+    }
+    const wt = path.join(base, "wt");
+    git("-C", main1, "worktree", "add", "-q", "--detach", wt);
+    git("-C", main2, "worktree", "add", "-q", "--detach", path.join(base, "wt2"));
+    git("-C", main2, "config", "core.hooksPath", path.join(wt, "other-hooks"));
+    const c2: GitCache = new Map();
+    await wait();
+    gitProtected(wt, undefined, env, [wt], c2);
+    const dotGit = path.join(wt, ".git");
+    const wt2Git = fs.readFileSync(path.join(base, "wt2", ".git"), "utf8");
+    const fd = fs.openSync(dotGit, "r+");
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, wt2Git, 0);
+    fs.closeSync(fd);
+    assert.ok(gitProtected(wt, undefined, env, [wt], c2).includes(path.join(wt, "other-hooks")), "a .git file pointed elsewhere is seen");
+    // 3. A hooks folder outside that is also on PATH (a helper looked for there): a hook added is seen.
+    const hp = path.join(outside, "hp");
+    fs.mkdirSync(hp);
+    const r3 = path.join(base, "r3");
+    git("init", "-q", r3);
+    git("-C", r3, "config", "core.hooksPath", hp);
+    git("-C", r3, "config", "credential.helper", "mine");
+    const env3 = { ...env, PATH: `${hp}${path.delimiter}${process.env.PATH}` };
+    const c3: GitCache = new Map();
+    await wait();
+    gitProtected(r3, undefined, env3, [r3], c3);
+    assert.equal(c3.size, 1);
+    fs.writeFileSync(path.join(r3, "evil"), "#!/bin/sh\n");
+    fs.symlinkSync(path.join(r3, "evil"), path.join(hp, "pre-commit"));
+    assert.ok(gitProtected(r3, undefined, env3, [r3], c3).includes(path.join(r3, "evil")), "a hook added in a hooks folder on PATH is seen");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("kept git answers do not miss a folder becoming a repository, a hook added through a linked hooks folder, or a program link moved into the project (Codex round 18)", async () => {
   const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache2-")));
   const proj = path.join(base, "proj");

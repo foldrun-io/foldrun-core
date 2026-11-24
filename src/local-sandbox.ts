@@ -399,7 +399,7 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
 }
 
 /** Answers gitProtected gave for each repository, with what each depends on — one per sandbox. */
-export type GitCache = Map<string, { ctx: string; deps: string[]; ids: string[]; sig: string; out: string[] }>;
+export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; sig: string; out: string[] }>;
 
 /**
  * Every path's inode, change and modify times, size and mode (or why it cannot be read), as one string:
@@ -482,6 +482,13 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     if (r.status !== 0) throw new Error(`git could not say ${what} for ${dir}: ${r.err || `exit ${r.status}`}`);
     return r.out.trim();
   };
+  const whichRepo = (dir: string): string => {
+    const a = git(dir, ["rev-parse", "--is-bare-repository", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
+    if (a.status !== 0) return "";
+    if (a.out.split("\n")[0]!.trim() === "true") return a.out;
+    const b = git(dir, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+    return b.status === 0 ? `${a.out}\0${b.out}` : "";
+  };
   for (const dir of repos) {
     // A .git folder git does not take for a repository (no HEAD in it — a folder of bare repositories
     // someone named .git, the report): git runs nothing from it and would answer for the repository
@@ -489,13 +496,17 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     if (dir !== cwd && inertGit(dir)) continue;
     // A repository asked before, none of whose files changed since: the same answer (FOL-214 follow-up —
     // asking git is ~20 programs a repository, seconds a launch in a folder of repositories).
+    // Which repository git takes this folder for is asked of git every time, in one or two programs: a
+    // nearer one made above, a .git file pointed elsewhere, a folder made bare — what files cannot tell
+    // (Codex rounds 19–20). Only what follows from that repository is kept.
+    const asked = Date.now();
+    const found = cache ? whichRepo(dir) : "";
     const hit = cache?.get(dir);
-    if (hit && hit.ctx === ctx && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
+    if (hit && found && hit.found === found && hit.ctx === ctx && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
       out.push(...hit.out);
       continue;
     }
     const start = out.length;
-    const asked = Date.now();
     // Paths looked at whose answer was "not to protect" (a program outside the writable folders): kept
     // against too, so one made to lead into the project later is asked again (Codex round 18).
     const looked: string[] = [];
@@ -708,23 +719,18 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       } catch {
         /* none: counted by identity below */
       }
-      // Each folder from here up to the top, and a .git in it: a nearer repository made between them
-      // changes which one git reads (Codex round 19). And every folder above a path looked at and not
-      // protected: one made a link into the project would lead that path there (Codex round 19).
-      const between: string[] = [];
-      for (let a = path.resolve(dir); ; a = path.dirname(a)) {
-        between.push(a, path.join(a, ".git"));
-        if (fold(realish(a)) === fold(realish(top)) || path.dirname(a) === a) break;
-      }
+      // Every folder above a path looked at and not protected: one made a link into the project would
+      // lead that path there (Codex round 19).
       const above = looked.flatMap((x) => {
         const up: string[] = [];
         for (let a = path.dirname(path.resolve(x)); path.dirname(a) !== a; a = path.dirname(a)) up.push(a);
         return up;
       });
-      const ids = [...new Set([dir, top, ...gitDirs, ...between, ...above].filter((x) => !(dotGitFile && x === dotGit)))];
-      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])].filter((x) => !ids.includes(x));
+      // A path may be both (a hooks folder that is also on PATH): both checks then (Codex round 20).
+      const ids = [...new Set([dir, top, ...gitDirs, ...above].filter((x) => !(dotGitFile && x === dotGit)))];
+      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])];
       const files = statSig(deps, asked - 1000);
-      if (files !== null) cache.set(dir, { ctx, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
+      if (files !== null && found) cache.set(dir, { ctx, found, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
       else cache.delete(dir);
     }
   }
