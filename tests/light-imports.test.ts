@@ -8,9 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
-const src = (f: string) => fileURLToPath(new URL(`../src/${f}`, import.meta.url));
+/** A file URL, not a path: a `#` in a checkout path or a Windows drive letter would break import() of a path (Codex). */
+const src = (f: string) => new URL(`../src/${f}`, import.meta.url).href;
 
 /** Every module URL a fresh process loads when it imports `file`. */
 function loads(file: string): string[] {
