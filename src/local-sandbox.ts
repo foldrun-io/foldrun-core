@@ -500,11 +500,15 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
   // folder a command may write — walked fresh each time it is asked.
   const writable = (at: string) => linkHops(at).some((h) => inRoots(fold(h))) || inRoots(fold(path.resolve(at)));
   const whichRepo = (dir: string): string => {
+    // Exactly the lines asked for, each a whole path (only git's own newline taken off): a folder whose
+    // name holds a newline is not kept at all (Codex round 28).
     const a = git(dir, ["rev-parse", "--is-bare-repository", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
-    if (a.status !== 0) return "";
-    if (a.out.split("\n")[0]!.trim() === "true") return a.out;
+    const lines = a.out.split("\n");
+    if (a.status !== 0 || lines.length !== 4 || lines[3] !== "" || !["true", "false"].includes(lines[0]!)) return "";
+    if (lines[0] === "true") return a.out;
     const b = git(dir, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
-    return b.status === 0 ? `${a.out}\0${b.out}` : "";
+    const t = b.out.split("\n");
+    return b.status === 0 && t.length === 2 && t[1] === "" && t[0] ? `${a.out}\0${b.out}` : "";
   };
   for (const dir of repos) {
     // A .git folder git does not take for a repository (no HEAD in it — a folder of bare repositories
@@ -529,8 +533,8 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     const start = out.length;
     // Pinned to what the probe found (cleared after this repository, below).
     if (found) {
-      const [bareLine, gd, , ] = found.split("\0")[0]!.split("\n").map((x) => x.trim());
-      const topLine = found.split("\0")[1]?.trim();
+      const [bareLine, gd] = found.split("\0")[0]!.split("\n");
+      const topLine = found.split("\0")[1]?.split("\n")[0];
       pin = bareLine === "true" ? ["--git-dir", gd!] : topLine ? ["--git-dir", gd!, "--work-tree", topLine] : [];
     }
     // Paths looked at whose answer was "not to protect" (a program outside the writable folders): kept
@@ -759,15 +763,18 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
           if (fold(realish(a)) === fold(realish(top)) || path.dirname(a) === a) break;
         }
       }
-      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x) && !above.includes(x));
+      // The git folders too: one swapped and put back while this was asked would leave the other's answer
+      // (Codex round 28). Git writes in them on every commit: a launch right after one is just not kept.
+      const aged = [...new Set([...above, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
+      const ids = [...new Set([dir, top])].filter((x) => !pointers.includes(x) && !aged.includes(x));
       const deps = [...new Set([...pointers, ...mine])];
       const files = statSig(deps, asked - 1000);
       // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
       // and back while it was asked would leave another repository's answer here (Codex round 24); the
       // pointer files changed meanwhile are refused by the racy rule above.
-      const aboveSig = idSig(above, asked - 1000);
+      const aboveSig = idSig(aged, asked - 1000);
       pin = [];
-      if (files !== null && found && aboveSig !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, above, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
+      if (files !== null && found && aboveSig !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, above: aged, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
       else cache.delete(dir);
     }
   }
