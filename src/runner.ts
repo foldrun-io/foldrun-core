@@ -129,6 +129,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, browseSessionProblems } from "./providers.ts";
 import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
+import { replyLanguageLine } from "./reply-language.ts";
 import { resolveRegion, deriveLocale, localeProse, regionName, type RegionChoice, type LocaleFacts } from "./locale.ts";
 import { trimChars } from "./paths.ts";
 import { earlierTurns, conversationBlock, messagesBlock, type RunContext, type RunInput, type SessionMessage } from "./conversation.ts";
@@ -662,6 +663,18 @@ export function agentLanguage(agentDir: string, tenant: string, agentFront: Reco
     { level: "workspace", value: readAgentsMd(workspaceRootOf(agentDir))?.data?.language },
     { level: "account", value: readAgentsMd(accountDir(tenant))?.data?.language },
   ]);
+}
+
+/**
+ * FOL-275: the `Reply language: …` line put ahead of a person's message —
+ * only on the step a person's message reaches (a conversation turn), and
+ * only when someone set `language:`; an agent that never mentions one reads
+ * the prompt it always did. Null when no line goes.
+ */
+export function replyLineFor(step: { conversationTurn?: boolean; instruction?: string | null }, language: LanguageChoice): string | null {
+  if (step.conversationTurn !== true || !step.instruction) return null;
+  if (language.from === "default" || language.from === "env") return null;
+  return replyLanguageLine(step.instruction, language.language);
 }
 
 /**
@@ -2511,6 +2524,11 @@ async function runStepBody(
     push("info", `stub call ${call + 1}${stepBudgetUsd !== null ? ` (ceiling $${stepBudgetUsd.toFixed(2)})` : ""}`);
     // What a real step would have read before its instruction (FOL-162).
     if (conversation) push("info", `stub conversation: ${conversation}`);
+    {
+      const front = configMatter(fs.readFileSync(path.join(agentDir, "agent.md"), "utf8")).data as Record<string, unknown>;
+      const line = replyLineFor(step, agentLanguage(agentDir, tenant, front));
+      if (line) push("info", `stub ${line}`);
+    }
     step.status = "completed";
     // A stub answer may open with `cost: 0.25` — a pretend price, so the
     // parts of orchestration that watch money (budget:) are testable too.
@@ -2978,6 +2996,12 @@ async function runStepBody(
       : "Begin your run now, following your instructions.";
     // The conversation's earlier turns go first, the request after them —
     // in the user turn, not the system prompt (conversation.ts says why).
+    // FOL-275: which language to answer the person in, just ahead of their words.
+    const replyLine = replyLineFor(step, language);
+    if (replyLine) {
+      prompt = `${replyLine}\n\n${prompt}`;
+      push("info", replyLine.toLowerCase().replace(/^reply language/, "reply language (from the message)"));
+    }
     if (conversation) prompt = `${conversation}\n\n${prompt}`;
     if (context) prompt += `\n\n<previous_step_results>\n${context.slice(0, CONTEXT_CHARS)}\n</previous_step_results>`;
     if (priorData !== undefined) {
