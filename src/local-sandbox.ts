@@ -1103,10 +1103,14 @@ export function cacheProblem(cache: string, cwd: string, denies: string[], platf
     at = path.join(at, part);
     let st: fs.Stats;
     try { st = fs.lstatSync(at); } catch { break; }
-    // The system's own links above the home (macOS /var, /tmp) are not a
-    // command's to make; a link at or below the home is refused.
-    if (st.isSymbolicLink() && within(fold(at), fold(os.homedir()))) return `goes through a symbolic link (${at}).`;
+    // Only the system's own links (macOS /var, /tmp, owned by root) may be
+    // on the way; any other could point the cache somewhere a command should
+    // never write, wherever it sits (Codex). A folder on the way belongs to
+    // root or to this person — another user could swap it for a link.
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    if (st.isSymbolicLink() && st.uid !== 0) return `goes through a symbolic link (${at}).`;
     if (!st.isSymbolicLink() && !st.isDirectory()) return `has a file where a folder should be (${at}).`;
+    if (uid !== null && st.isDirectory() && st.uid !== 0 && st.uid !== uid) return `goes through a folder another user owns (${at}).`;
   }
   if (spellings.some((c) => denies.some((d) => within(c, d) || within(d, c)))) return "overlaps a folder that holds credentials.";
   return null;

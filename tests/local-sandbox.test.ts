@@ -203,7 +203,7 @@ test("a package cache inside a credential folder is refused", async () => {
   }
 });
 
-test("a package cache in or around the project, or behind a link under the home, is refused before it is made writable (Codex)", async () => {
+test("a package cache in or around the project, or behind a link that is not the system's, is refused before it is made writable (Codex)", async () => {
   const proj = tmpProject();
   const home = fs.mkdtempSync(path.join(os.homedir(), ".foldrun-cache-test-"));
   try {
@@ -216,6 +216,16 @@ test("a package cache in or around the project, or behind a link under the home,
     fs.symlinkSync(real, path.join(home, "link"));
     assert.match(cacheProblem(path.join(home, "link"), proj, []) ?? "", /symbolic link/);
     assert.match(cacheProblem(path.join(home, "link", "deeper"), proj, []) ?? "", /symbolic link/);
+    // A link outside the home too (an XDG cache in /tmp): only the system's own, owned by root, may be on the way (Codex).
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-xdg-"));
+    try {
+      fs.mkdirSync(path.join(outside, "real"));
+      fs.symlinkSync(path.join(outside, "real"), path.join(outside, "foldrun-packages"));
+      assert.match(cacheProblem(path.join(outside, "foldrun-packages", "proj-1"), proj, []) ?? "", /symbolic link/);
+      assert.equal(cacheProblem(path.join(outside, "real", "proj-1"), proj, []), null, "the system's /var or /tmp link above it is fine");
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
     // A file in the way, and a relative path.
     fs.writeFileSync(path.join(home, "file"), "");
     assert.match(cacheProblem(path.join(home, "file", "x"), proj, []) ?? "", /file where a folder/);
