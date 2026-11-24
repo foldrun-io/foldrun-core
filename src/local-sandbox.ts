@@ -399,7 +399,7 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
 }
 
 /** Answers gitProtected gave for each repository, with what each depends on — one per sandbox. */
-export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; sig: string; out: string[] }>;
+export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; above: string[]; sig: string; out: string[] }>;
 
 /**
  * Every path's inode, change and modify times, size and mode (or why it cannot be read), as one string:
@@ -426,18 +426,24 @@ function statSig(paths: string[], notAfter?: number): string | null {
   return parts.join("|");
 }
 
-/** Which file each path is — device, inode, type — or why it cannot be read: its times and size left out. */
-function idSig(paths: string[]): string {
-  return paths
-    .map((p) => {
-      try {
-        const s = fs.lstatSync(p, { bigint: true });
-        return `${s.dev}:${s.ino}:${s.mode & BigInt(0o170000)}`;
-      } catch (err) {
-        return `-${(err as NodeJS.ErrnoException).code ?? "?"}`;
-      }
-    })
-    .join("|");
+/**
+ * Which file each path is — device, inode, type — or why it cannot be read: its times and size left out.
+ * Null when one changed at or after `notAfter`, judged from the same lstat as the identity kept.
+ */
+function idSig(paths: string[], notAfter?: number): string | null;
+function idSig(paths: string[]): string;
+function idSig(paths: string[], notAfter?: number): string | null {
+  const parts: string[] = [];
+  for (const p of paths) {
+    try {
+      const s = fs.lstatSync(p, { bigint: true });
+      if (notAfter !== undefined && Number(s.ctimeMs) >= notAfter) return null;
+      parts.push(`${s.dev}:${s.ino}:${s.mode & BigInt(0o170000)}`);
+    } catch (err) {
+      parts.push(`-${(err as NodeJS.ErrnoException).code ?? "?"}`);
+    }
+  }
+  return parts.join("|");
 }
 
 /**
@@ -505,7 +511,7 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     const asked = Date.now();
     const found = cache ? whichRepo(dir) : "";
     const hit = cache?.get(dir);
-    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
+    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}#${idSig(hit.above)}` === hit.sig) {
       out.push(...hit.out);
       continue;
     }
@@ -730,19 +736,14 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         return up;
       });
       // A path may be both (a hooks folder that is also on PATH): both checks then (Codex round 20).
-      const ids = [...new Set([dir, top, ...gitDirs, ...above].filter((x) => !(dotGitFile && x === dotGit)))];
+      const ids = [...new Set([dir, top, ...gitDirs].filter((x) => !(dotGitFile && x === dotGit)))];
+      const aboveU = [...new Set(above)].filter((x) => !ids.includes(x));
       const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])];
       const files = statSig(deps, asked - 1000);
       // A folder above made a link while this repository was asked: not trusted to have been seen either
-      // (Codex round 21).
-      const settled = above.every((a) => {
-        try {
-          return Number(fs.lstatSync(a).ctimeMs) < asked - 1000;
-        } catch {
-          return true;
-        }
-      });
-      if (files !== null && found && settled) cache.set(dir, { ctx: asks, found, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
+      // (Codex round 21) — its age and the identity kept read from one lstat (Codex round 22).
+      const aboveSig = idSig(aboveU, asked - 1000);
+      if (files !== null && found && aboveSig !== null) cache.set(dir, { ctx: asks, found, deps, ids, above: aboveU, sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
       else cache.delete(dir);
     }
   }
