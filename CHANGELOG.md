@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.3.0] — 2026-11-24
+
+### New in the public API
+
+- `takesEffort` from `@foldrun/core/engine-loop`
+- `effortFor` from `@foldrun/core/engine-loop`
+- `effortParam` from `@foldrun/core/engine-loop`
+- `fitEffortFor` from `@foldrun/core/engine-loop`
+
+- feat(engine): send the agent's effort as output_config.effort (FOL-256) ([2495171](https://github.com/foldrun-io/foldrun-core/commit/2495171))
+
 ## [27.2.0] — 2026-11-24
 
 ### New in the public API
