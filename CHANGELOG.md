@@ -13,6 +13,24 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.4.0] — 2026-11-24
+
+### New in the public API
+
+- `@foldrun/core/model-names`
+- `EFFORT_LEVELS` from `@foldrun/core/model-names`
+- `MODEL_TIERS` from `@foldrun/core/model-names`
+- `Tier` from `@foldrun/core/model-names`
+- `resolveTier` from `@foldrun/core/model-names`
+- `resolveModel` from `@foldrun/core/model-names`
+- `Effort` from `@foldrun/core/model-names`
+- `resolveEffort` from `@foldrun/core/model-names`
+- `isEffortWord` from `@foldrun/core/model-names`
+
+- fix(core): re-export EFFORT_LEVELS from where it is defined, so the public surface reads it as the same const (FOL-265) ([21e28f6](https://github.com/foldrun-io/foldrun-core/commit/21e28f6))
+- test(core): light-imports passes file URLs to the child, so a # or a drive letter in the path works (FOL-265, Codex) ([c6e3eab](https://github.com/foldrun-io/foldrun-core/commit/c6e3eab))
+- feat(core): a turn loads what it uses — MCP only with a server, model words alone (FOL-265) ([a59a2b8](https://github.com/foldrun-io/foldrun-core/commit/a59a2b8))
+
 ## [27.3.0] — 2026-11-24
 
 ### New in the public API
