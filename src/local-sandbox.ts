@@ -399,7 +399,7 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
 }
 
 /** Answers gitProtected gave for each repository, with what each depends on — one per sandbox. */
-export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; looked: string[]; sig: string; out: string[] }>;
+export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; above: string[]; looked: string[]; sig: string; out: string[] }>;
 
 /**
  * Every path's inode, change and modify times, size and mode (or why it cannot be read), as one string:
@@ -476,11 +476,14 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     return [path.resolve(p), ...hops, realish(hops[hops.length - 1]!)];
   };
   if (!gitBin) throw new Error(inRepo ? "this project is a git repository, and no git was found to ask where its hooks and config are" : "no git was found to read git's settings (its config files may name files in the project)");
+  // While an answer that may be kept is collected, every question is about the repository the first probe
+  // named, by its folders: a .git pointer swapped meanwhile cannot make git answer for another (Codex 26–27).
+  let pin: string[] = [];
   const git = (dir: string, args: string[]) => {
     // The person's own git settings (XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL…)
     // decide what the next git command reads: ask with those, and nothing
     // that makes git load or run anything else.
-    const r = spawnSync(gitBin, ["-C", dir, ...args], { encoding: "utf8", timeout: 10_000, env: gitEnv(hostEnv, pathVar) });
+    const r = spawnSync(gitBin, [...pin, "-C", dir, ...args], { encoding: "utf8", timeout: 10_000, env: gitEnv(hostEnv, pathVar) });
     return { status: r.status, out: r.stdout ?? "", err: (r.stderr || r.error?.message || "").trim().split("\n")[0] ?? "" };
   };
   const must = (dir: string, args: string[], what: string) => {
@@ -514,15 +517,22 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     // nearer one made above, a .git file pointed elsewhere, a folder made bare — what files cannot tell
     // (Codex rounds 19–20). Only what follows from that repository is kept.
     const asked = Date.now();
+    pin = [];
     const found = cache ? whichRepo(dir) : "";
     const hit = cache?.get(dir);
     // The program paths found not the project's are judged again, as a fresh answer would (Codex rounds
     // 19–24: any link made on the way, inside a link's target or before a `..`, is walked).
-    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig && !hit.looked.some(writable)) {
+    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}#${idSig(hit.above)}` === hit.sig && !hit.looked.some(writable)) {
       out.push(...hit.out);
       continue;
     }
     const start = out.length;
+    // Pinned to what the probe found (cleared after this repository, below).
+    if (found) {
+      const [bareLine, gd, , ] = found.split("\0")[0]!.split("\n").map((x) => x.trim());
+      const topLine = found.split("\0")[1]?.trim();
+      pin = bareLine === "true" ? ["--git-dir", gd!] : topLine ? ["--git-dir", gd!, "--work-tree", topLine] : [];
+    }
     // Paths looked at whose answer was "not to protect" (a program outside the writable folders): kept
     // against too, so one made to lead into the project later is asked again (Codex round 18).
     const looked: string[] = [];
@@ -749,13 +759,15 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
           if (fold(realish(a)) === fold(realish(top)) || path.dirname(a) === a) break;
         }
       }
-      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits, ...above])].filter((x) => !pointers.includes(x));
+      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x) && !above.includes(x));
       const deps = [...new Set([...pointers, ...mine])];
       const files = statSig(deps, asked - 1000);
       // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
       // and back while it was asked would leave another repository's answer here (Codex round 24); the
       // pointer files changed meanwhile are refused by the racy rule above.
-      if (files !== null && found && idSig(above, asked - 1000) !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}`, out: mine });
+      const aboveSig = idSig(above, asked - 1000);
+      pin = [];
+      if (files !== null && found && aboveSig !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, above, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
       else cache.delete(dir);
     }
   }
