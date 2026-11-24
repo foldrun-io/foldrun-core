@@ -128,6 +128,27 @@ export interface LocalSandboxPolicy {
   denyRead?: string[];
   /** Sites a command may reach (`api.example.com`, `*.example.com`). */
   sites: string[];
+  /** Where package managers keep their downloads for this project: writable,
+   *  and named to npm, yarn, pnpm, bun, pip, uv and go. One per project — a
+   *  shared one would let one project's code change what another installs.
+   *  Unset: a folder in the session's temp folder, gone when it closes. */
+  cache?: string;
+}
+
+/** The variables that point package managers at the sandbox's cache (FOL-272:
+ *  npm's own ~/.npm is not writable inside, so `npm install` and `npx` failed
+ *  with a "sudo chown" message). */
+export function packageCacheEnv(cache: string): Record<string, string> {
+  return {
+    npm_config_cache: path.join(cache, "npm"),
+    YARN_CACHE_FOLDER: path.join(cache, "yarn"),
+    npm_config_store_dir: path.join(cache, "pnpm"),
+    BUN_INSTALL_CACHE_DIR: path.join(cache, "bun"),
+    PIP_CACHE_DIR: path.join(cache, "pip"),
+    UV_CACHE_DIR: path.join(cache, "uv"),
+    GOCACHE: path.join(cache, "go-build"),
+    GOMODCACHE: path.join(cache, "go-mod"),
+  };
 }
 
 export interface LocalSandbox {
@@ -149,8 +170,10 @@ export interface LocalSandbox {
   canWrite(file: string): boolean;
   /** For the session's record and the CLI: what the walls do, in plain words. */
   describe(): string;
-  /** Every folder a command may write to: the project, its temp folder and the runtime's own. */
+  /** Every folder a command may write to: the project, its temp folder, the package cache and the runtime's own. */
   writable(): string[];
+  /** The package managers' cache folder (policy.cache, or one in the temp folder). */
+  cache: string;
   /** Give this handle back; the walls come down when the last one is. */
   close(): Promise<void>;
 }
@@ -885,6 +908,7 @@ interface Walls {
   tmp: string;
   describe: string;
   writable: string[];
+  cache: string;
   teardown(): Promise<void>;
 }
 let walls: Walls | null = null;
@@ -923,12 +947,16 @@ function handleOf(w: Walls): LocalSandbox {
   return {
     backend: w.backend,
     tmp: w.tmp,
+    cache: w.cache,
     launch: async (command, env) => {
       if (!live()) throw new Error("the sandbox is closed");
       const gen = w.gen;
       // An environment built from this process after the walls went up
       // has the helper folder for PATH: the person's own goes inside.
-      const { inner, outer } = carry(env.PATH === w.hostEnv.PATH ? { ...env, PATH: w.personPath } : env);
+      // Package managers keep their downloads in the sandbox's cache: their
+      // usual folders in the home are not writable inside.
+      const withCache = { ...env, ...packageCacheEnv(w.cache) };
+      const { inner, outer } = carry(withCache.PATH === w.hostEnv.PATH ? { ...withCache, PATH: w.personPath } : withCache);
       const { line, token } = await w.wrapRaw(inner ? `${inner}\n${command}` : command);
       // Made under this handle's walls, still up: a line from a later
       // policy, or for a handle given back meanwhile, is not handed out.
@@ -1086,7 +1114,20 @@ async function bringUp(
     rmTmp();
     return { refused: `the temp folder ${tmp} is inside a folder that holds credentials.` };
   }
-  const writeRoots = [cwd, tmp, ...ownWrites].map(realish);
+  // Checked against the credential folders before anything is made there.
+  let cache = policy.cache ? path.resolve(expand(policy.cache)) : path.join(tmp, "cache");
+  if (denies.some((d) => within(fold(realish(cache)), d) || within(d, fold(realish(cache))))) {
+    rmTmp();
+    return { refused: `the package cache ${cache} overlaps a folder that holds credentials.` };
+  }
+  try {
+    fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+    cache = realish(cache);
+  } catch (err) {
+    rmTmp();
+    return { refused: `the package cache folder could not be made: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const writeRoots = [cwd, tmp, cache, ...ownWrites].map(realish);
   const hostPATH = process.env.PATH!;
   // What would let a command change the code that keeps the walls: none of
   // it may sit in a folder a command may write, nor hold one.
@@ -1133,7 +1174,7 @@ async function bringUp(
       network: { allowedDomains: [...new Set(policy.sites)], deniedDomains: [] },
       filesystem: {
         denyRead: [...DENY_READ, ...(policy.denyRead ?? []), deniedDir].map(lit),
-        allowWrite: [lit(cwd), lit(tmp)],
+        allowWrite: [lit(cwd), lit(tmp), lit(cache)],
         // Credentials are not written either: a project that holds one of
         // those folders would otherwise grant writes into it.
         denyWrite: [...new Set([...protectedWrites, ...credWrites])].map(lit),
@@ -1215,7 +1256,8 @@ async function bringUp(
     describe:
       `changes stay in this folder; keys and passwords can't be read; git hooks and settings can't be changed; ` +
       `internet limited to ${policy.sites.length} approved site${policy.sites.length === 1 ? "" : "s"}`,
-    writable: [cwd, tmp, ...RUNTIME_OWN_WRITES],
+    writable: [cwd, tmp, ...(within(fold(cache), fold(tmp)) ? [] : [cache]), ...RUNTIME_OWN_WRITES],
+    cache,
     teardown: async () => {
       if (w.down) return;
       w.down = true;

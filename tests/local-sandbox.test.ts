@@ -162,6 +162,47 @@ test("what the walls do is said in plain words: no backend names, and every writ
   }
 });
 
+test("package managers keep their downloads in the project's cache, not the home folder (FOL-272)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const cache = path.join(tmpProject(), "packages");
+  const box = await openLocalSandbox({ cwd: proj, sites: [], cache });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    assert.equal(box.cache, fs.realpathSync(cache));
+    assert.ok(box.writable().includes(box.cache));
+    const ctx = ctxFor(proj, box, { ...process.env, TMPDIR: box.tmp, npm_config_cache: path.join(os.homedir(), ".npm") });
+    const bash = (command: string) => ENGINE_TOOLS.Bash!.run({ command, timeout: 30_000 }, ctx);
+    const r = await bash('echo "$npm_config_cache|$PIP_CACHE_DIR" && mkdir -p "$npm_config_cache" && echo ok > "$npm_config_cache/probe" && cat "$npm_config_cache/probe"');
+    assert.equal(r.isError, undefined, r.text);
+    assert.ok(r.text.includes(`${path.join(box.cache, "npm")}|${path.join(box.cache, "pip")}`), r.text);
+    assert.match(r.text, /\bok\b/);
+    assert.equal(fs.readFileSync(path.join(box.cache, "npm", "probe"), "utf8"), "ok\n");
+    // The home folder's own npm folder stays out of reach.
+    const home = await bash(`touch "${path.join(os.homedir(), ".npm", `foldrun-sbx-${process.pid}`)}" 2>&1; echo "exit=$?"`);
+    assert.doesNotMatch(home.text, /exit=0/, home.text);
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+    fs.rmSync(path.dirname(cache), { recursive: true, force: true });
+  }
+});
+
+test("a package cache inside a credential folder is refused", async () => {
+  const proj = tmpProject();
+  try {
+    const box = await openLocalSandbox({ cwd: proj, sites: [], cache: path.join(os.homedir(), ".ssh", "foldrun-cache") }, { platform: process.platform === "linux" ? "linux" : "darwin" });
+    assert.ok(isRefusal(box), "refused");
+    assert.equal(fs.existsSync(path.join(os.homedir(), ".ssh", "foldrun-cache")), false, "nothing made there");
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("inside the walls a listed site answers (skipped offline)", { skip: process.env.FOLDRUN_TEST_OFFLINE === "1" ? "offline" : false }, async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
   const proj = tmpProject();
