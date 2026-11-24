@@ -739,13 +739,23 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         }
         (file ? pointers : dotGits).push(g);
       }
-      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
+      // Started below the top: the folders above, up to the top, are outside what a command may write; one
+      // that changed while this was asked (a .git put in it and taken away) is not trusted to have been
+      // seen (Codex round 26). Later changes there are git's to answer (whichRepo, every launch).
+      const above: string[] = [];
+      if (fold(realish(dir)) !== fold(realish(top))) {
+        for (let a = path.dirname(path.resolve(dir)); ; a = path.dirname(a)) {
+          above.push(a);
+          if (fold(realish(a)) === fold(realish(top)) || path.dirname(a) === a) break;
+        }
+      }
+      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits, ...above])].filter((x) => !pointers.includes(x));
       const deps = [...new Set([...pointers, ...mine])];
       const files = statSig(deps, asked - 1000);
       // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
       // and back while it was asked would leave another repository's answer here (Codex round 24); the
       // pointer files changed meanwhile are refused by the racy rule above.
-      if (files !== null && found && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}`, out: mine });
+      if (files !== null && found && idSig(above, asked - 1000) !== null && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}`, out: mine });
       else cache.delete(dir);
     }
   }
