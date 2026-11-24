@@ -32,8 +32,11 @@
 // (`history`), never the text.
 
 import crypto from "node:crypto";
-import { listRunSummaries, readRun, runFailure, type RunRecord, type StepRecord } from "./store.ts";
+import { listRunSummaries, readRun, runFailure, workspaceDir, type RunRecord, type RunSummary, type StepRecord } from "./store.ts";
+import fs from "node:fs";
+import path from "node:path";
 import { records } from "./records.ts";
+import { docRows, docStore, quietly } from "./workspace-docs.ts";
 
 /** A context id as a caller writes it: A2A's id rule — printable ASCII, no spaces. */
 export const CONTEXT_ID = /^[\x21-\x7e]{1,200}$/;
@@ -125,6 +128,8 @@ export function runContext(id: string, a2aPrincipal?: string): RunContext {
 export interface SessionSummary {
   /** The conversation's id: what `context` names on a run, and what foldrun code resumes. */
   context: string;
+  /** What a person named it (FOL-264), else null. */
+  name: string | null;
   /** Its turns that became runs (a turn on a person's own computer makes none). */
   turns: number;
   /** The agent its last turn ran. */
@@ -148,30 +153,100 @@ export const SESSIONS_LIMIT = 200;
 export function listSessions(tenant: string, workspace: string, limit = 50): SessionSummary[] {
   const n = Math.max(1, Math.min(SESSIONS_LIMIT, Math.floor(limit)));
   const port = records(tenant, workspace);
-  if (port?.sessionsOf) return port.sessionsOf(tenant, workspace, n);
-  const by = new Map<string, SessionSummary>();
-  const rows = listRunSummaries(tenant, workspace)
+  const groups = port?.sessionsOf ? port.sessionsOf(tenant, workspace, n) : sessionsFromSummaries(listRunSummaries(tenant, workspace), n);
+  const names = sessionNames(tenant, workspace);
+  return groups.map(({ turns, last }) => ({
+    context: last.context!.id,
+    name: names.get(last.context!.key)?.name ?? null,
+    turns,
+    agent: last.steps[0]?.agent ?? null,
+    lastAt: last.startedAt,
+    lastStatus: last.status,
+    lastRun: last.id,
+    startedBy: last.startedBy ?? null,
+    lastSummary: last.summary ? last.summary.slice(0, 200) : null,
+  }));
+}
+
+// A conversation's name (FOL-264): kept with the project, by its key, so a
+// conversation moving between a person's computer and the cloud keeps one
+// name. Rows on the platform, the project's state folder otherwise (never
+// deployed over).
+const SESSION_NAME_KIND = "session-name";
+export const SESSION_NAME_MAX = 80;
+
+export interface SessionName {
+  name: string;
+  at: string;
+  by: string | null;
+}
+
+/** Null when it may be a conversation's name; otherwise why not. */
+export function sessionNameProblem(name: unknown): string | null {
+  if (typeof name !== "string" || !name.trim()) return "name: a few words, or null to take the name away";
+  if (name.trim().length > SESSION_NAME_MAX) return `name: at most ${SESSION_NAME_MAX} characters`;
+  if (/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(name)) return "name: no control or direction characters";
+  return null;
+}
+
+const namesFile = (tenant: string, workspace: string) => path.join(workspaceDir(tenant, workspace), "state", ".session-names.json");
+
+function readNamesFile(tenant: string, workspace: string): Record<string, SessionName> {
+  try {
+    const v = JSON.parse(fs.readFileSync(namesFile(tenant, workspace), "utf8"));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Every named conversation of the project, by key; where both places hold one, the newer. */
+export function sessionNames(tenant: string, workspace: string): Map<string, SessionName> {
+  const out = new Map<string, SessionName>(Object.entries(readNamesFile(tenant, workspace)));
+  for (const { key, data } of quietly(() => docRows(tenant, workspace)?.list(tenant, workspace, SESSION_NAME_KIND) ?? [], [])) {
+    const d = data as SessionName | { cleared: true; at: string };
+    const had = out.get(key);
+    if (had && had.at > d.at) continue;
+    if ("cleared" in d) out.delete(key);
+    else out.set(key, d);
+  }
+  return out;
+}
+
+/** Name a conversation of the project, or take its name away (null). */
+export function setSessionName(tenant: string, workspace: string, context: string, name: string | null, by: string | null = null): SessionName | null {
+  const key = contextKey(context);
+  const at = new Date().toISOString();
+  const value = name === null ? null : { name: name.trim(), at, by };
+  const store = docStore(tenant, workspace);
+  if (store) {
+    // A cleared name is a row too, so an older name in the folder does not come back.
+    store.put(tenant, workspace, SESSION_NAME_KIND, key, value ?? { cleared: true, at });
+    return value;
+  }
+  const all = readNamesFile(tenant, workspace);
+  if (value) all[key] = value;
+  else delete all[key];
+  const file = namesFile(tenant, workspace);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(all, null, 2));
+  fs.renameSync(tmp, file);
+  return value;
+}
+
+/** Runs grouped by conversation, the most recently used first: what a records port's sessionsOf answers. */
+export function sessionsFromSummaries(rows: readonly RunSummary[], limit: number): Array<{ turns: number; last: RunSummary }> {
+  const by = new Map<string, { turns: number; last: RunSummary }>();
+  const listed = rows
     .filter((s) => s.context && s.context.a2a !== true && s.test !== true)
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
-  for (const s of rows) {
-    const key = s.context!.key;
-    const had = by.get(key);
-    if (had) {
-      had.turns++;
-      continue;
-    }
-    by.set(key, {
-      context: s.context!.id,
-      turns: 1,
-      agent: s.steps[0]?.agent ?? null,
-      lastAt: s.startedAt,
-      lastStatus: s.status,
-      lastRun: s.id,
-      startedBy: s.startedBy ?? null,
-      lastSummary: s.summary ? s.summary.slice(0, 200) : null,
-    });
+  for (const s of listed) {
+    const had = by.get(s.context!.key);
+    if (had) had.turns++;
+    else by.set(s.context!.key, { turns: 1, last: s });
   }
-  return [...by.values()].slice(0, n);
+  return [...by.values()].slice(0, limit);
 }
 
 const FINISHED = new Set(["completed", "failed"]);

@@ -20,7 +20,7 @@ import {
 import { recordTriggerEvent, readTriggerEvents, summariseTriggers } from "../src/trigger-log.ts";
 import { writeHandedIn, readHandedIn, writeBaseRevision, readBaseRevision } from "../src/run-container.ts";
 import { readStorageBaseline, writeStorageBaseline } from "../src/step-state.ts";
-import { contextKey, earlierTurns } from "../src/conversation.ts";
+import { contextKey, earlierTurns, listSessions, setSessionName } from "../src/conversation.ts";
 import { openRunsOfCustomer } from "../src/customer.ts";
 import { putFile, getFile, listStorage, deleteFile, readFileBytes, withFileStoreLock, purgeWorkspaceStorage, moveWorkspaceStorage, usedBytes } from "../src/storage.ts";
 
@@ -89,6 +89,29 @@ export function recordsContract(label: string, make: () => Promise<Subject>): vo
     assert.deepEqual(earlierTurns(T, W, asking, 1).map((r) => r.id), ["c2"], "the limit holds");
     assert.deepEqual(earlierTurns(T, W, { ...asking, id: "c2", startedAt: "2026-11-01T02:00:00.000Z" }).map((r) => r.id), ["c1"]);
     assert.equal(earlierTurns(T, W, asking)[0]!.context?.key, key, "whole records come back");
+  });
+
+  test(t("a project's conversations (FOL-236): grouped by key, newest first, turns counted; test runs, A2A and other projects left out"), () => {
+    mkWs("other");
+    const c = (id: string, a2a = false) => ({ context: { id, key: a2a ? contextKey(id, "caller") : contextKey(id), ...(a2a ? { a2a: true as const } : {}) } });
+    writeRun(T, W, run("s1", "2026-11-01T01:00:00.000Z", { ...c("a"), finishedAt: "2026-11-01T01:05:00.000Z" }));
+    writeRun(T, W, run("s2", "2026-11-01T02:00:00.000Z", { ...c("b"), finishedAt: "2026-11-01T02:05:00.000Z" }));
+    writeRun(T, W, run("s3", "2026-11-01T03:00:00.000Z", { ...c("a"), status: "running", finishedAt: null }));
+    writeRun(T, W, run("s4", "2026-11-01T04:00:00.000Z", { ...c("t"), test: true }));
+    writeRun(T, W, run("s5", "2026-11-01T05:00:00.000Z", c("x", true)));
+    writeRun(T, W, run("s6", "2026-11-01T06:00:00.000Z"));
+    writeRun(T, "other", run("s7", "2026-11-01T07:00:00.000Z", c("o")));
+    const got = listSessions(T, W, 50).map((x) => [x.context, x.turns, x.lastRun, x.lastStatus]);
+    assert.deepEqual(got, [["a", 2, "s3", "running"], ["b", 1, "s2", "completed"]]);
+    assert.deepEqual(listSessions(T, W, 1).map((x) => x.context), ["a"], "the limit holds");
+  });
+
+  test(t("a conversation's name (FOL-264) is kept in the project's rows when they are on, and a cleared one stays cleared"), () => {
+    writeRun(T, W, run("n1", "2026-11-01T01:00:00.000Z", { context: { id: "named", key: contextKey("named") } }));
+    setSessionName(T, W, "named", "the fix");
+    assert.equal(listSessions(T, W, 50).find((x) => x.context === "named")!.name, "the fix");
+    setSessionName(T, W, "named", null);
+    assert.equal(listSessions(T, W, 50).find((x) => x.context === "named")!.name, null);
   });
 
   test(t("an end customer's open runs (FOL-168): live runs naming it, across workspaces, nobody else's"), () => {

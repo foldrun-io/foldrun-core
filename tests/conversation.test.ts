@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { contextKey, contextIdProblem, conversationBlock, earlierTurns, escapeXml, listSessions, messagesBlock, runContext, CONVERSATION_LIMITS, SESSION_MESSAGE_LIMITS } from "../src/conversation.ts";
+import { contextKey, contextIdProblem, conversationBlock, earlierTurns, escapeXml, listSessions, messagesBlock, runContext, sessionNameProblem, sessionNames, setSessionName, CONVERSATION_LIMITS, SESSION_MESSAGE_LIMITS } from "../src/conversation.ts";
 import { startFlowRun, createFlowRun, waitForRun } from "../src/runner.ts";
 import { readRun, writeRun, type FlowStep, type RunRecord } from "../src/store.ts";
 
@@ -268,4 +268,21 @@ test("a project's conversations, newest first: turns counted, the last turn's ag
   assert.ok(!all.some((x) => x.context === "sess-test"), "test runs are not a conversation to list");
   assert.ok(!all.some((x) => x.context === "sess-ext"), "an outside agent's conversation is its caller's");
   assert.equal(listSessions("acme", "desk", 1).length, 1, "the limit holds");
+});
+
+test("a conversation's name (FOL-264): set, listed, changed, taken away; one name per conversation key; refused when it is not a few plain words", () => {
+  finished("n1", "2026-11-21T01:00:00.000Z", "2026-11-21T01:01:00.000Z", { ctx: "named-a" });
+  assert.equal(listSessions("acme", "desk", 200).find((x) => x.context === "named-a")!.name, null);
+  setSessionName("acme", "desk", "named-a", "  the billing fix  ", "user:u1");
+  assert.equal(listSessions("acme", "desk", 200).find((x) => x.context === "named-a")!.name, "the billing fix");
+  assert.equal(sessionNames("acme", "desk").get(contextKey("named-a"))!.by, "user:u1");
+  setSessionName("acme", "desk", "named-a", "billing, take two");
+  assert.equal(listSessions("acme", "desk", 200).find((x) => x.context === "named-a")!.name, "billing, take two");
+  setSessionName("acme", "desk", "named-a", null);
+  assert.equal(listSessions("acme", "desk", 200).find((x) => x.context === "named-a")!.name, null);
+  assert.equal(sessionNameProblem("ok name"), null);
+  assert.match(sessionNameProblem("")!, /a few words/);
+  assert.match(sessionNameProblem("x".repeat(81))!, /at most 80/);
+  assert.match(sessionNameProblem("evil‮name")!, /control or direction/);
+  assert.match(sessionNameProblem(42)!, /a few words/);
 });
