@@ -399,7 +399,7 @@ export function helperFolder(pathVar: string | undefined, roots: string[], platf
 }
 
 /** Answers gitProtected gave for each repository, with what each depends on — one per sandbox. */
-export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; above: string[]; sig: string; out: string[] }>;
+export type GitCache = Map<string, { ctx: string; found: string; deps: string[]; ids: string[]; looked: string[]; sig: string; out: string[] }>;
 
 /**
  * Every path's inode, change and modify times, size and mode (or why it cannot be read), as one string:
@@ -491,6 +491,11 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
   // Which git answers is part of every answer too (its own system config, its defaults): by path and by
   // file (Codex round 21).
   const asks = cache ? `${ctx}\0${gitBin}\0${statSig([gitBin])}` : "";
+  const rootsF = writeRoots.map((r) => fold(realish(r)));
+  const inRoots = (x: string) => rootsF.some((r) => within(x, r));
+  // A program path is the project's to plant when it, a link on the way to it, or where it leads is in a
+  // folder a command may write — walked fresh each time it is asked.
+  const writable = (at: string) => linkHops(at).some((h) => inRoots(fold(h))) || inRoots(fold(path.resolve(at)));
   const whichRepo = (dir: string): string => {
     const a = git(dir, ["rev-parse", "--is-bare-repository", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
     if (a.status !== 0) return "";
@@ -511,7 +516,9 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     const asked = Date.now();
     const found = cache ? whichRepo(dir) : "";
     const hit = cache?.get(dir);
-    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}#${idSig(hit.above)}` === hit.sig) {
+    // The program paths found not the project's are judged again, as a fresh answer would (Codex rounds
+    // 19–24: any link made on the way, inside a link's target or before a `..`, is walked).
+    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig && !hit.looked.some(writable)) {
       out.push(...hit.out);
       continue;
     }
@@ -593,8 +600,6 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     const personDirs = [...(hostEnv.PATH ?? "").split(path.delimiter), hostEnv.GIT_EXEC_PATH ?? "", execPath.status === 0 ? execPath.out.trim() : ""]
       .map((d, i, all) => (d === "" && i >= all.length - 2 ? null : d === "" || d === "." ? top : textJoin(top, d)))
       .filter((d): d is string => d !== null);
-    const rootsF = writeRoots.map((r) => fold(realish(r)));
-    const inRoots = (x: string) => rootsF.some((r) => within(x, r));
     const protectWord = (key: string, x: string) => {
       const bare = !x.includes("/");
       // A bare name is a program looked up on the person's PATH: in each
@@ -604,8 +609,8 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
         // In a writable folder by its name, by where it leads, or by a
         // link on the way: each of those can be swapped.
         const hops = linkHops(at);
-        if (!hops.some((h) => inRoots(fold(h))) && !inRoots(fold(path.resolve(at)))) {
-          looked.push(at, ...hops);
+        if (!writable(at)) {
+          looked.push(at);
           continue;
         }
         if (/[*?[]/.test(x)) throw new Error(`the git setting ${key} names files in the project by a pattern (${x}), and which ones it runs cannot be told`);
@@ -728,29 +733,14 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       } catch {
         /* none: counted by identity below */
       }
-      // Every folder above a path looked at and not protected: one made a link into the project would
-      // lead that path there (Codex round 19).
-      const above = looked.flatMap((x) => {
-        const up: string[] = [];
-        for (let a = path.dirname(path.resolve(x)); path.dirname(a) !== a; a = path.dirname(a)) up.push(a);
-        // And each folder as written, before `..` takes it away: the kernel walks into it first, so one
-        // made a link later leads the rest elsewhere (Codex round 23).
-        const parts = x.split(path.sep);
-        for (let k = 1; k < parts.length; k++) {
-          const pre = parts.slice(0, k).join(path.sep);
-          if (pre && path.isAbsolute(pre)) up.push(pre);
-        }
-        return up;
-      });
       // A path may be both (a hooks folder that is also on PATH): both checks then (Codex round 20).
       const ids = [...new Set([dir, top, ...gitDirs].filter((x) => !(dotGitFile && x === dotGit)))];
-      const aboveU = [...new Set(above)].filter((x) => !ids.includes(x));
-      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])];
+      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine])];
       const files = statSig(deps, asked - 1000);
-      // A folder above made a link while this repository was asked: not trusted to have been seen either
-      // (Codex round 21) — its age and the identity kept read from one lstat (Codex round 22).
-      const aboveSig = idSig(aboveU, asked - 1000);
-      if (files !== null && found && aboveSig !== null) cache.set(dir, { ctx: asks, found, deps, ids, above: aboveU, sig: `${files}#${idSig(ids)}#${aboveSig}`, out: mine });
+      // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
+      // and back while it was asked would leave another repository's answer here (Codex round 24); the
+      // pointer files changed meanwhile are refused by the racy rule above.
+      if (files !== null && found && whichRepo(dir) === found) cache.set(dir, { ctx: asks, found, deps, ids, looked: [...new Set(looked)], sig: `${files}#${idSig(ids)}`, out: mine });
       else cache.delete(dir);
     }
   }
