@@ -337,6 +337,28 @@ test("the launcher's PATH holds no folder a command may write, and no relative e
   }
 });
 
+test("a deep node_modules does not refuse the sandbox; repositories at its package roots are still found, and a deep folder elsewhere still refuses", () => {
+  const proj = tmpProject();
+  try {
+    fs.mkdirSync(path.join(proj, "node_modules", ...Array.from({ length: 14 }, (_, i) => `d${i}`)), { recursive: true });
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/plain")]).status, 0);
+    assert.equal(spawnSync("git", ["init", "-q", path.join(proj, "node_modules/@scope/pkg")]).status, 0);
+    // A whole folder of projects, each with its own node_modules (a person's folder of repos — the report).
+    fs.mkdirSync(path.join(proj, "app/node_modules", ...Array.from({ length: 14 }, (_, i) => `e${i}`)), { recursive: true });
+    const got = gitProtected(proj);
+    assert.ok(got.includes(realish(path.join(proj, "node_modules/plain/.git/hooks"))), got.join(", "));
+    assert.ok(got.includes(realish(path.join(proj, "node_modules/@scope/pkg/.git/hooks"))), got.join(", "));
+    // A .git folder git does not read as a repository (a folder of bare ones) is passed over, its paths still kept from writes.
+    fs.mkdirSync(path.join(proj, "data/.git/old.git"), { recursive: true });
+    const inert = gitProtected(proj);
+    assert.ok(inert.includes(path.join(proj, "data/.git/hooks")), inert.join(", "));
+    fs.mkdirSync(path.join(proj, "src", ...Array.from({ length: 14 }, (_, i) => `s${i}`)), { recursive: true });
+    assert.throws(() => gitProtected(proj), /deeper than/);
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("a nested repository's hooks are found, and a project inside a credential folder is refused", async () => {
   const proj = tmpProject();
   try {

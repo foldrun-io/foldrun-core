@@ -106,6 +106,12 @@ export const LAUNCHER = fs.existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
  *  as deep), and how many folders: past either, the open is refused. */
 const GIT_SEARCH_DEPTH = 10;
 const GIT_SEARCH_DIRS = 100_000;
+/** Folders of installed packages and build output. A repository in one sits at a package's root
+ *  (`node_modules/x/.git`, `node_modules/@scope/x/.git`), so only those two levels are searched: a
+ *  dependency tree deeper than GIT_SEARCH_DEPTH, or bigger than GIT_SEARCH_DIRS, no longer refuses the
+ *  sandbox (a person's folder of projects did). A .git a command makes deeper later is the same case as
+ *  any repository made later: the file tools refuse it (NESTED_GIT). */
+const PACKAGE_DIRS = new Set(["node_modules", ".pnpm-store", "bower_components", ".venv", "venv", "site-packages", "__pycache__", ".tox", ".next", ".nuxt", ".turbo", ".cache", ".gradle", "target"]);
 
 /** The variables the launcher itself starts with: plain ones a program
  *  needs, none that makes a program load or run something. */
@@ -438,6 +444,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     return r.out.trim();
   };
   for (const dir of repos) {
+    // A .git folder git does not take for a repository (no HEAD in it — a folder of bare repositories
+    // someone named .git, the report): git runs nothing from it and would answer for the repository
+    // around it. Its paths are still kept from writes (above); there is nothing to ask git.
+    if (dir !== cwd && inertGit(dir)) continue;
     const probe = git(dir, ["rev-parse", "--is-bare-repository"]);
     // Only the project folder may be no repository (a nested one has a .git,
     // or is a bare one); its global and system config are still read below.
@@ -714,6 +724,17 @@ function looksBare(dir: string): boolean {
   }
 }
 
+/** A `.git` here that git does not read as a repository: a folder with no HEAD file, not bare itself. */
+function inertGit(dir: string): boolean {
+  try {
+    const st = fs.lstatSync(path.join(dir, ".git"));
+    if (!st.isDirectory()) return false;
+    return !fs.existsSync(path.join(dir, ".git", "HEAD")) && !looksBare(dir);
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `dir` or a folder above it holds a `.git`. */
 function hasGitAbove(dir: string): boolean {
   for (let d = path.resolve(dir); ; d = path.dirname(d)) {
@@ -743,12 +764,38 @@ function nestedRepos(cwd: string): string[] {
       if (!e.isDirectory() || e.name === ".git") continue;
       const sub = path.join(dir, e.name);
       if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
+      if (PACKAGE_DIRS.has(e.name)) {
+        found.push(...packageRepos(sub));
+        continue;
+      }
       if (depth + 1 >= GIT_SEARCH_DEPTH) {
         if (fs.readdirSync(sub, { withFileTypes: true }).some((x) => x.isDirectory())) throw new Error(`the project's folders go deeper than ${GIT_SEARCH_DEPTH} levels (${sub})`);
         continue;
       }
       stack.push({ dir: sub, depth: depth + 1 });
     }
+  }
+  return found;
+}
+
+/** The repositories at a package folder's package roots: `<dir>/<name>` and `<dir>/@scope/<name>`. */
+function packageRepos(dir: string): string[] {
+  const found: string[] = [];
+  const list = (d: string): fs.Dirent[] => {
+    try {
+      return fs.readdirSync(d, { withFileTypes: true });
+    } catch (err) {
+      throw new Error(`${d} could not be searched for nested git repositories (${(err as NodeJS.ErrnoException).code ?? String(err)})`);
+    }
+  };
+  const check = (sub: string) => {
+    if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
+  };
+  for (const e of list(dir)) {
+    if (!e.isDirectory() || e.name === ".git") continue;
+    const sub = path.join(dir, e.name);
+    check(sub);
+    if (e.name.startsWith("@")) for (const s of list(sub)) if (s.isDirectory() && s.name !== ".git") check(path.join(sub, s.name));
   }
   return found;
 }
