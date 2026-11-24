@@ -59,6 +59,11 @@ test("a message is read from its end: a client's English notes ahead of a Persia
   assert.equal(replyLanguage("این خطا را ببین\n\n```\nTypeError: x is undefined\n```"), "fa");
   // A pasted error after a Persian question: the question decides (Codex).
   assert.equal(replyLanguage("چرا این خطا می‌آید؟\n\nTypeError: Cannot read properties of undefined (reading 'x')\n    at run (src/a.ts:3:9)"), "fa");
+  assert.equal(replyLanguage("Why did this fail?\nTypeError: x is undefined"), "en", "the question above the error line counts");
+  // A long unbroken token is read in linear time (Codex).
+  const t0 = Date.now();
+  replyLanguage("a".repeat(200_000));
+  assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
   // A file name in Persian letters does not make an English message Persian.
   assert.equal(replyLanguage("Fix گزارش.ts please"), "en");
   assert.equal(replyLanguageLine("test if this task is in cloud"), "Reply language: English (en)");

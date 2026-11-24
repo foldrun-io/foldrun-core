@@ -251,6 +251,18 @@ test("a background job that keeps the output open does not hold the command: it 
     assert.match(r.text, /^started\n\[it left something running in the background/);
     assert.equal(r.isError, undefined);
     killGroups(ctx);
+    // The job is not killed by the call returning: a later write still lands (Codex).
+    const marker = path.join(dir, "wrote-later");
+    const r2 = await Bash.run({ command: `(sleep 1; echo late; touch ${marker}) & echo begun` }, ctx);
+    assert.match(r2.text, /^begun\n\[it left something running/);
+    await new Promise((done) => setTimeout(done, 1800));
+    assert.equal(fs.existsSync(marker), true, "the job went on after its first write");
+    // A job that prints without pause does not hold the call.
+    const t0 = Date.now();
+    const r3 = await Bash.run({ command: "(while true; do echo tick; sleep 0.05; done) & echo looping" }, ctx);
+    assert.ok(Date.now() - t0 < 4000, `returned in ${Date.now() - t0} ms`);
+    assert.match(r3.text, /^looping/);
+    killGroups(ctx);
     // And a plain command's output still arrives whole.
     const big = await Bash.run({ command: "seq 1 20000 | tail -1" }, ctx);
     assert.equal(big.text, "20000");

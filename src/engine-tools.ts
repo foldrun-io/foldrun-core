@@ -855,6 +855,8 @@ const grep: EngineTool = {
 
 /** After the shell exits, how long its output may still arrive before the command counts as returned. */
 const EXIT_GRACE_MS = 300;
+/** …and the longest it may keep arriving: what is printed after that, by a job left in the background, is not waited for. */
+const EXIT_DRAIN_MAX_MS = 2000;
 
 const bash: EngineTool = {
   name: "Bash",
@@ -943,22 +945,43 @@ const bash: EngineTool = {
       child.on("error", (err) => done(`the command could not start: ${err.message}`, true));
       // The shell has ended, but something it started in the background
       // (`server &`) still holds its output open: "close" would wait for
-      // that, up to the timeout (FOL-273). A moment for the last output,
-      // then the command has returned; what it left runs on and ends with
-      // the step (killGroups).
+      // that, up to the timeout (FOL-273). Once the output has been quiet
+      // for a moment after the exit, the command has returned. The pipes
+      // stay open and are read to the end, unshown — closing them would kill
+      // the job on its next write (Codex) — and the job ends with the step
+      // (killGroups).
       let left = false;
-      let finish: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = null;
-      child.on("exit", (code, signal) => {
-        setTimeout(() => {
-          if (!finish) return;
+      let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+      let quiet: NodeJS.Timeout | null = null;
+      let exitedAt = 0;
+      const settle = () => {
+        if (quiet) clearTimeout(quiet);
+        quiet = setTimeout(() => {
+          if (!finish || !exited) return;
           left = true;
-          child.stdout!.destroy();
-          child.stderr!.destroy();
-          finish(code, signal);
-        }, EXIT_GRACE_MS).unref();
+          const f = finish;
+          f(exited.code, exited.signal);
+          child.stdout!.off("data", take);
+          child.stderr!.off("data", take);
+          child.stdout!.resume();
+          child.stderr!.resume();
+        // A job that prints without pause cannot hold the call past a bound either.
+        }, Math.max(0, Math.min(EXIT_GRACE_MS, exitedAt + EXIT_DRAIN_MAX_MS - Date.now())));
+        quiet.unref();
+      };
+      const after = () => {
+        if (exited) settle();
+      };
+      child.stdout!.on("data", after);
+      child.stderr!.on("data", after);
+      child.on("exit", (code, signal) => {
+        exited = { code, signal };
+        exitedAt = Date.now();
+        settle();
       });
-      finish = (code, signal) => {
+      let finish: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = (code, signal) => {
         finish = null;
+        if (quiet) clearTimeout(quiet);
         const body = capped(out.trimEnd()) + (dropped ? `\n[${dropped} characters of output dropped while it ran]` : "") + (left ? "\n[it left something running in the background, which goes on until the turn ends; its output after this is not shown]" : "");
         if (why === "timeout") return done(`${body}\n[stopped after ${ms} ms — the command did not finish]`.trim(), true);
         if (why === "stopped") return done(`${body}\n[stopped with the step]`.trim(), true);

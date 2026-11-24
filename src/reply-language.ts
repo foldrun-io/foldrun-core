@@ -22,15 +22,21 @@ function prose(text: string): string {
     .replace(/`[^`\n]*`/g, " ")
     .replace(/\bhttps?:\/\/\S+/gi, " ")
     .replace(/(?:^|\s)[~.]?\/[^\s]+/g, " ")
-    // A file name says nothing either, whatever letters it has ("Fix گزارش.ts" — Codex).
-    .replace(/\S+\.[A-Za-z][A-Za-z0-9]{0,7}\b/g, " ");
+    // A file name says nothing either, whatever letters it has ("Fix گزارش.ts" — Codex):
+    // word by word, so a long unbroken token costs its length once, not its square.
+    .split(/(\s+)/)
+    .map((w) => (FILE_NAME.test(w) ? " " : w))
+    .join("");
 }
+const FILE_NAME = /\.[A-Za-z][A-Za-z0-9]{0,7}(?:[^A-Za-z0-9]|$)/;
+/** Only the end of a long message is read: the person's words are there, and the work stays bounded. */
+const READ_CHARS = 8000;
 
 /** Text a program printed — an error, a stack frame, a log line, a prompt — not the person writing. */
 const MACHINE_LINE = /^\s*(?:[A-Z][A-Za-z]*(?:Error|Exception|Warning)\b|Traceback\b|at\s+\S+|npm (?:ERR|WARN)|error(?:\[|:)|warning(?:\[|:)|fatal:|\$ |> |\d{4}-\d\d-\d\d[T ]\d\d:)/;
-function printed(paragraph: string): boolean {
-  const lines = paragraph.split("\n").filter((l) => l.trim());
-  return lines.length > 0 && lines.filter((l) => MACHINE_LINE.test(l)).length * 2 >= lines.length;
+/** A paragraph without the lines a program printed ("Why did this fail?" above a TypeError keeps its question — Codex). */
+function ownLines(paragraph: string): string {
+  return paragraph.split("\n").filter((l) => !MACHINE_LINE.test(l)).join("\n");
 }
 
 /** Quoted text is someone else's words (a label, a message), not an ask. */
@@ -126,13 +132,15 @@ export function askedLanguage(text: string): string | null {
  * says nothing (a pasted command, "ok").
  */
 export function replyLanguage(message: string, hint: string | null = null): string | null {
-  const asked = askedLanguage(message);
+  const end = message.length > READ_CHARS ? message.slice(-READ_CHARS) : message;
+  const asked = askedLanguage(end);
   if (asked) return asked;
-  const parts = prose(message).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const parts = prose(end).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
-    // What a program printed (a pasted error) is passed over: the person's own words before it decide.
-    if (printed(parts[i]!)) continue;
-    const tag = detectLanguage(parts[i]!, hint);
+    // What a program printed (a pasted error) is passed over: the person's own words decide.
+    const own = ownLines(parts[i]!);
+    if (!own.trim()) continue;
+    const tag = detectLanguage(own, hint);
     if (tag) return tag;
   }
   return null;
