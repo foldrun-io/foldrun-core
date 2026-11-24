@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.5.1] — 2026-11-24
+
+- fix(local-sandbox): folders read at the depth boundary count toward the folder cap (FOL-214, Codex round 17) ([fded4e0](https://github.com/foldrun-io/foldrun-core/commit/fded4e0))
+- fix(local-sandbox): search every folder again, node_modules included — the depth cap of 64 is the fix, the package-root shortcut left repositories unseen (FOL-214, Codex round 16) ([8bc6796](https://github.com/foldrun-io/foldrun-core/commit/8bc6796))
+- fix(local-sandbox): pnpm's store searched; one folder count for the whole search (FOL-214, Codex round 15) ([8d0fe76](https://github.com/foldrun-io/foldrun-core/commit/8d0fe76))
+- fix(local-sandbox): the depth cap is 64, not 10 — a Next.js project's .next was refused; package roots only in node_modules (nested ones too), caches searched in full; bare repositories inside an unread .git are asked about (FOL-214, Codex round 14) ([ed7612b](https://github.com/foldrun-io/foldrun-core/commit/ed7612b))
+- fix(local-sandbox): a deep node_modules no longer refuses the sandbox — package and build folders are searched at package roots; a .git git does not read as a repository is passed over (FOL-214) ([68475e1](https://github.com/foldrun-io/foldrun-core/commit/68475e1))
+
 ## [27.5.0] — 2026-11-24
 
 ### Widened in the public API
