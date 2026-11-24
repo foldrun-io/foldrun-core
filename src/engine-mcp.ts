@@ -64,7 +64,7 @@ export function shellLine(command: string, args: string[]): string {
   return [command, ...args].map((w) => `'${w.replaceAll("'", `'\\''`)}'`).join(" ");
 }
 
-function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string, wrapped?: string): { client: Transport; server?: Transport } {
+function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string, wrapped?: string, viaProxy?: typeof fetch): { client: Transport; server?: Transport } {
   if (s.type === "sdk") {
     const [client, server] = InMemoryTransport.createLinkedPair();
     return { client, server };
@@ -92,7 +92,10 @@ function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: 
   const requestInit: RequestInit = { headers: s.headers ?? {}, ...(s.redirect === "error" ? { redirect: "error" as const } : {}) };
   // SSE is the older MCP transport (deprecated in the SDK); still accepted,
   // because an agent may name a server that has nothing newer.
-  return { client: s.type === "sse" ? new SSEClientTransport(url, { requestInit }) : new StreamableHTTPClientTransport(url, { requestInit }) };
+  // Inside the walls, every request (the SSE stream too) goes through their
+  // site proxy (FOL-222): the same list decides as for a command.
+  const via = viaProxy ? { fetch: viaProxy } : {};
+  return { client: s.type === "sse" ? new SSEClientTransport(url, { requestInit, ...via }) : new StreamableHTTPClientTransport(url, { requestInit, ...via }) };
 }
 
 /** A call's result as the loop hands it on: its text and images in the
@@ -165,7 +168,7 @@ function bounded<T>(work: Promise<T>, ms: number, signal: AbortSignal, what: str
  *  read, as the SDK read it); `toolEnv` is what a tool's process starts
  *  from — the loop's shellEnv, which a caller keeps apart from the model's
  *  credentials. */
-export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
+export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange" | "fetch"> | null }): Promise<McpConnection> {
   const open: { client: Client; transport: Transport; server?: Transport }[] = [];
   const close = async () => {
     await Promise.all(open.map(async (o) => {
@@ -205,12 +208,13 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
         // A long-lived server inside the walls must be stoppable when they
         // change: without a token and a way to check it, it does not start.
         if (!wrapped.token || typeof ctx.sandbox.fresh !== "function" || typeof ctx.sandbox.onChange !== "function") throw new Error(`MCP server ${name}: this sandbox cannot tell a long-lived server when its rules change, so it is not started`);
-      } else if (ctx.sandbox && (s.type === "http" || s.type === "sse")) {
-        // This process would make that connection itself, past the walls'
-        // proxy and its address checks: not offered inside the walls.
-        throw new Error(`MCP server ${name}: a server over ${s.type === "sse" ? "SSE" : "HTTP"} is not available inside the local sandbox — run this in the cloud, or use a stdio server`);
+      } else if (ctx.sandbox && (s.type === "http" || s.type === "sse") && typeof ctx.sandbox.fetch !== "function") {
+        // This process makes that connection itself: only through the walls'
+        // site proxy. A sandbox that has none refuses the server.
+        throw new Error(`MCP server ${name}: a server over ${s.type === "sse" ? "SSE" : "HTTP"} needs the sandbox's site proxy, which this sandbox does not offer — run this in the cloud, or use a stdio server`);
       }
-      const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd);
+      const remoteInWalls = ctx.sandbox && (s.type === "http" || s.type === "sse") ? ctx.sandbox.fetch : undefined;
+      const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd, undefined, remoteInWalls);
       const client = new Client({ name: "foldrun-engine", version: "1.0.0" });
       open.push({ client, transport: t.client, server: t.server });
       const sandboxToken = wrapped?.token;

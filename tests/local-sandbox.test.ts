@@ -362,13 +362,13 @@ test("inside the walls the loop needs shellEnv said outright, and a walls object
   assert.ok(readOptions({ model: "m", tools: ["Bash"], localSandbox: walls, shellEnv: {} }, "foldrun").localSandbox);
 });
 
-test("inside the walls an MCP server over HTTP is not offered, and a stdio one only wrapped", async () => {
+test("inside the walls an MCP server over HTTP needs the walls' proxy, and a stdio one only wrapped", async () => {
   const walls = { launch: async () => ({ line: "", env: {} }) };
   // A sandbox with no way to check a long-lived server is refused for one.
   const noFresh = { launch: async () => ({ line: "x", env: {}, token: "t" }) };
   await assert.rejects(connectMcp({ loc: { type: "stdio", command: "node", args: ["x.js"] } }, { env: {}, toolEnv: {}, cwd: os.tmpdir(), signal: new AbortController().signal, sandbox: noFresh }), /cannot tell a long-lived server/);
   const signal = new AbortController().signal;
-  await assert.rejects(connectMcp({ far: { type: "http", url: "https://ok.example.com/mcp" } }, { env: {}, toolEnv: {}, cwd: os.tmpdir(), signal, sandbox: walls }), /not available inside the local sandbox/);
+  await assert.rejects(connectMcp({ far: { type: "http", url: "https://ok.example.com/mcp" } }, { env: {}, toolEnv: {}, cwd: os.tmpdir(), signal, sandbox: walls }), /needs the sandbox's site proxy/);
   await assert.rejects(connectMcp({ loc: { type: "stdio", command: "node", args: ["x.js"] } }, { env: {}, toolEnv: {}, cwd: os.tmpdir(), signal, sandbox: walls }), /gave no command line/);
 });
 

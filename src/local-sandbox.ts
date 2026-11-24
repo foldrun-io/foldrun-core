@@ -68,6 +68,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { execFile, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { proxyFetch, type SiteProxy } from "./proxy-fetch.ts";
 
 /** Where a person's credentials live: never readable from inside. Paths
  *  under the home folder are written `~/…`, as the runtime expects. */
@@ -174,6 +175,10 @@ export interface LocalSandbox {
   writable(): string[];
   /** The package managers' cache folder (policy.cache, or one in the temp folder). */
   cache: string;
+  /** A fetch that goes out only through the walls' site proxy (FOL-222): a
+   *  remote MCP server is reached this way, so the same site list decides.
+   *  Refuses once this handle is closed, or when the proxy is not up. */
+  fetch: typeof fetch;
   /** Give this handle back; the walls come down when the last one is. */
   close(): Promise<void>;
 }
@@ -890,6 +895,8 @@ function installTrees(): { what: string; dir: string }[] {
 /** The one set of walls this process has up, shared by its handles. */
 interface Walls {
   key: string;
+  /** Where the runtime's site proxy listens on this machine, with its credential; null when it is not up. */
+  proxy(): SiteProxy | null;
   gen: number;
   users: number;
   down: boolean;
@@ -980,6 +987,13 @@ function handleOf(w: Walls): LocalSandbox {
     canWrite: (file) => live() && w.rules.canWrite(file),
     describe: () => w.describe,
     writable: () => [...w.writable],
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      if (!live()) throw new Error("the sandbox is closed");
+      const p = w.proxy();
+      // Never a direct connection: no proxy, no request.
+      if (!p) throw new Error("the sandbox's site proxy is not up, so nothing is sent");
+      return proxyFetch(p)(input, init);
+    }) as typeof fetch,
     close: async () => {
       if (released) return;
       released = true;
@@ -1261,6 +1275,10 @@ async function bringUp(
   for (const k of LAUNCHER_VARS) if (typeof process.env[k] === "string") launcherEnv[k] = process.env[k]!;
   const w: Walls = {
     key,
+    proxy: () => {
+      const port = M.getProxyPort();
+      return typeof port === "number" && port > 0 ? { host: "127.0.0.1", port, user: "srt", ...(M.getProxyAuthToken() ? { token: M.getProxyAuthToken()! } : {}) } : null;
+    },
     gen: ++generation,
     users: 1,
     down: false,

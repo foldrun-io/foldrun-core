@@ -38,7 +38,7 @@ export interface McpSpec {
 
 /** What a host may rely on from this connector: a host that keeps servers
  *  for a session (foldrun code) refuses to start any on a build without them. */
-export const ENGINE_MCP_FEATURES = { killOnClose: true, maxTools: true, redirectError: true, kill: true } as const;
+export const ENGINE_MCP_FEATURES = { killOnClose: true, maxTools: true, redirectError: true, kill: true, remoteInWalls: true } as const;
 
 /** Refused before a model call is paid for: a server this loop cannot connect. */
 export function checkMcpSpecs(servers: Record<string, unknown>, engine: string): Record<string, McpSpec> {

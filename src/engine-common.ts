@@ -57,6 +57,9 @@ export interface SandboxWalls {
   onChange?(listener: (token: string) => void | Promise<void>): () => void;
   canRead(file: string): boolean;
   canWrite(file: string): boolean;
+  /** A fetch through the walls' site proxy: a remote MCP server is reached
+   *  only this way inside the walls; without it such a server is refused. */
+  fetch?: typeof fetch;
 }
 
 export interface LoopOptions {
