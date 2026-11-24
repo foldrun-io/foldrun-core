@@ -262,6 +262,10 @@ test("a background job that keeps the output open does not hold the command: it 
     const r3 = await Bash.run({ command: "(while true; do echo tick; sleep 0.05; done) & echo looping" }, ctx);
     assert.ok(Date.now() - t0 < 4000, `returned in ${Date.now() - t0} ms`);
     assert.match(r3.text, /^looping/);
+    assert.equal(r3.isError, undefined, "the shell succeeded: no timeout for what it left");
+    killGroups(ctx);
+    const r4 = await Bash.run({ command: "(while true; do echo tick; sleep 0.05; done) & echo short", timeout: 1000 }, ctx);
+    assert.equal(r4.isError, undefined, `a 1 s timeout does not fire while a job's output drains: ${r4.text.slice(-120)}`);
     killGroups(ctx);
     // And a plain command's output still arrives whole.
     const big = await Bash.run({ command: "seq 1 20000 | tail -1" }, ctx);

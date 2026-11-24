@@ -64,6 +64,8 @@ test("a message is read from its end: a client's English notes ahead of a Persia
   const t0 = Date.now();
   replyLanguage("a".repeat(200_000));
   assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
+  // An ask ahead of a long code block still counts (Codex).
+  assert.equal(replyLanguage("Please reply in Persian\n\n```js\n" + "const x = 1;\n".repeat(800) + "```"), "fa");
   // A file name in Persian letters does not make an English message Persian.
   assert.equal(replyLanguage("Fix گزارش.ts please"), "en");
   assert.equal(replyLanguageLine("test if this task is in cloud"), "Reply language: English (en)");

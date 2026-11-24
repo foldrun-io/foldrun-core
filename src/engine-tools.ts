@@ -977,6 +977,8 @@ const bash: EngineTool = {
       child.on("exit", (code, signal) => {
         exited = { code, signal };
         exitedAt = Date.now();
+        // The shell succeeded or failed on its own: a job it left cannot turn that into a timeout (Codex).
+        clearTimeout(timer);
         settle();
       });
       let finish: ((code: number | null, signal: NodeJS.Signals | null) => void) | null = (code, signal) => {

@@ -110,7 +110,11 @@ const ASK_FA = /(?:به|با)\s*(فارسی|انگلیسی|عربی)\s*(?:جوا
 
 /** A language the person asked to be answered in, in so many words; the last ask wins. */
 export function askedLanguage(text: string): string | null {
-  const p = unquoted(prose(text));
+  return askedIn(prose(text));
+}
+
+function askedIn(prosed: string): string | null {
+  const p = unquoted(prosed);
   let found: { at: number; tag: string } | null = null;
   for (const m of p.matchAll(ASK_EN)) {
     if (NEGATED_EN.test(p.slice(Math.max(0, m.index! - 40), m.index!))) continue;
@@ -132,10 +136,13 @@ export function askedLanguage(text: string): string | null {
  * says nothing (a pasted command, "ok").
  */
 export function replyLanguage(message: string, hint: string | null = null): string | null {
-  const end = message.length > READ_CHARS ? message.slice(-READ_CHARS) : message;
-  const asked = askedLanguage(end);
+  // Code is taken out of the whole message first (every pattern here is linear), then only the end is read:
+  // a long code block cannot push the person's own words out (Codex).
+  const all = prose(message);
+  const end = all.length > READ_CHARS ? all.slice(-READ_CHARS) : all;
+  const asked = askedIn(all.length > READ_CHARS * 4 ? all.slice(-READ_CHARS * 4) : all);
   if (asked) return asked;
-  const parts = prose(end).split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const parts = end.split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
     // What a program printed (a pasted error) is passed over: the person's own words decide.
     const own = ownLines(parts[i]!);
