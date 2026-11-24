@@ -482,6 +482,9 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     if (r.status !== 0) throw new Error(`git could not say ${what} for ${dir}: ${r.err || `exit ${r.status}`}`);
     return r.out.trim();
   };
+  // Which git answers is part of every answer too (its own system config, its defaults): by path and by
+  // file (Codex round 21).
+  const asks = cache ? `${ctx}\0${gitBin}\0${statSig([gitBin])}` : "";
   const whichRepo = (dir: string): string => {
     const a = git(dir, ["rev-parse", "--is-bare-repository", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
     if (a.status !== 0) return "";
@@ -502,7 +505,7 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     const asked = Date.now();
     const found = cache ? whichRepo(dir) : "";
     const hit = cache?.get(dir);
-    if (hit && found && hit.found === found && hit.ctx === ctx && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
+    if (hit && found && hit.found === found && hit.ctx === asks && `${statSig(hit.deps)}#${idSig(hit.ids)}` === hit.sig) {
       out.push(...hit.out);
       continue;
     }
@@ -730,7 +733,16 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       const ids = [...new Set([dir, top, ...gitDirs, ...above].filter((x) => !(dotGitFile && x === dotGit)))];
       const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine, ...looked])];
       const files = statSig(deps, asked - 1000);
-      if (files !== null && found) cache.set(dir, { ctx, found, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
+      // A folder above made a link while this repository was asked: not trusted to have been seen either
+      // (Codex round 21).
+      const settled = above.every((a) => {
+        try {
+          return Number(fs.lstatSync(a).ctimeMs) < asked - 1000;
+        } catch {
+          return true;
+        }
+      });
+      if (files !== null && found && settled) cache.set(dir, { ctx: asks, found, deps, ids, sig: `${files}#${idSig(ids)}`, out: mine });
       else cache.delete(dir);
     }
   }

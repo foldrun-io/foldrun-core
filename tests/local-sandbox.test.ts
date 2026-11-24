@@ -415,6 +415,32 @@ test("git's answers are kept per repository, and asked again when anything they 
   }
 });
 
+test("kept git answers are not used when another git program would answer (Codex round 21)", async () => {
+  const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache4-")));
+  try {
+    const bin = path.join(base, "bin");
+    fs.mkdirSync(bin);
+    const real = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin" } }).stdout.trim();
+    fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nexec ${real} "$@"\n`, { mode: 0o755 });
+    const proj = path.join(base, "proj");
+    assert.equal(spawnSync(real, ["init", "-q", proj]).status, 0);
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(base, "global"), GIT_CONFIG_NOSYSTEM: "1" };
+    const cache: GitCache = new Map();
+    await new Promise((r) => setTimeout(r, 1100));
+    const pathVar = `${bin}:/usr/bin:/bin`;
+    gitProtected(proj, pathVar, env, [proj], cache);
+    const kept = [...cache.values()][0];
+    assert.ok(kept);
+    gitProtected(proj, pathVar, env, [proj], cache);
+    assert.equal([...cache.values()][0], kept, "the same git: kept");
+    fs.appendFileSync(path.join(bin, "git"), "# another build\n");
+    gitProtected(proj, pathVar, env, [proj], cache);
+    assert.notEqual([...cache.values()][0], kept, "another git: asked again");
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("kept git answers ask git which repository each time: a folder made bare between, a .git file pointed elsewhere, a hooks folder on PATH (Codex round 20)", async () => {
   const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache3-")));
   const outside = path.join(base, "outside");
