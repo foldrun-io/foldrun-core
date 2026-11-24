@@ -97,6 +97,25 @@ export interface LoopOptions {
    *  (and so removed) each time it is called. The model reads it after the
    *  calls it is making, or, about to finish, reads it and goes on. */
   steer: (() => unknown[]) | null;
+  /** "summarized": ask the model for a readable summary of its thinking
+   *  (`thinking.display`), on the models that take it (showsThinking).
+   *  Thinking happens and is billed the same either way; null leaves the
+   *  request as it was. The caller sets it only for an endpoint that takes
+   *  the field for these model names — Anthropic's, or foldrun's gateway,
+   *  which shapes `thinking` per provider (model-supply.ts); an endpoint
+   *  that serves another model under a Claude name is not known from here. */
+  thinkingDisplay?: "summarized" | null;
+}
+
+/**
+ * Whether a model returns a summary of its thinking when asked
+ * (`thinking: {type: "adaptive", display: "summarized"}`): the Claude models
+ * that think by default. Others are sent nothing — an older Claude would
+ * refuse the field or start thinking where it did not, and another
+ * provider's endpoint has no such field.
+ */
+export function showsThinking(model: string): boolean {
+  return /^claude-(fable|mythos|opus|sonnet)-5(-\d+)?$|^claude-haiku-5-5$/.test(model);
 }
 
 export function hookFns(hooks: unknown, event: string): HookFn[] {
@@ -179,6 +198,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     mcpServers,
     mcpGranted: mcpTools,
     steer: typeof options.steer === "function" ? (options.steer as () => unknown[]) : null,
+    thinkingDisplay: options.thinkingDisplay === "summarized" ? "summarized" : null,
     compaction: options.compaction === false ? false : compactionFor(
       typeof options.contextWindow === "number" && Number.isFinite(options.contextWindow) && options.contextWindow >= MIN_CONTEXT_WINDOW ? Math.floor(options.contextWindow) : COMPACTION_DEFAULTS.contextWindow,
     ),

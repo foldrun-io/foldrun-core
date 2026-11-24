@@ -39,10 +39,11 @@ import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
 import { connectMcp, type McpConnection } from "./engine-mcp.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT, compacted, cutPoints, estimateTokens, fileLists, findCut, isContextOverflow, previousSummary, summaryRequest } from "./engine-compact.ts";
-import { DEFAULT_MAX_TOKENS, readOptions, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
+import { DEFAULT_MAX_TOKENS, readOptions, showsThinking, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
 export type Engine = "sdk" | "foldrun";
+export { showsThinking };
 
 const DEFAULT_BASE = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
@@ -78,7 +79,7 @@ function requestHeaders(env: Record<string, string | undefined>, userAgent: stri
  *  a finish, the way the SDK's error results do. */
 /** What this engine can do that a caller may ask about before relying on
  *  it: `steer` — messages sent while a turn runs (FOL-213). */
-export const ENGINE_FEATURES = { steer: true } as const;
+export const ENGINE_FEATURES = { steer: true, thinking: true } as const;
 
 export function endOf(stopReason: string | null, calls: number): { subtype: string; error?: string } {
   switch (stopReason) {
@@ -99,7 +100,7 @@ export function endOf(stopReason: string | null, calls: number): { subtype: stri
   }
 }
 
-export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
+export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env" | "thinkingDisplay">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
   // A one-off request (a summary) writes nothing to the cache.
   const mark = cache ? { cache_control: { type: "ephemeral" } } : {};
   const tools = o.tools.map((t, i) => ({
@@ -120,6 +121,9 @@ export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "to
     ...(o.systemPrompt ? { system: [{ type: "text", text: o.systemPrompt, ...mark }] } : {}),
     ...(tools.length ? { tools } : {}),
     messages: sent,
+    // Asked for, and only of a model that answers it: the summary of its
+    // thinking, in the thinking blocks it already sends empty.
+    ...(o.thinkingDisplay === "summarized" && showsThinking(o.model) ? { thinking: { type: "adaptive", display: "summarized" } } : {}),
     stream: true,
   };
 }
@@ -363,7 +367,8 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     const older = (c: number) => messages.slice(0, c).reduce((n, m) => n + estimateTokens(m), 0);
     for (const later of cutPoints(messages)) if (later > cut && older(cut) < 1_024) cut = later;
     if (older(cut) < 1_024) return { ok: false, why: "there was too little older to summarise" };
-    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false };
+    // No thinking summary on this one: nobody reads it (Codex).
+    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false, thinkingDisplay: null };
     // The request itself must fit: the conversation's text is held to the
     // window less the reply's reserve and the prompts, newest part kept.
     const request = [{ role: "user", content: [{ type: "text", text: summaryRequest(messages.slice(0, cut), previousSummary(messages), Math.max(4_000, (room - 3_000) * 4)) }] }];
