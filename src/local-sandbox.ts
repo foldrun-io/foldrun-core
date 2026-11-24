@@ -726,16 +726,21 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
       // was asked is not trusted to have been seen ("racy git", as git's index does it): nothing is cached
       // then, and it is asked again next time.
       const mine = out.slice(start);
-      const dotGit = path.join(dir, ".git");
-      let dotGitFile = false;
-      try {
-        dotGitFile = fs.lstatSync(dotGit).isFile();
-      } catch {
-        /* none: counted by identity below */
+      // The .git where it was asked and at the top (one started below a worktree's top reads the top's
+      // pointer, Codex round 25): a pointer file is read by git, so in full; a folder by identity.
+      const pointers: string[] = [];
+      const dotGits: string[] = [];
+      for (const g of new Set([path.join(dir, ".git"), path.join(top, ".git")])) {
+        let file = false;
+        try {
+          file = fs.lstatSync(g).isFile();
+        } catch {
+          /* none: by identity below */
+        }
+        (file ? pointers : dotGits).push(g);
       }
-      // A path may be both (a hooks folder that is also on PATH): both checks then (Codex round 20).
-      const ids = [...new Set([dir, top, ...gitDirs].filter((x) => !(dotGitFile && x === dotGit)))];
-      const deps = [...new Set([...(dotGitFile ? [dotGit] : []), ...mine])];
+      const ids = [...new Set([dir, top, ...gitDirs, ...dotGits])].filter((x) => !pointers.includes(x));
+      const deps = [...new Set([...pointers, ...mine])];
       const files = statSig(deps, asked - 1000);
       // And git still takes the folder for the same repository it was asked about: one pointed elsewhere
       // and back while it was asked would leave another repository's answer here (Codex round 24); the
