@@ -37,7 +37,8 @@
       "./snapshot-archive",
       "./engine-loop",
       "./engine-mcp",
-      "./local-sandbox"
+      "./local-sandbox",
+      "./model-names"
     ]
   },
   "main": "./dist/index.js",

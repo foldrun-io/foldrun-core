@@ -28,7 +28,7 @@ import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { CallCounter, callKeysFor, REFUSALS_BEFORE_STOP, type Limits } from "./limits.ts";
 import { classifyCall, podAt, readPodEvents, type BrowserPodOutcome, type CallKind, type ClassifyContext } from "./browser-pod.ts";
-import { grantedServer } from "./engine-mcp.ts";
+import { grantedServer } from "./mcp-specs.ts";
 
 export interface ExecUsage {
   inputTokens: number;

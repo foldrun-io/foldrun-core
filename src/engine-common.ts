@@ -6,7 +6,7 @@
 // @foldrun/core's public API.
 
 import { ENGINE_TOOLS, type EngineTool, type ToolOutcome } from "./engine-tools.ts";
-import { checkMcpSpecs, grantedServer, type McpSpec } from "./engine-mcp.ts";
+import { checkMcpSpecs, grantedServer, type McpSpec } from "./mcp-specs.ts";
 import { COMPACTION_DEFAULTS, MIN_CONTEXT_WINDOW, compactionFor } from "./engine-compact.ts";
 
 export const DEFAULT_MAX_TOKENS = 16_000;

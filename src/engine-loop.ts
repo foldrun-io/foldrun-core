@@ -37,7 +37,7 @@
 import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
-import { connectMcp, type McpConnection } from "./engine-mcp.ts";
+import type { McpConnection } from "./engine-mcp.ts";
 import { SUPPLY_PROVIDERS } from "./model-supply.ts";
 import { providerPreset } from "./providers.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT, compacted, cutPoints, estimateTokens, fileLists, findCut, isContextOverflow, previousSummary, summaryRequest } from "./engine-compact.ts";
@@ -376,6 +376,8 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   let mcp: McpConnection | null = null;
   try {
   if (Object.keys(o.mcpServers).length) {
+    // Loaded here, not at the top: a step with no server never loads the MCP library (FOL-265).
+    const { connectMcp } = await import("./engine-mcp.ts");
     mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal, sandbox: o.localSandbox });
     for (const t of mcp.tools) {
       if (byName.has(t.name)) throw new Error(`the MCP tool ${t.name} has the name of a tool the step already has`);
