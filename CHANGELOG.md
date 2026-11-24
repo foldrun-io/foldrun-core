@@ -13,6 +13,33 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.6.0] — 2026-11-24
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `gitProtected` from `@foldrun/core/local-sandbox`
+
+### New in the public API
+
+- `GitCache` from `@foldrun/core/local-sandbox`
+
+- fix(local-sandbox): kept git answers — not kept when git cannot say where its config files are (older git); folders holding the top accepted as the person's (Codex round 30) ([87fd7d6](https://github.com/foldrun-io/foldrun-core/commit/87fd7d6))
+- fix(local-sandbox): git's folder paths keep a trailing space (only its newline is taken off); work tree folders changed while asked are not kept (Codex round 29) ([b71c0da](https://github.com/foldrun-io/foldrun-core/commit/b71c0da))
+- fix(local-sandbox): kept git answers — git's paths read whole (a name with a newline is never kept); git folders changed while asked are not kept (Codex round 28) ([c22ba9d](https://github.com/foldrun-io/foldrun-core/commit/c22ba9d))
+- fix(local-sandbox): kept git answers — collection pinned to the probed repository (--git-dir/--work-tree); folders above stored from the lstat that passed the age check (Codex round 27) ([98d5437](https://github.com/foldrun-io/foldrun-core/commit/98d5437))
+- fix(local-sandbox): kept git answers — not kept when a folder between the start and the top changed while asked (Codex round 26) ([f97d209](https://github.com/foldrun-io/foldrun-core/commit/f97d209))
+- fix(local-sandbox): kept git answers — the top's .git pointer is watched too (Codex round 25) ([579caeb](https://github.com/foldrun-io/foldrun-core/commit/579caeb))
+- fix(local-sandbox): kept git answers — program paths found not the project's are judged again on every hit, as a fresh answer would; git re-asked before an answer is kept (Codex round 24) ([c4ddaf8](https://github.com/foldrun-io/foldrun-core/commit/c4ddaf8))
+- fix(local-sandbox): kept git answers — each folder of a looked-at path as written, before .. removes it (Codex round 23) ([479d7de](https://github.com/foldrun-io/foldrun-core/commit/479d7de))
+- fix(local-sandbox): kept git answers — a folder's age and identity read from one lstat (Codex round 22) ([cdae1d3](https://github.com/foldrun-io/foldrun-core/commit/cdae1d3))
+- fix(local-sandbox): kept git answers — keyed on the git program that answers; a folder above a looked-at path changed while asked is not trusted (Codex round 21) ([c964e38](https://github.com/foldrun-io/foldrun-core/commit/c964e38))
+- fix(local-sandbox): kept git answers — which repository a folder is is asked of git on every launch; a path watched both ways gets both checks (Codex round 20) ([f6608e2](https://github.com/foldrun-io/foldrun-core/commit/f6608e2))
+- fix(local-sandbox): kept git answers — a nearer repository made between the project and its top, and a folder above a looked-at program path made a link, are seen (Codex round 19) ([a51dede](https://github.com/foldrun-io/foldrun-core/commit/a51dede))
+- fix(local-sandbox): kept git answers — never for a folder that is no repository, stat what links lead to, keep against the program paths looked at too (Codex round 18) ([f601a1e](https://github.com/foldrun-io/foldrun-core/commit/f601a1e))
+- perf(local-sandbox): keep git's answers per repository for the sandbox's life, asked again when any file they came from changes (FOL-214 follow-up) ([9db9fb1](https://github.com/foldrun-io/foldrun-core/commit/9db9fb1))
+
 ## [27.5.1] — 2026-11-24
 
 - fix(local-sandbox): folders read at the depth boundary count toward the folder cap (FOL-214, Codex round 17) ([fded4e0](https://github.com/foldrun-io/foldrun-core/commit/fded4e0))
