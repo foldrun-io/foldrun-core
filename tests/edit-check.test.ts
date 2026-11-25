@@ -94,6 +94,11 @@ test("JavaScript is checked in the grammar it loads in: export refused in a Comm
     assert.equal(eb.isError, true, "broken in both grammars is still refused");
     // A package.json that is not a plain file, or that the walls deny, decides nothing.
     assert.equal(jsMode(path.join(dir, "esm", "a.js"), true), "either", "inside the walls no package.json is read");
+    // node's package scope stops at node_modules: a dependency without a package.json of its own is not the project's module.
+    fs.mkdirSync(path.join(dir, "esm", "node_modules", "dep"), { recursive: true });
+    assert.equal(jsMode(path.join(dir, "esm", "node_modules", "dep", "index.js")), "either");
+    const dep = await write(ctx, { file_path: path.join(dir, "esm", "node_modules", "dep", "index.js"), content: "with ({}) {}\n" });
+    assert.equal(dep.isError, undefined, dep.text);
     fs.mkdirSync(path.join(dir, "pipe"));
     if (spawnSync("mkfifo", [path.join(dir, "pipe", "package.json")]).status === 0) assert.equal(jsMode(path.join(dir, "pipe", "a.js")), "either", "a pipe is never opened");
     assert.equal(jsMode(path.join(dir, "b.mjs")), "module");

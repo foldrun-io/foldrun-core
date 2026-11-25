@@ -114,6 +114,10 @@ test("inside the walls: the syntax guard reads the grammar and checks Python the
     const w = await ENGINE_TOOLS.Write!.run({ file_path: f, content: "with ({}) {}\n" }, ctx);
     assert.equal(w.isError, true, w.text);
     assert.match(w.text, /would stop parsing/);
+    // A dependency under node_modules is outside the project's package scope, as node reads it.
+    fs.mkdirSync(path.join(proj, "node_modules", "dep"), { recursive: true });
+    const dep = await ENGINE_TOOLS.Write!.run({ file_path: path.join(proj, "node_modules", "dep", "index.js"), content: "with ({}) {}\n" }, ctx);
+    assert.equal(dep.isError, undefined, dep.text);
     // Python, through the walls, when a system python3 is there.
     const { systemPython } = await import("../src/edit-check.ts");
     if (systemPython()) {

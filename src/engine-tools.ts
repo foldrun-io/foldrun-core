@@ -62,6 +62,7 @@ function checkOptions(ctx: ToolContext): Omit<CheckOptions, "ms"> {
           manifest: async (file: string, ms: number) => {
             const script =
               `d=${shq(path.dirname(path.resolve(file)))}; while :; do ` +
+              `case "$d" in */node_modules) exit 3;; esac; ` +
               `if [ -e "$d/package.json" ]; then [ -f "$d/package.json" ] || exit 4; exec /usr/bin/head -c ${CHECK_MAX_BYTES + 1} -- "$d/package.json"; fi; ` +
               `[ "$d" = / ] && exit 3; d=$(/usr/bin/dirname -- "$d"); done`;
             try {

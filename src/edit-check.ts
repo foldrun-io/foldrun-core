@@ -52,6 +52,8 @@ export function jsMode(file: string, walled = false): "commonjs" | "module" | "e
   // between their check and the open (Codex). Either grammar then — never a refusal node would not give.
   if (walled) return "either";
   for (let d = path.dirname(path.resolve(file)); ; d = path.dirname(d)) {
+    // node's package scope stops at a node_modules folder (Codex): no type found, either grammar.
+    if (path.basename(d) === "node_modules") return "either";
     const pj = path.join(d, "package.json");
     let st: fs.Stats | null = null;
     try {
