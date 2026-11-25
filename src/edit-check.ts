@@ -122,8 +122,12 @@ export function jsMode(file: string, walled = false): "commonjs" | "module" | "e
  *  install dialog, so it counts only when they are there. */
 export function systemPython(platform: NodeJS.Platform = process.platform, exists: (p: string) => boolean = fs.existsSync): string | null {
   const darwinTools = exists("/Library/Developer/CommandLineTools/usr/bin/python3") || exists("/Applications/Xcode.app/Contents/Developer/usr/bin/python3");
-  const candidates = platform === "darwin" ? ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", ...(darwinTools ? ["/usr/bin/python3"] : [])] : ["/usr/bin/python3", "/usr/local/bin/python3"];
-  return candidates.find((p) => exists(p)) ?? null;
+  const dirs = platform === "darwin" ? ["/opt/homebrew/bin", "/usr/local/bin"] : ["/usr/bin", "/usr/local/bin"];
+  // The newest found first: newer Python reads more syntax, and an older one would refuse what the project's accepts.
+  const versioned: string[] = [];
+  for (let minor = 20; minor >= 8; minor--) for (const d of dirs) versioned.push(`${d}/python3.${minor}`);
+  const plain = platform === "darwin" ? ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", ...(darwinTools ? ["/usr/bin/python3"] : [])] : ["/usr/bin/python3", "/usr/local/bin/python3"];
+  return [...versioned, ...plain].find((p) => exists(p)) ?? null;
 }
 
 const PY_CHECK =
@@ -132,7 +136,7 @@ const PY_CHECK =
   "try:\n" +
   "    compile(src, sys.argv[1], 'exec', dont_inherit=True)\n" +
   "except (SyntaxError, ValueError) as e:\n" +
-  "    print('%s:%s: %s: %s' % (getattr(e, 'lineno', None) or '?', getattr(e, 'offset', None) or '?', type(e).__name__, getattr(e, 'msg', None) or e))\n" +
+  "    print('%s:%s: %s: %s (checked with Python %d.%d)' % (getattr(e, 'lineno', None) or '?', getattr(e, 'offset', None) or '?', type(e).__name__, getattr(e, 'msg', None) or e, sys.version_info[0], sys.version_info[1]))\n" +
   "    sys.exit(1)\n";
 
 /** Run one checker program with the text on stdin: exit 0 = parses, 1 = a syntax error (its words), else unchecked. */
@@ -254,6 +258,8 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
       const r = await (o.runNode ?? runDirect)(process.execPath, args, text, until - Date.now());
       if (r.timedOut) return { kind: "unchecked", why: "the check took too long" };
       if (r.code === 0) return { kind: "ok" };
+      // JSX (React projects keep it in .js) is no JavaScript node reads: its first < is this error — not ours to judge.
+      if (r.code === 1 && /SyntaxError: Unexpected token '<'/.test(r.out)) return { kind: "unchecked", why: "it may be JSX" };
       if (r.code === 1 && /SyntaxError/.test(r.out)) return { kind: "errors", errors: [nodeError(r.out)] };
       return { kind: "unchecked", why: "the checker failed" };
     };

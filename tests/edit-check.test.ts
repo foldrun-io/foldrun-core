@@ -105,6 +105,13 @@ test("JavaScript is checked in the grammar it loads in: export refused in a Comm
     // A real error, with its line.
     const m = await write(ctx, { file_path: path.join(dir, "c.js"), content: "const a = 1;\nif (a) {\n" });
     assert.match(m.text, /line \d+: SyntaxError/);
+    // JSX in a .js file (a React project) is let through, said not checked.
+    const jf = path.join(dir, "Button.js");
+    fs.writeFileSync(jf, "module.exports = () => null;\n");
+    await read(ctx, jf);
+    const jsx = await edit(ctx, { file_path: jf, old_string: "null", new_string: "<button />" });
+    assert.equal(jsx.isError, undefined, jsx.text);
+    assert.match(jsx.text, /not checked: it may be JSX/);
     // A shebang and a top-level return are fine for node.
     const s = await write(ctx, { file_path: path.join(dir, "bin.js"), content: "#!/usr/bin/env node\nconst a = 1;\n" });
     assert.equal(s.isError, undefined, s.text);
@@ -233,7 +240,7 @@ test("Python is checked only where programs run unasked, with a system python3, 
     await read(ctx, f);
     const r = await edit(ctx, { file_path: f, old_string: "def f():\n    return 1\n", new_string: "return 1\n" });
     assert.equal(r.isError, true, r.text);
-    assert.match(r.text, /'return' outside function/);
+    assert.match(r.text, /'return' outside function \(checked with Python 3\.\d+\)/);
     const ok = await edit(ctx, { file_path: f, old_string: "return 1", new_string: "return 2" });
     assert.equal(ok.isError, undefined, ok.text);
     // Without that permission: not checked, and nothing said about it.
@@ -265,6 +272,7 @@ test("JSON is held to comments-and-trailing-commas JSON, except the files every 
   for (const f of ["package.json", "sub/package-lock.json", "composer.json"]) assert.equal((await checkText(f, '{"a": 1,}', { programs: false, ms: 1000 })).kind, "errors", f);
   assert.equal(checkerFor("package.json"), "json");
   assert.equal(checkerFor("a.ts"), null, "TypeScript waits for the language-server layer (FOL-297)");
+  assert.equal(systemPython("linux", (p) => p === "/usr/bin/python3" || p === "/usr/bin/python3.11" || p === "/usr/local/bin/python3.13"), "/usr/local/bin/python3.13", "the newest first");
   assert.equal(systemPython("darwin", (p) => p === "/usr/bin/python3"), null, "macOS /usr/bin/python3 without the command line tools would open a dialog");
   assert.equal(systemPython("darwin", (p) => p === "/usr/bin/python3" || p === "/Library/Developer/CommandLineTools/usr/bin/python3"), "/usr/bin/python3");
 });
