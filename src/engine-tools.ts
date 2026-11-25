@@ -307,10 +307,23 @@ function staleReason(ctx: ToolContext, file: string): string | null {
   return null;
 }
 
+/** The largest image Read shows a model: the providers take about 5 MB of base64 (FOL-295). */
+export const READ_IMAGE_BYTES = Math.floor(3.75 * 1024 * 1024);
+
+/** An image a model can be shown, by its first bytes — never by its name. */
+export function imageMediaType(buf: Buffer): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf.length >= 6 && /^GIF8[79]a$/.test(buf.subarray(0, 6).toString("latin1"))) return "image/gif";
+  if (buf.length >= 12 && buf.subarray(0, 4).toString("latin1") === "RIFF" && buf.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+
 const read: EngineTool = {
   name: "Read",
   description:
     "Read a text file. Returns its lines numbered as `<line>\\t<text>`. " +
+    "An image (PNG, JPEG, GIF, WebP — a screenshot, a design, a chart) is shown to you as the image, where the model takes images. " +
     `At most ${READ_LINES} lines per call: pass offset (first line, from 1) and limit for the rest of a long file. ` +
     "A file must be read before Edit or Write may change it.",
   input_schema: {
@@ -338,6 +351,15 @@ const read: EngineTool = {
     if (stat.isDirectory()) return fail(`${file} is a directory — use Glob to list files`);
     const buf = await readChecked(ctx, file);
     if (typeof buf === "string") return fail(buf);
+    // An image, shown as one (FOL-295): screenshots and designs for models that take images.
+    const image = imageMediaType(buf);
+    if (image) {
+      const size = `${Math.max(1, Math.round(buf.length / 1024))} KB`;
+      if (buf.length > READ_IMAGE_BYTES) return fail(`${file} is a ${size} image — larger than a model is shown (3.75 MB); make a smaller copy (sips -Z 1600 on a Mac, convert -resize 1600x1600 elsewhere) and Read that`);
+      ctx.reads.set(file, stat.mtimeMs);
+      const said = `${file}: ${image.slice(6).toUpperCase()} image, ${size}`;
+      return { text: said, parts: [{ type: "text", text: said }, { type: "image", data: buf.toString("base64"), mediaType: image }] };
+    }
     if (looksBinary(buf)) return fail(`${file} is not a text file`);
     ctx.reads.set(file, stat.mtimeMs);
     const text = buf.toString("utf8");

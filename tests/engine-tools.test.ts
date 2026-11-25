@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ENGINE_TOOLS, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, matchInWorker, globMatcher, type ToolContext } from "../src/engine-tools.ts";
+import { ENGINE_TOOLS, imageMediaType, READ_IMAGE_BYTES, globToRegExp, killGroups, occurrences, capped, RESULT_CAP, matchInWorker, globMatcher, type ToolContext } from "../src/engine-tools.ts";
 
 function withDir(body: (dir: string, ctx: ToolContext, stop: AbortController) => Promise<void>) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-engine-tools-")));
@@ -272,3 +272,32 @@ test("a background job that keeps the output open does not hold the command: it 
     const big = await Bash.run({ command: "seq 1 20000 | tail -1" }, ctx);
     assert.equal(big.text, "20000");
   }));
+
+test("Read shows an image as an image, known by its bytes; too large is refused with what to do; a renamed binary stays refused (FOL-295)", () =>
+  withDir(async (dir, ctx) => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100, 1)]);
+    fs.writeFileSync(path.join(dir, "shot.dat"), png);
+    const r = await Read.run({ file_path: "shot.dat" }, ctx);
+    assert.equal(r.isError, undefined);
+    assert.match(r.text, /shot\.dat: PNG image, 1 KB$/);
+    assert.equal(r.parts?.length, 2);
+    assert.deepEqual(r.parts?.[1], { type: "image", data: png.toString("base64"), mediaType: "image/png" });
+    // Read counts as read: Write may then replace it.
+    assert.equal((await Write.run({ file_path: "shot.dat", content: "x" }, ctx)).isError, undefined);
+    assert.equal(imageMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), "image/jpeg");
+    assert.equal(imageMediaType(Buffer.from("GIF89a....")), "image/gif");
+    assert.equal(imageMediaType(Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")])), "image/webp");
+    fs.writeFileSync(path.join(dir, "fake.png"), Buffer.from([0, 1, 2, 3, 0, 0, 9]));
+    assert.match((await Read.run({ file_path: "fake.png" }, ctx)).text, /not a text file/, "a name is not enough");
+    fs.writeFileSync(path.join(dir, "big.png"), Buffer.concat([png, Buffer.alloc(READ_IMAGE_BYTES)]));
+    const big = await Read.run({ file_path: "big.png" }, ctx);
+    assert.equal(big.isError, true);
+    assert.match(big.text, /larger than a model is shown \(3\.75 MB\); make a smaller copy/);
+  }));
+
+test("the person's images go with the prompt, after its text, as image blocks (FOL-268)", async () => {
+  const { readOptions } = await import("../src/engine-common.ts");
+  const o = readOptions({ model: "m", images: [{ data: "AAAA", mediaType: "image/png" }, { data: "x", mediaType: "text/html" }, null] });
+  assert.deepEqual(o.images, [{ data: "AAAA", mediaType: "image/png" }], "only well-formed images");
+  assert.equal(readOptions({ model: "m" }).images, undefined);
+});

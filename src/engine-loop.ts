@@ -352,7 +352,8 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   // An earlier conversation comes first (foldrun code's local turns carry
   // theirs, 19 Nov 2026); the prompt is always the newest user turn.
   if (o.history.length % 2 !== 0) throw new Error("history must end with the model's turn, so the prompt is the next user turn");
-  const messages: { role: string; content: Block[] }[] = [...o.history, { role: "user", content: [{ type: "text", text: prompt }] }];
+  const images: Block[] = (o.images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mediaType, data: i.data } }));
+  const messages: { role: string; content: Block[] }[] = [...o.history, { role: "user", content: [{ type: "text", text: prompt }, ...images] }];
   const total = emptyUsage();
   let turns = 0;
   let lastText = "";

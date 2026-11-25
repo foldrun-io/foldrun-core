@@ -90,6 +90,8 @@ export interface LoopOptions {
   /** The conversation so far, before this prompt: earlier user turns, the
    *  model's replies and tool results, as the loop yielded them. */
   history: { role: string; content: Block[] }[];
+  /** Images the person sent with the prompt, as they are (FOL-268): after its text, in the same turn. */
+  images?: { data: string; mediaType: string }[];
   /** The step's MCP servers (engine-mcp.ts), connected when the loop starts. */
   mcpServers: Record<string, McpSpec>;
   /** MCP tools the step was granted by name, with the server each names:
@@ -170,6 +172,17 @@ export function hookFns(hooks: unknown, event: string): HookFn[] {
 /** The SDK's options, as this engine reads them. What it cannot honour it
  *  refuses here, before a model call is paid for. */
 /** `engine` names the loop in what it refuses. */
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/** Only well-formed images, at most 20 (FOL-268). */
+function readImages(v: unknown): { data: string; mediaType: string }[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x): x is { data: string; mediaType: string } => !!x && typeof x === "object" && typeof (x as Json).data === "string" && IMAGE_TYPES.has(String((x as Json).mediaType)))
+    .slice(0, 20)
+    .map((x) => ({ data: x.data, mediaType: x.mediaType }));
+}
+
 export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
   const env = (options.env as Record<string, string | undefined> | undefined) ?? process.env;
   const listed = Array.isArray(options.tools) ? (options.tools as unknown[]).map(String) : [];
@@ -242,6 +255,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     canUseTool: typeof options.canUseTool === "function" ? (options.canUseTool as CanUseTool) : null,
     outer: (options.abortController as AbortController | undefined)?.signal ?? null,
     history: readHistory(options.history),
+    ...(readImages(options.images).length ? { images: readImages(options.images) } : {}),
     mcpServers,
     mcpGranted: mcpTools,
     steer: typeof options.steer === "function" ? (options.steer as () => unknown[]) : null,
