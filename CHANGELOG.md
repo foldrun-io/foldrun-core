@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [28.0.0] — 2026-11-25
+
+### Breaking changes
+
+- on a Docker install, a step held to its list no longer starts with (224e304)
+- `buildRequest` from `@foldrun/core/engine-loop` — parameter 1 changed
+
+- feat(engine): server tools the gateway runs — serverTools sent first in tools (known web_search/web_fetch/web_browse types only), server_tool_use input parsed, the gateway's foldrun-server-tools announcement passed up once (FOL-304) ([74026c3](https://github.com/foldrun-io/foldrun-core/commit/74026c3))
+- fix(run-container): a Docker step held to its network list gets its own network with no route out; a relay is its one way to the egress proxy (FOL-215) ([224e304](https://github.com/foldrun-io/foldrun-core/commit/224e304))
+
 ## [27.13.0] — 2026-11-25
 
 ### feat
