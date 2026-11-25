@@ -125,7 +125,13 @@ export interface EgressGrant {
   /** Which sites the step may reach through the proxy's forward door
    *  (network.ts). Absent on a grant from a runner that predates it: the
    *  forward door then allows only the hosts the secrets were granted to. */
-  network?: { level: NetworkLevel; hosts: string[] };
+  network?: {
+    level: NetworkLevel;
+    hosts: string[];
+    /** Sites refused whatever the level (a browse job's blocked_domains,
+     *  FOL-313): the proxy refuses them even where it only reports. */
+    deny?: string[];
+  };
   /** Refuse a site off the list (true), or allow it and name it in the
    *  trace (false: report only). Set by the platform when it leases. */
   enforce?: boolean;
