@@ -13,6 +13,21 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.7.0] — 2026-11-25
+
+- fix(engine): syntax guard — JSX in .js let through unchecked; the newest system Python checks, its version named in a refusal (FOL-292, Codex) ([0e1e383](https://github.com/foldrun-io/foldrun-core/commit/0e1e383))
+- fix(engine): syntax guard — tsconfig/jsconfig not judged (TypeScript reads them looser; FOL-297), line separators end a comment (FOL-292, Codex) ([7e7842e](https://github.com/foldrun-io/foldrun-core/commit/7e7842e))
+- fix(engine): syntax guard — nested trailing commas, CR-ended comments and a BOM are accepted (FOL-292, Codex) ([7787732](https://github.com/foldrun-io/foldrun-core/commit/7787732))
+- fix(engine): syntax guard — unclosed comments and {,} stay errors; Babel's JSON5 files not judged (FOL-292, Codex) ([0c1188d](https://github.com/foldrun-io/foldrun-core/commit/0c1188d))
+- fix(engine): syntax guard — JSON held to comments-and-trailing-commas JSON except package.json, lock files and composer (FOL-292, Codex) ([5207a73](https://github.com/foldrun-io/foldrun-core/commit/5207a73))
+- fix(engine): syntax guard — deno.json, biome.json, turbo.json, tslint.json, api-extractor allow comments (FOL-292, Codex) ([4c198b9](https://github.com/foldrun-io/foldrun-core/commit/4c198b9))
+- fix(engine): syntax guard — the package scope stops at node_modules, as node's does (FOL-292, Codex) ([05a5f16](https://github.com/foldrun-io/foldrun-core/commit/05a5f16))
+- fix(engine): syntax guard — inside the walls the nearest package.json is read there, so .js is checked in node's grammar (FOL-292, Codex) ([c5c2a12](https://github.com/foldrun-io/foldrun-core/commit/c5c2a12))
+- fix(engine): syntax guard — bounded descriptor reads (head -c inside the walls), no package.json read inside the walls, no string sentinel (FOL-292, Codex) ([1fd3a3c](https://github.com/foldrun-io/foldrun-core/commit/1fd3a3c))
+- fix(engine): syntax guard — package.json read through a non-blocking descriptor; Write reads the old file only when the new content fails, capped (FOL-292, Codex) ([f329eea](https://github.com/foldrun-io/foldrun-core/commit/f329eea))
+- fix(engine): syntax guard — package.json read only as a plain file the walls allow; .js with no type accepts either grammar; empty JSON refused; a file removed meanwhile is not brought back (FOL-292, Codex) ([eb80bb5](https://github.com/foldrun-io/foldrun-core/commit/eb80bb5))
+- feat(engine): Edit and Write refuse a change that would make a file that parses stop parsing (FOL-292) ([861514b](https://github.com/foldrun-io/foldrun-core/commit/861514b))
+
 ## [27.6.0] — 2026-11-24
 
 ### Widened in the public API
