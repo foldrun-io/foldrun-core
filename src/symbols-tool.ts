@@ -6,6 +6,7 @@
 // secrets or the run journal), and its servers are installed per step into
 // the container's own temporary folder.
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
@@ -32,6 +33,18 @@ type Emit = (type: "info" | "error", text: string) => void;
 export function buildSymbolsTools(opts: { agentDir: string; workspaceRoot: string; libraryRoot: string; toolsDir?: string; env?: Record<string, string | undefined>; emit?: Emit }) {
   const roots: Roots = { agentDir: opts.agentDir, workspaceRoot: opts.workspaceRoot, libraryRoot: opts.libraryRoot };
   const stop = new AbortController();
+  // A fresh folder for this step's servers, never a shared one: a cache another run could have written would be
+  // a program this step runs (Codex). Removed with the step.
+  const own = opts.toolsDir ? null : fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-lsp-"));
+  /** Allowed by the file tools' rule, as written and as the real file behind any link (Codex). */
+  const allowed = (file: string): boolean => {
+    if (!checkPaths("Read", { file_path: file }, roots).ok) return false;
+    try {
+      return checkPaths("Read", { file_path: fs.realpathSync(file) }, roots).ok;
+    } catch {
+      return false;
+    }
+  };
   // One context for the step: its servers are started once and live until the step ends (close()).
   const ctx: ToolContext = {
     cwd: opts.workspaceRoot,
@@ -40,9 +53,9 @@ export function buildSymbolsTools(opts: { agentDir: string; workspaceRoot: strin
     reads: new Map(),
     groups: new Set(),
     programs: true,
-    toolsDir: opts.toolsDir ?? path.join(os.tmpdir(), "foldrun-lsp"),
-    // What the file tools may read, and nothing else is shown (Codex).
-    readable: (file: string) => checkPaths("Read", { file_path: file }, roots).ok,
+    toolsDir: opts.toolsDir ?? (own as string),
+    // What the file tools may read, and nothing else is shown; asked again after each read (lsp.ts).
+    readable: allowed,
   };
   const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
   const run = tool(
@@ -59,6 +72,7 @@ export function buildSymbolsTools(opts: { agentDir: string; workspaceRoot: strin
       const verdict = checkPaths("Read", { file_path: args.file_path }, roots);
       if (!verdict.ok) return { ...text((verdict.reason ?? `"${args.file_path}" may not be read`).replace(/^Read was denied/, "symbols was refused")), isError: true };
       const abs = expandVirtual(args.file_path, roots)?.abs ?? path.resolve(roots.agentDir, args.file_path);
+      if (!allowed(abs)) return { ...text(`symbols was refused: "${args.file_path}" is not a file this step may read`), isError: true };
       const r = await symbols.run({ ...args, file_path: abs }, ctx);
       if (r.isError) opts.emit?.("info", `symbols: ${r.text.slice(0, 200)}`);
       return { ...text(r.text), ...(r.isError ? { isError: true } : {}) };
@@ -80,6 +94,26 @@ export function buildSymbolsTools(opts: { agentDir: string; workspaceRoot: strin
         }
       }
       ctx.groups.clear();
+    },
+    /** The step is over: its servers end and their folder goes. */
+    dispose: () => {
+      stop.abort();
+      stopServers(ctx);
+      for (const g of ctx.groups) {
+        try {
+          process.kill(-g, "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+      ctx.groups.clear();
+      if (own) {
+        try {
+          fs.rmSync(own, { recursive: true, force: true });
+        } catch {
+          /* swept with the temp folder */
+        }
+      }
     },
     /** The tool's own function, for tests. */
     call: (args: { action: string; file_path: string; line: number; symbol?: string; column?: number }) => run.handler(args as never, {}),

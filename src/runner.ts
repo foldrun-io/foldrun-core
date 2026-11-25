@@ -2370,6 +2370,8 @@ async function runStepBody(
   let redactions: [string, string][] = [];
   let fileDir: string | null = null;
   let installDir: string | null = null;
+  /** tools: [symbols] in process: its servers' folder goes with the step (finally). */
+  let disposeSymbols: (() => void) | null = null;
   let disposeRuntime: (() => void) | undefined;
   /** The delegate door served for this step (sandbox: own sub-agents), held
    *  here so the finally can close it however the step ends. */
@@ -4123,6 +4125,7 @@ async function runStepBody(
       // tools: [symbols] here: the step runs in this process, so its language servers do too — as foldrun run's
       // commands already do on this machine. Ended with the step (below).
       const symbolsTools = symbolsTool ? buildSymbolsTools({ agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), emit: (type, t) => push(type, t) }) : null;
+      disposeSymbols = symbolsTools ? symbolsTools.dispose : null;
       const localInbox = peerChannel ? inboxReader(peerChannel, push) : undefined;
       // tools: [text] — no proxy in this process, so no extraction service:
       // the tool is there and says so, rather than going missing.
@@ -4331,6 +4334,7 @@ async function runStepBody(
         // best-effort — the door's records expire on their own
       }
     }
+    disposeSymbols?.();
     try {
       cleanupFileSecrets(fileDir);
       if (installDir) fs.rmSync(installDir, { recursive: true, force: true });

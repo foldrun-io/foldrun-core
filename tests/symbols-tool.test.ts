@@ -19,6 +19,13 @@ test("symbols in a step: refuses files outside the workspace and the secrets, re
     assert.match(out.content[0].text, /symbols was refused|may not be read/);
     const lang = (await t.call({ action: "definition", file_path: "workspace/a.rs", line: 1, symbol: "main" })) as any;
     assert.match(lang.content[0].text, /TypeScript, JavaScript, Python and Go/, "a workspace/… path reaches the file");
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-sym-out-")));
+    fs.writeFileSync(path.join(outside, "s.ts"), "export const secret = 1;\n");
+    fs.symlinkSync(path.join(outside, "s.ts"), path.join(ws, "link.ts"));
+    const linked = (await t.call({ action: "definition", file_path: "workspace/link.ts", line: 1, symbol: "secret" })) as any;
+    assert.equal(linked.isError, true, "a link out of the workspace is refused by the real file behind it");
+    assert.doesNotMatch(linked.content[0].text, /secret = 1/);
+    fs.rmSync(outside, { recursive: true, force: true });
   } finally {
     t.close();
     fs.rmSync(ws, { recursive: true, force: true });
