@@ -140,7 +140,10 @@ const alive = (pid: number) => {
 export function recordHold(dir: string, hold: Omit<SessionHold, "pid" | "since">): () => void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `${process.pid}.json`);
-  fs.writeFileSync(file, JSON.stringify({ ...hold, pid: process.pid, since: new Date().toISOString() }), { mode: 0o600 });
+  // Whole or not at all: a reader never sees half a record and takes a live session for a broken one (Codex).
+  const part = path.join(dir, `.${process.pid}.${Math.random().toString(36).slice(2)}.part`);
+  fs.writeFileSync(part, JSON.stringify({ ...hold, pid: process.pid, since: new Date().toISOString() }), { mode: 0o600 });
+  fs.renameSync(part, file);
   return () => {
     try {
       fs.rmSync(file, { force: true });
