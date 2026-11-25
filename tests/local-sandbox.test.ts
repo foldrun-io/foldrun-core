@@ -95,6 +95,41 @@ const ctxFor = (cwd: string, sandbox: ToolContext["sandbox"], env: Record<string
   sandbox,
 });
 
+test("inside the walls: the syntax guard reads the grammar and checks Python there (FOL-292)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const box = await openLocalSandbox({ cwd: proj, sites: [] });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    const ctx = { ...ctxFor(proj, box, { ...process.env, TMPDIR: box.tmp }), programs: true };
+    fs.writeFileSync(path.join(proj, "package.json"), JSON.stringify({ type: "module" }));
+    const f = path.join(proj, "m.js");
+    fs.writeFileSync(f, "export const a = 1;\n");
+    await ENGINE_TOOLS.Read!.run({ file_path: f }, ctx);
+    // `with` parses as a script but not as a module: refused because the package says module (read inside the walls).
+    const w = await ENGINE_TOOLS.Write!.run({ file_path: f, content: "with ({}) {}\n" }, ctx);
+    assert.equal(w.isError, true, w.text);
+    assert.match(w.text, /would stop parsing/);
+    // Python, through the walls, when a system python3 is there.
+    const { systemPython } = await import("../src/edit-check.ts");
+    if (systemPython()) {
+      const p = path.join(proj, "x.py");
+      const r = await ENGINE_TOOLS.Write!.run({ file_path: p, content: "def (:\n" }, ctx);
+      assert.equal(r.isError, true, r.text);
+      assert.match(r.text, /SyntaxError/);
+      const ok = await ENGINE_TOOLS.Write!.run({ file_path: p, content: "x = 1\n" }, ctx);
+      assert.equal(ok.isError, undefined, ok.text);
+    }
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("inside the walls: the shell writes the project, not the home folder; credentials stay unread; only listed sites answer", async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
   const proj = tmpProject();

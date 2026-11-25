@@ -126,6 +126,18 @@ export const runDirect: Runner = (program, args, input, ms) =>
     child.stdin!.end(input);
   });
 
+/** The grammar a package.json's text gives a .js file: its "type", or either when it says none or is not one. */
+export function typeOf(text: string | null | undefined): "commonjs" | "module" | "either" {
+  if (text === null) return "either";
+  if (text === undefined) return "either";
+  try {
+    const j = JSON.parse(text);
+    return j && j.type === "module" ? "module" : j && j.type === "commonjs" ? "commonjs" : "either";
+  } catch {
+    return "either";
+  }
+}
+
 /** A file's text, read by a descriptor opened without waiting, only if it is a plain file of at most `max` bytes:
  *  null otherwise (a pipe, a device, too large, gone). */
 export function readBounded(file: string, max = CHECK_MAX_BYTES): string | null {
@@ -165,6 +177,9 @@ export interface CheckOptions {
   runNode?: Runner;
   /** The local walls are up: no project file is read by this process to decide a grammar. */
   walled?: boolean;
+  /** Inside the walls: the nearest package.json above `file`, read there — its text, null when there is none, or
+   *  undefined when it could not be read (either grammar then). */
+  manifest?: (file: string, ms: number) => Promise<string | null | undefined>;
   /** Milliseconds left for this check. */
   ms: number;
   python?: string | null;
@@ -185,8 +200,9 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
     }
   }
   if (kind === "js") {
-    const mode = jsMode(file, o.walled === true);
     const until = Date.now() + o.ms;
+    let mode = jsMode(file, o.walled === true);
+    if (o.walled && mode === "either" && !/\.(mjs|cjs)$/i.test(file) && o.manifest) mode = typeOf(await o.manifest(file, o.ms));
     const once = async (asModule: boolean): Promise<Verdict> => {
       const args = asModule ? ["--input-type=module", "--check", "-"] : ["--check", "-"];
       const r = await (o.runNode ?? runDirect)(process.execPath, args, text, until - Date.now());

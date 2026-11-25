@@ -58,6 +58,25 @@ function checkOptions(ctx: ToolContext): Omit<CheckOptions, "ms"> {
     walled: !!ctx.sandbox,
     ...(ctx.sandbox
       ? {
+          // The nearest package.json, found and read inside the walls (a plain file, capped): what node will read.
+          manifest: async (file: string, ms: number) => {
+            const script =
+              `d=${shq(path.dirname(path.resolve(file)))}; while :; do ` +
+              `if [ -e "$d/package.json" ]; then [ -f "$d/package.json" ] || exit 4; exec /usr/bin/head -c ${CHECK_MAX_BYTES + 1} -- "$d/package.json"; fi; ` +
+              `[ "$d" = / ] && exit 3; d=$(/usr/bin/dirname -- "$d"); done`;
+            try {
+              const r = await runInside(ctx, script, "", Math.max(1, ms));
+              if (r.code === 3) return null;
+              if (r.code !== 0 || r.out.length > CHECK_MAX_BYTES) return undefined;
+              return r.out.toString("utf8");
+            } catch {
+              return undefined;
+            }
+          },
+        }
+      : {}),
+    ...(ctx.sandbox
+      ? {
           runPython: async (program: string, args: string[], input: string, ms: number) => {
             try {
               const r = await runInside(ctx, `exec ${[program, ...args].map(shq).join(" ")}`, input, Math.max(1, ms));
