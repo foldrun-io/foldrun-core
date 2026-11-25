@@ -142,6 +142,16 @@ export interface EgressGrant {
    *  the call that starts a browser gets `server`, foldrun's vendor egress
    *  door, as its only proxy. Absent: nothing changes. */
   vendorDoor?: { vendor: string; server: string };
+  /** A lease with no run behind it, for one job (FOL-313): `browse-job`, a
+   *  single cloud browser call from /v1/messages or the laptop. The proxy
+   *  opens such a lease on its forward door alone, refuses it on every other
+   *  (the /e/ door, live frames, identity, operator, search, text, browse),
+   *  never on a copy that may reach private addresses, and not after
+   *  `expiresAt`. A purpose the proxy does not know opens nothing. */
+  purpose?: "browse-job";
+  /** With `purpose`: the absolute end of the lease (ms since the epoch),
+   *  never renewed. Required with a purpose: one without is refused. */
+  expiresAt?: number;
 }
 
 export interface EgressLease {
