@@ -39,6 +39,7 @@
       "./engine-mcp",
       "./local-sandbox",
       "./local-resources",
+      "./frontmatter-read",
       "./model-names"
     ]
   },

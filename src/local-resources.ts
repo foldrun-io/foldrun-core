@@ -69,7 +69,7 @@ export function parseBudget(raw: string, c: Computer): { budget: Budget } | { pr
 }
 
 /** What an agent asks for, from its own fields: null when it writes neither `size:` nor `resources:`. The cloud's
- *  resolver is loaded only here, so a session that never asks stays light (foldrun code's module ceiling). */
+ *  resolver (step-limits.ts, the same one run-container uses) is loaded only here, so a session stays light. */
 export async function agentAsks(front: Record<string, unknown>): Promise<{ ask: Budget | null; problems: string[] }> {
   const size = front.size;
   const raw = front.resources;
@@ -79,7 +79,7 @@ export async function agentAsks(front: Record<string, unknown>): Promise<{ ask: 
   if (size !== undefined && !cls) problems.push(`size: ${String(size)} — small, large or heavy`);
   const read = raw === undefined ? { value: {}, problems: [] } : readResources(raw);
   problems.push(...read.problems);
-  const { resolveResources } = await import("./run-container.ts");
+  const { resolveResources } = await import("./step-limits.ts");
   const r = resolveResources(cls, read.value);
   const cpu = Number(r.cpus);
   const mi = anyMemoryMi(r.memory);
