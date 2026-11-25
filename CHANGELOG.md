@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.8.1] — 2026-11-25
+
+- fix(edit-check): type the checker's environment as foldrun-web's typecheck reads it ([6d2bb67](https://github.com/foldrun-io/foldrun-core/commit/6d2bb67))
+
 ## [27.8.0] — 2026-11-25
 
 ### Widened in the public API
