@@ -347,7 +347,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       .filter((t): t is string => typeof t === "string" && t.trim() !== "")
       .map((t) => ({ type: "text", text: t.slice(0, 20_000) }));
   };
-  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set(), sandbox: o.localSandbox, programs: o.programs };
+  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set(), sandbox: o.localSandbox, programs: o.programs, ...(o.toolsDir ? { toolsDir: o.toolsDir } : {}), ...(o.readable ? { readable: o.readable } : {}) };
   // Inside the walls, what a command left running (a server in the
   // background) holds the rules it started under: when a later launch finds
   // them changed, it is ended before that launch goes ahead.

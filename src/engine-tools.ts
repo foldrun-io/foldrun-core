@@ -26,6 +26,7 @@ import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { LAUNCHER } from "./local-sandbox.ts";
+import { symbols } from "./lsp.ts";
 import { CHECK_MAX_BYTES, CHECK_MS, checkerFor, guardChange, readBounded, type CheckOptions } from "./edit-check.ts";
 
 export interface ToolContext {
@@ -58,6 +59,12 @@ export interface ToolContext {
   /** The shell a command runs in when there are no walls (default `bash` from PATH): a client running commands as
    *  the person names a fixed one, so a folder early in PATH cannot stand in for it (Codex). */
   shell?: string;
+  /** Where Symbols installs its language servers (FOL-297): the client's own place — in foldrun code, the project's
+   *  package cache. Absent: none is installed. */
+  toolsDir?: string;
+  /** The client's own rule for what may be read (foldrun code: the folder and the ones added), over the walls':
+   *  Symbols shows no location it refuses. */
+  readable?: (file: string) => boolean;
 }
 
 /** A command running in the background (Bash `run_in_background`, FOL-293). */
@@ -127,7 +134,7 @@ const ALLOW_SYNTAX_ERRORS = {
  *  the walls, the open file must be the very file now at the path the rules
  *  allow (same device and inode), so a path swapped between the check and
  *  the open is refused, not read. A string is the refusal. */
-async function readChecked(ctx: ToolContext, file: string): Promise<Buffer | string> {
+export async function readChecked(ctx: ToolContext, file: string): Promise<Buffer | string> {
   if (!ctx.sandbox) return fs.readFileSync(file);
   // Inside the walls the read itself runs there (cat), so the OS holds it
   // however the path changes between a check and the read.
@@ -1519,4 +1526,5 @@ export const ENGINE_TOOLS: Readonly<Record<string, EngineTool>> = {
   Glob: glob,
   Grep: grep,
   Bash: bash,
+  Symbols: symbols,
 };
