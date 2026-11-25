@@ -13,6 +13,17 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.13.0] — 2026-11-25
+
+### feat
+
+- tools: [symbols] in a step — definitions and references by a language server in the step's own sandbox, confined to what the file tools may read (FOL-297) ([527387f](https://github.com/foldrun-io/foldrun-core/commit/527387f))
+
+### fix
+
+- symbols in a step — Go's read-only module cache made writable before the step's folder is removed (Codex, FOL-297) ([ef8b38a](https://github.com/foldrun-io/foldrun-core/commit/ef8b38a))
+- symbols in a step — its own server folder per step, removed after; the read rule checked on the real file behind a link (Codex, FOL-297) ([bc57b4a](https://github.com/foldrun-io/foldrun-core/commit/bc57b4a))
+
 ## [27.12.0] — 2026-11-25
 
 - fix(engine): Symbols checks each file again after reading it, and a stopped turn ends a server's wait (Codex, FOL-297) ([62c486c](https://github.com/foldrun-io/foldrun-core/commit/62c486c))
