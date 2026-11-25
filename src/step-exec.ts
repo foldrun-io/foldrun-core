@@ -22,7 +22,7 @@ import { costOf, type TokenPrice } from "./catalog.ts";
 import type { TestEffect } from "./test-mode.ts";
 import type { OperatorEvent } from "./operator.ts";
 import { spawn } from "node:child_process";
-import { checkPaths, checkBash, isFilesystemTool, linkWorkspace, workspaceLinkEnv, resolveAgentPath, isWithin } from "./confine.ts";
+import { checkPaths, checkBashInput, isFilesystemTool, linkWorkspace, workspaceLinkEnv, resolveAgentPath, isWithin } from "./confine.ts";
 import { DELEGATE_TOOLS, subagentGuard, toAgentDefinitions, type SubagentSpec } from "./subagents.ts";
 import { hostSafeEnv } from "./host-env.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
@@ -598,7 +598,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
                 // the rewrite goes through the same checks here: a hook can
                 // narrow what the agent does, never widen it.
                 const again = hookInput.tool_name === "Bash"
-                  ? checkBash(String(v.input.command ?? ""))
+                  ? checkBashInput(v.input as Record<string, unknown>)
                   : isFilesystemTool(hookInput.tool_name)
                     ? checkPaths(hookInput.tool_name, v.input, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
                     : { ok: true as const };
@@ -666,7 +666,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
         }
         const verdict =
           toolName === "Bash"
-            ? checkBash(String(input.command ?? ""))
+            ? checkBashInput(input as Record<string, unknown>)
             : isFilesystemTool(toolName)
               ? checkPaths(toolName, input, { agentDir, workspaceRoot, libraryRoot, configWrites: opts.configWrites })
               : { ok: true as const };

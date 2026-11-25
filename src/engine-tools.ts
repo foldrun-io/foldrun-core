@@ -49,6 +49,26 @@ export interface ToolContext {
   programs?: boolean;
   /** How the syntax checks run, over the defaults (tests: a slow or failing checker). */
   checkWith?: Partial<Omit<CheckOptions, "ms">>;
+  /** Commands started with Bash `run_in_background`, by id (FOL-293). They are in `groups` too, so they end with
+   *  the step like anything else a command started. Absent: made on first use. */
+  jobs?: Map<string, BgJob>;
+}
+
+/** A command running in the background (Bash `run_in_background`, FOL-293). */
+export interface BgJob {
+  id: string;
+  command: string;
+  pid: number | undefined;
+  /** Its output, held to a bounded tail; `base` is how many characters came before `out`'s first. */
+  out: string;
+  base: number;
+  /** How far the model has read, in characters since the job started. */
+  read: number;
+  exit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  stdin: import("node:stream").Writable | null;
+  /** Wakes a `wait` when output arrives or it exits. */
+  wake: Set<() => void>;
+  startedAt: number;
 }
 
 /** How Edit and Write check a change's syntax here: Python through the walls when they are up. */
@@ -1016,6 +1036,142 @@ const grep: EngineTool = {
   },
 };
 
+/** At most this many background jobs a step keeps at once; a finished one can be dropped by reading it after it ended. */
+export const BG_JOBS_MAX = 8;
+/** How long a background start waits for its first output before answering. */
+const BG_FIRST_MS = 1000;
+
+/** The output a job printed since the model last read it, with what was dropped said plainly. */
+function jobNews(job: BgJob): string {
+  const from = Math.max(job.read, job.base);
+  const lost = from - job.read;
+  const text = job.out.slice(from - job.base);
+  job.read = job.base + job.out.length;
+  const body = capped(text.trimEnd());
+  return (lost ? `[${lost} characters it printed before this were dropped — the job keeps only its latest output]\n` : "") + body;
+}
+
+function jobState(job: BgJob): string {
+  if (!job.exit) return `job ${job.id} is running (${Math.round((Date.now() - job.startedAt) / 1000)} s)`;
+  return `job ${job.id} has ended — ${job.exit.code === 0 ? "exit code 0" : `exit code ${job.exit.code ?? `none, signal ${job.exit.signal}`}`}`;
+}
+
+function endJob(job: BgJob, ctx: ToolContext): void {
+  const kill = (sig: NodeJS.Signals) => {
+    try {
+      if (job.pid) process.kill(-job.pid, sig);
+    } catch {
+      // already gone
+    }
+  };
+  kill("SIGTERM");
+  setTimeout(() => {
+    kill("SIGKILL");
+    if (job.pid) ctx.groups.delete(job.pid);
+  }, KILL_GRACE_MS).unref();
+}
+
+/** Start `line` in the background: its own process group, stdin open for later writes, output kept in a tail. */
+async function startJob(command: string, line: string, env: Record<string, string | undefined>, ctx: ToolContext): Promise<ToolOutcome> {
+  const jobs = (ctx.jobs ??= new Map());
+  // A finished job the model has read to the end makes room for a new one.
+  for (const [id, j] of jobs) if (j.exit && j.read >= j.base + j.out.length && jobs.size >= BG_JOBS_MAX) jobs.delete(id);
+  if (jobs.size >= BG_JOBS_MAX) return fail(`${BG_JOBS_MAX} background jobs are already kept in this step — stop one (Bash with job and stop: true) first`);
+  if (ctx.signal.aborted) return fail("the step was stopped before the command ran");
+  let n = jobs.size + 1;
+  while (jobs.has(`b${n}`)) n += 1;
+  const id = `b${n}`;
+  const child = spawn(ctx.sandbox ? LAUNCHER : "bash", ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  if (child.pid) ctx.groups.add(child.pid);
+  const job: BgJob = { id, command, pid: child.pid, out: "", base: 0, read: 0, exit: null, stdin: child.stdin, wake: new Set(), startedAt: Date.now() };
+  const wake = () => {
+    for (const w of [...job.wake]) w();
+  };
+  const take = (chunk: Buffer) => {
+    job.out += chunk.toString("utf8");
+    // A server that logs forever keeps only its latest output.
+    if (job.out.length > RESULT_CAP * 4) {
+      const cut = job.out.length - RESULT_CAP * 2;
+      job.out = job.out.slice(cut);
+      job.base += cut;
+    }
+    wake();
+  };
+  child.stdout!.on("data", take);
+  child.stderr!.on("data", take);
+  child.stdin!.on("error", () => {
+    /* the job closed its input; a later write says so */
+  });
+  const started = await new Promise<string | null>((resolve) => {
+    child.once("error", (err) => resolve(err.message));
+    child.once("spawn", () => resolve(null));
+  });
+  if (started !== null) return fail(`the command could not start: ${started}`);
+  child.on("exit", (code, signal) => {
+    job.exit = { code, signal };
+    job.stdin = null;
+    wake();
+  });
+  jobs.set(id, job);
+  // A moment for its first lines (a server's "listening on…"), or its end if it was quick.
+  await waitJob(job, BG_FIRST_MS, ctx.signal);
+  const news = jobNews(job);
+  return {
+    text: `${jobState(job)} — started in the background. Read its new output, write to its input, wait or stop it with Bash {job: "${id}", stdin?, wait?, stop?}; it ends with the step.${news ? `\n${news}` : ""}`,
+    ...(job.exit && job.exit.code !== 0 ? { isError: true } : {}),
+  };
+}
+
+/** Until the job prints, ends, `ms` pass or the step stops. */
+function waitJob(job: BgJob, ms: number, signal: AbortSignal, untilExit = false): Promise<void> {
+  return new Promise((resolve) => {
+    if (job.exit || signal.aborted || ms <= 0) return resolve();
+    let timer: NodeJS.Timeout;
+    const done = () => {
+      clearTimeout(timer);
+      job.wake.delete(check);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const check = () => {
+      if (job.exit || !untilExit) done();
+    };
+    timer = setTimeout(done, ms);
+    job.wake.add(check);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** A call naming a background job: write its input, wait, stop it, and give what it printed since the last read. */
+async function onJob(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+  const id = str(input, "job")!;
+  const job = ctx.jobs?.get(id);
+  if (!job) return fail(`no background job ${id} in this step${ctx.jobs?.size ? ` (there are: ${[...ctx.jobs.keys()].join(", ")})` : ""}`);
+  if (input.command !== undefined) return fail("give either command (a new command) or job (one already running), not both");
+  const stdin = typeof input.stdin === "string" ? input.stdin : null;
+  if (input.stdin !== undefined && stdin === null) return fail("stdin is text to write to the job's input");
+  if (stdin !== null) {
+    if (!job.stdin || job.exit) return fail(`${jobState(job)} — its input is closed`);
+    const ok = await new Promise<boolean>((resolve) => job.stdin!.write(stdin, (err) => resolve(!err)));
+    if (!ok) return fail(`${jobState(job)} — it did not take the input`);
+  }
+  if (input.stop === true) {
+    if (!job.exit) {
+      endJob(job, ctx);
+      await waitJob(job, KILL_GRACE_MS + 500, ctx.signal, true);
+    }
+    const news = jobNews(job);
+    ctx.jobs!.delete(id);
+    return { text: `${job.exit ? `${jobState(job)}; stopped` : `job ${id} was sent SIGTERM then SIGKILL`}${news ? `\n${news}` : ""}` };
+  }
+  const ms = input.wait === undefined ? 0 : Number.isInteger(input.wait) ? Math.max(0, Math.min(BASH_MAX_MS, input.wait as number)) : -1;
+  if (ms < 0) return fail("wait is milliseconds, a whole number");
+  // Waits for the end, not the next line: "wait 30 s for the tests" means until they finish or 30 s pass.
+  if (ms) await waitJob(job, ms, ctx.signal, true);
+  const news = jobNews(job);
+  return { text: `${jobState(job)}${news ? `\n${news}` : "\n(no new output)"}`, ...(job.exit && job.exit.code !== 0 ? { isError: true } : {}) };
+}
+
 /** After the shell exits, how long its output may still arrive before the command counts as returned. */
 const EXIT_GRACE_MS = 300;
 /** …and the longest it may keep arriving: what is printed after that, by a job left in the background, is not waited for. */
@@ -1026,20 +1182,30 @@ const bash: EngineTool = {
   description:
     "Run a shell command in the working directory and return its output (stdout and stderr together) and exit code. " +
     `Stops after timeout milliseconds (default ${BASH_DEFAULT_MS}, at most ${BASH_MAX_MS}). ` +
-    "Each call is a new shell: a `cd` or a variable does not carry to the next. Use Read, Edit, Glob and Grep for files rather than cat, sed, find and grep.",
+    "Each call is a new shell: a `cd` or a variable does not carry to the next. Use Read, Edit, Glob and Grep for files rather than cat, sed, find and grep. " +
+    "For a server, a watcher or a long build, set run_in_background: it answers with a job id and its first output; then call Bash with that job alone to read what it printed since, write to its input (stdin), wait for it to finish (wait, ms) or stop it and everything it started (stop: true). Background jobs end with the step.",
   input_schema: {
     type: "object",
     properties: {
       command: { type: "string", description: "The command line" },
-      timeout: { type: "integer", description: "Milliseconds before the command is stopped" },
+      timeout: { type: "integer", description: "Milliseconds before the command is stopped (not for a background job)" },
       description: { type: "string", description: "What the command does, in a few words" },
+      run_in_background: { type: "boolean", description: "Start it and answer at once with a job id, leaving it running" },
+      job: { type: "string", description: "A background job's id, instead of command: read its new output, and with stdin, wait or stop act on it" },
+      stdin: { type: "string", description: "With job: text written to its input (add \\n for Enter)" },
+      wait: { type: "integer", description: "With job: wait up to this many milliseconds for it to finish" },
+      stop: { type: "boolean", description: "With job: stop it and everything it started" },
     },
-    required: ["command"],
   },
   readOnly: false,
   async run(input, ctx) {
+    if (input.job !== undefined) {
+      if (!str(input, "job")) return fail("job is a background job's id, like b1");
+      return onJob(input, ctx);
+    }
+    for (const k of ["stdin", "wait", "stop"]) if (input[k] !== undefined) return fail(`${k} goes with job (a background job's id)`);
     const command = str(input, "command");
-    if (!command) return fail("Bash needs command");
+    if (!command) return fail("Bash needs command (or job, for one running in the background)");
     const ms = Math.max(1000, Math.min(BASH_MAX_MS, Number.isInteger(input.timeout) ? (input.timeout as number) : BASH_DEFAULT_MS));
     // Inside the walls on a person's machine: the line that runs is the
     // sandbox's wrapping of it. One that cannot be wrapped does not run.
@@ -1054,6 +1220,7 @@ const bash: EngineTool = {
         return fail(`the command was not run: the sandbox could not wrap it (${err instanceof Error ? err.message : String(err)})`);
       }
     }
+    if (input.run_in_background === true) return startJob(command, line, env, ctx);
     return new Promise<ToolOutcome>((resolve) => {
       if (ctx.signal.aborted) return resolve(fail("the step was stopped before the command ran"));
       // Its own process group, so a stop or a timeout ends what it started

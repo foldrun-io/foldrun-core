@@ -310,3 +310,47 @@ test("the person's images go with the prompt, after its text, as image blocks (F
   assert.throws(() => readOptions({ model: "m", images: [{ data: "not base64!", mediaType: "image/png" }] }), /not base64/);
   assert.throws(() => readOptions({ model: "m", images: [{ data: "A".repeat(6_000_000), mediaType: "image/png" }] }), /at most 3\.75 MB/);
 });
+
+test("Bash run_in_background: a job id at once, its new output on each read, stdin, wait, stop, and an end with the step (FOL-293)", () =>
+  withDir(async (dir, ctx) => {
+    const started = await Bash.run({ command: "echo ready; while read l; do echo \"got $l\"; [ \"$l\" = bye ] && exit 3; done", run_in_background: true }, ctx);
+    assert.match(started.text, /^job b1 is running .* — started in the background/);
+    assert.match(started.text, /\nready$/);
+    assert.equal(started.isError, undefined);
+    // Nothing new since: said plainly, not the old lines again.
+    assert.match((await Bash.run({ job: "b1" }, ctx)).text, /is running[\s\S]*\(no new output\)$/);
+    await Bash.run({ job: "b1", stdin: "one\n" }, ctx);
+    const one = await Bash.run({ job: "b1", wait: 300 }, ctx);
+    assert.match(one.text, /got one$/);
+    assert.doesNotMatch(one.text, /ready/);
+    // stdin, then wait for the end: the exit code is the job's own.
+    const end = await Bash.run({ job: "b1", stdin: "bye\n", wait: 5000 }, ctx);
+    assert.match(end.text, /^job b1 has ended — exit code 3\ngot bye$/);
+    assert.equal(end.isError, true);
+    assert.match((await Bash.run({ job: "b1", stdin: "x\n" }, ctx)).text, /its input is closed/);
+    // A server that never ends: stop takes it and what it started.
+    const srv = await Bash.run({ command: "sleep 60 & sleep 60; echo never", run_in_background: true }, ctx);
+    assert.match(srv.text, /^job b2 is running/);
+    const pid = ctx.jobs!.get("b2")!.pid!;
+    const stopped = await Bash.run({ job: "b2", stop: true }, ctx);
+    assert.match(stopped.text, /b2/);
+    assert.throws(() => process.kill(-pid, 0), "the whole group is gone");
+    assert.match((await Bash.run({ job: "b2" }, ctx)).text, /no background job b2 in this step \(there are: b1\)/);
+    // The wrong shapes say what goes with what.
+    assert.match((await Bash.run({ stdin: "x" }, ctx)).text, /stdin goes with job/);
+    assert.match((await Bash.run({ job: "b1", command: "ls" }, ctx)).text, /either command .* or job/);
+    // What is left running ends with the step.
+    await Bash.run({ command: "sleep 60", run_in_background: true }, ctx);
+    const left = ctx.jobs!.get("b2")!.pid!;
+    killGroups(ctx);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.throws(() => process.kill(-left, 0));
+    void dir;
+  }));
+
+test("checkBashInput: text written into a background job is checked as a command is (FOL-293)", async () => {
+  const { checkBashInput } = await import("../src/confine.ts");
+  assert.equal(checkBashInput({ job: "b1", stdin: "cat ~/.ssh/id_rsa\n" }).ok, false);
+  assert.equal(checkBashInput({ job: "b1", stdin: "npm test\n" }).ok, true);
+  assert.equal(checkBashInput({ command: "ls" }).ok, true);
+});

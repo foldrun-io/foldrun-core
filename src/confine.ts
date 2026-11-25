@@ -487,6 +487,16 @@ const PROTECTED_BASH: { re: RegExp; writeOnly: boolean; reason: string }[] = [
  */
 const WEB_URL = /\bhttps?:\/\/[^\s'"`)]+/gi;
 
+/**
+ * A Bash call's text, all of it: the command, and the text it writes into a background job (FOL-293) — a shell
+ * started in the background and fed lines must not walk past the check a command line gets.
+ */
+export function checkBashInput(input: Record<string, unknown>): ConfineVerdict {
+  const first = checkBash(String(input.command ?? ""));
+  if (!first.ok || typeof input.stdin !== "string") return first;
+  return checkBash(input.stdin);
+}
+
 export function checkBash(command: string): ConfineVerdict {
   for (const re of BASH_ESCAPES) {
     if (re.test(command)) {
