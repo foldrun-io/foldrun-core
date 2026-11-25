@@ -890,10 +890,44 @@ function inertGit(dir: string): boolean {
   }
 }
 
+/** Whether a path is there at all, a dangling link included. */
+function lexists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A `.git` that is only what the sandbox's mount points leave: a real folder (not a link) holding
+ *  nothing but an empty `hooks` folder and empty regular files named for the protected git paths.
+ *  No HEAD, objects or refs in any form, so no git reads it as a repository (FOL-333). */
+function onlyMountPoints(dir: string): boolean {
+  const g = path.join(dir, ".git");
+  try {
+    if (!fs.lstatSync(g).isDirectory()) return false;
+    for (const name of fs.readdirSync(g)) {
+      const st = fs.lstatSync(path.join(g, name));
+      if (name === "hooks" && st.isDirectory() && fs.readdirSync(path.join(g, name)).length === 0) continue;
+      if (["config", "config.worktree", "commondir", "gitdir"].includes(name) && st.isFile() && st.size === 0) continue;
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `dir` or a folder above it holds a `.git`. */
 function hasGitAbove(dir: string): boolean {
   for (let d = path.resolve(dir); ; d = path.dirname(d)) {
-    if (fs.existsSync(path.join(d, ".git"))) return true;
+    // The sandbox's own mount points are passed over: on Linux the write-denied <project>/.git/hooks and
+    // .git/config of a project that is no repository leave an empty .git while the walls are up, and the
+    // next launch then refused every command (FOL-333). Only exactly that — nothing git could ever take
+    // for a repository — is passed over; its paths are still kept from writes by gitProtected.
+    // lstat: a .git link that leads nowhere yet counts too — what it names could become a repository (Codex).
+    if (lexists(path.join(d, ".git")) && !(d === path.resolve(dir) && onlyMountPoints(d))) return true;
     if (path.dirname(d) === d) return false;
   }
 }

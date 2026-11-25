@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { APPARMOR_HINT, apparmorHint, CONTAINER_HINT, inContainer, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
+import { APPARMOR_HINT, apparmorHint, CONTAINER_HINT, inContainer, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, LAUNCHER, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
 import { readOptions } from "../src/engine-common.ts";
 import { connectMcp } from "../src/engine-mcp.ts";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
@@ -1064,6 +1064,61 @@ test("git: a project that is no repository still protects a global config inside
   } finally {
     fs.rmSync(proj, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("git: an empty .git in a project that is no repository — what the Linux mount points make — is not a repository (FOL-333)", () => {
+  const proj = tmpProject();
+  try {
+    // What bubblewrap leaves while the walls are up: .git, .git/hooks and an empty .git/config, no HEAD.
+    fs.mkdirSync(path.join(proj, ".git", "hooks"), { recursive: true });
+    fs.writeFileSync(path.join(proj, ".git", "config"), "");
+    const got = gitProtected(proj);
+    for (const p of [".git", ".git/hooks", ".git/config"]) assert.ok(got.includes(path.join(proj, p)), `${p} still protected in ${got.join(", ")}`);
+    // Asked again, with a cache (as every launch asks), the same answer.
+    const cache: GitCache = new Map();
+    assert.deepEqual(gitProtected(proj, undefined, process.env, [proj], cache).sort(), got.slice().sort());
+    // Anything more than the mount points is not passed over (Codex): a HEAD — a dangling link too —,
+    // a commondir that names somewhere, a hook in hooks/, a .git that is a link.
+    const variants: [string, () => void, () => void][] = [
+      ["dangling HEAD link", () => fs.symlinkSync("refs/heads/main", path.join(proj, ".git", "HEAD")), () => fs.rmSync(path.join(proj, ".git", "HEAD"))],
+      ["HEAD file", () => fs.writeFileSync(path.join(proj, ".git", "HEAD"), "ref: refs/heads/main\n"), () => fs.rmSync(path.join(proj, ".git", "HEAD"))],
+      ["commondir naming a folder", () => fs.writeFileSync(path.join(proj, ".git", "commondir"), "../common\n"), () => fs.rmSync(path.join(proj, ".git", "commondir"))],
+      ["a hook", () => fs.writeFileSync(path.join(proj, ".git", "hooks", "pre-commit"), "#!/bin/sh\n"), () => fs.rmSync(path.join(proj, ".git", "hooks", "pre-commit"))],
+      ["refs folder", () => fs.mkdirSync(path.join(proj, ".git", "refs")), () => fs.rmSync(path.join(proj, ".git", "refs"), { recursive: true })],
+    ];
+    for (const [what, make, undo] of variants) {
+      make();
+      assert.throws(() => gitProtected(proj), /git could not/, what);
+      undo();
+    }
+    assert.ok(gitProtected(proj).length > 0, "back to the mount points only");
+    // A .git link that leads nowhere is not passed over, nor taken for "no .git" (Codex).
+    fs.rmSync(path.join(proj, ".git"), { recursive: true });
+    fs.symlinkSync(path.join(proj, "later"), path.join(proj, ".git"));
+    assert.throws(() => gitProtected(proj), /git could not/, "dangling .git link");
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("linux: two launches in a project that is no repository both run (FOL-333)", { skip: process.platform !== "linux" }, async (t) => {
+  const proj = tmpProject();
+  const got = await openLocalSandbox({ cwd: proj, sites: [] });
+  if (isRefusal(got)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    return t.skip(`no sandbox here: ${got.refused}`);
+  }
+  try {
+    for (const n of [1, 2]) {
+      const l = await got.launch(`echo run${n} > run${n}.txt`, { PATH: process.env.PATH, HOME: os.homedir() });
+      const r = spawnSync(LAUNCHER, ["-c", l.line], { env: l.env, cwd: proj, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(fs.readFileSync(path.join(proj, `run${n}.txt`), "utf8").trim(), `run${n}`);
+    }
+  } finally {
+    await got.close();
+    fs.rmSync(proj, { recursive: true, force: true });
   }
 });
 
