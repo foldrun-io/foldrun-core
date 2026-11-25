@@ -31,7 +31,7 @@ export type Verdict =
 /** JSON files every reader takes strictly (npm, composer): a comment or a trailing comma breaks them. Every other
  *  .json is held only to JSON with comments and trailing commas — tsconfig, deno, babel and many more read it so, and a
  *  list of them never ends (Codex). */
-const STRICT_JSON = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|composer\.json|composer\.lock)$/;
+const STRICT_JSON = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|composer\.json)$/;
 
 /** JSON with comments and trailing commas, as plain JSON: comments become spaces and a comma before } or ] goes, never
  *  inside a string. */
@@ -49,19 +49,24 @@ export function stripJsonc(text: string): string {
       while (i < text.length && text[i] !== "\n") i++;
     } else if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
-      i = end < 0 ? text.length : end + 2;
+      // An unclosed comment is an error: left in, it fails the parse.
+      if (end < 0) return out + text.slice(i);
+      i = end + 2;
       out += " ";
     } else {
       out += c;
       i++;
     }
   }
-  return out.replace(/,(\s*[}\]])/g, "$1");
+  // Only a comma after a value: {,} and [,] stay errors.
+  return out.replace(/([^\s,[{])(\s*),(\s*[}\]])/g, "$1$2$3");
 }
 
 /** Which checker a file has, if any. */
 export function checkerFor(file: string): "json" | "js" | "py" | null {
   const f = file.replace(/\\/g, "/");
+  // Babel reads its JSON files as JSON5 (unquoted keys): not ours to judge.
+  if (/(^|\/)(\.babelrc(\.json)?|babel\.config\.json)$/.test(f)) return null;
   if (/\.jsonc?$/i.test(f)) return "json";
   if (/\.(js|cjs|mjs)$/i.test(f)) return "js";
   if (/\.py$/i.test(f)) return "py";
