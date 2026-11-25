@@ -250,6 +250,31 @@ export function checkPaths(
   input: Record<string, unknown>,
   roots: Roots,
 ): ConfineVerdict {
+  // Edit's `edits` (FOL-294): every file in the list is checked as one Edit's file_path is, and rewritten the same
+  // way (workspace/… spelled out); one refused refuses the whole change.
+  if (toolName === "Edit" && Array.isArray(input.edits)) {
+    const { edits, ...rest } = input;
+    const head = checkPaths(toolName, rest, roots);
+    if (!head.ok) return head;
+    let changed = false;
+    const out: unknown[] = [];
+    for (const e of edits as unknown[]) {
+      const o = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+      if (typeof o.file_path !== "string" || !o.file_path.trim()) {
+        out.push(e);
+        continue;
+      }
+      const v = checkPaths(toolName, { file_path: o.file_path }, roots);
+      if (!v.ok) return v;
+      const now = v.updatedInput?.file_path;
+      if (typeof now === "string" && now !== o.file_path) {
+        out.push({ ...o, file_path: now });
+        changed = true;
+      } else out.push(e);
+    }
+    const base = head.updatedInput ?? (changed ? rest : undefined);
+    return { ok: true, updatedInput: base || changed ? { ...(base ?? rest), edits: out } : undefined };
+  }
   const workspace = real(path.resolve(roots.workspaceRoot));
   const library = real(path.resolve(roots.libraryRoot));
   const isWrite = WRITE_TOOLS.has(toolName);

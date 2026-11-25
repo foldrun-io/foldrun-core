@@ -607,6 +607,10 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
         if (p.tool.name === "Read") filesRead.add(file);
         else if (p.tool.name === "Write" || p.tool.name === "Edit") filesChanged.add(file);
       }
+      // Edit's edits (FOL-294): every file it changed.
+      if (!outcome.isError && p.tool.name === "Edit" && Array.isArray(p.decision.input.edits)) {
+        for (const e of p.decision.input.edits as { file_path?: unknown }[]) if (typeof e?.file_path === "string") filesChanged.add(e.file_path);
+      }
       const context = await after(o, p.tool.name, String(p.block.id), p.decision.input, outcome, sessionId, signal);
       return { outcome, context };
     };

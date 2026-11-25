@@ -379,3 +379,62 @@ test("Bash job: stop ends what an exited shell left running; a job that never re
     assert.ok(Date.now() - t0 < 8000);
     killGroups(ctx);
   }));
+
+test("Edit edits: one change across files, all or nothing (FOL-294)", () =>
+  withDir(async (dir, ctx) => {
+    fs.writeFileSync(path.join(dir, "a.ts"), "export function oldName() { return 1; }\n");
+    fs.writeFileSync(path.join(dir, "b.ts"), "import { oldName } from './a';\noldName();\noldName();\n");
+    for (const f of ["a.ts", "b.ts"]) await Read.run({ file_path: f }, ctx);
+    const ok = await Edit.run({ edits: [
+      { file_path: "a.ts", old_string: "oldName", new_string: "newName" },
+      { file_path: "b.ts", old_string: "oldName", new_string: "newName", replace_all: true },
+    ] }, ctx);
+    assert.equal(ok.isError, undefined, ok.text);
+    assert.match(ok.text, /^Edited 2 files \(4 replacements\)/);
+    assert.equal(fs.readFileSync(path.join(dir, "b.ts"), "utf8"), "import { newName } from './a';\nnewName();\nnewName();\n");
+    // One change that does not match: no file is touched, and the answer names which.
+    const before = { a: fs.readFileSync(path.join(dir, "a.ts"), "utf8"), b: fs.readFileSync(path.join(dir, "b.ts"), "utf8") };
+    const no = await Edit.run({ edits: [
+      { file_path: "a.ts", old_string: "newName", new_string: "third" },
+      { file_path: "b.ts", old_string: "not there", new_string: "x" },
+    ] }, ctx);
+    assert.match(no.text, /^nothing was changed: .*b\.ts, change 1: old_string was not found/);
+    assert.equal(fs.readFileSync(path.join(dir, "a.ts"), "utf8"), before.a);
+    // Changes to one file apply in order, each against the text the one before left.
+    const chain = await Edit.run({ edits: [
+      { file_path: "a.ts", old_string: "newName", new_string: "mid" },
+      { file_path: "a.ts", old_string: "mid()", new_string: "last()" },
+    ] }, ctx);
+    assert.match(chain.text, /^Edited 1 file \(2 replacements\)/);
+    assert.match(fs.readFileSync(path.join(dir, "a.ts"), "utf8"), /function last\(\)/);
+    // A file not Read first, a syntax break, the same file by two paths, or mixed shapes: refused, nothing written.
+    fs.writeFileSync(path.join(dir, "c.ts"), "const c = 1;\n");
+    assert.match((await Edit.run({ edits: [{ file_path: "c.ts", old_string: "1", new_string: "2" }] }, ctx)).text, /^nothing was changed: .*Read/);
+    await Read.run({ file_path: "c.ts" }, ctx);
+    fs.symlinkSync(path.join(dir, "c.ts"), path.join(dir, "c-link.ts"));
+    await Read.run({ file_path: "c-link.ts" }, ctx);
+    // The same file by a link is one file: its changes apply in order, written once.
+    assert.match((await Edit.run({ edits: [{ file_path: "c.ts", old_string: "1", new_string: "2" }, { file_path: "c-link.ts", old_string: "const", new_string: "let" }] }, ctx)).text, /^Edited 1 file \(2 replacements\)/);
+    assert.equal(fs.readFileSync(path.join(dir, "c.ts"), "utf8"), "let c = 2;\n");
+    fs.writeFileSync(path.join(dir, "d.json"), '{"a": 1, "b": 2}\n');
+    await Read.run({ file_path: "d.json" }, ctx);
+    assert.match((await Edit.run({ edits: [{ file_path: "a.ts", old_string: "last", new_string: "x2" }, { file_path: "d.json", old_string: '1, "b"', new_string: '1 "b"' }] }, ctx)).text, /^nothing was changed: .*would stop parsing/);
+    assert.match(fs.readFileSync(path.join(dir, "a.ts"), "utf8"), /function last\(\)/, "the good file was not written either");
+    assert.match((await Edit.run({ file_path: "c.ts", edits: [{ file_path: "c.ts", old_string: "1", new_string: "2" }] }, ctx)).text, /either edits or file_path/);
+  }));
+
+test("checkPaths: every file in Edit's edits is held to the workspace (FOL-294)", async () => {
+  const { checkPaths } = await import("../src/confine.ts");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-confine-")));
+  const agentDir = path.join(root, "agents", "a");
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.mkdirSync(path.join(root, "knowledge"), { recursive: true });
+  const roots = { agentDir, workspaceRoot: root, libraryRoot: path.join(root, "..", "library-x") };
+  assert.equal(checkPaths("Edit", { edits: [{ file_path: "x.md", old_string: "a", new_string: "b" }] }, roots).ok, true);
+  assert.equal(checkPaths("Edit", { edits: [{ file_path: "x.md", old_string: "a", new_string: "b" }, { file_path: "/etc/hosts", old_string: "a", new_string: "b" }] }, roots).ok, false);
+  assert.equal(checkPaths("Edit", { edits: [{ file_path: "workspace/knowledge/p.md", old_string: "a", new_string: "b" }] }, roots).ok, false);
+  const v = checkPaths("Edit", { edits: [{ file_path: "workspace/storage/r.md", old_string: "a", new_string: "b" }] }, roots);
+  assert.equal(v.ok, true);
+  assert.equal((v.updatedInput as any)?.edits?.[0]?.file_path, path.join(root, "storage", "r.md"), "spelled out as one Edit's would be");
+  fs.rmSync(root, { recursive: true, force: true });
+});

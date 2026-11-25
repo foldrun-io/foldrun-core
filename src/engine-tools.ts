@@ -524,12 +524,128 @@ export function occurrences(hay: string, needle: string): number {
   return n;
 }
 
+/** At most this many replacements in one Edit `edits` list (FOL-294). */
+export const EDITS_MAX = 50;
+
+/** One file's replacements, worked out before anything is written: the new text, or why not. */
+function applyEdits(file: string, before: string, list: { old_string: string; new_string: string; replace_all?: boolean }[]): { after: string; count: number } | { problem: string } {
+  let text = before;
+  let count = 0;
+  for (const [i, e] of list.entries()) {
+    const at = `${file}, change ${i + 1}`;
+    if (!e.old_string) return { problem: `${at}: old_string is empty` };
+    if (e.old_string === e.new_string) return { problem: `${at}: old_string and new_string are the same` };
+    const n = occurrences(text, e.old_string);
+    if (n === 0) return { problem: `${at}: old_string was not found${i ? " (after the changes before it in this file)" : ""} — Read the file and copy the text exactly` };
+    if (n > 1 && e.replace_all !== true) return { problem: `${at}: old_string occurs ${n} times — add surrounding lines so it matches once, or pass replace_all: true` };
+    const pos = text.indexOf(e.old_string);
+    text = e.replace_all === true ? text.split(e.old_string).join(e.new_string) : text.slice(0, pos) + e.new_string + text.slice(pos + e.old_string.length);
+    count += e.replace_all === true ? n : 1;
+  }
+  return { after: text, count };
+}
+
+/**
+ * Edit's `edits` (FOL-294): replacements across files, all or nothing. Every file is read, checked as Read and
+ * unchanged since, and every replacement matched, before anything is written; the syntax guard sees each file's
+ * final text; a write that fails puts back the files already written.
+ */
+async function editMany(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolOutcome> {
+  const raw = input.edits;
+  if (!Array.isArray(raw) || !raw.length) return fail("edits is a list of {file_path, old_string, new_string, replace_all?}");
+  if (raw.length > EDITS_MAX) return fail(`edits holds at most ${EDITS_MAX} changes — split it`);
+  for (const k of ["file_path", "old_string", "new_string", "replace_all"]) if (input[k] !== undefined) return fail(`give either edits or ${k} (one change), not both`);
+  /** Per file, in the order first named, its changes in order. */
+  const byFile = new Map<string, { old_string: string; new_string: string; replace_all?: boolean }[]>();
+  for (const [i, e] of raw.entries()) {
+    const o = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+    const given = str(o, "file_path");
+    const from = str(o, "old_string");
+    const to = str(o, "new_string");
+    if (!given || from === null || to === null) return fail(`edits[${i}] needs file_path, old_string and new_string`);
+    const file = abs(ctx, given);
+    const list = byFile.get(file) ?? [];
+    list.push({ old_string: from, new_string: to, ...(o.replace_all === true ? { replace_all: true } : {}) });
+    byFile.set(file, list);
+  }
+  // One file named by two paths (a link) would be written twice from the same old text: refused (FOL-294).
+  const reals = new Map<string, string>();
+  for (const file of byFile.keys()) {
+    let r = file;
+    try {
+      r = fs.realpathSync(file);
+    } catch {
+      /* missing: said below */
+    }
+    const other = reals.get(r);
+    if (other) return fail(`nothing was changed: ${other} and ${file} are the same file — name it one way`);
+    reals.set(r, file);
+  }
+  const plan: { file: string; before: string; after: string; count: number }[] = [];
+  for (const [file, list] of byFile) {
+    const no = walled(ctx, file, true);
+    if (no) return fail(`nothing was changed: ${no.text}`);
+    if (!fs.existsSync(file)) return fail(`nothing was changed: ${file} does not exist — use Write to create it`);
+    if (fs.statSync(file).isDirectory()) return fail(`nothing was changed: ${file} is a directory`);
+    const stale = staleReason(ctx, file);
+    if (stale) return fail(`nothing was changed: ${stale}`);
+    const buf = await readChecked(ctx, file);
+    if (typeof buf === "string") return fail(`nothing was changed: ${buf}`);
+    if (looksBinary(buf)) return fail(`nothing was changed: ${file} is not a text file`);
+    const before = buf.toString("utf8");
+    const r = applyEdits(file, before, list);
+    if ("problem" in r) return fail(`nothing was changed: ${r.problem}`);
+    plan.push({ file, before, after: r.after, count: r.count });
+  }
+  const notes: string[] = [];
+  if (input.allow_syntax_errors !== true) {
+    for (const p of plan) {
+      if (!checkerFor(p.file)) continue;
+      const g = await guardChange(p.file, p.before, p.after, checkOptions(ctx));
+      if ("refuse" in g) return fail(`nothing was changed: ${g.refuse}`);
+      if (g.note) notes.push(g.note);
+      if (ctx.signal.aborted) return fail("nothing was changed: the step was stopped");
+    }
+    // The checks took time: each file is still as it was read.
+    for (const p of plan) {
+      const again = fs.existsSync(p.file) ? staleReason(ctx, p.file) : `${p.file} was removed while the change was checked`;
+      if (again) return fail(`nothing was changed: ${again}`);
+    }
+  }
+  const done: typeof plan = [];
+  for (const p of plan) {
+    try {
+      if (ctx.sandbox) await writeInside(p.file, p.after, ctx);
+      else writeWhole(p.file, p.after);
+      done.push(p);
+      ctx.reads.set(p.file, fs.statSync(p.file).mtimeMs);
+    } catch (err) {
+      // All or nothing: what was written goes back.
+      const back: string[] = [];
+      for (const d of done) {
+        try {
+          if (ctx.sandbox) await writeInside(d.file, d.before, ctx);
+          else writeWhole(d.file, d.before);
+          ctx.reads.set(d.file, fs.statSync(d.file).mtimeMs);
+        } catch {
+          back.push(d.file);
+        }
+      }
+      return fail(`nothing was changed: ${p.file} could not be written (${err instanceof Error ? err.message : String(err)})${back.length ? `; and ${back.join(", ")} could NOT be put back — they hold the new text` : done.length ? "; the files written before it were put back" : ""}`);
+    }
+  }
+  const total = plan.reduce((n, p) => n + p.count, 0);
+  return { text: `Edited ${plan.length} file${plan.length === 1 ? "" : "s"} (${total} replacement${total === 1 ? "" : "s"}): ${plan.map((p) => p.file).join(", ")}${notes.length ? `\n${notes.join("\n")}` : ""}` };
+}
+
 const edit: EngineTool = {
   name: "Edit",
   description:
     "Replace exact text in a file that has been Read. old_string must match the file character for character, " +
     "whitespace and line breaks included, and must occur exactly once — add surrounding lines to make it unique, " +
-    "or pass replace_all to change every occurrence. Nothing is changed when it does not match.",
+    "or pass replace_all to change every occurrence. Nothing is changed when it does not match. " +
+    "For one change made across several files (a rename, a signature and its callers), pass edits: a list of " +
+    "{file_path, old_string, new_string, replace_all?} applied in order, all or nothing — every file Read first.",
   input_schema: {
     type: "object",
     properties: {
@@ -537,12 +653,26 @@ const edit: EngineTool = {
       old_string: { type: "string", description: "The exact text to replace" },
       new_string: { type: "string", description: "What replaces it" },
       replace_all: { type: "boolean", description: "Replace every occurrence (default false)" },
+      edits: {
+        type: "array",
+        description: `Instead of the four above: up to ${EDITS_MAX} changes across files, all applied or none`,
+        items: {
+          type: "object",
+          properties: {
+            file_path: { type: "string" },
+            old_string: { type: "string" },
+            new_string: { type: "string" },
+            replace_all: { type: "boolean" },
+          },
+          required: ["file_path", "old_string", "new_string"],
+        },
+      },
       allow_syntax_errors: ALLOW_SYNTAX_ERRORS,
     },
-    required: ["file_path", "old_string", "new_string"],
   },
   readOnly: false,
   async run(input, ctx) {
+    if (input.edits !== undefined) return editMany(input, ctx);
     const given = str(input, "file_path");
     const from = str(input, "old_string");
     const to = str(input, "new_string");
