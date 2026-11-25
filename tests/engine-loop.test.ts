@@ -1613,3 +1613,53 @@ test("effort: the agent's level goes out as output_config.effort, on a model tha
   assert.equal("output_config" in (await sent("claude-sonnet-5-5", "extreme")), false, "a word that is not a level is not sent");
 });
 
+
+test("server tools (FOL-304): sent first in tools, the gateway's announcement passed up once, its blocks kept in the conversation", async () => {
+  const bodies: any[] = [];
+  let n = 0;
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw));
+      n++;
+      res.writeHead(200, { "content-type": "text/event-stream", "foldrun-server-tools": "web_search_20250305,web_fetch_20250910, bad value" });
+      const send = (ev: Record<string, unknown>) => res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      send({ type: "message_start", message: { id: `msg_${n}`, model: "m", usage: { input_tokens: 5, output_tokens: 1 } } });
+      if (n === 1) {
+        send({ type: "content_block_start", index: 0, content_block: { type: "server_tool_use", id: "srv_1", name: "web_search", input: {} } });
+        send({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"query":"hats"}' } });
+        send({ type: "content_block_stop", index: 0 });
+        send({ type: "content_block_start", index: 1, content_block: { type: "web_search_tool_result", tool_use_id: "srv_1", content: [{ type: "web_search_result", url: "https://h.example", title: "Hats" }] } });
+        send({ type: "content_block_stop", index: 1 });
+        send({ type: "message_delta", delta: { stop_reason: "pause_turn" }, usage: { output_tokens: 3 } });
+      } else {
+        send({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+        send({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Found hats." } });
+        send({ type: "content_block_stop", index: 0 });
+        send({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } });
+      }
+      send({ type: "message_stop" });
+      res.end();
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const out: any[] = [];
+    const serverTools = [{ type: "web_search_20250305", name: "web_search" }, { type: "web_fetch_20250910", name: "web_fetch" }, { type: "code_execution_20250522", name: "code_execution" }];
+    for await (const m of foldrunQuery({ prompt: "find hats", options: { cwd: os.tmpdir(), model: "m", tools: ["Glob"], serverTools, env: { ANTHROPIC_BASE_URL: url, ANTHROPIC_API_KEY: "k" } } as any })) out.push(m);
+    assert.deepEqual(bodies[0].tools.slice(0, 2), serverTools.slice(0, 2), "the two known server tools first, as written");
+    assert.ok(!bodies[0].tools.some((t: any) => t.name === "code_execution"), "a server tool the engine does not know is never sent");
+    assert.equal(bodies[0].tools.at(-1).name, "Glob");
+    const said = out.filter((m) => m.type === "system" && m.subtype === "server_tools");
+    assert.equal(said.length, 1, "said once");
+    assert.deepEqual(said[0].tools, ["web_search_20250305", "web_fetch_20250910"]);
+    const sent = JSON.stringify(bodies[1].messages);
+    assert.match(sent, /"server_tool_use"[\s\S]*"query":"hats"[\s\S]*web_search_tool_result/, "pause_turn resent with the server blocks kept");
+    assert.equal(out.at(-1).subtype, "success");
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

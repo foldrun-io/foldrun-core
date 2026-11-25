@@ -105,15 +105,19 @@ export function endOf(stopReason: string | null, calls: number): { subtype: stri
   }
 }
 
-export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
+export function buildRequest(o: Pick<LoopOptions, "model" | "systemPrompt" | "tools" | "env" | "serverTools">, messages: { role: string; content: Block[] }[], cache = true, maxTokens?: number): Json {
   // A one-off request (a summary) writes nothing to the cache.
   const mark = cache ? { cache_control: { type: "ephemeral" } } : {};
-  const tools = o.tools.map((t, i) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.input_schema,
-    ...(i === o.tools.length - 1 ? mark : {}),
-  }));
+  // Server tools first (FOL-304): the cache mark stays on the last client tool.
+  const tools = [
+    ...(o.serverTools ?? []),
+    ...o.tools.map((t, i) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.input_schema,
+      ...(i === o.tools.length - 1 ? mark : {}),
+    })),
+  ];
   const sent = messages.map((m, i) => {
     if (i !== messages.length - 1 || !m.content.length) return m;
     const last = m.content.length - 1;
@@ -265,6 +269,8 @@ interface Turn {
   usage: Usage;
   /** tool_use ids whose arguments did not arrive as valid JSON. */
   malformed: Set<string>;
+  /** The server tool types the gateway says it runs itself (`foldrun-server-tools`, FOL-304), when it says so. */
+  serverTools?: string[];
 }
 
 /** One model call: yields the raw stream events, returns the whole turn. */
@@ -272,7 +278,11 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
   const thinking = thinkingParam(o);
   const output = effortParam(o);
   const res = await openStream(o, { ...buildRequest(o, messages, cache, maxTokens), ...(thinking ? { thinking } : {}), ...(output ? { output_config: output } : {}) }, signal);
-  const turn: Turn = { id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set() };
+  const announced = res.headers.get("foldrun-server-tools");
+  const turn: Turn = {
+    id: "", model: o.model, content: [], stopReason: null, usage: emptyUsage(), malformed: new Set(),
+    ...(announced !== null ? { serverTools: announced.split(",").map((x) => x.trim()).filter((x) => /^[a-z_]+_\d{8}$/.test(x)) } : {}),
+  };
   // A caller that must count what a stream that breaks part-way had
   // already reported (a summary request) reads it here.
   if (track) track.turn = turn;
@@ -292,7 +302,8 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
       addUsage(turn.usage, m?.usage);
     } else if (type === "content_block_start") {
       const block = { ...(ev.content_block as Block) };
-      if (block.type === "tool_use") block.input = {};
+      // A server tool's call (FOL-304) streams its input as a client tool's does; its result block comes whole.
+      if (block.type === "tool_use" || block.type === "server_tool_use") block.input = {};
       turn.content[ev.index as number] = block;
       open.add(ev.index as number);
     } else if (type === "content_block_delta") {
@@ -306,7 +317,14 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
     } else if (type === "content_block_stop") {
       open.delete(ev.index as number);
       const block = turn.content[ev.index as number];
-      if (block?.type === "tool_use") {
+      if (block?.type === "server_tool_use") {
+        try {
+          const parsed: unknown = JSON.parse(partialJson.get(ev.index as number) || "{}");
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) block.input = parsed;
+        } catch {
+          /* the gateway ran it already: its input is only shown */
+        }
+      } else if (block?.type === "tool_use") {
         const raw = partialJson.get(ev.index as number) ?? "";
         try {
           const parsed: unknown = raw ? JSON.parse(raw) : {};
@@ -332,6 +350,7 @@ async function* modelTurn(o: LoopOptions, messages: { role: string; content: Blo
 }
 
 async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interrupted: () => boolean): AsyncGenerator<Json> {
+  let serverToolsSaid = false;
   const sessionId = crypto.randomUUID();
   const startedAt = Date.now();
   const byName = new Map(o.tools.map((t) => [t.name, t]));
@@ -430,7 +449,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
     for (const later of cutPoints(messages)) if (later > cut && older(cut) < 1_024) cut = later;
     if (older(cut) < 1_024) return { ok: false, why: "there was too little older to summarise" };
     // No thinking summary on this one: nobody reads it (Codex).
-    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], partial: false, thinkingDisplay: null, effort: null };
+    const ask = { ...o, systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, tools: [], serverTools: undefined, partial: false, thinkingDisplay: null, effort: null };
     // The request itself must fit: the conversation's text is held to the
     // window less the reply's reserve and the prompts, newest part kept.
     const request = [{ role: "user", content: [{ type: "text", text: summaryRequest(messages.slice(0, cut), previousSummary(messages), Math.max(4_000, (room - 3_000) * 4)) }] }];
@@ -511,7 +530,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
         if (done.ok && contextNow() > o.compaction.contextWindow - o.compaction.reserveTokens) autoCompaction = false;
       }
     }
-    let turn: Turn;
+    let turn!: Turn;
     try {
       const stream = modelTurn(o, messages, signal);
       for (;;) {
@@ -521,6 +540,11 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
           break;
         }
         yield { type: "stream_event", event: step.value, parent_tool_use_id: null, session_id: sessionId };
+      }
+      // What the gateway runs itself, said once a session: a caller offers server tools only where they are run (FOL-304).
+      if (turn.serverTools && !serverToolsSaid) {
+        serverToolsSaid = true;
+        yield { type: "system", subtype: "server_tools", tools: turn.serverTools, session_id: sessionId };
       }
     } catch (err) {
       // An interrupt we were asked for ends the loop quietly: the caller

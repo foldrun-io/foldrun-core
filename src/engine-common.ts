@@ -76,6 +76,9 @@ export interface LoopOptions {
   programs?: boolean;
   /** Where Symbols installs language servers, and the client's own read rule (FOL-297; ToolContext). */
   toolsDir?: string;
+  /** Server tools the gateway runs itself (FOL-304), sent as written in the request's tools — only
+   *  web_search_* / web_fetch_* / foldrun_web_browse_* types; their blocks come back in the reply. */
+  serverTools?: { type: string; name: string; [k: string]: unknown }[];
   readable?: (file: string) => boolean;
   /** The User-Agent the model calls carry: the caller's own name
    *  (`userAgent`, e.g. foldrun-cli/27.8.0), else foldrun-engine. An option,
@@ -260,6 +263,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     // machine without walls (engineHostShell), where each command is asked.
     programs: localSandbox !== null || (sandbox?.enabled === false && options.engineHostShell !== true),
     ...(typeof options.toolsDir === "string" && path.isAbsolute(options.toolsDir) ? { toolsDir: options.toolsDir } : {}),
+    ...(Array.isArray(options.serverTools) ? { serverTools: serverToolsOf(options.serverTools) } : {}),
     ...(typeof options.readable === "function" ? { readable: options.readable as (file: string) => boolean } : {}),
     userAgent: typeof options.userAgent === "string" && /^[!-~]{1,100}$/.test(options.userAgent) && !/^claude[-_/]/i.test(options.userAgent) ? options.userAgent : "foldrun-engine",
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
@@ -338,3 +342,13 @@ export async function after(o: LoopOptions, name: string, id: string, input: Jso
   return added;
 }
 
+
+/** The server tools a caller may ask for, each a known dated type and its one name; anything else dropped. */
+export function serverToolsOf(raw: unknown[]): { type: string; name: string; [k: string]: unknown }[] {
+  const ok: Record<string, RegExp> = { web_search: /^web_search_\d{8}$/, web_fetch: /^web_fetch_\d{8}$/, web_browse: /^foldrun_web_browse_\d{8}$/ };
+  return raw.filter((t): t is { type: string; name: string } => {
+    if (!t || typeof t !== "object") return false;
+    const x = t as { type?: unknown; name?: unknown };
+    return typeof x.name === "string" && typeof x.type === "string" && ok[x.name]?.test(x.type) === true;
+  });
+}
