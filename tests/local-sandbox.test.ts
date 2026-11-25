@@ -100,7 +100,7 @@ test("inside the walls: a site not on the list is asked about, by host, and only
   const proj = tmpProject();
   const asked: string[] = [];
   let answer: boolean | { allow: false; reason: string } = { allow: false, reason: "the person said no" };
-  const box = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (host, port) => (asked.push(`${host}:${port}`), answer) });
+  const box = await openLocalSandbox({ cwd: proj, sites: [] }, {}, async (host, port) => (asked.push(`${host}:${port}`), answer));
   if (isRefusal(box)) {
     fs.rmSync(proj, { recursive: true, force: true });
     if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
@@ -120,7 +120,7 @@ test("inside the walls: a site not on the list is asked about, by host, and only
     assert.ok(asked.length > n, "asked again: remembering an answer is the caller's");
     // A second opener of the same walls never answers for the first (Codex).
     const other: string[] = [];
-    const second = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (h) => (other.push(h), true) });
+    const second = await openLocalSandbox({ cwd: proj, sites: [] }, {}, async (h) => (other.push(h), true));
     assert.ok(!isRefusal(second));
     answer = { allow: false, reason: "no" };
     await bash("curl -sS -m 10 -o /dev/null https://example.org/ || true");
@@ -142,7 +142,7 @@ test("inside the walls: an opener of walls already up cannot install an asker (F
     return t.skip(`the sandbox cannot start here: ${first.refused}`);
   }
   const asked: string[] = [];
-  const second = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (h) => (asked.push(h), true) });
+  const second = await openLocalSandbox({ cwd: proj, sites: [] }, {}, async (h) => (asked.push(h), true));
   try {
     assert.ok(!isRefusal(second));
     const ctx = ctxFor(proj, first, { ...process.env, TMPDIR: first.tmp });

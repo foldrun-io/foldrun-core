@@ -1204,7 +1204,10 @@ let asker: AskSite | null = null;
  */
 export function openLocalSandbox(
   policy: LocalSandboxPolicy,
-  opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime>; askSite?: AskSite } = {},
+  opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime> } = {},
+  /** Asked about a site a command reaches that is not on the list (FOL-312) — a trailing argument, so the release
+   *  reads it as a widening. */
+  askSite?: AskSite,
 ): Promise<LocalSandbox | SandboxRefusal> {
   return inQueue(async () => {
     const fresh = walls === null || walls.down;
@@ -1214,8 +1217,8 @@ export function openLocalSandbox(
     // the first (Codex). None: unlisted sites are refused, as before. Accepted: a second handle of the same walls
     // shares the one proxy, so a yes to a site holds for every command inside them — the same person's session in
     // the same process; telling handles apart would take the runtime's per-command network lists.
-    if (!("refused" in got) && opts.askSite && fresh && asker === null) {
-      const mine = opts.askSite;
+    if (!("refused" in got) && askSite && fresh && asker === null) {
+      const mine = askSite;
       asker = mine;
       const close = got.close.bind(got);
       got.close = async () => {
