@@ -311,6 +311,34 @@ test("the person's images go with the prompt, after its text, as image blocks (F
   assert.throws(() => readOptions({ model: "m", images: [{ data: "A".repeat(6_000_000), mediaType: "image/png" }] }), /at most 3\.75 MB/);
 });
 
+/** Whether anything of a process group still runs. A killed process stays in its group as a zombie until it is
+ *  reaped (on Linux, in a container whose first process does not reap, maybe never): that is not running. */
+async function groupRunning(pgid: number, ms = 3000): Promise<boolean> {
+  const end = Date.now() + ms;
+  for (;;) {
+    let live = true;
+    try {
+      process.kill(-pgid, 0);
+    } catch {
+      live = false;
+    }
+    if (live && process.platform === "linux") {
+      live = fs.readdirSync("/proc").filter((d) => /^\d+$/.test(d)).some((d) => {
+        try {
+          const stat = fs.readFileSync(`/proc/${d}/stat`, "utf8");
+          const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+          return Number(f[2]) === pgid && f[0] !== "Z";
+        } catch {
+          return false;
+        }
+      });
+    }
+    if (!live) return false;
+    if (Date.now() > end) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 test("Bash run_in_background: a job id at once, its new output on each read, stdin, wait, stop, and an end with the step (FOL-293)", () =>
   withDir(async (dir, ctx) => {
     const started = await Bash.run({ command: "echo ready; while read l; do echo \"got $l\"; [ \"$l\" = bye ] && exit 3; done", run_in_background: true }, ctx);
@@ -334,7 +362,7 @@ test("Bash run_in_background: a job id at once, its new output on each read, std
     const pid = ctx.jobs!.get("b2")!.pid!;
     const stopped = await Bash.run({ job: "b2", stop: true }, ctx);
     assert.match(stopped.text, /b2/);
-    assert.throws(() => process.kill(-pid, 0), "the whole group is gone");
+    assert.equal(await groupRunning(pid), false, "the whole group is gone");
     assert.match((await Bash.run({ job: "b2" }, ctx)).text, /no background job b2 in this step \(there are: b1\)/);
     // The wrong shapes say what goes with what.
     assert.match((await Bash.run({ stdin: "x" }, ctx)).text, /stdin goes with job/);
@@ -344,8 +372,7 @@ test("Bash run_in_background: a job id at once, its new output on each read, std
     assert.match((await Bash.run({ command: "sleep 60", run_in_background: true }, ctx)).text, /^job b3 is running/);
     const left = ctx.jobs!.get("b3")!.pid!;
     killGroups(ctx);
-    await new Promise((r) => setTimeout(r, 200));
-    assert.throws(() => process.kill(-left, 0));
+    assert.equal(await groupRunning(left), false);
     void dir;
   }));
 
@@ -368,10 +395,9 @@ test("Bash job: stop ends what an exited shell left running; a job that never re
     const pid = ctx.jobs!.get("b1")!.pid!;
     await Bash.run({ job: "b1", wait: 2000 }, ctx);
     assert.ok(ctx.jobs!.get("b1")!.exit, "the shell itself exited");
-    assert.doesNotThrow(() => process.kill(-pid, 0), "its sleep is still there");
+    assert.equal(await groupRunning(pid, 0), true, "its sleep is still there");
     await Bash.run({ job: "b1", stop: true }, ctx);
-    await new Promise((r) => setTimeout(r, 300));
-    assert.throws(() => process.kill(-pid, 0), "stop ended the group anyway");
+    assert.equal(await groupRunning(pid), false, "stop ended the group anyway");
     await Bash.run({ command: "sleep 60", run_in_background: true }, ctx);
     const t0 = Date.now();
     const big = await Bash.run({ job: "b2", stdin: "x".repeat(4 * 1024 * 1024) }, ctx);
