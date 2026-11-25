@@ -319,6 +319,52 @@ export function imageMediaType(buf: Buffer): "image/png" | "image/jpeg" | "image
   return null;
 }
 
+/** An image's width and height from its header, or null when it cannot be read (FOL-295). */
+export function imageDimensions(b: Buffer): { w: number; h: number } | null {
+  const t = imageMediaType(b);
+  if (t === "image/png" && b.length >= 24 && b.subarray(12, 16).toString("latin1") === "IHDR") return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (t === "image/gif" && b.length >= 10) return { w: b.readUInt16LE(6), h: b.readUInt16LE(8) };
+  if (t === "image/webp" && b.length >= 30) {
+    const kind = b.subarray(12, 16).toString("latin1");
+    if (kind === "VP8X") return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+    if (kind === "VP8 ") return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+    if (kind === "VP8L") {
+      const v = b.readUInt32LE(21);
+      return { w: 1 + (v & 0x3fff), h: 1 + ((v >> 14) & 0x3fff) };
+    }
+    return null;
+  }
+  if (t === "image/jpeg") {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) return null;
+      const marker = b[i + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+      i += 2 + b.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
+/** The first bytes of a file, without reading all of it: inside the walls, there. */
+async function headOf(ctx: ToolContext, file: string, n: number): Promise<Buffer | null> {
+  if (ctx.sandbox) {
+    const r = await runInside(ctx, `exec /usr/bin/head -c ${n} -- ${shq(file)}`, "");
+    return r.code === 0 ? r.out : null;
+  }
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(n);
+      return buf.subarray(0, fs.readSync(fd, buf, 0, n, 0));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 const read: EngineTool = {
   name: "Read",
   description:
@@ -349,6 +395,11 @@ const read: EngineTool = {
       return fail(`${file} does not exist`);
     }
     if (stat.isDirectory()) return fail(`${file} is a directory — use Glob to list files`);
+    // A large image is told from its first bytes, before the whole file is read (Codex).
+    if (stat.size > READ_IMAGE_BYTES) {
+      const head = await headOf(ctx, file, 16);
+      if (head && imageMediaType(head)) return fail(`${file} is a ${Math.round(stat.size / 1024)} KB image — larger than a model is shown (3.75 MB); make a smaller copy (sips -Z 1600 on a Mac, convert -resize 1600x1600 elsewhere) and Read that`);
+    }
     const buf = await readChecked(ctx, file);
     if (typeof buf === "string") return fail(buf);
     // An image, shown as one (FOL-295): screenshots and designs for models that take images.
@@ -356,8 +407,12 @@ const read: EngineTool = {
     if (image) {
       const size = `${Math.max(1, Math.round(buf.length / 1024))} KB`;
       if (buf.length > READ_IMAGE_BYTES) return fail(`${file} is a ${size} image — larger than a model is shown (3.75 MB); make a smaller copy (sips -Z 1600 on a Mac, convert -resize 1600x1600 elsewhere) and Read that`);
+      // An image whose size cannot be read, or too large a side, would fail the next model call (Codex).
+      const dim = imageDimensions(buf);
+      if (!dim || !dim.w || !dim.h) return fail(`${file} looks like an image but its header cannot be read — it may be damaged; not shown`);
+      if (Math.max(dim.w, dim.h) > 8000) return fail(`${file} is ${dim.w}×${dim.h} px — larger than a model is shown (8000 px a side); make a smaller copy and Read that`);
       ctx.reads.set(file, stat.mtimeMs);
-      const said = `${file}: ${image.slice(6).toUpperCase()} image, ${size}`;
+      const said = `${file}: ${image.slice(6).toUpperCase()} image, ${dim.w}×${dim.h} px, ${size}`;
       return { text: said, parts: [{ type: "text", text: said }, { type: "image", data: buf.toString("base64"), mediaType: image }] };
     }
     if (looksBinary(buf)) return fail(`${file} is not a text file`);

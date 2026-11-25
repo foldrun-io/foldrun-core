@@ -174,13 +174,24 @@ export function hookFns(hooks: unknown, event: string): HookFn[] {
 /** `engine` names the loop in what it refuses. */
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
-/** Only well-formed images, at most 20 (FOL-268). */
+/** Base64 of 3.75 MB, the most one image may be; 20 MB of base64 for all (FOL-268, Codex). */
+const IMAGE_B64_MAX = Math.ceil((3.75 * 1024 * 1024) / 3) * 4;
+const IMAGES_B64_TOTAL = 20 * 1024 * 1024;
+
+/** Only well-formed images, at most 20, each and all within what a request takes — else refused whole. */
 function readImages(v: unknown): { data: string; mediaType: string }[] {
   if (!Array.isArray(v)) return [];
-  return v
+  const out = v
     .filter((x): x is { data: string; mediaType: string } => !!x && typeof x === "object" && typeof (x as Json).data === "string" && IMAGE_TYPES.has(String((x as Json).mediaType)))
-    .slice(0, 20)
     .map((x) => ({ data: x.data, mediaType: x.mediaType }));
+  if (out.length > 20) throw new Error("at most 20 images go with one prompt");
+  let total = 0;
+  for (const i of out) {
+    if (!i.data || i.data.length > IMAGE_B64_MAX || i.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(i.data)) throw new Error("an image sent with the prompt is not base64 of at most 3.75 MB");
+    total += i.data.length;
+  }
+  if (total > IMAGES_B64_TOTAL) throw new Error("the images sent with the prompt are more than 20 MB together");
+  return out;
 }
 
 export function readOptions(options: Json, engine = "foldrun"): LoopOptions {

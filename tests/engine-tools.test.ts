@@ -275,11 +275,18 @@ test("a background job that keeps the output open does not hold the command: it 
 
 test("Read shows an image as an image, known by its bytes; too large is refused with what to do; a renamed binary stays refused (FOL-295)", () =>
   withDir(async (dir, ctx) => {
-    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100, 1)]);
+    const ihdr = Buffer.alloc(16);
+    ihdr.writeUInt32BE(13, 0);
+    ihdr.write("IHDR", 4, "latin1");
+    ihdr.writeUInt32BE(640, 8);
+    ihdr.writeUInt32BE(480, 12);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, Buffer.alloc(100, 1)]);
     fs.writeFileSync(path.join(dir, "shot.dat"), png);
     const r = await Read.run({ file_path: "shot.dat" }, ctx);
     assert.equal(r.isError, undefined);
-    assert.match(r.text, /shot\.dat: PNG image, 1 KB$/);
+    assert.match(r.text, /shot\.dat: PNG image, 640×480 px, 1 KB$/);
+    fs.writeFileSync(path.join(dir, "broken.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]));
+    assert.match((await Read.run({ file_path: "broken.png" }, ctx)).text, /header cannot be read/);
     assert.equal(r.parts?.length, 2);
     assert.deepEqual(r.parts?.[1], { type: "image", data: png.toString("base64"), mediaType: "image/png" });
     // Read counts as read: Write may then replace it.
@@ -300,4 +307,6 @@ test("the person's images go with the prompt, after its text, as image blocks (F
   const o = readOptions({ model: "m", images: [{ data: "AAAA", mediaType: "image/png" }, { data: "x", mediaType: "text/html" }, null] });
   assert.deepEqual(o.images, [{ data: "AAAA", mediaType: "image/png" }], "only well-formed images");
   assert.equal(readOptions({ model: "m" }).images, undefined);
+  assert.throws(() => readOptions({ model: "m", images: [{ data: "not base64!", mediaType: "image/png" }] }), /not base64/);
+  assert.throws(() => readOptions({ model: "m", images: [{ data: "A".repeat(6_000_000), mediaType: "image/png" }] }), /at most 3\.75 MB/);
 });
