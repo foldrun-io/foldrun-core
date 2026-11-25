@@ -13,6 +13,36 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [28.1.0] — 2026-11-25
+
+### New in the public API
+
+- `@foldrun/core/local-resources`
+- `BudgetChoice` from `@foldrun/core/local-resources`
+- `BUDGET_CHOICES` from `@foldrun/core/local-resources`
+- `Computer` from `@foldrun/core/local-resources`
+- `Budget` from `@foldrun/core/local-resources`
+- `detectComputer` from `@foldrun/core/local-resources`
+- `budgetFor` from `@foldrun/core/local-resources`
+- `parseBudget` from `@foldrun/core/local-resources`
+- `agentAsks` from `@foldrun/core/local-resources`
+- `ResourceRow` from `@foldrun/core/local-resources`
+- `resolveLocal` from `@foldrun/core/local-resources`
+- `formatMi` from `@foldrun/core/local-resources`
+- `formatCpu` from `@foldrun/core/local-resources`
+- `SessionHold` from `@foldrun/core/local-resources`
+- `recordHold` from `@foldrun/core/local-resources`
+- `readHolds` from `@foldrun/core/local-resources`
+
+### feat
+
+- local-resources — this computer's CPU and memory, the budget a person chooses, what an agent's size:/resources: ask (the cloud's own resolveResources), the lower in force, and a record per open session (FOL-240 slice 1) ([3046298](https://github.com/foldrun-io/foldrun-core/commit/3046298))
+
+### fix
+
+- local-resources loads the cloud's resolver only when an agent's ask is read — an idle foldrun code session stays under its module ceiling (FOL-240) ([5b202ed](https://github.com/foldrun-io/foldrun-core/commit/5b202ed))
+- a session's hold is written whole (renamed into place), never read half-written (Codex, FOL-240) ([c4060d4](https://github.com/foldrun-io/foldrun-core/commit/c4060d4))
+
 ## [28.0.0] — 2026-11-25
 
 ### Breaking changes
