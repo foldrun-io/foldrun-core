@@ -978,10 +978,29 @@ export function appArmorRestrictsUserns(read = (f: string) => fs.readFileSync(f,
   }
 }
 
-/** The fix for that block. Never "turn the restriction off". */
-export const APPARMOR_HINT =
-  "Ubuntu restricts unprivileged user namespaces, so bubblewrap cannot start. Allow bubblewrap alone with the profile Ubuntu ships: " +
-  "sudo cp /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict";
+/** The fix for that block: bubblewrap alone may make namespaces, the rest of the
+ *  system stays restricted. Never "turn the restriction off" (the sysctl).
+ *  Not Ubuntu's own bwrap-userns-restrict profile: it lets bwrap start but takes
+ *  the capabilities away inside, and the sandbox's seccomp step needs one more
+ *  namespace there ("nested userns is capability-restricted") — tried on Ubuntu
+ *  24.04, 25 Nov 2026; that profile is also only in apparmor-profiles, which
+ *  minimal and cloud images leave out. */
+export function apparmorHint(bwrap = "/usr/bin/bwrap"): string {
+  const head = "Ubuntu restricts unprivileged user namespaces, so bubblewrap cannot start. ";
+  // Only the packaged binary gets a command: a root-owned path with nothing to quote (Codex).
+  if (bwrap !== "/usr/bin/bwrap" && bwrap !== "/bin/bwrap")
+    return head + `foldrun found bubblewrap at ${bwrap}, not the system's: put the distribution's first (sudo apt-get install bubblewrap, /usr/bin/bwrap), then run foldrun code again for the fix.`;
+  const file = "/etc/apparmor.d/foldrun-bwrap";
+  return (
+    head +
+    "An administrator may let bubblewrap make them again, as Ubuntu did before 24.04 — " +
+    `for every user of this machine who can run ${bwrap}, not only foldrun; the restriction stays on for every other program: ` +
+    `test ! -e ${file} && printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile foldrun-bwrap ${bwrap} flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee ${file} >/dev/null && sudo apparmor_parser -r ${file}` +
+    " (it writes nothing if that file exists). If sudo aa-status lists bwrap-userns-restrict, that profile wins and starts bwrap without the capabilities the sandbox needs inside: remove it first (sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo rm /etc/apparmor.d/bwrap-userns-restrict)."
+  );
+}
+/** The hint for the packaged bwrap, for callers that do not know which one runs. */
+export const APPARMOR_HINT = apparmorHint();
 
 /** Inside a container: its runtime, not the host, decides whether user
  *  namespaces may be made — and Docker's default profile refuses them. A host
@@ -1408,7 +1427,7 @@ async function bringUp(
   const pinned = platform === "linux" ? { rg: which("rg", trusted, early), bwrap: which("bwrap", trusted, early), socat: which("socat", trusted, early) } : { rg: null, bwrap: null, socat: null };
   const deps = M.checkDependencies(pinned.rg ? { command: pinned.rg } : undefined);
   // Why namespaces were refused: a container's runtime, or Ubuntu's AppArmor on a machine of its own.
-  const nsHint = () => (platform !== "linux" ? undefined : inContainer() ? CONTAINER_HINT : appArmorRestrictsUserns() ? APPARMOR_HINT : undefined);
+  const nsHint = () => (platform !== "linux" ? undefined : inContainer() ? CONTAINER_HINT : appArmorRestrictsUserns() ? apparmorHint(pinned.bwrap ?? undefined) : undefined);
   // A tool missing comes first: nothing about namespaces matters until it is installed (bench, 25 Nov 2026).
   if (deps.errors.length) return { refused: `the sandbox cannot start: ${deps.errors.join("; ")}`, hint: installHint(platform) };
   // Without seccomp a Linux command can reach any Unix socket it can see —

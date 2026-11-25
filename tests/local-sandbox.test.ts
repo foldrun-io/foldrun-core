@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { APPARMOR_HINT, CONTAINER_HINT, inContainer, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
+import { APPARMOR_HINT, apparmorHint, CONTAINER_HINT, inContainer, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
 import { readOptions } from "../src/engine-common.ts";
 import { connectMcp } from "../src/engine-mcp.ts";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
@@ -76,7 +76,15 @@ test("Ubuntu's AppArmor userns block is recognised, and the fix offered is the b
   assert.equal(appArmorRestrictsUserns(() => "1\n"), true);
   assert.equal(appArmorRestrictsUserns(() => "0\n"), false);
   assert.equal(appArmorRestrictsUserns(() => { throw new Error("ENOENT"); }), false);
-  assert.match(APPARMOR_HINT, /bwrap-userns-restrict/);
+  // Ubuntu 24.04, 25 Nov 2026: a profile for bwrap alone, unconfined with userns; Ubuntu's restrict profile is named only to remove it.
+  assert.match(APPARMOR_HINT, /profile foldrun-bwrap \/usr\/bin\/bwrap flags=\(unconfined\)/);
+  assert.match(APPARMOR_HINT, /test ! -e \/etc\/apparmor.d\/foldrun-bwrap &&/, "never over an administrator's file");
+  assert.match(APPARMOR_HINT, /every user of this machine/, "says what it allows");
+  assert.match(apparmorHint("/bin/bwrap"), /profile foldrun-bwrap \/bin\/bwrap /, "the bwrap that runs");
+  assert.doesNotMatch(apparmorHint("/home/me/.local/bin/bwrap"), /sudo tee/, "no system-wide exemption for a path a user may replace (Codex)");
+  assert.match(apparmorHint("/home/me/.local/bin/bwrap"), /apt-get install bubblewrap/);
+  assert.match(APPARMOR_HINT, /apparmor_parser -R \/etc\/apparmor.d\/bwrap-userns-restrict/);
+  assert.doesNotMatch(APPARMOR_HINT, /apparmor_restrict_unprivileged_userns=0|sysctl -w/);
   // A container's runtime decides, not the host's AppArmor (bench, 25 Nov 2026).
   assert.equal(inContainer((f) => f === "/.dockerenv", () => ""), true, "Docker");
   assert.equal(inContainer((f) => f === "/run/.containerenv", () => ""), true, "Podman");
