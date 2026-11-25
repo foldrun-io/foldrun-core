@@ -251,7 +251,7 @@ test("Python is checked only where programs run unasked, with a system python3, 
 });
 
 test("JSON is held to comments-and-trailing-commas JSON, except the files every reader takes strictly", async () => {
-  for (const f of ["tsconfig.json", "deno.json", "x.jsonc", ".vscode/settings.json"]) {
+  for (const f of ["deno.json", "x.jsonc", ".vscode/settings.json"]) {
     const v = await checkText(f, '{\n  // a comment\n  "a": [1, 2,],\n  /* more */ "b": "http://x//y",\n}\n', { programs: false, ms: 1000 });
     assert.equal(v.kind, "ok", f);
     assert.equal((await checkText(f, '{"a": 1 "b": 2}', { programs: false, ms: 1000 })).kind, "errors", `${f}: a real error still counts`);
@@ -260,6 +260,8 @@ test("JSON is held to comments-and-trailing-commas JSON, except the files every 
   assert.equal((await checkText("package.json", '\uFEFF{"ok":true}', { programs: false, ms: 1000 })).kind, "ok", "BOM in a strict file");
   for (const bad of ["{,}", "[,]", "{} /*", '{"a": 1,,}']) assert.equal((await checkText("deno.json", bad, { programs: false, ms: 1000 })).kind, "errors", bad);
   assert.equal(checkerFor("babel.config.json"), null, "Babel reads JSON5");
+  assert.equal(checkerFor("app/tsconfig.build.json"), null, "TypeScript reads its configs looser still");
+  assert.equal((await checkText("deno.json", '{ // c\u2028 "a": 1 }', { programs: false, ms: 1000 })).kind, "ok");
   for (const f of ["package.json", "sub/package-lock.json", "composer.json"]) assert.equal((await checkText(f, '{"a": 1,}', { programs: false, ms: 1000 })).kind, "errors", f);
   assert.equal(checkerFor("package.json"), "json");
   assert.equal(checkerFor("a.ts"), null, "TypeScript waits for the language-server layer (FOL-297)");

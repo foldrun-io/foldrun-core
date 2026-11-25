@@ -46,7 +46,9 @@ export function stripJsonc(text: string): string {
       out += text.slice(i, j + 1);
       i = j + 1;
     } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n" && text[i] !== "\r") i++;
+      while (i < text.length && !"\n\r\u2028\u2029".includes(text[i]!)) i++;
+      // A line separator ends it but is no JSON whitespace: it goes with the comment.
+      if (text[i] === "\u2028" || text[i] === "\u2029") i++;
     } else if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
       // An unclosed comment is an error: left in, it fails the parse.
@@ -70,8 +72,9 @@ export function stripJsonc(text: string): string {
 /** Which checker a file has, if any. */
 export function checkerFor(file: string): "json" | "js" | "py" | null {
   const f = file.replace(/\\/g, "/");
-  // Babel reads its JSON files as JSON5 (unquoted keys): not ours to judge.
-  if (/(^|\/)(\.babelrc(\.json)?|babel\.config\.json)$/.test(f)) return null;
+  // Babel reads its JSON files as JSON5 and TypeScript its configs looser still (unquoted keys, an empty file): not
+  // ours to judge — a tsconfig's errors come with the language-server layer (FOL-297).
+  if (/(^|\/)(\.babelrc(\.json)?|babel\.config\.json|[tj]sconfig[^/]*\.json)$/.test(f)) return null;
   if (/\.jsonc?$/i.test(f)) return "json";
   if (/\.(js|cjs|mjs)$/i.test(f)) return "js";
   if (/\.py$/i.test(f)) return "py";
