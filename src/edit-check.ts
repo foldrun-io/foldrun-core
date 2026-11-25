@@ -28,13 +28,41 @@ export type Verdict =
   | { kind: "errors"; errors: string[] }
   | { kind: "unchecked"; why: string };
 
-/** Files named like JSON that allow comments and trailing commas. */
-const JSONC = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|\.eslintrc[^/]*|devcontainer\.json|deno\.json|biome\.json|turbo\.json|tslint\.json|api-extractor[^/]*\.json|[^/]*\.jsonc)$|(^|\/)\.(vscode|devcontainer)\//;
+/** JSON files every reader takes strictly (npm, composer): a comment or a trailing comma breaks them. Every other
+ *  .json is held only to JSON with comments and trailing commas — tsconfig, deno, babel and many more read it so, and a
+ *  list of them never ends (Codex). */
+const STRICT_JSON = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|composer\.json|composer\.lock)$/;
+
+/** JSON with comments and trailing commas, as plain JSON: comments become spaces and a comma before } or ] goes, never
+ *  inside a string. */
+export function stripJsonc(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+      out += " ";
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out.replace(/,(\s*[}\]])/g, "$1");
+}
 
 /** Which checker a file has, if any. */
 export function checkerFor(file: string): "json" | "js" | "py" | null {
   const f = file.replace(/\\/g, "/");
-  if (/\.json$/i.test(f)) return JSONC.test(f) ? null : "json";
+  if (/\.jsonc?$/i.test(f)) return "json";
   if (/\.(js|cjs|mjs)$/i.test(f)) return "js";
   if (/\.py$/i.test(f)) return "py";
   return null;
@@ -194,8 +222,9 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
   if (Buffer.byteLength(text) > CHECK_MAX_BYTES) return { kind: "unchecked", why: "the file is over 1 MB" };
   if (o.ms <= 0) return { kind: "unchecked", why: "no time was left to check it" };
   if (kind === "json") {
+    const strict = STRICT_JSON.test(file.replace(/\\/g, "/"));
     try {
-      JSON.parse(text);
+      JSON.parse(strict ? text : stripJsonc(text));
       return { kind: "ok" };
     } catch (err) {
       return { kind: "errors", errors: [String(err instanceof Error ? err.message : err)] };

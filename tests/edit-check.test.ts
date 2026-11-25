@@ -25,7 +25,7 @@ test("an edit that would break a JSON file that parses is refused; the file and 
     fs.writeFileSync(f, '{"a": 1, "b": 2}\n');
     await read(ctx, f);
     const seen = ctx.reads.get(f);
-    const r = await edit(ctx, { file_path: f, old_string: '"b": 2', new_string: '"b": 2,' });
+    const r = await edit(ctx, { file_path: f, old_string: '1, "b"', new_string: '1 "b"' });
     assert.equal(r.isError, true);
     assert.match(r.text, /not applied — .*data\.json would stop parsing/);
     assert.match(r.text, /allow_syntax_errors/);
@@ -250,8 +250,13 @@ test("Python is checked only where programs run unasked, with a system python3, 
   }
 });
 
-test("files that allow comments are not held to strict JSON; others have no checker", () => {
-  for (const f of ["tsconfig.json", "app/tsconfig.build.json", ".vscode/settings.json", "x.jsonc", ".devcontainer/devcontainer.json", ".eslintrc.json", "deno.json", "biome.json", "turbo.json"]) assert.equal(checkerFor(f), null, f);
+test("JSON is held to comments-and-trailing-commas JSON, except the files every reader takes strictly", async () => {
+  for (const f of ["tsconfig.json", "deno.json", "babel.config.json", ".babelrc.json", "x.jsonc", ".vscode/settings.json"]) {
+    const v = await checkText(f, '{\n  // a comment\n  "a": [1, 2,],\n  /* more */ "b": "http://x//y",\n}\n', { programs: false, ms: 1000 });
+    assert.equal(v.kind, "ok", f);
+    assert.equal((await checkText(f, '{"a": 1 "b": 2}', { programs: false, ms: 1000 })).kind, "errors", `${f}: a real error still counts`);
+  }
+  for (const f of ["package.json", "sub/package-lock.json", "composer.json"]) assert.equal((await checkText(f, '{"a": 1,}', { programs: false, ms: 1000 })).kind, "errors", f);
   assert.equal(checkerFor("package.json"), "json");
   assert.equal(checkerFor("a.ts"), null, "TypeScript waits for the language-server layer (FOL-297)");
   assert.equal(systemPython("darwin", (p) => p === "/usr/bin/python3"), null, "macOS /usr/bin/python3 without the command line tools would open a dialog");
