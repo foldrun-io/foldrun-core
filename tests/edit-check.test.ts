@@ -134,6 +134,20 @@ test("an edit that empties a JSON file is refused; Edit does not bring back a fi
   }
 });
 
+test("Write reads the file it replaces only when the new content does not parse, and not past the size checked", async () => {
+  const { dir, ctx, done } = setup();
+  try {
+    const f = path.join(dir, "big.json");
+    fs.writeFileSync(f, "[" + "1,".repeat(600_000) + "1]");
+    await read(ctx, f);
+    const r = await write(ctx, { file_path: f, content: "{oops" });
+    assert.equal(r.isError, undefined, r.text);
+    assert.match(r.text, /not checked against the file as it was/);
+  } finally {
+    done();
+  }
+});
+
 test("a check that runs out of time lets the change through, said not checked", async () => {
   const slow = async () => ({ code: null, out: "", timedOut: true });
   const g = await guardChange("x.js", "a", "b", { programs: false, runNode: slow });

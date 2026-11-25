@@ -57,12 +57,27 @@ export function jsMode(file: string, canRead: (p: string) => boolean = () => tru
       // none here: further up
     }
     if (st) {
-      if (!st.isFile() || st.size > 1_000_000 || !canRead(pj)) return "either";
+      if (!canRead(pj)) return "either";
+      // Opened without waiting (a pipe swapped in after the stat cannot hold this process), then judged and read by
+      // the descriptor itself: a plain file of a sane size, or nothing is decided (Codex).
+      let fd: number | null = null;
       try {
-        const j = JSON.parse(fs.readFileSync(pj, "utf8"));
+        fd = fs.openSync(pj, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        const fst = fs.fstatSync(fd);
+        if (!fst.isFile() || fst.size > 1_000_000) return "either";
+        const buf = Buffer.alloc(fst.size);
+        let got = 0;
+        while (got < fst.size) {
+          const n = fs.readSync(fd, buf, got, fst.size - got, got);
+          if (n <= 0) break;
+          got += n;
+        }
+        const j = JSON.parse(buf.subarray(0, got).toString("utf8"));
         return j && j.type === "module" ? "module" : j && j.type === "commonjs" ? "commonjs" : "either";
       } catch {
         return "either";
+      } finally {
+        if (fd !== null) fs.closeSync(fd);
       }
     }
     if (path.dirname(d) === d) return "either";
@@ -196,11 +211,22 @@ export type Guard = { refuse: string } | { note: string | null };
  * not — a file already broken may be repaired step by step, though a parser names only its first error (Codex).
  * Both checks share one deadline.
  */
-export async function guardChange(file: string, before: string | null, after: string, o: Omit<CheckOptions, "ms">, ms = CHECK_MS): Promise<Guard> {
+export async function guardChange(
+  file: string,
+  /** What is there now (null: a new file), or how to read it — asked only when the change does not parse (Codex);
+   *  "unreadable" when it cannot be read, which is never refused for. */
+  beforeOf: string | null | (() => Promise<string | null | "unreadable">),
+  after: string,
+  o: Omit<CheckOptions, "ms">,
+  ms = CHECK_MS,
+): Promise<Guard> {
   const until = Date.now() + ms;
   const now = await checkText(file, after, { ...o, ms });
   if (now.kind === "ok") return { note: null };
   if (now.kind === "unchecked") return { note: checkerFor(file) === "py" && !o.programs ? null : `syntax not checked: ${now.why}` };
+  const got = typeof beforeOf === "function" ? await beforeOf() : beforeOf;
+  if (got === "unreadable") return { note: `syntax not checked against the file as it was: it could not be read` };
+  const before = got;
   if (before !== null) {
     const was = await checkText(file, before, { ...o, ms: until - Date.now() });
     if (was.kind !== "ok") return { note: `it still does not parse: ${now.errors[0]}` };

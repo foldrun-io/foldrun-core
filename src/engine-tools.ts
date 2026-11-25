@@ -26,7 +26,7 @@ import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { LAUNCHER } from "./local-sandbox.ts";
-import { checkerFor, guardChange, type CheckOptions } from "./edit-check.ts";
+import { CHECK_MAX_BYTES, checkerFor, guardChange, type CheckOptions } from "./edit-check.ts";
 
 export interface ToolContext {
   /** Relative paths resolve here: the agent's directory. */
@@ -370,15 +370,18 @@ const write: EngineTool = {
     // The syntax guard (FOL-292): a file that parses is not replaced by one that does not.
     let note: string | null = null;
     if (input.allow_syntax_errors !== true && checkerFor(file)) {
-      let before: string | null = null;
-      let unreadable = false;
-      if (existed) {
+      // What is there, read only if the new content does not parse, and only up to the size checked (Codex).
+      const beforeOf = async (): Promise<string | null | "unreadable"> => {
+        if (!existed) return null;
+        try {
+          if (fs.statSync(file).size > CHECK_MAX_BYTES) return "unreadable";
+        } catch {
+          return "unreadable";
+        }
         const buf = await readChecked(ctx, file);
-        // What is there cannot be read: nothing to compare with, so never refused for it.
-        if (typeof buf === "string") unreadable = true;
-        else before = buf.toString("utf8");
-      }
-      const g = unreadable ? { note: null } : await guardChange(file, before, content, checkOptions(ctx));
+        return typeof buf === "string" ? "unreadable" : buf.toString("utf8");
+      };
+      const g = await guardChange(file, beforeOf, content, checkOptions(ctx));
       if ("refuse" in g) return fail(g.refuse);
       note = g.note;
       // While it was checked: stopped, or the file came, went or changed — nothing is written (Codex).
