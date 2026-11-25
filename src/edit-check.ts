@@ -145,7 +145,7 @@ type Runner = (program: string, args: string[], input: string, ms: number) => Pr
 /** Directly, from a neutral folder, with nothing of this process's environment. */
 export const runDirect: Runner = (program, args, input, ms) =>
   new Promise((resolve) => {
-    const child = spawn(program, args, { cwd: os.tmpdir(), env: { PATH: "/usr/bin:/bin" }, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = spawn(program, args, { cwd: os.tmpdir(), env: { PATH: "/usr/bin:/bin" } as Record<string, string> as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let out = "";
     let timedOut = false;
     const take = (b: Buffer) => {
