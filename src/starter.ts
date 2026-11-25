@@ -504,6 +504,7 @@ owner: ana@example.com      # who answers for it; else the workspace's, else the
 model: default              # fast | default | max
 effort: low                 # how hard to think about it
 size: large                 # small | large | heavy — the sandbox it rents
+media: text                 # text | as-is — an image handed to it: read into text (no image tokens) or looked at itself
 resources: { memory: 4Gi }  # optional: cpu, memory, disk in numbers, over the size class
 tools: [web, read, ask, peers, text, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it, \`text\` reads images, PDFs, office files and recordings as text, \`docs\` reads a library's current docs, \`video\` renders Remotion video
 disallowedTools: [Bash]     # subtract from what it would otherwise have

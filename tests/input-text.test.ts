@@ -158,6 +158,12 @@ test("the prompt's note: the media inputs marked with their .txt, only when text
   assert.match(note, /inputs\/scan\.pdf \(application\/pdf, 2 KiB\) — its text, when it could be extracted: inputs\/scan\.pdf\.txt/);
   assert.doesNotMatch(note, /data\.csv \(text\/csv, 10 B\) —/);
   assert.match(note, /read it first/);
+  assert.doesNotMatch(note, /look at this image/, "text is the default");
+  // media: as-is (FOL-268): images are looked at, documents still read as text.
+  const asIs = inputsNote(files, { textBeside: textCandidates(files).map((f) => f.path), media: "as-is" });
+  assert.match(asIs, /inputs\/own\.png \(image\/png, 10 B\) — look at this image itself with Read/);
+  assert.doesNotMatch(asIs, /scan\.pdf \(application\/pdf, 2 KiB\) — look/);
+  assert.match(asIs, /open the image itself first — this agent is set to see them as they are \(media: as-is\)/);
 });
 
 test("the platform hook: absent on a laptop, kept until reset", () => {

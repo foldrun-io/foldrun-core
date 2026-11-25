@@ -3646,7 +3646,7 @@ async function runStepBody(
           // Its file tools inside the sandbox get the same allowance (FOL-96).
           configWrites: step.approve === true && Boolean(step.approvedAt),
           // A snapshot step is told where its folder is, and what comes back.
-          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs, platform.extractText ? { textBeside: textCandidates(stepInputs).map((f) => f.path) } : undefined)}` : ""}`,
+          prompt: `${prompt}${snapshotId ? `\n\n${SNAPSHOT_NOTE}` : ""}${stepInputs ? `\n\n${inputsNote(stepInputs, { ...(platform.extractText ? { textBeside: textCandidates(stepInputs).map((f) => f.path) } : {}), ...(front.media === "as-is" ? { media: "as-is" as const } : {}) })}` : ""}`,
           model,
           effort,
           systemPrompt,

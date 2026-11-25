@@ -80,6 +80,7 @@ const AGENT: FieldSpec[] = [
   { key: "effort", type: "string", values: EFFORT_LEVELS, help: "how long it thinks" },
   { key: "max_output_tokens", type: ["number", "string"], help: "the most tokens one model reply may have, 1 to 1048576; on foldrun's models the price list's ceiling applies too" },
   { key: "size", type: "string", values: ["small", "large", "heavy"], help: "the sandbox it rents; anything else becomes large" },
+  { key: "media", type: "string", values: ["text", "as-is"], help: "what an image handed to it becomes: text (the default — read on foldrun's servers, no image tokens) or as-is (it looks at the image itself: UIs, charts, designs); recordings and documents are always read into text" },
   { key: "resources", type: "object", help: "{cpu, memory, disk} in numbers, over the size class's figures key by key — cpu 0.5–8, memory 256Mi–16Gi, disk 1–40Gi" },
   { key: "permissionMode", type: "string", values: ["plan"], help: "plan = read-only; no other mode changes anything here" },
   { key: "tools", type: ["list", "string"], help: "the one grant list" },
