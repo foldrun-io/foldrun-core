@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.2.1] — 2026-11-25
+
+- fix(local-sandbox): a project that is no git repository runs commands on Linux (FOL-333) ([7a4721f](https://github.com/foldrun-io/foldrun-core/commit/7a4721f))
+
 ## [29.2.0] — 2026-11-25
 
 ### New in the public API
