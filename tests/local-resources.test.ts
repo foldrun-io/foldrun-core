@@ -28,11 +28,11 @@ test("parseBudget: cpu=…,memory=…, off, a choice's name; out-of-range refuse
   assert.match((parseBudget("ram=4Gi", mac) as any).problem, /cpu=2,memory=4Gi/);
 });
 
-test("agentAsks: from size: and resources: as the cloud resolves them; nothing when it writes neither", () => {
-  assert.deepEqual(agentAsks({}), { ask: null, problems: [] });
-  assert.deepEqual(agentAsks({ size: "heavy" }).ask, { cpu: 4, memoryMi: 8192 });
-  assert.deepEqual(agentAsks({ size: "small", resources: { memory: "3Gi" } }).ask, { cpu: 1, memoryMi: 3072 });
-  assert.match(agentAsks({ size: "huge" }).problems.join(), /small, large or heavy/);
+test("agentAsks: from size: and resources: as the cloud resolves them; nothing when it writes neither", async () => {
+  assert.deepEqual(await agentAsks({}), { ask: null, problems: [] });
+  assert.deepEqual((await agentAsks({ size: "heavy" })).ask, { cpu: 4, memoryMi: 8192 });
+  assert.deepEqual((await agentAsks({ size: "small", resources: { memory: "3Gi" } })).ask, { cpu: 1, memoryMi: 3072 });
+  assert.match((await agentAsks({ size: "huge" })).problems.join(), /small, large or heavy/);
 });
 
 test("resolveLocal: the lowest of budget, session ceiling and ask; over named; held said as it is", () => {
