@@ -356,6 +356,10 @@ test("checkBashInput: text written into a background job is checked as a command
   assert.equal(checkBashInput({ command: "ls" }).ok, true);
   // Whole lines only, so a line cannot be built from pieces each of which passes.
   assert.equal(checkBashInput({ job: "b1", stdin: "cat ~" }).ok, false);
+  assert.equal(checkBashInput({ job: "b1", stdin: "cat \\\n" }).ok, false);
+  assert.equal(checkBashInput({ job: "b1", stdin: "echo 'a\n" }).ok, false);
+  assert.equal(checkBashInput({ job: "b1", stdin: "echo \"it's\"\n" }).ok, false, "conservative: a lone quote in a line is refused");
+  assert.equal(checkBashInput({ job: "b1", stdin: "echo 'ok'\n" }).ok, true);
 });
 
 test("Bash job: stop ends what an exited shell left running; a job that never reads its input does not hold the call (FOL-293)", () =>

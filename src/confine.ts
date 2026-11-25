@@ -496,6 +496,10 @@ export function checkBashInput(input: Record<string, unknown>): ConfineVerdict {
   if (!first.ok || typeof input.stdin !== "string") return first;
   // Whole lines only: a line built from pieces written one call at a time would never be checked whole (Codex).
   if (input.stdin && !input.stdin.endsWith("\n")) return { ok: false, reason: "Bash was denied: text written to a background job is whole lines here — end it with \\n." };
+  // …and none that carries on into the next write: a line ending in \ or a quote left open (Codex).
+  const t = input.stdin;
+  const open = (q: string) => (t.replace(/\\./g, "").split(q).length - 1) % 2 === 1;
+  if (/\\\n/.test(t) || open("'") || open('"')) return { ok: false, reason: "Bash was denied: text written to a background job must not carry on into the next write (a line ending in \\ or an open quote)." };
   return checkBash(input.stdin);
 }
 

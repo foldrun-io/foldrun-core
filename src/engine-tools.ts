@@ -1042,6 +1042,8 @@ export const BG_JOBS_MAX = 8;
 const BG_FIRST_MS = 1000;
 /** How long text written to a job's input may wait for the job to take it. */
 const BG_WRITE_MS = 5000;
+/** Text still waiting in a job's input past which no more is taken (Codex: a stalled reader must not grow memory). */
+const BG_STDIN_PENDING_MAX = 1024 * 1024;
 /** The last job number given in a step: an id is never given twice, so a stale one names nothing (Codex). */
 const jobSeq = new WeakMap<ToolContext, number>();
 
@@ -1060,7 +1062,9 @@ function jobState(job: BgJob): string {
   return `job ${job.id} has ended — ${job.exit.code === 0 ? "exit code 0" : `exit code ${job.exit.code ?? `none, signal ${job.exit.signal}`}`}`;
 }
 
-/** Ends the job's whole group — also after its shell exited, for what the shell left running (Codex). */
+/** Ends the job's whole group — also after its shell exited, for what the shell left running (Codex). The id
+ *  is not given to a new group while any process of this one lives; once none does, the signal finds nothing —
+ *  the same bound killGroups works within. */
 function endJob(job: BgJob, ctx: ToolContext): void {
   const kill = (sig: NodeJS.Signals) => {
     try {
@@ -1157,6 +1161,7 @@ async function onJob(input: Record<string, unknown>, ctx: ToolContext): Promise<
   if (input.stdin !== undefined && stdin === null) return fail("stdin is text to write to the job's input");
   if (stdin !== null) {
     if (!job.stdin || job.exit) return fail(`${jobState(job)} — its input is closed`);
+    if (job.stdin.writableLength > BG_STDIN_PENDING_MAX) return fail(`${jobState(job)} — over 1 MB written to it is still unread; wait for it to read, or stop it`);
     // A job that never reads its input must not hold the call, or the step's stop (Codex).
     const took = await new Promise<"ok" | "error" | "slow">((resolve) => {
       const timer = setTimeout(() => finish("slow"), BG_WRITE_MS);
