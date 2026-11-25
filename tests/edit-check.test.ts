@@ -256,6 +256,8 @@ test("JSON is held to comments-and-trailing-commas JSON, except the files every 
     assert.equal(v.kind, "ok", f);
     assert.equal((await checkText(f, '{"a": 1 "b": 2}', { programs: false, ms: 1000 })).kind, "errors", `${f}: a real error still counts`);
   }
+  for (const good of ['{"tasks":{"ok":"echo ok",},}', '{\r  // cr only\r  "a": 1\r}', '\uFEFF{"ok":true}']) assert.equal((await checkText("deno.json", good, { programs: false, ms: 1000 })).kind, "ok", JSON.stringify(good));
+  assert.equal((await checkText("package.json", '\uFEFF{"ok":true}', { programs: false, ms: 1000 })).kind, "ok", "BOM in a strict file");
   for (const bad of ["{,}", "[,]", "{} /*", '{"a": 1,,}']) assert.equal((await checkText("deno.json", bad, { programs: false, ms: 1000 })).kind, "errors", bad);
   assert.equal(checkerFor("babel.config.json"), null, "Babel reads JSON5");
   for (const f of ["package.json", "sub/package-lock.json", "composer.json"]) assert.equal((await checkText(f, '{"a": 1,}', { programs: false, ms: 1000 })).kind, "errors", f);

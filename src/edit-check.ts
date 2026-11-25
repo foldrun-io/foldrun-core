@@ -46,7 +46,7 @@ export function stripJsonc(text: string): string {
       out += text.slice(i, j + 1);
       i = j + 1;
     } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
+      while (i < text.length && text[i] !== "\n" && text[i] !== "\r") i++;
     } else if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
       // An unclosed comment is an error: left in, it fails the parse.
@@ -59,7 +59,12 @@ export function stripJsonc(text: string): string {
     }
   }
   // Only a comma after a value: {,} and [,] stay errors.
-  return out.replace(/([^\s,[{])(\s*),(\s*[}\]])/g, "$1$2$3");
+  // Repeated: nested closers share characters between matches ("x",},}).
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/([^\s,[{])(\s*),(\s*[}\]])/g, "$1$2$3");
+  }
+  return out;
 }
 
 /** Which checker a file has, if any. */
@@ -229,7 +234,9 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
   if (kind === "json") {
     const strict = STRICT_JSON.test(file.replace(/\\/g, "/"));
     try {
-      JSON.parse(strict ? text : stripJsonc(text));
+      // A byte-order mark is not part of the text (node, TypeScript and npm skip it).
+      const body = text.replace(/^\uFEFF/, "");
+      JSON.parse(strict ? body : stripJsonc(body));
       return { kind: "ok" };
     } catch (err) {
       return { kind: "errors", errors: [String(err instanceof Error ? err.message : err)] };
