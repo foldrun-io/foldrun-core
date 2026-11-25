@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.12.0] — 2026-11-25
+
+- fix(engine): Symbols checks each file again after reading it, and a stopped turn ends a server's wait (Codex, FOL-297) ([62c486c](https://github.com/foldrun-io/foldrun-core/commit/62c486c))
+- fix(engine): Symbols reads bounded — head -c inside the walls, a regular file read to a limit outside them; a malformed settings request is answered, not thrown (Codex, FOL-297) ([3b79101](https://github.com/foldrun-io/foldrun-core/commit/3b79101))
+- fix(engine): Symbols drops a server message that is not an object, and reads location text from regular files only (Codex, FOL-297) ([1da60a3](https://github.com/foldrun-io/foldrun-core/commit/1da60a3))
+- fix(engine): Symbols reads nothing without a read rule and a place for its servers; a server's message is capped (Codex, FOL-297) ([b8b3ea8](https://github.com/foldrun-io/foldrun-core/commit/b8b3ea8))
+- fix(engine): Symbols says a location from the folder whichever spelling of it the server used (FOL-297) ([0fd96cb](https://github.com/foldrun-io/foldrun-core/commit/0fd96cb))
+- feat(engine): Symbols — definition and references from a language server (TypeScript 7 tsc --lsp, pyright, gopls), foldrun's pinned servers installed on first use into the client's tools folder, run only where programs run unasked; every location checked before it is shown (FOL-297) ([03c6daf](https://github.com/foldrun-io/foldrun-core/commit/03c6daf))
+
 ## [27.11.0] — 2026-11-25
 
 - feat(egress): grant.network.deny — sites refused whatever the level, for a browse job's blocked domains (FOL-313) ([800147c](https://github.com/foldrun-io/foldrun-core/commit/800147c))
