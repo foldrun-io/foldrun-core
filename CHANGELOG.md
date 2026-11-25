@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.1.0] — 2026-11-25
+
+### New in the public API
+
+- `inContainer` from `@foldrun/core/local-sandbox`
+- `CONTAINER_HINT` from `@foldrun/core/local-sandbox`
+
+- fix(local-sandbox): the hint says what applies — install first; in a container, its runtime, not Ubuntu's AppArmor ([1c3c01f](https://github.com/foldrun-io/foldrun-core/commit/1c3c01f))
+
 ## [29.0.0] — 2026-11-25
 
 ### Breaking changes
