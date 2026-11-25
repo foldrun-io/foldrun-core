@@ -261,7 +261,8 @@ test("a background job that keeps the output open does not hold the command: it 
     const t0 = Date.now();
     const r3 = await Bash.run({ command: "(while true; do echo tick; sleep 0.05; done) & echo looping" }, ctx);
     assert.ok(Date.now() - t0 < 4000, `returned in ${Date.now() - t0} ms`);
-    assert.match(r3.text, /^looping/);
+    // The job may print before the shell does: the shell's line is there, in any order (it failed CI, 25 Nov).
+    assert.match(r3.text, /(^|\n)looping(\n|$)/);
     assert.equal(r3.isError, undefined, "the shell succeeded: no timeout for what it left");
     killGroups(ctx);
     const r4 = await Bash.run({ command: "(while true; do echo tick; sleep 0.05; done) & echo short", timeout: 1000 }, ctx);
