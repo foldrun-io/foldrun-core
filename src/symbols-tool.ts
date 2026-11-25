@@ -109,6 +109,16 @@ export function buildSymbolsTools(opts: { agentDir: string; workspaceRoot: strin
       ctx.groups.clear();
       if (own) {
         try {
+          // Go keeps its module cache read-only: made writable first, or every step would leave one behind (Codex).
+          const writable = (d: string) => {
+            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+              if (!e.isDirectory()) continue;
+              const f = path.join(d, e.name);
+              fs.chmodSync(f, 0o700);
+              writable(f);
+            }
+          };
+          writable(own);
           fs.rmSync(own, { recursive: true, force: true });
         } catch {
           /* swept with the temp folder */
