@@ -26,6 +26,7 @@ import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { LAUNCHER } from "./local-sandbox.ts";
+import { checkerFor, guardChange, type CheckOptions } from "./edit-check.ts";
 
 export interface ToolContext {
   /** Relative paths resolve here: the agent's directory. */
@@ -43,7 +44,37 @@ export interface ToolContext {
   /** On a person's machine, the walls (local-sandbox.ts): commands run
    *  through `wrap`; the file tools refuse what canRead / canWrite refuse. */
   sandbox?: import("./engine-common.ts").SandboxWalls | null;
+  /** The step may run programs unasked here — inside the local walls, or in a container — so Edit and Write may
+   *  check Python with a system python3 (edit-check.ts). Absent: only the checks that run nothing of the project. */
+  programs?: boolean;
+  /** How the syntax checks run, over the defaults (tests: a slow or failing checker). */
+  checkWith?: Partial<Omit<CheckOptions, "ms">>;
 }
+
+/** How Edit and Write check a change's syntax here: Python through the walls when they are up. */
+function checkOptions(ctx: ToolContext): Omit<CheckOptions, "ms"> {
+  return {
+    programs: ctx.programs === true,
+    ...(ctx.sandbox
+      ? {
+          runPython: async (program: string, args: string[], input: string, ms: number) => {
+            try {
+              const r = await runInside(ctx, `exec ${[program, ...args].map(shq).join(" ")}`, input, Math.max(1, ms));
+              return { code: r.code, out: r.out.toString("utf8"), timedOut: /^ran past /.test(r.err) };
+            } catch {
+              return { code: null, out: "", timedOut: false };
+            }
+          },
+        }
+      : {}),
+    ...ctx.checkWith,
+  };
+}
+
+const ALLOW_SYNTAX_ERRORS = {
+  type: "boolean",
+  description: "Write it even though it would not parse (a test fixture meant to be invalid). Default false: a change that would break a file's syntax is refused, the file left as it was.",
+};
 
 /** A file's contents, read through the descriptor that was checked: inside
  *  the walls, the open file must be the very file now at the path the rules
@@ -315,6 +346,7 @@ const write: EngineTool = {
     properties: {
       file_path: { type: "string", description: "The file, absolute or relative to the working directory" },
       content: { type: "string", description: "The file's whole new content" },
+      allow_syntax_errors: ALLOW_SYNTAX_ERRORS,
     },
     required: ["file_path", "content"],
   },
@@ -334,6 +366,26 @@ const write: EngineTool = {
     const stale = staleReason(ctx, file);
     if (stale) return fail(stale);
     const existed = fs.existsSync(file);
+    // The syntax guard (FOL-292): a file that parses is not replaced by one that does not.
+    let note: string | null = null;
+    if (input.allow_syntax_errors !== true && checkerFor(file)) {
+      let before: string | null = null;
+      let unreadable = false;
+      if (existed) {
+        const buf = await readChecked(ctx, file);
+        // What is there cannot be read: nothing to compare with, so never refused for it.
+        if (typeof buf === "string") unreadable = true;
+        else before = buf.toString("utf8");
+      }
+      const g = unreadable ? { note: null } : await guardChange(file, before, content, checkOptions(ctx));
+      if ("refuse" in g) return fail(g.refuse);
+      note = g.note;
+      // While it was checked: stopped, or the file came, went or changed — nothing is written (Codex).
+      if (ctx.signal.aborted) return fail(`${file} was not written: the step was stopped`);
+      if (fs.existsSync(file) !== existed) return fail(`${file} was not written: it ${existed ? "was removed" : "appeared"} while the change was checked — Read it, then write again`);
+      const again = staleReason(ctx, file);
+      if (again) return fail(again);
+    }
     try {
       if (ctx.sandbox) await writeInside(file, content, ctx);
       else writeWhole(file, content);
@@ -341,7 +393,7 @@ const write: EngineTool = {
       return fail(`${file} was not written: ${err instanceof Error ? err.message : String(err)}`);
     }
     ctx.reads.set(file, fs.statSync(file).mtimeMs);
-    return { text: `${existed ? "Wrote" : "Created"} ${file} (${content.length} characters)` };
+    return { text: `${existed ? "Wrote" : "Created"} ${file} (${content.length} characters)${note ? `\n${note}` : ""}` };
   },
 };
 
@@ -366,6 +418,7 @@ const edit: EngineTool = {
       old_string: { type: "string", description: "The exact text to replace" },
       new_string: { type: "string", description: "What replaces it" },
       replace_all: { type: "boolean", description: "Replace every occurrence (default false)" },
+      allow_syntax_errors: ALLOW_SYNTAX_ERRORS,
     },
     required: ["file_path", "old_string", "new_string"],
   },
@@ -402,6 +455,16 @@ const edit: EngineTool = {
     // split/join and slice, never String.replace: `$&` in new_string is text.
     const at = before.indexOf(from);
     const after = all ? before.split(from).join(to) : before.slice(0, at) + to + before.slice(at + from.length);
+    // The syntax guard (FOL-292): an edit that would make a file that parses stop parsing is refused.
+    let note: string | null = null;
+    if (input.allow_syntax_errors !== true && checkerFor(file)) {
+      const g = await guardChange(file, before, after, checkOptions(ctx));
+      if ("refuse" in g) return fail(g.refuse);
+      note = g.note;
+      if (ctx.signal.aborted) return fail(`${file} was not changed: the step was stopped`);
+      const again = staleReason(ctx, file);
+      if (again) return fail(again);
+    }
     try {
       if (ctx.sandbox) await writeInside(file, after, ctx);
       else writeWhole(file, after);
@@ -409,7 +472,7 @@ const edit: EngineTool = {
       return fail(`${file} was not changed: ${err instanceof Error ? err.message : String(err)}`);
     }
     ctx.reads.set(file, fs.statSync(file).mtimeMs);
-    return { text: `Edited ${file} (${all ? count : 1} replacement${(all ? count : 1) === 1 ? "" : "s"})` };
+    return { text: `Edited ${file} (${all ? count : 1} replacement${(all ? count : 1) === 1 ? "" : "s"})${note ? `\n${note}` : ""}` };
   },
 };
 
