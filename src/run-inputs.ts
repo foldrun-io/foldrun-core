@@ -56,7 +56,7 @@ export function inputsNote(files: RunInputFile[], opts?: { textBeside?: string[]
   const look = (f: RunInputFile) => opts?.media === "as-is" && f.mime.startsWith("image/");
   const lines = files.map((f) => `- ${INPUTS_DIR}/${f.path} (${f.mime}, ${human(f.size)})${look(f) ? " — look at this image itself with Read" : ""}${beside.has(f.path) ? ` — its text, when it could be extracted: ${INPUTS_DIR}/${f.path}.txt` : ""}`);
   const textNote = beside.size
-    ? `Where ${INPUTS_DIR}/<file>.txt exists beside a file, it holds that file's text, extracted before this step started (OCR for images and scans, the document's text, a transcript for audio and video): read it first — it costs far less than the file — and open the file itself only when the text looks wrong or incomplete. No .txt means no text could be extracted (the step's trail says why). `
+    ? `Where ${INPUTS_DIR}/<file>.txt exists beside a file${files.some(look) ? " (other than the images marked to be looked at)" : ""}, it holds that file's text, extracted before this step started (OCR for images and scans, the document's text, a transcript for audio and video): read it first — it costs far less than the file — and open the file itself only when the text looks wrong or incomplete. No .txt means no text could be extracted (the step's trail says why). `
     : "";
   const lookNote = files.some(look) ? "The images marked to be looked at: open the image itself first — this agent is set to see them as they are (media: as-is); a .txt beside one is there to search or quote. " : "";
   return (
