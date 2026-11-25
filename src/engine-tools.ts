@@ -618,7 +618,9 @@ async function editMany(input: Record<string, unknown>, ctx: ToolContext): Promi
     }
   }
   const done: typeof plan = [];
-  /** Put back what this call wrote — a file only while it holds this call's text, never over a change since (Codex). */
+  /** Put back what this call wrote — a file only while it holds this call's text, never over a change since (Codex).
+   *  A change landing between that read and the write back is the window every Edit has between its stale check
+   *  and its write; nothing here locks a file against other programs. */
   const undo = async (list: typeof plan): Promise<string[]> => {
     const left: string[] = [];
     for (const d of list) {
