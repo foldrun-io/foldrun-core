@@ -1194,11 +1194,24 @@ function handleOf(w: Walls): LocalSandbox {
  * handle of its own on the same walls (they come down when the last handle
  * is closed); one with another policy is refused while they are up.
  */
+/** Asked when a command inside reaches a site not on the list (FOL-312): true lets this connection through; false,
+ *  or `{ allow: false, reason }`, refuses it with that reason. Called for every such connection — remembering an
+ *  answer is the caller's. */
+export type AskSite = (host: string, port: number) => Promise<boolean | { allow: false; reason: string }>;
+
+/** The open walls' asker: set once the probe is done (the probe's own unlisted site is never asked about). */
+let asker: AskSite | null = null;
+
 export function openLocalSandbox(
   policy: LocalSandboxPolicy,
-  opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime> } = {},
+  opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime>; askSite?: AskSite } = {},
 ): Promise<LocalSandbox | SandboxRefusal> {
-  return inQueue(() => openNow(policy, opts));
+  return inQueue(async () => {
+    const got = await openNow(policy, opts);
+    // The latest opener's asker answers (one session per process); none: unlisted sites are refused, as before.
+    if (!("refused" in got)) asker = opts.askSite ?? null;
+    return got;
+  });
 }
 
 async function openNow(policy: LocalSandboxPolicy, opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime> }): Promise<LocalSandbox | SandboxRefusal> {
@@ -1447,6 +1460,16 @@ async function bringUp(
       ...(pinned.rg ? { ripgrep: { command: pinned.rg } } : {}),
       ...(pinned.bwrap ? { bwrapPath: pinned.bwrap } : {}),
       ...(pinned.socat ? { socatPath: pinned.socat } : {}),
+    }, async ({ host, port }: { host: string; port?: number }) => {
+      // Only `true` lets a connection through (the runtime reads anything else as a refusal).
+      const ask = asker;
+      if (!ask) return false;
+      try {
+        const a = await ask(host, typeof port === "number" ? port : 443);
+        return a === true ? true : M.askCallbackDenyReason === true && a && typeof a === "object" ? a : false;
+      } catch {
+        return false;
+      }
     });
   } catch (err) {
     cleanupProbe();
@@ -1529,6 +1552,7 @@ async function bringUp(
     teardown: async () => {
       if (w.down) return;
       w.down = true;
+      asker = null;
       try {
         await M.reset();
       } catch {

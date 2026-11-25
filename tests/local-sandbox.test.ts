@@ -95,6 +95,35 @@ const ctxFor = (cwd: string, sandbox: ToolContext["sandbox"], env: Record<string
   sandbox,
 });
 
+test("inside the walls: a site not on the list is asked about, by host, and only a yes lets it through (FOL-312)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const asked: string[] = [];
+  let answer: boolean | { allow: false; reason: string } = { allow: false, reason: "the person said no" };
+  const box = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (host, port) => (asked.push(`${host}:${port}`), answer) });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    assert.deepEqual(asked, [], "the probe's own unlisted site is never asked about");
+    const ctx = ctxFor(proj, box, { ...process.env, TMPDIR: box.tmp });
+    const bash = (command: string) => ENGINE_TOOLS.Bash!.run({ command, timeout: 30_000 }, ctx);
+    const no = await bash("curl -sS -m 10 -o /dev/null -w '%{http_code}' https://example.org/");
+    assert.equal(no.isError, true, no.text);
+    assert.ok(asked.includes("example.org:443"), JSON.stringify(asked));
+    // A yes lets that connection through (whether the site then answers depends on this machine's network).
+    answer = true;
+    const n = asked.length;
+    await bash("curl -sS -m 10 -o /dev/null https://example.org/ || true");
+    assert.ok(asked.length > n, "asked again: remembering an answer is the caller's");
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("inside the walls: the syntax guard reads the grammar and checks Python there (FOL-292)", async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
   const proj = tmpProject();
