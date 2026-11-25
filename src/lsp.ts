@@ -246,6 +246,8 @@ export class LspClient {
       } catch {
         m = {};
       }
+      // Anything but an object (null, a number) is not a message (Codex).
+      if (!m || typeof m !== "object" || Array.isArray(m)) m = {};
       this.buf = this.buf.subarray(head + 4 + n);
       if (typeof m.method === "string" && m.id !== undefined) {
         // A server's own request: settings are none, everything else is acknowledged.
@@ -531,7 +533,9 @@ export const symbols: EngineTool = {
     for (const f of new Set(listed.map((l) => l.file))) {
       let lines: string[] = [];
       try {
-        if (fs.statSync(f).size <= OPEN_BYTES_MAX) {
+        // A regular file of a reasonable size only: a device or a pipe is never read (Codex).
+        const st = fs.statSync(f);
+        if (st.isFile() && st.size <= OPEN_BYTES_MAX) {
           const b = f === file ? text : await readChecked(ctx, f);
           lines = typeof b === "string" && f !== file ? [] : String(typeof b === "string" ? b : b.toString("utf8")).split("\n");
         }
