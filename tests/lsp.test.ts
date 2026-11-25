@@ -18,7 +18,7 @@ function withDir(body: (dir: string, ctx: ToolContext, tools: string) => Promise
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-lsp-")));
   const tools = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-lsp-tools-")));
   const stop = new AbortController();
-  const ctx: ToolContext = { cwd: dir, env: { PATH: process.env.PATH, HOME: os.homedir() }, signal: stop.signal, reads: new Map(), groups: new Set(), programs: true, toolsDir: tools, ...o };
+  const ctx: ToolContext = { cwd: dir, env: { PATH: process.env.PATH, HOME: os.homedir() }, signal: stop.signal, reads: new Map(), groups: new Set(), programs: true, toolsDir: tools, readable: () => true, ...o };
   return body(dir, ctx, tools).finally(() => {
     stopServers(ctx);
     killGroups(ctx);
@@ -113,8 +113,10 @@ test("Symbols: refused where programs are not run unasked, for an unknown langua
     assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 9, symbol: "x" }, ctx)).text, /has 2 lines/);
     assert.match((await Symbols.run({ action: "rename", file_path: "a.ts", line: 1, symbol: "x" }, ctx)).text, /definition or references/);
     assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 1 }, ctx)).text, /give symbol/);
-    assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 1, symbol: "x" }, { ...ctx, toolsDir: undefined })).text, /no place to install/);
+    assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 1, symbol: "x" }, { ...ctx, toolsDir: undefined })).text, /no place for its language servers/);
     assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 1, symbol: "x" }, { ...ctx, readable: () => false })).text, /not a file this session may read/);
+    const { readable: _r, ...noRule } = ctx;
+    assert.match((await Symbols.run({ action: "definition", file_path: "a.ts", line: 1, symbol: "nope" }, noRule)).text, /no rule for what it may read/, "a cloud step with no rule reads nothing, not even the line");
   }));
 
 test("Symbols with the real servers: TypeScript, Python, Go installed on first use (FOLDRUN_LSP_REAL=1)", { skip: process.env.FOLDRUN_LSP_REAL === "1" ? false : "set FOLDRUN_LSP_REAL=1", timeout: 600_000 }, () =>

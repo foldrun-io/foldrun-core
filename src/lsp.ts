@@ -30,6 +30,8 @@ const REQUEST_MS = 30_000;
 const INSTALL_MS = 300_000;
 /** The largest file sent to a server as it is opened. */
 const OPEN_BYTES_MAX = 4 * 1024 * 1024;
+/** The most a server may send in one message, or have pending unparsed. */
+const FRAME_MAX = 32 * 1024 * 1024;
 
 const EXTENSIONS: Record<string, Language> = {
   ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript", js: "typescript", jsx: "typescript", mjs: "typescript", cjs: "typescript",
@@ -222,6 +224,13 @@ export class LspClient {
 
   private take(d: Buffer) {
     this.buf = Buffer.concat([this.buf, d]);
+    // A server that sends more than any answer needs, or a frame that never ends, is stopped (Codex).
+    if (this.buf.length > FRAME_MAX) {
+      this.buf = Buffer.alloc(0);
+      this.exited ??= `sent more than ${FRAME_MAX / 1024 / 1024} MB in one message`;
+      this.stop();
+      return;
+    }
     for (;;) {
       const head = this.buf.indexOf("\r\n\r\n");
       if (head < 0) return;
@@ -454,6 +463,9 @@ export const symbols: EngineTool = {
     if (!symbol && column === undefined) return fail("give symbol (the name as written on that line) or column");
     // A server is a program: it runs only where programs run unasked — inside the walls or in a container (Codex).
     if (!ctx.programs) return fail("Symbols runs a language server, which runs only inside the sandbox (or in the cloud) — here, find it with Grep");
+    // Nothing is read without a rule for what may be (the walls, or the client's own), nor where no server can run (Codex).
+    if (!ctx.sandbox && !ctx.readable) return fail("Symbols is not available in this session (no rule for what it may read) — find it with Grep");
+    if (!ctx.toolsDir) return fail("Symbols is not available in this session (no place for its language servers) — find it with Grep");
     const file = path.resolve(ctx.cwd, input.file_path);
     const lang = languageOf(file);
     if (!lang) return fail(`no language server for ${path.extname(file) || "files without an extension"} — Symbols reads TypeScript, JavaScript, Python and Go`);
