@@ -38,6 +38,7 @@
       "./engine-loop",
       "./engine-mcp",
       "./local-sandbox",
+      "./local-resources",
       "./model-names"
     ]
   },
