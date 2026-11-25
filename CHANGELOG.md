@@ -13,6 +13,12 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.8.2] — 2026-11-25
+
+### test
+
+- the looping job may print before the shell's own line (flaky in the dev gate) ([5d81bec](https://github.com/foldrun-io/foldrun-core/commit/5d81bec))
+
 ## [27.8.1] — 2026-11-25
 
 - fix(edit-check): type the checker's environment as foldrun-web's typecheck reads it ([6d2bb67](https://github.com/foldrun-io/foldrun-core/commit/6d2bb67))
