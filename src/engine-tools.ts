@@ -134,11 +134,30 @@ const ALLOW_SYNTAX_ERRORS = {
  *  the walls, the open file must be the very file now at the path the rules
  *  allow (same device and inode), so a path swapped between the check and
  *  the open is refused, not read. A string is the refusal. */
-export async function readChecked(ctx: ToolContext, file: string): Promise<Buffer | string> {
-  if (!ctx.sandbox) return fs.readFileSync(file);
+export async function readChecked(ctx: ToolContext, file: string, max?: number): Promise<Buffer | string> {
+  if (!ctx.sandbox) {
+    if (max === undefined) return fs.readFileSync(file);
+    // Bounded (Symbols, FOL-297): the file as opened must be a regular file, and no more than `max` is read of it,
+    // so a path swapped for a device or a pipe is never streamed into memory.
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) return `${file} is not a regular file`;
+      const buf = Buffer.alloc(max);
+      let n = 0;
+      for (;;) {
+        const got = fs.readSync(fd, buf, n, max - n, null);
+        if (got <= 0) break;
+        n += got;
+        if (n >= max) break;
+      }
+      return buf.subarray(0, n);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
   // Inside the walls the read itself runs there (cat), so the OS holds it
-  // however the path changes between a check and the read.
-  const r = await runInside(ctx, `exec /bin/cat -- ${shq(file)}`, "");
+  // however the path changes between a check and the read; `max` bounds it (head -c).
+  const r = await runInside(ctx, max === undefined ? `exec /bin/cat -- ${shq(file)}` : `exec /usr/bin/head -c ${Math.floor(max)} -- ${shq(file)}`, "");
   if (r.code !== 0) return `${file} could not be read: ${r.err || "the sandbox refused it"}`;
   return r.out;
 }

@@ -251,7 +251,8 @@ export class LspClient {
       this.buf = this.buf.subarray(head + 4 + n);
       if (typeof m.method === "string" && m.id !== undefined) {
         // A server's own request: settings are none, everything else is acknowledged.
-        const items = ((m.params as Json | undefined)?.items as unknown[] | undefined) ?? [];
+        const asked = (m.params as Json | undefined)?.items;
+        const items = Array.isArray(asked) ? asked : [];
         this.send({ jsonrpc: "2.0", id: m.id, result: m.method === "workspace/configuration" ? items.map(() => null) : null });
       } else if (typeof m.id === "number" && this.waiting.has(m.id)) {
         const w = this.waiting.get(m.id)!;
@@ -482,7 +483,7 @@ export const symbols: EngineTool = {
     }
     // Read as Read reads it: inside the walls, through the descriptor that was checked.
     const { readChecked } = await import("./engine-tools.ts");
-    const got = await readChecked(ctx, file);
+    const got = await readChecked(ctx, file, OPEN_BYTES_MAX);
     if (typeof got === "string") return fail(got);
     text = got.subarray(0, OPEN_BYTES_MAX).toString("utf8");
     const lines = text.split("\n");
@@ -536,7 +537,7 @@ export const symbols: EngineTool = {
         // A regular file of a reasonable size only: a device or a pipe is never read (Codex).
         const st = fs.statSync(f);
         if (st.isFile() && st.size <= OPEN_BYTES_MAX) {
-          const b = f === file ? text : await readChecked(ctx, f);
+          const b = f === file ? text : await readChecked(ctx, f, OPEN_BYTES_MAX);
           lines = typeof b === "string" && f !== file ? [] : String(typeof b === "string" ? b : b.toString("utf8")).split("\n");
         }
       } catch {
