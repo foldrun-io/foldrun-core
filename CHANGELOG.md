@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.11.0] — 2026-11-25
+
+- feat(egress): grant.network.deny — sites refused whatever the level, for a browse job's blocked domains (FOL-313) ([800147c](https://github.com/foldrun-io/foldrun-core/commit/800147c))
+
 ## [27.10.0] — 2026-11-25
 
 ### New in the public API
