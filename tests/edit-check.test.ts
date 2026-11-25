@@ -93,7 +93,7 @@ test("JavaScript is checked in the grammar it loads in: export refused in a Comm
     const eb = await write(ctx, { file_path: path.join(dir, "plain", "b.js"), content: "export const = 1;\n" });
     assert.equal(eb.isError, true, "broken in both grammars is still refused");
     // A package.json that is not a plain file, or that the walls deny, decides nothing.
-    assert.equal(jsMode(path.join(dir, "plain", "a.js"), () => false), "either");
+    assert.equal(jsMode(path.join(dir, "esm", "a.js"), true), "either", "inside the walls no package.json is read");
     fs.mkdirSync(path.join(dir, "pipe"));
     if (spawnSync("mkfifo", [path.join(dir, "pipe", "package.json")]).status === 0) assert.equal(jsMode(path.join(dir, "pipe", "a.js")), "either", "a pipe is never opened");
     assert.equal(jsMode(path.join(dir, "b.mjs")), "module");
@@ -143,6 +143,20 @@ test("Write reads the file it replaces only when the new content does not parse,
     const r = await write(ctx, { file_path: f, content: "{oops" });
     assert.equal(r.isError, undefined, r.text);
     assert.match(r.text, /not checked against the file as it was/);
+  } finally {
+    done();
+  }
+});
+
+test("a file whose text is the word 'unreadable' is compared like any other (Codex)", async () => {
+  const { dir, ctx, done } = setup();
+  try {
+    const f = path.join(dir, "w.cjs");
+    fs.writeFileSync(f, "unreadable\n");
+    await read(ctx, f);
+    const r = await write(ctx, { file_path: f, content: "const = ;\n" });
+    assert.equal(r.isError, true, r.text);
+    assert.match(r.text, /would stop parsing/);
   } finally {
     done();
   }

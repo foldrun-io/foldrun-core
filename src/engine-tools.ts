@@ -26,7 +26,7 @@ import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { LAUNCHER } from "./local-sandbox.ts";
-import { CHECK_MAX_BYTES, checkerFor, guardChange, type CheckOptions } from "./edit-check.ts";
+import { CHECK_MAX_BYTES, CHECK_MS, checkerFor, guardChange, readBounded, type CheckOptions } from "./edit-check.ts";
 
 export interface ToolContext {
   /** Relative paths resolve here: the agent's directory. */
@@ -55,7 +55,7 @@ export interface ToolContext {
 function checkOptions(ctx: ToolContext): Omit<CheckOptions, "ms"> {
   return {
     programs: ctx.programs === true,
-    ...(ctx.sandbox ? { canRead: (p: string) => ctx.sandbox!.canRead(p) } : {}),
+    walled: !!ctx.sandbox,
     ...(ctx.sandbox
       ? {
           runPython: async (program: string, args: string[], input: string, ms: number) => {
@@ -371,15 +371,13 @@ const write: EngineTool = {
     let note: string | null = null;
     if (input.allow_syntax_errors !== true && checkerFor(file)) {
       // What is there, read only if the new content does not parse, and only up to the size checked (Codex).
-      const beforeOf = async (): Promise<string | null | "unreadable"> => {
+      const beforeOf = async (): Promise<string | null | { unreadable: true }> => {
         if (!existed) return null;
-        try {
-          if (fs.statSync(file).size > CHECK_MAX_BYTES) return "unreadable";
-        } catch {
-          return "unreadable";
-        }
-        const buf = await readChecked(ctx, file);
-        return typeof buf === "string" ? "unreadable" : buf.toString("utf8");
+        const no = { unreadable: true as const };
+        if (!ctx.sandbox) return readBounded(file) ?? no;
+        // Inside the walls the read runs there, and stops past the cap whatever the file has become.
+        const r = await runInside(ctx, `exec /usr/bin/head -c ${CHECK_MAX_BYTES + 1} -- ${shq(file)}`, "", CHECK_MS);
+        return r.code !== 0 || r.out.length > CHECK_MAX_BYTES ? no : r.out.toString("utf8");
       };
       const g = await guardChange(file, beforeOf, content, checkOptions(ctx));
       if ("refuse" in g) return fail(g.refuse);

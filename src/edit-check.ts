@@ -45,9 +45,12 @@ export function checkerFor(file: string): "json" | "js" | "py" | null {
  * "module" or "commonjs" when it says so, else either (node detects it, Codex). A package.json is read only when it is
  * a plain file of a sane size the walls let this session read (`canRead`): a pipe or a denied path decides nothing.
  */
-export function jsMode(file: string, canRead: (p: string) => boolean = () => true): "commonjs" | "module" | "either" {
+export function jsMode(file: string, walled = false): "commonjs" | "module" | "either" {
   if (/\.mjs$/i.test(file)) return "module";
   if (/\.cjs$/i.test(file)) return "commonjs";
+  // Inside the walls this process reads nothing on the project's word: a path the walls deny could be swapped in
+  // between their check and the open (Codex). Either grammar then — never a refusal node would not give.
+  if (walled) return "either";
   for (let d = path.dirname(path.resolve(file)); ; d = path.dirname(d)) {
     const pj = path.join(d, "package.json");
     let st: fs.Stats | null = null;
@@ -57,27 +60,15 @@ export function jsMode(file: string, canRead: (p: string) => boolean = () => tru
       // none here: further up
     }
     if (st) {
-      if (!canRead(pj)) return "either";
-      // Opened without waiting (a pipe swapped in after the stat cannot hold this process), then judged and read by
-      // the descriptor itself: a plain file of a sane size, or nothing is decided (Codex).
-      let fd: number | null = null;
+      // Read by a descriptor opened without waiting and judged by itself: a pipe swapped in after the stat cannot
+      // hold this process, nor a file grown past the cap (Codex).
+      const text = readBounded(pj, 1_000_000);
+      if (text === null) return "either";
       try {
-        fd = fs.openSync(pj, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-        const fst = fs.fstatSync(fd);
-        if (!fst.isFile() || fst.size > 1_000_000) return "either";
-        const buf = Buffer.alloc(fst.size);
-        let got = 0;
-        while (got < fst.size) {
-          const n = fs.readSync(fd, buf, got, fst.size - got, got);
-          if (n <= 0) break;
-          got += n;
-        }
-        const j = JSON.parse(buf.subarray(0, got).toString("utf8"));
+        const j = JSON.parse(text);
         return j && j.type === "module" ? "module" : j && j.type === "commonjs" ? "commonjs" : "either";
       } catch {
         return "either";
-      } finally {
-        if (fd !== null) fs.closeSync(fd);
       }
     }
     if (path.dirname(d) === d) return "either";
@@ -135,6 +126,29 @@ export const runDirect: Runner = (program, args, input, ms) =>
     child.stdin!.end(input);
   });
 
+/** A file's text, read by a descriptor opened without waiting, only if it is a plain file of at most `max` bytes:
+ *  null otherwise (a pipe, a device, too large, gone). */
+export function readBounded(file: string, max = CHECK_MAX_BYTES): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > max) return null;
+    const buf = Buffer.alloc(max + 1);
+    let got = 0;
+    while (got <= max) {
+      const n = fs.readSync(fd, buf, got, max + 1 - got, got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return got > max ? null : buf.subarray(0, got).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
 /** node's words for a syntax error on stdin: "line L: SyntaxError: …". */
 export function nodeError(out: string): string {
   const line = /\[stdin\]:(\d+)/.exec(out)?.[1];
@@ -149,8 +163,8 @@ export interface CheckOptions {
   runPython?: Runner;
   /** How node is run (tests). */
   runNode?: Runner;
-  /** Whether this session may read a path (the walls' canRead): a package.json it may not read decides nothing. */
-  canRead?: (p: string) => boolean;
+  /** The local walls are up: no project file is read by this process to decide a grammar. */
+  walled?: boolean;
   /** Milliseconds left for this check. */
   ms: number;
   python?: string | null;
@@ -171,7 +185,7 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
     }
   }
   if (kind === "js") {
-    const mode = jsMode(file, o.canRead);
+    const mode = jsMode(file, o.walled === true);
     const until = Date.now() + o.ms;
     const once = async (asModule: boolean): Promise<Verdict> => {
       const args = asModule ? ["--input-type=module", "--check", "-"] : ["--check", "-"];
@@ -214,8 +228,8 @@ export type Guard = { refuse: string } | { note: string | null };
 export async function guardChange(
   file: string,
   /** What is there now (null: a new file), or how to read it — asked only when the change does not parse (Codex);
-   *  "unreadable" when it cannot be read, which is never refused for. */
-  beforeOf: string | null | (() => Promise<string | null | "unreadable">),
+   *  { unreadable: true } when it cannot be read, which is never refused for. */
+  beforeOf: string | null | (() => Promise<string | null | { unreadable: true }>),
   after: string,
   o: Omit<CheckOptions, "ms">,
   ms = CHECK_MS,
@@ -225,7 +239,7 @@ export async function guardChange(
   if (now.kind === "ok") return { note: null };
   if (now.kind === "unchecked") return { note: checkerFor(file) === "py" && !o.programs ? null : `syntax not checked: ${now.why}` };
   const got = typeof beforeOf === "function" ? await beforeOf() : beforeOf;
-  if (got === "unreadable") return { note: `syntax not checked against the file as it was: it could not be read` };
+  if (got !== null && typeof got === "object") return { note: `syntax not checked against the file as it was: it could not be read` };
   const before = got;
   if (before !== null) {
     const was = await checkText(file, before, { ...o, ms: until - Date.now() });
