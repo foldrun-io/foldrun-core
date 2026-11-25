@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.2.0] — 2026-11-25
+
+### New in the public API
+
+- `apparmorHint` from `@foldrun/core/local-sandbox`
+
+- fix(local-sandbox): the Ubuntu fix that works — a profile for bwrap alone, not Ubuntu's restrict profile (FOL-214, tried on 24.04) ([b5cede0](https://github.com/foldrun-io/foldrun-core/commit/b5cede0))
+
 ## [29.1.0] — 2026-11-25
 
 ### New in the public API
