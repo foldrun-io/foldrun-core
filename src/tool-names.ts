@@ -54,7 +54,7 @@ export const BUILTIN_TOOLS = new Set([
  *  accepted so a file that says so is not flagged. `text` is extract_text
  *  (text-tool.ts) — named `text`, not `extract`, because `extract` is
  *  already one of the web tool's actions (`limits: {web.extract: 5}`). */
-export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install", "text"]);
+export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install", "text", "symbols"]);
 
 /** Would this name resolve to something the runtime provides? Built-ins win a
  *  clash, so a tool file of the same name is shadowed rather than granted. */

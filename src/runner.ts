@@ -48,6 +48,7 @@ import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNa
 import type { DelegationResult, OperatorEvent } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
 import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-tool.ts";
+import { SYMBOLS_SERVER, SYMBOLS_TOOL, buildSymbolsTools, symbolsPromptLine } from "./symbols-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
 import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
@@ -1858,6 +1859,7 @@ export function agentContext(
   let wantAsk = false;
   let wantPeers = false;
   let wantText = false;
+  let wantSymbols = false;
 
   for (const ref of toolRefs(front)) {
     const toolName = ref.name;
@@ -1890,7 +1892,7 @@ export function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
-    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text") {
+    } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text" || toolName === "symbols") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
       if (toolName === "search") wantSearch = true;
@@ -1898,6 +1900,7 @@ export function agentContext(
       else if (toolName === "ask") wantAsk = true;
       else if (toolName === "peers") wantPeers = true;
       else if (toolName === "text") wantText = true;
+      else if (toolName === "symbols") wantSymbols = true;
       else wantDesks = true;
       if (available[toolName]) shadowed.push(toolName);
     } else if (toolName === "install") {
@@ -1970,6 +1973,12 @@ export function agentContext(
     allowed.push(TEXT_TOOL);
     parts.add("text", `# Files as text\n\n${textPromptLine()}`);
   }
+  // tools: [symbols] (FOL-297) — a language server in the step's own boundary; the server is the step's.
+  const symbolsTool = wantSymbols;
+  if (symbolsTool) {
+    allowed.push(SYMBOLS_TOOL);
+    parts.add("symbols", `# Definitions and references\n\n${symbolsPromptLine()}`);
+  }
   if (searchTools.promptLines.length || historyTools.promptLines.length || deskTools.promptLines.length) {
     parts.add("finding", `# Finding things\n\n${[...searchTools.promptLines, ...historyTools.promptLines, ...deskTools.promptLines].join("\n")}`);
   }
@@ -1992,6 +2001,7 @@ export function agentContext(
   const denied: string[] = refNames(front.disallowedTools);
   if (denied.includes("install")) denied.push(INSTALL_TOOL);
   if (denied.includes("text")) denied.push(TEXT_TOOL);
+  if (denied.includes("symbols")) denied.push(SYMBOLS_TOOL);
   const finalAllowed = allowed.filter((t) => !denied.includes(t));
   readsFiles = canReadBack(finalAllowed);
   const prompt = parts.assemble();
@@ -2045,6 +2055,7 @@ export function agentContext(
     ask,
     peers,
     textTool,
+    symbolsTool,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2586,6 +2597,7 @@ async function runStepBody(
       ask,
       peers,
       textTool,
+      symbolsTool,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -3037,6 +3049,7 @@ async function runStepBody(
       ...(ask ? ["foldrun_ask"] : []),
       ...(peers ? ["foldrun_peers"] : []),
       ...(textTool ? [TEXT_SERVER] : []),
+      ...(symbolsTool ? [SYMBOLS_SERVER] : []),
     ];
     if (peers) {
       // The colleagues' contract, in the prompt the step reads: who runs
@@ -3638,6 +3651,7 @@ async function runStepBody(
           consults,
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
           ...(textTool ? { text: true } : {}),
+          ...(symbolsTool ? { symbols: true } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -4106,6 +4120,9 @@ async function runStepBody(
       // whatever its tools); only tools: [peers] gets the tools to send.
       const peerChannel = peerBus && stepIndex !== undefined && stepIndex >= 0 ? peerBus.channelFor({ agent: step.agent, step: stepIndex }, siblings) : null;
       const peerTools = peers ? buildPeerTools({ channel: peerChannel, self: step.agent, siblings, emit: push }) : null;
+      // tools: [symbols] here: the step runs in this process, so its language servers do too — as foldrun run's
+      // commands already do on this machine. Ended with the step (below).
+      const symbolsTools = symbolsTool ? buildSymbolsTools({ agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), emit: (type, t) => push(type, t) }) : null;
       const localInbox = peerChannel ? inboxReader(peerChannel, push) : undefined;
       // tools: [text] — no proxy in this process, so no extraction service:
       // the tool is there and says so, rather than going missing.
@@ -4179,6 +4196,7 @@ async function runStepBody(
           ...(askTools ? { foldrun_ask: askTools.server } : {}),
           ...(peerTools ? { foldrun_peers: peerTools.server } : {}),
           ...(textTools ? { [TEXT_SERVER]: textTools.server } : {}),
+          ...(symbolsTools ? { [SYMBOLS_SERVER]: symbolsTools.server } : {}),
           ...(delegateTools?.server ? { foldrun_delegate: delegateTools.server } : {}),
           ...(a2aTools?.server ? { foldrun_a2a: a2aTools.server } : {}),
           ...(installTools ? { foldrun_install: installTools.server } : {}),
@@ -4235,6 +4253,8 @@ async function runStepBody(
         try {
           return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
         } finally {
+          // The attempt's language servers end with it (a retry starts them again).
+          symbolsTools?.close();
           if (t) {
             for (const line of t.drainLog()) pushWatching("info", line.startsWith("translator") ? line : `translator: ${line}`);
             await t.close();

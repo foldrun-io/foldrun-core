@@ -80,6 +80,7 @@ const TOOL_GROUPS: Completion[] = [
   { label: "video", hint: "motion graphics and video from React code: new, compositions, still, render (Remotion) — gallery" },
   { label: "ask", hint: "ask_person — ask the person running the desk mid-step, and wait for the answer" },
   { label: "peers", hint: "peers_list + peers_message — the colleagues running beside it in its parallel group, and a message to one of them" },
+  { label: "symbols", hint: "symbols — where a name is defined and every use of it, by a language server (TypeScript, Python, Go)" },
   { label: "text", hint: "extract_text — an image, scanned PDF, office file, audio or video as text (Persian + English OCR, speech)" },
   { label: "install", hint: "install apt, pip or npm packages mid-step — every agent has it; disallowedTools: [install] removes it" },
 ];

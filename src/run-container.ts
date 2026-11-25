@@ -128,6 +128,8 @@ export interface ContainerStepInput {
   /** tools: [text] — extract_text, rebuilt in here over the lease's /text
    *  door to the extraction service (text-tool.ts). */
   text?: boolean;
+  /** tools: [symbols] (FOL-297): definitions and references by a language server, run in this container. */
+  symbols?: boolean;
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -929,6 +931,7 @@ try {
   const { httpChannel, buildAskTool, buildPeerTools, inboxReader } = await import("@foldrun/core/operator");
   const { buildDelegateTools } = await import("@foldrun/core/delegate-tools");
   const { buildTextTools } = await import("@foldrun/core/text-tool");
+  const { buildSymbolsTools } = await import("@foldrun/core/symbols-tool");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
   const { materializeFileSecrets } = await import("@foldrun/core/secret-files");
@@ -1045,6 +1048,8 @@ try {
   // tools: [text] — a file as text, through the extraction service behind
   // the same proxy; the lease was granted the door only for this tool.
   const textTool = input.text ? buildTextTools({ egress: env.FOLDRUN_EGRESS || null, agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", emit }) : { server: null };
+  // tools: [symbols] — the container is the boundary its language servers run in; they end with it.
+  const symbolsTool = input.symbols ? buildSymbolsTools({ agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", env, emit }) : { server: null };
   // sandbox: own sub-agents: a tool each, whose job runs in its own sandbox
   // on the worker, reached over the same proxy door.
   const delegate = input.delegates?.length ? buildDelegateTools({ specs: input.delegates, channel, emit, timeoutSec: input.timeoutSec, workspaceRoot: "/workspace" }) : { server: null };
@@ -1102,6 +1107,7 @@ try {
       ...(ask.server ? { foldrun_ask: ask.server } : {}),
       ...(peers.server ? { foldrun_peers: peers.server } : {}),
       ...(textTool.server ? { foldrun_text: textTool.server } : {}),
+      ...(symbolsTool.server ? { foldrun_symbols: symbolsTool.server } : {}),
       ...(delegate.server ? { foldrun_delegate: delegate.server } : {}),
       ...(install.server ? { foldrun_install: install.server } : {}),
       ...input.mcpServers,
