@@ -96,7 +96,8 @@ export interface ResourceRow {
   inForce: number | null;
   /** The agent asked for more than is allowed here: it runs at `inForce` only after the person agrees. */
   over: boolean;
-  held: "not yet held" | "sampled" | "enforced" | "no limit";
+  /** "by priority": CPU on macOS — the busiest command moves to the background band over the limit, never stopped (FOL-240). */
+  held: "not yet held" | "sampled" | "by priority" | "enforced" | "no limit";
 }
 
 /** The limit in force: the lowest of the computer's budget, the session's own ceiling and what the agent asks. */
