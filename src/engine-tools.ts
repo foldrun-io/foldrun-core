@@ -55,6 +55,9 @@ export interface ToolContext {
   /** The letter a job id starts with (default "b"): a second list of jobs — foldrun code's outside the sandbox —
    *  names its own so neither is mistaken for the other. */
   jobPrefix?: string;
+  /** The shell a command runs in when there are no walls (default `bash` from PATH): a client running commands as
+   *  the person names a fixed one, so a folder early in PATH cannot stand in for it (Codex). */
+  shell?: string;
 }
 
 /** A command running in the background (Bash `run_in_background`, FOL-293). */
@@ -1252,7 +1255,8 @@ async function startJob(command: string, line: string, env: Record<string, strin
   const n = (jobSeq.get(jobs) ?? 0) + 1;
   jobSeq.set(jobs, n);
   const id = `${ctx.jobPrefix ?? "b"}${n}`;
-  const child = spawn(ctx.sandbox ? LAUNCHER : "bash", ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  // A child that starts a process group of its own is not this job's to end — the same bound every command has.
+  const child = spawn(ctx.sandbox ? LAUNCHER : ctx.shell ?? "bash", ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (child.pid) ctx.groups.add(child.pid);
   const job: BgJob = { id, command, pid: child.pid, out: "", base: 0, read: 0, exit: null, stdin: child.stdin, wake: new Set(), startedAt: Date.now() };
   const wake = () => {
