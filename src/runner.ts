@@ -25,6 +25,7 @@ import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSand
 import { readResources, hasOverride, anyMemoryMi } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
 import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvName, DECLARED_ENV_PREFIX, OWN_KEYS_OFF } from "./model-credential.ts";
+import { isProxyEnvName } from "./env-names.ts";
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
 import { EGRESS_ENV, MODEL_KEY_NAME, addGrant, grantModelKey, hostOf, placeholderNames, proxyModelEnv, unsubstitute, type EgressGrant } from "./egress.ts";
@@ -3557,7 +3558,9 @@ async function runStepBody(
         );
       }
       const sandboxEnvSecrets = Object.fromEntries(
-        Object.entries(sandboxSecrets).map(([name, value]) => [isModelEnvName(name) ? `${DECLARED_ENV_PREFIX}${name}` : name, value]),
+        // A model key's name, or one the platform sets for the egress proxy
+        // (FOL-215), would replace the platform's own: under the prefix instead.
+        Object.entries(sandboxSecrets).map(([name, value]) => [isModelEnvName(name) || isProxyEnvName(name) ? `${DECLARED_ENV_PREFIX}${name}` : name, value]),
       );
       const substitutedApis = apiSpecs.map((api) => ({
         ...api,
@@ -3747,7 +3750,10 @@ async function runStepBody(
         // The pod's network, for the executor's own wall (the k8s tier's
         // network policy): a filtered pod reaches the proxy only (and DNS,
         // unless the platform walls that too).
-        network: { level: network.level, enforced: forward?.enforce === true },
+        // The proxy's address goes along from the lease itself, for an executor
+        // that walls the sandbox to it (Docker, FOL-215): not from the env,
+        // where a declared secret may shadow HTTPS_PROXY.
+        network: { level: network.level, enforced: forward?.enforce === true, proxy: forward?.proxy ?? null },
         // A test run's state/ and storage/ changes come out under the run.
         divert: testRun && runId ? divertFor(runId) : undefined,
         // Read at copy-out: what the host handed back into the sandbox.

@@ -1837,13 +1837,14 @@ export function parseDriverLine(
 
 // The network runner containers join when none is configured: a bridge with
 // inter-container traffic disabled, so two tenants' runs sharing a host
-// cannot see each other's ports — each gets the internet (the model API
-// lives there) and nothing beside it. Created once, reused forever.
+// cannot see each other's ports. It has the internet, so it is used only by
+// a step that is not told to send through the egress proxy (an install with
+// none, FOLDRUN_EGRESS_FORWARD=0); a step that is gets an account network
+// with no route out at all (runNetworkFor). Created once, reused forever.
 const RUN_NETWORK = "foldrun-runs";
 
+/** The legacy run network: a bridge with the internet (see above). */
 function ensureRunNetwork(): string {
-  const configured = process.env.FOLDRUN_RUNNER_NETWORK;
-  if (configured) return configured;
   const have = spawnSync(cli(), ["network", "inspect", RUN_NETWORK], { stdio: "ignore" });
   if (have.status !== 0) {
     spawnSync(
@@ -1857,6 +1858,153 @@ function ensureRunNetwork(): string {
     );
   }
   return RUN_NETWORK;
+}
+
+/** What a step's own network is labelled with, so a sweep finds what a crash left. */
+const STEP_NETWORK_LABEL = "foldrun.step-network";
+const RELAY_LABEL = "foldrun.egress-relay";
+/** The one upstream the relay serves: the proxy on the host, as a compose
+ *  install publishes it. Any other name is refused — the relay would resolve
+ *  a name it is itself an alias for on the step networks (Codex, FOL-215). */
+const RELAY_UPSTREAM_HOST = "host.docker.internal";
+
+/** The step's egress door, from the lease's forward-proxy URL that the
+ *  runner passes as a trusted field (never the step's env, which a declared
+ *  secret could shadow). A reason instead when it cannot be walled to. */
+export function egressDoorOf(proxyUrl: string | null | undefined): { host: string; port: number } | { why: string } {
+  if (!proxyUrl) return { why: "the step has no egress proxy to send through" };
+  let u: URL;
+  try {
+    u = new URL(proxyUrl);
+  } catch {
+    return { why: "the egress proxy's address does not parse" };
+  }
+  const host = u.hostname.toLowerCase();
+  const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  if (host !== RELAY_UPSTREAM_HOST) return { why: `the egress proxy is ${host}, and only ${RELAY_UPSTREAM_HOST} (the compose install's FOLDRUN_EGRESS_URL) can be walled to on Docker` };
+  return { host, port };
+}
+
+/** The relay for one upstream: its container name, by the upstream, so a new
+ *  proxy address gets a new relay and the old one drains instead of being cut. */
+export function relayNameFor(door: { host: string; port: number }): string {
+  const base = process.env.FOLDRUN_EGRESS_RELAY || "foldrun-egress-relay";
+  return `${base}-${crypto.createHash("sha256").update(`${door.host}:${door.port}`).digest("hex").slice(0, 10)}`;
+}
+
+/** The relay's program: forward each connection to the proxy, resolved once at
+ *  start (the hosts file entry, before it joins any step network), with a cap
+ *  on connections in all and per step, and an idle limit. */
+export function relayProgram(door: { host: string; port: number }, caps = { total: 512, perSource: 64, idleMs: 15 * 60_000 }): string {
+  return `const n=require("net"),d=require("dns");d.lookup(${JSON.stringify(door.host)},{family:4},(e,ip)=>{if(e){console.error(String(e));process.exit(1);}let all=0;const by=new Map();n.createServer((c)=>{const k=c.remoteAddress||"?";const m=by.get(k)||0;if(all>=${caps.total}||m>=${caps.perSource}){c.destroy();return;}all++;by.set(k,m+1);const u=n.connect(${door.port},ip);let done=false;const end=()=>{if(done)return;done=true;all--;const v=(by.get(k)||1)-1;if(v)by.set(k,v);else by.delete(k);c.destroy();u.destroy();};for(const s of [c,u]){s.setTimeout(${caps.idleMs},end);s.on("error",end);s.on("close",end);}c.pipe(u);u.pipe(c);}).listen(${door.port});});`;
+}
+
+/** Start (or find) the relay for this upstream, verified to be ours, running. */
+function ensureEgressRelay(door: { host: string; port: number }, image: string): string {
+  const name = relayNameFor(door);
+  const want = `${door.host}:${door.port}`;
+  const run = (args: string[]) => spawnSync(cli(), args, { encoding: "utf8", timeout: 60_000 });
+  const look = () => {
+    const got = run(["inspect", name, "--format", `{{index .Config.Labels "${RELAY_LABEL}"}}|{{.State.Running}}|{{.Id}}`]);
+    if (got.status !== 0) return null;
+    const [target, running, id] = got.stdout.trim().split("|");
+    if (target !== want) throw new Error(`a container named ${name} exists and is not foldrun's egress relay for ${want}: remove or rename it`);
+    return { running: running === "true", id };
+  };
+  let seen = look();
+  if (!seen) {
+    const made = run([
+      "run", "-d", "--name", name, "--restart", "unless-stopped",
+      "--label", `${RELAY_LABEL}=${want}`,
+      "--add-host", `${RELAY_UPSTREAM_HOST}:host-gateway`,
+      "--user", "65534:65534", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+      "--memory", "64m", "--pids-limit", "64",
+      "--entrypoint", "node", image, "-e", relayProgram(door),
+    ]);
+    if (made.status !== 0 && !/already in use/i.test(made.stderr || "")) throw new Error(`could not start the egress relay: ${(made.stderr || "").trim().slice(0, 300)}`);
+    seen = look(); // a racing worker's is fine once it is checked to be the same
+  }
+  if (seen && !seen.running) {
+    run(["start", name]);
+    seen = look();
+  }
+  if (!seen?.running) throw new Error(`the egress relay ${name} is not running (docker logs ${name})`);
+  return seen.id;
+}
+
+/** Docker's server version, asked for every held step (the socket may reach
+ *  a different engine later): an isolated gateway is Docker 28's, and an older
+ *  engine keeps an option it does not know without acting on it, so the
+ *  network's own record cannot prove the wall (Codex, FOL-215). */
+export function assertIsolatingEngine(version: () => string | null = () => {
+  const v = spawnSync(cli(), ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", timeout: 30_000 });
+  return v.status === 0 ? v.stdout.trim() : null;
+}): void {
+  const seen = version();
+  // A whole release number (28.0.1, 29.5.2-rc.1, 28.3.0+dfsg): not "28." or "29.dev".
+  const m = /^(\d+)\.(\d+)(?:\.(\d+))?(?:[-+~][0-9A-Za-z.+~-]+)?$/.exec(seen ?? "");
+  if (!m || Number(m[1]) < 28) {
+    throw new Error(`this step is held to its network list, and walling its container in needs Docker 28 or later (this engine: ${seen || "version unknown"}) — upgrade Docker`);
+  }
+}
+
+let lastSweep = 0;
+/** Remove step networks a crash left: older than an hour, with no step on them. */
+function sweepStepNetworks(): void {
+  if (Date.now() - lastSweep < 10 * 60_000) return;
+  lastSweep = Date.now();
+  const run = (args: string[]) => spawnSync(cli(), args, { encoding: "utf8", timeout: 30_000 });
+  const names = run(["network", "ls", "-q", "--filter", `label=${STEP_NETWORK_LABEL}=1`]).stdout.split("\n").filter(Boolean);
+  for (const id of names) {
+    const info = run(["network", "inspect", id, "--format", `{{.Created.Unix}}|{{range $k, $v := .Containers}}{{$v.Name}},{{end}}`]).stdout.trim();
+    const [created, members] = info.split("|");
+    if (!created || Date.now() / 1000 - Number(created) < 3600) continue;
+    const names2 = (members ?? "").split(",").filter(Boolean);
+    if (names2.some((m) => !m.startsWith(process.env.FOLDRUN_EGRESS_RELAY || "foldrun-egress-relay"))) continue;
+    for (const m of names2) run(["network", "disconnect", "-f", id, m]);
+    run(["network", "rm", id]);
+  }
+}
+
+/** This step's own network (FOL-215): internal (no route out), its gateway
+ *  isolated (no address of the host on it, so nothing listening on the host
+ *  answers), nothing else on it but the egress relay under the proxy's name —
+ *  the k8s tier's "the proxy and nothing else", with no other step reachable
+ *  either. Made for the step, removed after it. Throws rather than fall back. */
+export function stepNetwork(door: { host: string; port: number }, image: string, runId: string | undefined): { name: string; remove: () => void } {
+  assertIsolatingEngine();
+  sweepStepNetworks();
+  const run = (args: string[]) => spawnSync(cli(), args, { encoding: "utf8", timeout: 60_000 });
+  const relayId = ensureEgressRelay(door, image);
+  const name = `foldrun-step-${crypto.randomBytes(6).toString("hex")}`;
+  const made = run([
+    "network", "create", "--internal",
+    "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+    // Both families: a daemon that turns IPv6 on for new bridges would
+    // otherwise leave the host an address on the step's network (Codex).
+    "-o", "com.docker.network.bridge.gateway_mode_ipv6=isolated",
+    "--ipv6=false",
+    "--label", `${STEP_NETWORK_LABEL}=1`,
+    ...(runId ? ["--label", `${RUN_LABEL}=${runId}`] : []),
+    name,
+  ]);
+  const remove = () => {
+    run(["network", "disconnect", "-f", name, relayId]);
+    run(["network", "rm", name]);
+  };
+  if (made.status !== 0) throw new Error(`could not make this step's network: ${(made.stderr || "").trim().slice(0, 300)} — an isolated gateway needs Docker 28 or later; out of addresses means Docker's default-address-pools are used up`);
+  try {
+    const shape = run(["network", "inspect", name, "--format", `{{.Internal}}|{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}|{{.EnableIPv6}}|{{index .Options "com.docker.network.bridge.gateway_mode_ipv6"}}`]).stdout.trim();
+    if (!/^true\|isolated\|(false|true\|isolated)/.test(shape) || (shape.split("|")[2] === "true" && shape.split("|")[3] !== "isolated")) throw new Error(`this step's network ${name} is not internal with an isolated gateway (${shape || "unreadable"})`);
+    const joined = run(["network", "connect", "--alias", door.host, name, relayId]);
+    if (joined.status !== 0) throw new Error(`could not join the egress relay to ${name}: ${(joined.stderr || "").trim().slice(0, 300)}`);
+    const members = run(["network", "inspect", name, "--format", "{{range $k, $v := .Containers}}{{$k}} {{end}}"]).stdout;
+    if (!members.includes(relayId)) throw new Error(`the egress relay is not on ${name}`);
+  } catch (err) {
+    remove();
+    throw err;
+  }
+  return { name, remove };
 }
 
 // The cores the container engine can hand out, asked once. `--cpus` above it
@@ -1944,7 +2092,14 @@ export interface RunInContainerArgs {
   /** The step's network (network.ts), for an executor that can wall the
    *  sandbox in itself: the k8s tier labels a filtered pod so its policy
    *  admits the proxy and DNS alone. `enforced` false is report-only. */
-  network?: { level: NetworkLevel; enforced: boolean };
+  network?: {
+    level: NetworkLevel;
+    enforced: boolean;
+    /** The lease's forward-proxy URL, as the runner was handed it — the
+     *  trusted address to wall the sandbox to (the step's env is not: a
+     *  declared secret may shadow HTTPS_PROXY). */
+    proxy?: string | null;
+  };
   emit: (type: "text" | "tool" | "info" | "error", text: string, extra?: EventExtra) => void;
   /** The run this step belongs to. Stamped on the sandbox as a label so a
    *  person stopping the run can reach the thing actually burning money —
@@ -2189,6 +2344,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
 
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-run-"));
   let containerId = "";
+  let stepNet: { name: string; remove: () => void } | null = null;
   // The revisions this step starts from (FOL-126 fixes): taken before the
   // folder is copied, held until the copy-back is done.
   let pinned: Awaited<ReturnType<typeof pinRunBase>> = null;
@@ -2279,12 +2435,29 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     if (process.env.FOLDRUN_RUNNER_RUNTIME) {
       flags.push("--runtime", process.env.FOLDRUN_RUNNER_RUNTIME);
     }
-    flags.push("--network", ensureRunNetwork());
-    // A name for the host, so the egress proxy the platform runs is reachable
-    // from inside a step as host.docker.internal on Linux as it already is on
-    // Docker Desktop. The run bridge has inter-container traffic off; the
-    // host itself stays reachable, which is the one door this needs.
-    flags.push("--add-host", "host.docker.internal:host-gateway");
+    // The network (FOL-215). A step held to its list (trusted or none, the
+    // list enforced) gets a network of its own whose only way out is the
+    // egress relay — what the k8s tier's network policy does for its pod —
+    // and it does not start when that cannot be made. Report-only and open
+    // steps keep the bridge, as the k8s tier leaves those pods unwalled.
+    const walled = args.network && args.network.level !== "open" && args.network.enforced;
+    if (walled) {
+      if (process.env.FOLDRUN_RUNNER_NETWORK) {
+        throw new Error(`this step is held to its network list, and FOLDRUN_RUNNER_NETWORK (${process.env.FOLDRUN_RUNNER_NETWORK}) is a network foldrun cannot check is walled in: unset it, and each such step gets its own network with the egress proxy as its only way out`);
+      }
+      const door = egressDoorOf(args.network!.proxy);
+      if ("why" in door) throw new Error(`this step is held to its network list and its container cannot be walled in: ${door.why}`);
+      const net = stepNetwork(door, tag, args.runId);
+      stepNet = net;
+      flags.push("--network", net.name);
+    } else if (process.env.FOLDRUN_RUNNER_NETWORK) {
+      flags.push("--network", process.env.FOLDRUN_RUNNER_NETWORK, "--add-host", "host.docker.internal:host-gateway");
+    } else {
+      // A name for the host, so the egress proxy the platform runs is reachable
+      // from inside a step as host.docker.internal on Linux as it already is on
+      // Docker Desktop. The run bridge has inter-container traffic off.
+      flags.push("--network", ensureRunNetwork(), "--add-host", "host.docker.internal:host-gateway");
+    }
 
     // The dependency cache: this tenant's built venvs and npm prefixes, in a
     // per-tenant Docker named volume mounted where prepareRuntime already looks.
@@ -2422,6 +2595,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
     return { ...outcome, timing, applied, ...(refused.length ? { refused } : {}) };
   } finally {
     if (containerId) spawnSync(cli(), ["rm", "-f", containerId], { stdio: "ignore" });
+    stepNet?.remove();
     fs.rmSync(staging, { recursive: true, force: true });
     await pinned?.release();
   }

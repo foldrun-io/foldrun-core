@@ -82,7 +82,7 @@ test("held: the browsing step gets the forward door, a walled network and the co
   assert.equal(args!.env.HTTPS_PROXY, DOOR, "the forward door, as for any other step");
   assert.equal(args!.env.FOLDRUN_BROWSER_CONFINED, "1");
   assert.ok(args!.env.FOLDRUN_EGRESS_CA, "the CA, for the browser to trust on intercepted hosts");
-  assert.deepEqual(args!.network, { level: "trusted", enforced: true }, "the executor walls it (filtered)");
+  assert.deepEqual(args!.network, { level: "trusted", enforced: true, proxy: "http://foldrun:tok_abcdefghijklmnop1234@egress.test:8090" }, "the executor walls it (filtered)");
   assert.ok(events.some((e) => /enforced — hosted: the browser runs inside this step's sandbox/.test(e)), events.join("\n"));
   assert.ok(!events.some((e) => /not enforced in this step/.test(e)));
 });
@@ -93,7 +93,7 @@ test("switch off: exactly as before phase 3 — no proxy, no wall, said as not e
   assert.equal(args!.env.HTTPS_PROXY, undefined);
   assert.equal(args!.env.FOLDRUN_BROWSER_CONFINED, undefined);
   assert.equal(args!.env.FOLDRUN_EGRESS_CA, undefined);
-  assert.deepEqual(args!.network, { level: "trusted", enforced: false });
+  assert.deepEqual(args!.network, { level: "trusted", enforced: false, proxy: null });
   assert.ok(events.some((e) => /not enforced in this step: it may browse/.test(e)), events.join("\n"));
 });
 

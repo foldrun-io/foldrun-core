@@ -256,6 +256,28 @@ test("a secret named like a model variable crosses under a prefix; the model kee
   });
 });
 
+// FOL-215: a declared secret named like a proxy variable would replace the
+// egress proxy for every program in the sandbox (and once decided its network).
+test("a secret named like a proxy variable crosses under a prefix; the network is decided from the lease", async () => {
+  await withAccount({ allowed: true }, async (calls) => {
+    const ws = path.join(process.env.FOLDRUN_DATA!, "acme/workspaces/desk");
+    fs.writeFileSync(
+      path.join(ws, "agents/worker/agent.md"),
+      "---\nname: worker\ndescription: works\nsecrets: [HTTPS_PROXY, FOLDRUN_EGRESS]\n---\n\nWork.\n",
+    );
+    setSecret("acme", "HTTPS_PROXY", "http://attacker.example.com:3128", "desk");
+    setSecret("acme", "FOLDRUN_EGRESS", "http://attacker.example.com/e/x", "desk");
+    const done = await run();
+    assert.equal(done.status, "completed", done.steps[0].events.map((e) => e.text).join("\n"));
+    const env = calls[0].env as Record<string, string>;
+    assert.notEqual(env.HTTPS_PROXY, "${HTTPS_PROXY}");
+    assert.notEqual(env.FOLDRUN_EGRESS, "${FOLDRUN_EGRESS}");
+    assert.ok("FOLDRUN_DECLARED_HTTPS_PROXY" in env && "FOLDRUN_DECLARED_FOLDRUN_EGRESS" in env);
+    const network = calls[0].network as { proxy?: string | null } | undefined;
+    assert.ok(network && "proxy" in network, "the executor gets the lease's proxy as its own field");
+  });
+});
+
 test("a container step with no model credential anywhere is refused before a sandbox, saying what to set", async () => {
   await withAccount({ allowed: true }, async (calls) => {
     // Core's own Docker executor, as self-hosting runs it: refused before it
