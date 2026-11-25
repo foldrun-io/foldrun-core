@@ -45,6 +45,9 @@ import { SUPPLY_PROVIDERS } from "./model-supply.ts";
 import { providerPreset } from "./providers.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT, compacted, cutPoints, estimateTokens, fileLists, findCut, isContextOverflow, previousSummary, summaryRequest } from "./engine-compact.ts";
 import { DEFAULT_MAX_TOKENS, readOptions, showsThinking, takesEffort, effortFor, decide, after, emptyUsage, addUsage, type Json, type Block, type LoopOptions, type Decision, type Usage } from "./engine-common.ts";
+// The server tools the engine can send (FOL-304), from its public entry: foldrun code checks for it before asking the
+// gateway which it runs.
+export { serverToolsOf } from "./engine-common.ts";
 
 /** Which loop runs a step's turns. */
 export type Engine = "sdk" | "foldrun";
