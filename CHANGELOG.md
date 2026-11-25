@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.9.0] — 2026-11-25
+
+- fix(engine): a large image told from its header, a damaged or oversized image refused, prompt images checked (FOL-295, FOL-268, Codex) ([c4d1a73](https://github.com/foldrun-io/foldrun-core/commit/c4d1a73))
+- feat(engine): Read shows an image to the model (FOL-295); the person's images go with the prompt (images option, FOL-268) ([1b29fad](https://github.com/foldrun-io/foldrun-core/commit/1b29fad))
+
 ## [27.8.2] — 2026-11-25
 
 ### test
