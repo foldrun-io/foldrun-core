@@ -29,7 +29,7 @@ export type Verdict =
   | { kind: "unchecked"; why: string };
 
 /** Files named like JSON that allow comments and trailing commas. */
-const JSONC = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|\.eslintrc[^/]*|devcontainer\.json|[^/]*\.jsonc)$|(^|\/)\.(vscode|devcontainer)\//;
+const JSONC = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|\.eslintrc[^/]*|devcontainer\.json|deno\.json|biome\.json|turbo\.json|tslint\.json|api-extractor[^/]*\.json|[^/]*\.jsonc)$|(^|\/)\.(vscode|devcontainer)\//;
 
 /** Which checker a file has, if any. */
 export function checkerFor(file: string): "json" | "js" | "py" | null {

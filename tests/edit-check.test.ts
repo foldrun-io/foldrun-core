@@ -251,7 +251,7 @@ test("Python is checked only where programs run unasked, with a system python3, 
 });
 
 test("files that allow comments are not held to strict JSON; others have no checker", () => {
-  for (const f of ["tsconfig.json", "app/tsconfig.build.json", ".vscode/settings.json", "x.jsonc", ".devcontainer/devcontainer.json", ".eslintrc.json"]) assert.equal(checkerFor(f), null, f);
+  for (const f of ["tsconfig.json", "app/tsconfig.build.json", ".vscode/settings.json", "x.jsonc", ".devcontainer/devcontainer.json", ".eslintrc.json", "deno.json", "biome.json", "turbo.json"]) assert.equal(checkerFor(f), null, f);
   assert.equal(checkerFor("package.json"), "json");
   assert.equal(checkerFor("a.ts"), null, "TypeScript waits for the language-server layer (FOL-297)");
   assert.equal(systemPython("darwin", (p) => p === "/usr/bin/python3"), null, "macOS /usr/bin/python3 without the command line tools would open a dialog");
