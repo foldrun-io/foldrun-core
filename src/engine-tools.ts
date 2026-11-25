@@ -52,6 +52,9 @@ export interface ToolContext {
   /** Commands started with Bash `run_in_background`, by id (FOL-293). They are in `groups` too, so they end with
    *  the step like anything else a command started. Absent: made on first use. */
   jobs?: Map<string, BgJob>;
+  /** The letter a job id starts with (default "b"): a second list of jobs — foldrun code's outside the sandbox —
+   *  names its own so neither is mistaken for the other. */
+  jobPrefix?: string;
 }
 
 /** A command running in the background (Bash `run_in_background`, FOL-293). */
@@ -1203,8 +1206,8 @@ const BG_FIRST_MS = 1000;
 const BG_WRITE_MS = 5000;
 /** Text still waiting in a job's input past which no more is taken (Codex: a stalled reader must not grow memory). */
 const BG_STDIN_PENDING_MAX = 1024 * 1024;
-/** The last job number given in a step: an id is never given twice, so a stale one names nothing (Codex). */
-const jobSeq = new WeakMap<ToolContext, number>();
+/** The last job number given in a list of jobs: an id is never given twice, so a stale one names nothing (Codex). */
+const jobSeq = new WeakMap<Map<string, BgJob>, number>();
 
 /** The output a job printed since the model last read it, with what was dropped said plainly. */
 function jobNews(job: BgJob): string {
@@ -1246,9 +1249,9 @@ async function startJob(command: string, line: string, env: Record<string, strin
   for (const [id, j] of jobs) if (j.exit && j.read >= j.base + j.out.length && jobs.size >= BG_JOBS_MAX) jobs.delete(id);
   if (jobs.size >= BG_JOBS_MAX) return fail(`${BG_JOBS_MAX} background jobs are already kept in this step — stop one (Bash with job and stop: true) first`);
   if (ctx.signal.aborted) return fail("the step was stopped before the command ran");
-  const n = (jobSeq.get(ctx) ?? 0) + 1;
-  jobSeq.set(ctx, n);
-  const id = `b${n}`;
+  const n = (jobSeq.get(jobs) ?? 0) + 1;
+  jobSeq.set(jobs, n);
+  const id = `${ctx.jobPrefix ?? "b"}${n}`;
   const child = spawn(ctx.sandbox ? LAUNCHER : "bash", ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (child.pid) ctx.groups.add(child.pid);
   const job: BgJob = { id, command, pid: child.pid, out: "", base: 0, read: 0, exit: null, stdin: child.stdin, wake: new Set(), startedAt: Date.now() };

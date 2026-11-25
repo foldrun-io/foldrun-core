@@ -37,6 +37,9 @@
 import crypto from "node:crypto";
 import type { QueryFn, QueryLike } from "./step-exec.ts";
 import { killGroups, type EngineTool, type ToolContext, type ToolOutcome } from "./engine-tools.ts";
+/** The engine's built-in tools, for a client tool that runs one of them with a context of its own (foldrun code's
+ *  bash_outside runs Bash's background jobs outside the sandbox, FOL-296). */
+export { ENGINE_TOOLS } from "./engine-tools.ts";
 import type { McpConnection } from "./engine-mcp.ts";
 import { SUPPLY_PROVIDERS } from "./model-supply.ts";
 import { providerPreset } from "./providers.ts";
