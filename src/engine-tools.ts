@@ -1040,6 +1040,10 @@ const grep: EngineTool = {
 export const BG_JOBS_MAX = 8;
 /** How long a background start waits for its first output before answering. */
 const BG_FIRST_MS = 1000;
+/** How long text written to a job's input may wait for the job to take it. */
+const BG_WRITE_MS = 5000;
+/** The last job number given in a step: an id is never given twice, so a stale one names nothing (Codex). */
+const jobSeq = new WeakMap<ToolContext, number>();
 
 /** The output a job printed since the model last read it, with what was dropped said plainly. */
 function jobNews(job: BgJob): string {
@@ -1056,6 +1060,7 @@ function jobState(job: BgJob): string {
   return `job ${job.id} has ended — ${job.exit.code === 0 ? "exit code 0" : `exit code ${job.exit.code ?? `none, signal ${job.exit.signal}`}`}`;
 }
 
+/** Ends the job's whole group — also after its shell exited, for what the shell left running (Codex). */
 function endJob(job: BgJob, ctx: ToolContext): void {
   const kill = (sig: NodeJS.Signals) => {
     try {
@@ -1078,8 +1083,8 @@ async function startJob(command: string, line: string, env: Record<string, strin
   for (const [id, j] of jobs) if (j.exit && j.read >= j.base + j.out.length && jobs.size >= BG_JOBS_MAX) jobs.delete(id);
   if (jobs.size >= BG_JOBS_MAX) return fail(`${BG_JOBS_MAX} background jobs are already kept in this step — stop one (Bash with job and stop: true) first`);
   if (ctx.signal.aborted) return fail("the step was stopped before the command ran");
-  let n = jobs.size + 1;
-  while (jobs.has(`b${n}`)) n += 1;
+  const n = (jobSeq.get(ctx) ?? 0) + 1;
+  jobSeq.set(ctx, n);
   const id = `b${n}`;
   const child = spawn(ctx.sandbox ? LAUNCHER : "bash", ["-c", line], { cwd: ctx.cwd, env: env as NodeJS.ProcessEnv, detached: true, stdio: ["pipe", "pipe", "pipe"] });
   if (child.pid) ctx.groups.add(child.pid);
@@ -1152,14 +1157,24 @@ async function onJob(input: Record<string, unknown>, ctx: ToolContext): Promise<
   if (input.stdin !== undefined && stdin === null) return fail("stdin is text to write to the job's input");
   if (stdin !== null) {
     if (!job.stdin || job.exit) return fail(`${jobState(job)} — its input is closed`);
-    const ok = await new Promise<boolean>((resolve) => job.stdin!.write(stdin, (err) => resolve(!err)));
-    if (!ok) return fail(`${jobState(job)} — it did not take the input`);
+    // A job that never reads its input must not hold the call, or the step's stop (Codex).
+    const took = await new Promise<"ok" | "error" | "slow">((resolve) => {
+      const timer = setTimeout(() => finish("slow"), BG_WRITE_MS);
+      const onAbort = () => finish("slow");
+      function finish(r: "ok" | "error" | "slow") {
+        clearTimeout(timer);
+        ctx.signal.removeEventListener("abort", onAbort);
+        resolve(r);
+      }
+      ctx.signal.addEventListener("abort", onAbort, { once: true });
+      job.stdin!.write(stdin, (err) => finish(err ? "error" : "ok"));
+    });
+    if (took === "error") return fail(`${jobState(job)} — it did not take the input`);
+    if (took === "slow") return fail(`${jobState(job)} — it has not read its input for ${BG_WRITE_MS / 1000} s (the text waits in its input until it does)`);
   }
   if (input.stop === true) {
-    if (!job.exit) {
-      endJob(job, ctx);
-      await waitJob(job, KILL_GRACE_MS + 500, ctx.signal, true);
-    }
+    endJob(job, ctx);
+    if (!job.exit) await waitJob(job, KILL_GRACE_MS + 500, ctx.signal, true);
     const news = jobNews(job);
     ctx.jobs!.delete(id);
     return { text: `${job.exit ? `${jobState(job)}; stopped` : `job ${id} was sent SIGTERM then SIGKILL`}${news ? `\n${news}` : ""}` };

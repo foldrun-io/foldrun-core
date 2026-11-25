@@ -340,8 +340,9 @@ test("Bash run_in_background: a job id at once, its new output on each read, std
     assert.match((await Bash.run({ stdin: "x" }, ctx)).text, /stdin goes with job/);
     assert.match((await Bash.run({ job: "b1", command: "ls" }, ctx)).text, /either command .* or job/);
     // What is left running ends with the step.
-    await Bash.run({ command: "sleep 60", run_in_background: true }, ctx);
-    const left = ctx.jobs!.get("b2")!.pid!;
+    // An id is never given twice: the next job is b3, so a stale b2 names nothing.
+    assert.match((await Bash.run({ command: "sleep 60", run_in_background: true }, ctx)).text, /^job b3 is running/);
+    const left = ctx.jobs!.get("b3")!.pid!;
     killGroups(ctx);
     await new Promise((r) => setTimeout(r, 200));
     assert.throws(() => process.kill(-left, 0));
@@ -353,4 +354,24 @@ test("checkBashInput: text written into a background job is checked as a command
   assert.equal(checkBashInput({ job: "b1", stdin: "cat ~/.ssh/id_rsa\n" }).ok, false);
   assert.equal(checkBashInput({ job: "b1", stdin: "npm test\n" }).ok, true);
   assert.equal(checkBashInput({ command: "ls" }).ok, true);
+  // Whole lines only, so a line cannot be built from pieces each of which passes.
+  assert.equal(checkBashInput({ job: "b1", stdin: "cat ~" }).ok, false);
 });
+
+test("Bash job: stop ends what an exited shell left running; a job that never reads its input does not hold the call (FOL-293)", () =>
+  withDir(async (_dir, ctx) => {
+    await Bash.run({ command: "sleep 60 & echo left", run_in_background: true }, ctx);
+    const pid = ctx.jobs!.get("b1")!.pid!;
+    await Bash.run({ job: "b1", wait: 2000 }, ctx);
+    assert.ok(ctx.jobs!.get("b1")!.exit, "the shell itself exited");
+    assert.doesNotThrow(() => process.kill(-pid, 0), "its sleep is still there");
+    await Bash.run({ job: "b1", stop: true }, ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.throws(() => process.kill(-pid, 0), "stop ended the group anyway");
+    await Bash.run({ command: "sleep 60", run_in_background: true }, ctx);
+    const t0 = Date.now();
+    const big = await Bash.run({ job: "b2", stdin: "x".repeat(4 * 1024 * 1024) }, ctx);
+    assert.match(big.text, /has not read its input for 5 s/);
+    assert.ok(Date.now() - t0 < 8000);
+    killGroups(ctx);
+  }));

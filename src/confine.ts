@@ -494,6 +494,8 @@ const WEB_URL = /\bhttps?:\/\/[^\s'"`)]+/gi;
 export function checkBashInput(input: Record<string, unknown>): ConfineVerdict {
   const first = checkBash(String(input.command ?? ""));
   if (!first.ok || typeof input.stdin !== "string") return first;
+  // Whole lines only: a line built from pieces written one call at a time would never be checked whole (Codex).
+  if (input.stdin && !input.stdin.endsWith("\n")) return { ok: false, reason: "Bash was denied: text written to a background job is whole lines here — end it with \\n." };
   return checkBash(input.stdin);
 }
 
