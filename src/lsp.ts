@@ -273,15 +273,36 @@ export class LspClient {
     this.send({ jsonrpc: "2.0", method, params });
   }
 
-  request(method: string, params: unknown, ms = REQUEST_MS): Promise<Json> {
+  /** A request; the turn being stopped (`signal`) ends the wait at once (Codex). */
+  request(method: string, params: unknown, ms = REQUEST_MS, signal?: AbortSignal): Promise<Json> {
     if (this.exited) return Promise.reject(new Error(`${this.name} stopped: ${this.exited}`));
+    if (signal?.aborted) return Promise.reject(new Error("the turn was stopped"));
     const id = ++this.id;
     return new Promise((resolve, reject) => {
+      const stopped = () => {
+        const w = this.waiting.get(id);
+        if (!w) return;
+        clearTimeout(w.timer);
+        this.waiting.delete(id);
+        reject(new Error("the turn was stopped"));
+      };
       const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", stopped);
         this.waiting.delete(id);
         reject(new Error(`${this.name} did not answer ${method} within ${Math.round(ms / 1000)} s`));
       }, ms);
-      this.waiting.set(id, { resolve, reject, timer });
+      signal?.addEventListener("abort", stopped, { once: true });
+      this.waiting.set(id, {
+        resolve: (m) => {
+          signal?.removeEventListener("abort", stopped);
+          resolve(m);
+        },
+        reject: (e) => {
+          signal?.removeEventListener("abort", stopped);
+          reject(e);
+        },
+        timer,
+      });
       this.send({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -367,7 +388,7 @@ async function start(lang: Language, ctx: ToolContext): Promise<LspClient | stri
       rootUri: root,
       workspaceFolders: [{ uri: root, name: path.basename(ctx.cwd) || "project" }],
       capabilities: { textDocument: { definition: { linkSupport: false }, references: {} }, workspace: { configuration: true, workspaceFolders: true } },
-    }, START_MS);
+    }, START_MS, ctx.signal);
   } catch (e) {
     c.stop();
     return `${plan.name} did not start: ${(e as Error).message}`;
@@ -485,6 +506,7 @@ export const symbols: EngineTool = {
     const { readChecked } = await import("./engine-tools.ts");
     const got = await readChecked(ctx, file, OPEN_BYTES_MAX);
     if (typeof got === "string") return fail(got);
+    if (!mayShow(ctx, file)) return fail(`${input.file_path} changed while it was read — not used`);
     text = got.subarray(0, OPEN_BYTES_MAX).toString("utf8");
     const lines = text.split("\n");
     const here = lines[line - 1];
@@ -498,8 +520,8 @@ export const symbols: EngineTool = {
     try {
       const r = await server.withFile(file, LANGUAGE_ID[lang](file), text, (uri) =>
         action === "definition"
-          ? server.request("textDocument/definition", { textDocument: { uri }, position })
-          : server.request("textDocument/references", { textDocument: { uri }, position, context: { includeDeclaration: true } }),
+          ? server.request("textDocument/definition", { textDocument: { uri }, position }, REQUEST_MS, ctx.signal)
+          : server.request("textDocument/references", { textDocument: { uri }, position, context: { includeDeclaration: true } }, REQUEST_MS, ctx.signal),
       );
       if (r.error) return fail(`${server.name}: ${String((r.error as Json).message ?? "an error").slice(0, 300)}`);
       found = locationsOf(r.result);
@@ -538,6 +560,9 @@ export const symbols: EngineTool = {
         const st = fs.statSync(f);
         if (st.isFile() && st.size <= OPEN_BYTES_MAX) {
           const b = f === file ? text : await readChecked(ctx, f, OPEN_BYTES_MAX);
+          // Checked again after the read: a path moved meanwhile (a link put in its place) is asked of the rule as it
+          // is now — which marks it private if it now leads outside — and its text is dropped (Codex).
+          if (f !== file && !mayShow(ctx, f)) throw new Error("moved");
           lines = typeof b === "string" && f !== file ? [] : String(typeof b === "string" ? b : b.toString("utf8")).split("\n");
         }
       } catch {
