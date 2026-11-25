@@ -438,3 +438,27 @@ test("checkPaths: every file in Edit's edits is held to the workspace (FOL-294)"
   assert.equal((v.updatedInput as any)?.edits?.[0]?.file_path, path.join(root, "storage", "r.md"), "spelled out as one Edit's would be");
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("Edit edits: chained replace_all cannot grow a file without bound; a failed write puts back what was written (FOL-294)", () =>
+  withDir(async (dir, ctx) => {
+    fs.writeFileSync(path.join(dir, "g.txt"), "x".repeat(1000));
+    await Read.run({ file_path: "g.txt" }, ctx);
+    const grow = Array.from({ length: 5 }, () => ({ file_path: "g.txt", old_string: "x", new_string: "xxxxxxxxxx", replace_all: true }));
+    assert.match((await Edit.run({ edits: grow }, ctx)).text, /^nothing was changed: .*would grow past 16 MB/);
+    assert.equal(fs.readFileSync(path.join(dir, "g.txt"), "utf8").length, 1000);
+    // The second file's folder takes no writes: the first file is put back.
+    fs.writeFileSync(path.join(dir, "a.txt"), "one\n");
+    fs.mkdirSync(path.join(dir, "ro"));
+    fs.writeFileSync(path.join(dir, "ro", "b.txt"), "two\n");
+    await Read.run({ file_path: "a.txt" }, ctx);
+    await Read.run({ file_path: "ro/b.txt" }, ctx);
+    fs.chmodSync(path.join(dir, "ro"), 0o555);
+    try {
+      const r = await Edit.run({ edits: [{ file_path: "a.txt", old_string: "one", new_string: "ONE" }, { file_path: "ro/b.txt", old_string: "two", new_string: "TWO" }] }, ctx);
+      assert.match(r.text, /^nothing was changed: .*b\.txt could not be written.*the files written before it were put back/);
+      assert.equal(fs.readFileSync(path.join(dir, "a.txt"), "utf8"), "one\n");
+      assert.equal(fs.readFileSync(path.join(dir, "ro", "b.txt"), "utf8"), "two\n");
+    } finally {
+      fs.chmodSync(path.join(dir, "ro"), 0o755);
+    }
+  }));

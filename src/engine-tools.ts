@@ -526,6 +526,8 @@ export function occurrences(hay: string, needle: string): number {
 
 /** At most this many replacements in one Edit `edits` list (FOL-294). */
 export const EDITS_MAX = 50;
+/** The most text one file may become through an `edits` list: chained replace_all must not grow without bound (Codex). */
+export const EDIT_TEXT_MAX = 16 * 1024 * 1024;
 
 /** One file's replacements, worked out before anything is written: the new text, or why not. */
 function applyEdits(file: string, before: string, list: { old_string: string; new_string: string; replace_all?: boolean }[]): { after: string; count: number } | { problem: string } {
@@ -539,6 +541,9 @@ function applyEdits(file: string, before: string, list: { old_string: string; ne
     if (n === 0) return { problem: `${at}: old_string was not found${i ? " (after the changes before it in this file)" : ""} — Read the file and copy the text exactly` };
     if (n > 1 && e.replace_all !== true) return { problem: `${at}: old_string occurs ${n} times — add surrounding lines so it matches once, or pass replace_all: true` };
     const pos = text.indexOf(e.old_string);
+    // Measured before it is built: n copies of new_string in place of old_string.
+    const grows = (e.replace_all === true ? n : 1) * (e.new_string.length - e.old_string.length);
+    if (text.length + grows > EDIT_TEXT_MAX) return { problem: `${at}: the file would grow past ${EDIT_TEXT_MAX / 1024 / 1024} MB` };
     text = e.replace_all === true ? text.split(e.old_string).join(e.new_string) : text.slice(0, pos) + e.new_string + text.slice(pos + e.old_string.length);
     count += e.replace_all === true ? n : 1;
   }
@@ -613,25 +618,47 @@ async function editMany(input: Record<string, unknown>, ctx: ToolContext): Promi
     }
   }
   const done: typeof plan = [];
+  /** Put back what this call wrote — a file only while it holds this call's text, never over a change since (Codex). */
+  const undo = async (list: typeof plan): Promise<string[]> => {
+    const left: string[] = [];
+    for (const d of list) {
+      let now: string | null = null;
+      try {
+        now = fs.readFileSync(d.file, "utf8");
+      } catch {
+        /* gone: nothing of ours to take back */
+      }
+      if (now === null || now === d.before) continue;
+      if (now !== d.after) {
+        left.push(`${d.file} (changed by something else since — left as it is)`);
+        continue;
+      }
+      try {
+        if (ctx.sandbox) await writeInside(d.file, d.before, ctx);
+        else writeWhole(d.file, d.before);
+        ctx.reads.set(d.file, fs.statSync(d.file).mtimeMs);
+      } catch {
+        left.push(`${d.file} (could not be put back — it holds the new text)`);
+      }
+    }
+    return left;
+  };
   for (const p of plan) {
+    // Each file just before its write: one changed meanwhile is not written over (Codex).
+    const moved = fs.existsSync(p.file) ? staleReason(ctx, p.file) : `${p.file} was removed`;
+    if (moved) {
+      const left = await undo(done);
+      return fail(`nothing was changed: ${moved}${left.length ? `; and ${left.join(", ")}` : done.length ? "; the files written before it were put back" : ""}`);
+    }
     try {
       if (ctx.sandbox) await writeInside(p.file, p.after, ctx);
       else writeWhole(p.file, p.after);
       done.push(p);
       ctx.reads.set(p.file, fs.statSync(p.file).mtimeMs);
     } catch (err) {
-      // All or nothing: what was written goes back.
-      const back: string[] = [];
-      for (const d of done) {
-        try {
-          if (ctx.sandbox) await writeInside(d.file, d.before, ctx);
-          else writeWhole(d.file, d.before);
-          ctx.reads.set(d.file, fs.statSync(d.file).mtimeMs);
-        } catch {
-          back.push(d.file);
-        }
-      }
-      return fail(`nothing was changed: ${p.file} could not be written (${err instanceof Error ? err.message : String(err)})${back.length ? `; and ${back.join(", ")} could NOT be put back — they hold the new text` : done.length ? "; the files written before it were put back" : ""}`);
+      // All or nothing: what was written goes back — this file too, if its write landed before the error.
+      const left = await undo([...done, p]);
+      return fail(`nothing was changed: ${p.file} could not be written (${err instanceof Error ? err.message : String(err)})${left.length ? `; and ${left.join(", ")}` : done.length ? "; the files written before it were put back" : ""}`);
     }
   }
   const total = plan.reduce((n, p) => n + p.count, 0);
