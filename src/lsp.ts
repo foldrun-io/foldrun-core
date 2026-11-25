@@ -508,6 +508,12 @@ export const symbols: EngineTool = {
     if (!shown.length) return { text: `${head}: none found${hidden ? ` (${hidden} in files this session may not read)` : ""}` };
     // In a fixed order — by file, then line — whatever order the server answered in.
     shown.sort((a, b) => (a.file === b.file ? a.line - b.line || a.character - b.character : a.file < b.file ? -1 : 1));
+    let realCwd = ctx.cwd;
+    try {
+      realCwd = fs.realpathSync(ctx.cwd);
+    } catch {
+      /* as given */
+    }
     const texts = new Map<string, string[]>();
     const listed = shown.slice(0, SYMBOLS_MAX);
     for (const f of new Set(listed.map((l) => l.file))) {
@@ -523,8 +529,12 @@ export const symbols: EngineTool = {
       texts.set(f, lines);
     }
     const rows = listed.map((l) => {
-      const rel = path.relative(ctx.cwd, l.file);
-      const where = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : l.file;
+      // Said from the folder, whichever spelling of it the server used (a link such as macOS /var → /private/var).
+      const inside = (base: string) => {
+        const rel = path.relative(base, l.file);
+        return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : null;
+      };
+      const where = inside(ctx.cwd) ?? inside(realCwd) ?? l.file;
       const src = (texts.get(l.file)![l.line] ?? "").trim().slice(0, 200);
       return `${where}:${l.line + 1}:${l.character + 1}  ${src}`;
     });
