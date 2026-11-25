@@ -13,6 +13,19 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [28.2.0] — 2026-11-25
+
+### New in the public API
+
+- `serverToolsOf` from `@foldrun/core/engine-loop`
+- `@foldrun/core/frontmatter-read`
+- `frontmatterOf` from `@foldrun/core/frontmatter-read`
+
+### feat
+
+- engine-loop exports serverToolsOf — foldrun code checks the engine sends server tools from a public entry (FOL-304) ([52794b1](https://github.com/foldrun-io/foldrun-core/commit/52794b1))
+- light entry points for foldrun code — step-limits (the class figures and resources:, re-exported by run-container) and frontmatter-read (public), so a laptop session reads an agent's ask without loading the container machinery (FOL-240) ([01a42b1](https://github.com/foldrun-io/foldrun-core/commit/01a42b1))
+
 ## [28.1.0] — 2026-11-25
 
 ### New in the public API
