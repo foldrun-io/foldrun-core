@@ -13,6 +13,24 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.8.0] — 2026-11-25
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `openLocalSandbox` from `@foldrun/core/local-sandbox`
+
+### New in the public API
+
+- `AskSite` from `@foldrun/core/local-sandbox`
+
+- fix(local-sandbox): askSite is a trailing argument, not a new member of the inline options (a widening, not a break) ([a487f2b](https://github.com/foldrun-io/foldrun-core/commit/a487f2b))
+- docs(local-sandbox): a yes to a site holds for every handle of the same walls (FOL-312) ([0308d17](https://github.com/foldrun-io/foldrun-core/commit/0308d17))
+- fix(local-sandbox): only the open that brings the walls up may install the asker (FOL-312, Codex) ([5138a1d](https://github.com/foldrun-io/foldrun-core/commit/5138a1d))
+- fix(local-sandbox): the handle that brought the asker keeps it until it closes (FOL-312, Codex) ([fcfdae8](https://github.com/foldrun-io/foldrun-core/commit/fcfdae8))
+- feat(local-sandbox): askSite — a site not on the list is asked about while the command runs, a yes lets that connection through (FOL-312) ([959ce0c](https://github.com/foldrun-io/foldrun-core/commit/959ce0c))
+
 ## [27.7.0] — 2026-11-25
 
 - fix(engine): syntax guard — JSX in .js let through unchecked; the newest system Python checks, its version named in a refusal (FOL-292, Codex) ([0e1e383](https://github.com/foldrun-io/foldrun-core/commit/0e1e383))
