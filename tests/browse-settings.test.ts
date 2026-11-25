@@ -257,3 +257,18 @@ test("state in the block: a plain name, and beside cookies only with state_key",
   assert.equal(keyed.settings.state, "yt");
   assert.match(readBrowseSettings({ state: "x", storage: "TOK", storage_origin: "https://a.b" }).error!, /cannot be combined with storage/);
 });
+
+test("browseSettingsEnv: one block, the same defaults for the runner and a browser on a person's computer (FOL-267)", async () => {
+  const { browseSettingsEnv, readBrowseSettings } = await import("../src/providers.ts");
+  const { settings } = readBrowseSettings({ device: "iPhone 15", locale: "en-AU", headless: false, live: true, allowed_domains: ["example.com"], boundaries: true, live_view: false });
+  assert.deepEqual(browseSettingsEnv(settings), {
+    FOLDRUN_BROWSER_DEVICE: "iPhone 15",
+    FOLDRUN_BROWSER_LOCALE: "en-AU",
+    FOLDRUN_BROWSER_HEADLESS: "0",
+    FOLDRUN_BROWSER_LIVE: "1",
+    FOLDRUN_BROWSER_ALLOWED_DOMAINS: "example.com",
+    FOLDRUN_BROWSER_BOUNDARIES: "1",
+    FOLDRUN_BROWSER_LIVE_VIEW: "0",
+  });
+  assert.deepEqual(browseSettingsEnv({}), {});
+});

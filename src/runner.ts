@@ -126,7 +126,7 @@ import { readStorageBaseline, writeStorageBaseline } from "./step-state.ts";
 import { chooseExecutor, ensureImage } from "./container.ts";
 import { stampBundle } from "./okf.ts";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
-import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, webConfig, browseSessionProblems } from "./providers.ts";
+import { readBrowseSettings, readSearchSettings, resolveSearch, searchSettingsEnv, browseSettingsEnv, webConfig, browseSessionProblems } from "./providers.ts";
 import { NEWER_ACTIONS, resolveActionApi } from "./web-actions.ts";
 import { resolveLanguage, languageName, type LanguageChoice } from "./language.ts";
 import { replyLanguageLine } from "./reply-language.ts";
@@ -1729,33 +1729,7 @@ export function agentContext(
     // not say otherwise. Env rather than arguments because the tool is a
     // script the model calls: a default nobody typed should not have to be
     // typed by the model either.
-    ...(browseSettings.engine ? { FOLDRUN_BROWSER_ENGINE: browseSettings.engine } : {}),
-    ...(browseSettings.user_agent ? { FOLDRUN_BROWSER_USER_AGENT: browseSettings.user_agent } : {}),
-    ...(browseSettings.device ? { FOLDRUN_BROWSER_DEVICE: browseSettings.device } : {}),
-    ...(browseSettings.locale ? { FOLDRUN_BROWSER_LOCALE: browseSettings.locale } : {}),
-    ...(browseSettings.timezone ? { FOLDRUN_BROWSER_TIMEZONE: browseSettings.timezone } : {}),
-    ...(browseSettings.cookies ? { FOLDRUN_BROWSER_COOKIES: browseSettings.cookies } : {}),
-    ...(browseSettings.cookie_domain ? { FOLDRUN_BROWSER_COOKIE_DOMAIN: browseSettings.cookie_domain } : {}),
-    ...(browseSettings.storage ? { FOLDRUN_BROWSER_STORAGE: browseSettings.storage } : {}),
-    ...(browseSettings.storage_origin ? { FOLDRUN_BROWSER_STORAGE_ORIGIN: browseSettings.storage_origin } : {}),
-    // The named identities, as one JSON map the tool picks from by name.
-    ...(browseSettings.identities ? { FOLDRUN_BROWSER_IDENTITIES: JSON.stringify(browseSettings.identities) } : {}),
-    // Only the non-default travels: a window, on a virtual screen if need be.
-    ...(browseSettings.headless === false ? { FOLDRUN_BROWSER_HEADLESS: "0" } : {}),
-    ...(browseSettings.version ? { FOLDRUN_BROWSER_VERSION: browseSettings.version } : {}),
-    ...(browseSettings.live ? { FOLDRUN_BROWSER_LIVE: "1" } : {}),
-    // What the agent may do, from its file: a lock the call cannot widen.
-    ...(browseSettings.allowed_domains ? { FOLDRUN_BROWSER_ALLOWED_DOMAINS: browseSettings.allowed_domains.join(",") } : {}),
-    ...(browseSettings.deny ? { FOLDRUN_BROWSER_DENY: browseSettings.deny.join(",") } : {}),
-    ...(browseSettings.boundaries ? { FOLDRUN_BROWSER_BOUNDARIES: "1" } : {}),
-    ...(browseSettings.init ? { FOLDRUN_BROWSER_INIT: browseSettings.init.join(",") } : {}),
-    ...(browseSettings.extensions ? { FOLDRUN_BROWSER_EXTENSIONS: browseSettings.extensions.join(",") } : {}),
-    ...(browseSettings.webgpu ? { FOLDRUN_BROWSER_WEBGPU: "1" } : {}),
-    ...(browseSettings.ignore_https_errors ? { FOLDRUN_BROWSER_IGNORE_HTTPS_ERRORS: "1" } : {}),
-    ...(browseSettings.state_key ? { FOLDRUN_BROWSER_STATE_KEY: browseSettings.state_key } : {}),
-    ...(browseSettings.state ? { FOLDRUN_BROWSER_STATE: browseSettings.state } : {}),
-    ...(browseSettings.video ? { FOLDRUN_BROWSER_VIDEO: "1" } : {}),
-    ...(browseSettings.live_view === false ? { FOLDRUN_BROWSER_LIVE_VIEW: "0" } : {}),
+    ...browseSettingsEnv(browseSettings),
   };
 
   // Scripts declared as tools — callable by name, no bash required.
