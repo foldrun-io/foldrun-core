@@ -40,20 +40,32 @@ export function checkerFor(file: string): "json" | "js" | "py" | null {
   return null;
 }
 
-/** The grammar node loads a .js file in: the nearest package.json's "type", read as node reads it. */
-export function jsMode(file: string): "commonjs" | "module" {
+/**
+ * The grammar node loads a file in: .mjs a module, .cjs a script, a .js file by the nearest package.json's "type" —
+ * "module" or "commonjs" when it says so, else either (node detects it, Codex). A package.json is read only when it is
+ * a plain file of a sane size the walls let this session read (`canRead`): a pipe or a denied path decides nothing.
+ */
+export function jsMode(file: string, canRead: (p: string) => boolean = () => true): "commonjs" | "module" | "either" {
   if (/\.mjs$/i.test(file)) return "module";
   if (/\.cjs$/i.test(file)) return "commonjs";
   for (let d = path.dirname(path.resolve(file)); ; d = path.dirname(d)) {
     const pj = path.join(d, "package.json");
+    let st: fs.Stats | null = null;
     try {
-      const j = JSON.parse(fs.readFileSync(pj, "utf8"));
-      return j && j.type === "module" ? "module" : "commonjs";
-    } catch (err) {
-      // No package.json here: look further up. One that cannot be read decides nothing (node fails on it too).
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT" && (err as NodeJS.ErrnoException).code !== "ENOTDIR") return "commonjs";
+      st = fs.statSync(pj);
+    } catch {
+      // none here: further up
     }
-    if (path.dirname(d) === d) return "commonjs";
+    if (st) {
+      if (!st.isFile() || st.size > 1_000_000 || !canRead(pj)) return "either";
+      try {
+        const j = JSON.parse(fs.readFileSync(pj, "utf8"));
+        return j && j.type === "module" ? "module" : j && j.type === "commonjs" ? "commonjs" : "either";
+      } catch {
+        return "either";
+      }
+    }
+    if (path.dirname(d) === d) return "either";
   }
 }
 
@@ -122,6 +134,8 @@ export interface CheckOptions {
   runPython?: Runner;
   /** How node is run (tests). */
   runNode?: Runner;
+  /** Whether this session may read a path (the walls' canRead): a package.json it may not read decides nothing. */
+  canRead?: (p: string) => boolean;
   /** Milliseconds left for this check. */
   ms: number;
   python?: string | null;
@@ -134,7 +148,6 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
   if (Buffer.byteLength(text) > CHECK_MAX_BYTES) return { kind: "unchecked", why: "the file is over 1 MB" };
   if (o.ms <= 0) return { kind: "unchecked", why: "no time was left to check it" };
   if (kind === "json") {
-    if (!text.trim()) return { kind: "ok" };
     try {
       JSON.parse(text);
       return { kind: "ok" };
@@ -143,12 +156,24 @@ export async function checkText(file: string, text: string, o: CheckOptions): Pr
     }
   }
   if (kind === "js") {
-    const args = jsMode(file) === "module" ? ["--input-type=module", "--check", "-"] : ["--check", "-"];
-    const r = await (o.runNode ?? runDirect)(process.execPath, args, text, o.ms);
-    if (r.timedOut) return { kind: "unchecked", why: "the check took too long" };
-    if (r.code === 0) return { kind: "ok" };
-    if (r.code === 1 && /SyntaxError/.test(r.out)) return { kind: "errors", errors: [nodeError(r.out)] };
-    return { kind: "unchecked", why: "the checker failed" };
+    const mode = jsMode(file, o.canRead);
+    const until = Date.now() + o.ms;
+    const once = async (asModule: boolean): Promise<Verdict> => {
+      const args = asModule ? ["--input-type=module", "--check", "-"] : ["--check", "-"];
+      const r = await (o.runNode ?? runDirect)(process.execPath, args, text, until - Date.now());
+      if (r.timedOut) return { kind: "unchecked", why: "the check took too long" };
+      if (r.code === 0) return { kind: "ok" };
+      if (r.code === 1 && /SyntaxError/.test(r.out)) return { kind: "errors", errors: [nodeError(r.out)] };
+      return { kind: "unchecked", why: "the checker failed" };
+    };
+    if (mode !== "either") return once(mode === "module");
+    // Either grammar: errors only when both say so; the module's words when it reads like one.
+    const script = await once(false);
+    if (script.kind !== "errors") return script;
+    if (until - Date.now() <= 0) return { kind: "unchecked", why: "the check took too long" };
+    const mod = await once(true);
+    if (mod.kind !== "errors") return mod;
+    return /^\s*(import|export)\b/m.test(text) ? mod : script;
   }
   // Python
   if (!o.programs) return { kind: "unchecked", why: "Python is checked only where commands run in a sandbox" };

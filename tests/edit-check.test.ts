@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
 import { checkText, guardChange, jsMode, systemPython, checkerFor } from "../src/edit-check.ts";
 
@@ -83,6 +84,18 @@ test("JavaScript is checked in the grammar it loads in: export refused in a Comm
     const g = await write(ctx, { file_path: path.join(dir, "esm", "a.js"), content: "export const x = await Promise.resolve(1);\n" });
     assert.equal(g.isError, undefined, g.text);
     assert.equal(jsMode(path.join(dir, "esm", "b.cjs")), "commonjs");
+    // No "type": node detects either grammar, so either is accepted (Codex).
+    fs.mkdirSync(path.join(dir, "plain"));
+    fs.writeFileSync(path.join(dir, "plain", "package.json"), JSON.stringify({ name: "p" }));
+    const e = await write(ctx, { file_path: path.join(dir, "plain", "a.js"), content: "export const a = 1;\n" });
+    assert.equal(e.isError, undefined, e.text);
+    assert.equal(jsMode(path.join(dir, "plain", "a.js")), "either");
+    const eb = await write(ctx, { file_path: path.join(dir, "plain", "b.js"), content: "export const = 1;\n" });
+    assert.equal(eb.isError, true, "broken in both grammars is still refused");
+    // A package.json that is not a plain file, or that the walls deny, decides nothing.
+    assert.equal(jsMode(path.join(dir, "plain", "a.js"), () => false), "either");
+    fs.mkdirSync(path.join(dir, "pipe"));
+    if (spawnSync("mkfifo", [path.join(dir, "pipe", "package.json")]).status === 0) assert.equal(jsMode(path.join(dir, "pipe", "a.js")), "either", "a pipe is never opened");
     assert.equal(jsMode(path.join(dir, "b.mjs")), "module");
     // A real error, with its line.
     const m = await write(ctx, { file_path: path.join(dir, "c.js"), content: "const a = 1;\nif (a) {\n" });
@@ -90,6 +103,32 @@ test("JavaScript is checked in the grammar it loads in: export refused in a Comm
     // A shebang and a top-level return are fine for node.
     const s = await write(ctx, { file_path: path.join(dir, "bin.js"), content: "#!/usr/bin/env node\nconst a = 1;\n" });
     assert.equal(s.isError, undefined, s.text);
+  } finally {
+    done();
+  }
+});
+
+test("an edit that empties a JSON file is refused; Edit does not bring back a file removed while it was checked", async () => {
+  const { dir, ctx, done } = setup();
+  try {
+    const f = path.join(dir, "e.json");
+    fs.writeFileSync(f, "{}\n");
+    await read(ctx, f);
+    const r = await edit(ctx, { file_path: f, old_string: "{}", new_string: "  " });
+    assert.equal(r.isError, true, r.text);
+    const g = path.join(dir, "g.js");
+    fs.writeFileSync(g, "const a = 1;\n");
+    await read(ctx, g);
+    ctx.checkWith = {
+      runNode: async () => {
+        fs.rmSync(g);
+        return { code: 0, out: "", timedOut: false };
+      },
+    };
+    const d = await edit(ctx, { file_path: g, old_string: "1", new_string: "2" });
+    assert.equal(d.isError, true);
+    assert.match(d.text, /removed while the change was checked/);
+    assert.equal(fs.existsSync(g), false);
   } finally {
     done();
   }

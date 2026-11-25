@@ -55,6 +55,7 @@ export interface ToolContext {
 function checkOptions(ctx: ToolContext): Omit<CheckOptions, "ms"> {
   return {
     programs: ctx.programs === true,
+    ...(ctx.sandbox ? { canRead: (p: string) => ctx.sandbox!.canRead(p) } : {}),
     ...(ctx.sandbox
       ? {
           runPython: async (program: string, args: string[], input: string, ms: number) => {
@@ -462,6 +463,7 @@ const edit: EngineTool = {
       if ("refuse" in g) return fail(g.refuse);
       note = g.note;
       if (ctx.signal.aborted) return fail(`${file} was not changed: the step was stopped`);
+      if (!fs.existsSync(file)) return fail(`${file} was not changed: it was removed while the change was checked`);
       const again = staleReason(ctx, file);
       if (again) return fail(again);
     }
