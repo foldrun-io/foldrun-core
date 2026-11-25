@@ -132,6 +132,30 @@ test("inside the walls: a site not on the list is asked about, by host, and only
   }
 });
 
+test("inside the walls: an opener of walls already up cannot install an asker (FOL-312, Codex)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const first = await openLocalSandbox({ cwd: proj, sites: [] });
+  if (isRefusal(first)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${first.refused}`);
+    return t.skip(`the sandbox cannot start here: ${first.refused}`);
+  }
+  const asked: string[] = [];
+  const second = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (h) => (asked.push(h), true) });
+  try {
+    assert.ok(!isRefusal(second));
+    const ctx = ctxFor(proj, first, { ...process.env, TMPDIR: first.tmp });
+    const r = await ENGINE_TOOLS.Bash!.run({ command: "curl -sS -m 10 -o /dev/null https://example.org/", timeout: 30_000 }, ctx);
+    assert.equal(r.isError, true, "refused: no asker on these walls");
+    assert.deepEqual(asked, [], "the second opener's asker was never installed");
+  } finally {
+    if (!isRefusal(second)) await second.close();
+    await first.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("inside the walls: the syntax guard reads the grammar and checks Python there (FOL-292)", async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
   const proj = tmpProject();

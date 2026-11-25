@@ -1207,10 +1207,12 @@ export function openLocalSandbox(
   opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime>; askSite?: AskSite } = {},
 ): Promise<LocalSandbox | SandboxRefusal> {
   return inQueue(async () => {
+    const fresh = walls === null || walls.down;
     const got = await openNow(policy, opts);
-    // The handle that brought an asker answers until it closes; another opener of the same walls never answers for
-    // it (Codex). None: unlisted sites are refused, as before.
-    if (!("refused" in got) && opts.askSite && asker === null) {
+    // The runtime takes one callback per process: only the open that brought the walls up may give it an asker,
+    // which answers until that handle closes. Another opener of the same walls neither installs one nor answers for
+    // the first (Codex). None: unlisted sites are refused, as before.
+    if (!("refused" in got) && opts.askSite && fresh && asker === null) {
       const mine = opts.askSite;
       asker = mine;
       const close = got.close.bind(got);
