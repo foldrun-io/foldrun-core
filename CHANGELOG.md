@@ -13,6 +13,25 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [27.10.0] — 2026-11-25
+
+### New in the public API
+
+- `browseSettingsEnv` from `@foldrun/core`
+- `checkBashInput` from `@foldrun/core`
+- `browseSettingsEnv` from `@foldrun/core/providers`
+
+- docs(engine): the put-back's window, said (FOL-294) ([b79f8c2](https://github.com/foldrun-io/foldrun-core/commit/b79f8c2))
+- fix(engine): Edit edits — a file's growth capped, each file checked again just before its write, put back only while it holds this call's text (Codex, FOL-294) ([e6cc608](https://github.com/foldrun-io/foldrun-core/commit/e6cc608))
+- feat(engine): Edit edits — one change across files, all or nothing; each file Read and unchanged, every match checked and the syntax guard run before any write, written files put back on a failed write; every file confined in the cloud (FOL-294) ([903fb4f](https://github.com/foldrun-io/foldrun-core/commit/903fb4f))
+- fix(engine): Bash jobs — no write that carries on into the next (trailing \\, open quote), no more input past 1 MB unread (Codex, FOL-293) ([e5fad1a](https://github.com/foldrun-io/foldrun-core/commit/e5fad1a))
+- fix(engine): Bash jobs — whole lines to a job in the cloud, a write the job never reads gives up after 5 s, stop ends the group after the shell exited, ids never reused (Codex, FOL-293) ([77733ed](https://github.com/foldrun-io/foldrun-core/commit/77733ed))
+- feat(engine): Bash run_in_background — a job id at once, then job: read new output, stdin, wait, stop the group; ends with the step; stdin checked as a command is (FOL-293) ([ee06e47](https://github.com/foldrun-io/foldrun-core/commit/ee06e47))
+- feat(providers): browseSettingsEnv — the web.browse block's defaults in one place, for the runner and a browser on a person's computer (FOL-267) ([06554e2](https://github.com/foldrun-io/foldrun-core/commit/06554e2))
+- feat(egress): a lease for one job with no run — purpose browse-job, absolute expiresAt (FOL-313) ([6575883](https://github.com/foldrun-io/foldrun-core/commit/6575883))
+- fix(agents): media: as-is — the text-first note leaves out the images to be looked at (FOL-268, Codex) ([4b9d9d3](https://github.com/foldrun-io/foldrun-core/commit/4b9d9d3))
+- feat(agents): media: text | as-is — what an image handed to an agent becomes; as-is tells the step to look at its images itself (FOL-268) ([08c98f9](https://github.com/foldrun-io/foldrun-core/commit/08c98f9))
+
 ## [27.9.0] — 2026-11-25
 
 - fix(engine): a large image told from its header, a damaged or oversized image refused, prompt images checked (FOL-295, FOL-268, Codex) ([c4d1a73](https://github.com/foldrun-io/foldrun-core/commit/c4d1a73))
