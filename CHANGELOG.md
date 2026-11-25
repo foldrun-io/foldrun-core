@@ -13,6 +13,14 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.0.0] — 2026-11-25
+
+### Breaking changes
+
+- `ResourceRow` from `@foldrun/core/local-resources` — held changed
+
+- feat(local-resources): "by priority" as a way a limit is held — CPU on macOS (FOL-240) ([8448a33](https://github.com/foldrun-io/foldrun-core/commit/8448a33))
+
 ## [28.2.0] — 2026-11-25
 
 ### New in the public API
