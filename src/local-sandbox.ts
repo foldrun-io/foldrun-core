@@ -983,6 +983,24 @@ export const APPARMOR_HINT =
   "Ubuntu restricts unprivileged user namespaces, so bubblewrap cannot start. Allow bubblewrap alone with the profile Ubuntu ships: " +
   "sudo cp /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict";
 
+/** Inside a container: its runtime, not the host, decides whether user
+ *  namespaces may be made — and Docker's default profile refuses them. A host
+ *  setting read through /proc (AppArmor's) says nothing about that, so the
+ *  Ubuntu tip is wrong there (bench, 25 Nov 2026). */
+export function inContainer(exists = (f: string) => fs.existsSync(f), read = (f: string) => fs.readFileSync(f, "utf8")): boolean {
+  if (exists("/.dockerenv") || exists("/run/.containerenv")) return true;
+  try {
+    return /docker|containerd|kubepods|libpod|lxc/.test(read("/proc/1/cgroup"));
+  } catch {
+    return false;
+  }
+}
+
+/** The fix inside a container. Never "turn the walls off" as the only way. */
+export const CONTAINER_HINT =
+  "Inside a container, its runtime blocks the user namespaces bubblewrap needs (Docker's default profile does). Run foldrun code on the machine itself, " +
+  "or /permissions sandbox off (every command is then asked) — or /where cloud, a sandbox on the platform.";
+
 /** How to install what the backend needs, per OS. */
 function installHint(platform: NodeJS.Platform): string {
   if (platform === "darwin") return "Install ripgrep: brew install ripgrep";
@@ -1389,8 +1407,10 @@ async function bringUp(
   const early = [cwd, ...ownWrites, ...(ownCache ? [ownCache] : [])];
   const pinned = platform === "linux" ? { rg: which("rg", trusted, early), bwrap: which("bwrap", trusted, early), socat: which("socat", trusted, early) } : { rg: null, bwrap: null, socat: null };
   const deps = M.checkDependencies(pinned.rg ? { command: pinned.rg } : undefined);
-  const userns = () => platform === "linux" && appArmorRestrictsUserns();
-  if (deps.errors.length) return { refused: `the sandbox cannot start: ${deps.errors.join("; ")}`, hint: userns() ? APPARMOR_HINT : installHint(platform) };
+  // Why namespaces were refused: a container's runtime, or Ubuntu's AppArmor on a machine of its own.
+  const nsHint = () => (platform !== "linux" ? undefined : inContainer() ? CONTAINER_HINT : appArmorRestrictsUserns() ? APPARMOR_HINT : undefined);
+  // A tool missing comes first: nothing about namespaces matters until it is installed (bench, 25 Nov 2026).
+  if (deps.errors.length) return { refused: `the sandbox cannot start: ${deps.errors.join("; ")}`, hint: installHint(platform) };
   // Without seccomp a Linux command can reach any Unix socket it can see —
   // a host service outside the site proxy. Not walls enough to call walls.
   const noSeccomp = deps.warnings.find((w) => /seccomp/i.test(w));
@@ -1490,7 +1510,7 @@ async function bringUp(
   } catch (err) {
     cleanupProbe();
     rmTmp();
-    return { refused: `the sandbox did not start: ${err instanceof Error ? err.message : String(err)}`, hint: userns() ? APPARMOR_HINT : undefined };
+    return { refused: `the sandbox did not start: ${err instanceof Error ? err.message : String(err)}`, hint: nsHint() };
   }
 
   const backend: SandboxBackend = platform === "darwin" ? "seatbelt" : "bubblewrap";
@@ -1625,11 +1645,11 @@ async function bringUp(
     if (!said.has("NET_DENIED") || hits > 0) fails.push("a direct connection was not stopped");
     if (fails.length) {
       await w.teardown();
-      return { refused: `the sandbox did not hold: ${fails.join("; ")}`, hint: userns() ? APPARMOR_HINT : undefined };
+      return { refused: `the sandbox did not hold: ${fails.join("; ")}`, hint: nsHint() };
     }
   } catch (err) {
     await w.teardown();
-    return { refused: `the sandbox could not be checked: ${err instanceof Error ? err.message : String(err)}`, hint: userns() ? APPARMOR_HINT : undefined };
+    return { refused: `the sandbox could not be checked: ${err instanceof Error ? err.message : String(err)}`, hint: nsHint() };
   } finally {
     server.close();
     cleanupProbe();

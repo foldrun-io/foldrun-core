@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { APPARMOR_HINT, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
+import { APPARMOR_HINT, CONTAINER_HINT, inContainer, appArmorRestrictsUserns, cacheProblem, carry, chainOutside, fileRules, helperFolder, killTree, linkHops, remoteHelper, shellWords, gitProtected, type GitCache, isRefusal, openLocalSandbox, realish, trustedPath } from "../src/local-sandbox.ts";
 import { readOptions } from "../src/engine-common.ts";
 import { connectMcp } from "../src/engine-mcp.ts";
 import { ENGINE_TOOLS, type ToolContext } from "../src/engine-tools.ts";
@@ -77,6 +77,14 @@ test("Ubuntu's AppArmor userns block is recognised, and the fix offered is the b
   assert.equal(appArmorRestrictsUserns(() => "0\n"), false);
   assert.equal(appArmorRestrictsUserns(() => { throw new Error("ENOENT"); }), false);
   assert.match(APPARMOR_HINT, /bwrap-userns-restrict/);
+  // A container's runtime decides, not the host's AppArmor (bench, 25 Nov 2026).
+  assert.equal(inContainer((f) => f === "/.dockerenv", () => ""), true, "Docker");
+  assert.equal(inContainer((f) => f === "/run/.containerenv", () => ""), true, "Podman");
+  assert.equal(inContainer(() => false, () => "0::/kubepods/burstable/pod1/abc\n"), true, "a Kubernetes pod");
+  assert.equal(inContainer(() => false, () => "0::/init.scope\n"), false, "a machine of its own");
+  assert.equal(inContainer(() => false, () => { throw new Error("ENOENT"); }), false);
+  assert.match(CONTAINER_HINT, /sandbox off/);
+  assert.doesNotMatch(CONTAINER_HINT, /Ubuntu/);
   assert.doesNotMatch(APPARMOR_HINT, /sysctl|=0/);
 });
 
