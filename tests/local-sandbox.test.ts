@@ -118,6 +118,14 @@ test("inside the walls: a site not on the list is asked about, by host, and only
     const n = asked.length;
     await bash("curl -sS -m 10 -o /dev/null https://example.org/ || true");
     assert.ok(asked.length > n, "asked again: remembering an answer is the caller's");
+    // A second opener of the same walls never answers for the first (Codex).
+    const other: string[] = [];
+    const second = await openLocalSandbox({ cwd: proj, sites: [] }, { askSite: async (h) => (other.push(h), true) });
+    assert.ok(!isRefusal(second));
+    answer = { allow: false, reason: "no" };
+    await bash("curl -sS -m 10 -o /dev/null https://example.org/ || true");
+    assert.deepEqual(other, [], "the first handle's asker still answers");
+    await (second as any).close();
   } finally {
     await box.close();
     fs.rmSync(proj, { recursive: true, force: true });

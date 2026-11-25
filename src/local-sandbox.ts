@@ -1188,12 +1188,6 @@ function handleOf(w: Walls): LocalSandbox {
   };
 }
 
-/**
- * Start the walls for one session, or say why they cannot be had. The
- * runtime is one per process: a second open with the same policy gets a
- * handle of its own on the same walls (they come down when the last handle
- * is closed); one with another policy is refused while they are up.
- */
 /** Asked when a command inside reaches a site not on the list (FOL-312): true lets this connection through; false,
  *  or `{ allow: false, reason }`, refuses it with that reason. Called for every such connection — remembering an
  *  answer is the caller's. */
@@ -1202,14 +1196,29 @@ export type AskSite = (host: string, port: number) => Promise<boolean | { allow:
 /** The open walls' asker: set once the probe is done (the probe's own unlisted site is never asked about). */
 let asker: AskSite | null = null;
 
+/**
+ * Start the walls for one session, or say why they cannot be had. The
+ * runtime is one per process: a second open with the same policy gets a
+ * handle of its own on the same walls (they come down when the last handle
+ * is closed); one with another policy is refused while they are up.
+ */
 export function openLocalSandbox(
   policy: LocalSandboxPolicy,
   opts: { platform?: NodeJS.Platform; load?: () => Promise<Runtime>; askSite?: AskSite } = {},
 ): Promise<LocalSandbox | SandboxRefusal> {
   return inQueue(async () => {
     const got = await openNow(policy, opts);
-    // The latest opener's asker answers (one session per process); none: unlisted sites are refused, as before.
-    if (!("refused" in got)) asker = opts.askSite ?? null;
+    // The handle that brought an asker answers until it closes; another opener of the same walls never answers for
+    // it (Codex). None: unlisted sites are refused, as before.
+    if (!("refused" in got) && opts.askSite && asker === null) {
+      const mine = opts.askSite;
+      asker = mine;
+      const close = got.close.bind(got);
+      got.close = async () => {
+        if (asker === mine) asker = null;
+        return close();
+      };
+    }
     return got;
   });
 }
