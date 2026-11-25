@@ -1211,7 +1211,9 @@ export function openLocalSandbox(
     const got = await openNow(policy, opts);
     // The runtime takes one callback per process: only the open that brought the walls up may give it an asker,
     // which answers until that handle closes. Another opener of the same walls neither installs one nor answers for
-    // the first (Codex). None: unlisted sites are refused, as before.
+    // the first (Codex). None: unlisted sites are refused, as before. Accepted: a second handle of the same walls
+    // shares the one proxy, so a yes to a site holds for every command inside them — the same person's session in
+    // the same process; telling handles apart would take the runtime's per-command network lists.
     if (!("refused" in got) && opts.askSite && fresh && asker === null) {
       const mine = opts.askSite;
       asker = mine;
