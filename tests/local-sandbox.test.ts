@@ -498,9 +498,15 @@ test("the launcher's PATH holds no folder a command may write, and no relative e
 });
 
 test("git's answers are kept per repository, and asked again when anything they came from changes", async () => {
-  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache-"));
+  // Its own folder for everything it makes: the global config and the swapped .git used to sit beside the
+  // project in the shared temp folder, whose own times move whenever any other test (or process) makes a
+  // file there, and a change that recent is "racy" — nothing was kept, so the full suite failed and a run
+  // alone did not.
+  const base = realish(fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-gitcache-")));
+  const proj = path.join(base, "proj");
+  fs.mkdirSync(proj);
   const git = (...a: string[]) => assert.equal(spawnSync("git", a, { encoding: "utf8" }).status, 0, a.join(" "));
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(proj, "..", path.basename(proj) + "-global"), GIT_CONFIG_NOSYSTEM: "1" };
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(base, "global"), GIT_CONFIG_NOSYSTEM: "1" };
   const wait = () => new Promise((r) => setTimeout(r, 1100)); // past the "racy" second
   try {
     git("init", "-q", proj);
@@ -552,7 +558,7 @@ test("git's answers are kept per repository, and asked again when anything they 
     // A .git swapped for another: by identity, asked again.
     await wait();
     ask();
-    fs.renameSync(path.join(proj, "sub", ".git"), `${proj}-old-sub-git`);
+    fs.renameSync(path.join(proj, "sub", ".git"), path.join(base, "old-sub-git"));
     git("init", "-q", path.join(proj, "sub"));
     git("-C", path.join(proj, "sub"), "config", "core.hooksPath", "swapped");
     assert.ok(ask().includes(path.join(realish(path.join(proj, "sub")), "swapped")), "a swapped .git is asked again");
@@ -569,9 +575,7 @@ test("git's answers are kept per repository, and asked again when anything they 
     const other = gitProtected(proj, undefined, { ...env, GIT_CONFIG_GLOBAL: path.join(proj, "elsewhere") }, [proj], cache);
     assert.ok(!other.some((x) => x.endsWith(`${path.sep}pager-in-project`)), "another environment is asked, not answered from the cache");
   } finally {
-    fs.rmSync(proj, { recursive: true, force: true });
-    fs.rmSync(path.join(proj, "..", path.basename(proj) + "-global"), { force: true });
-    fs.rmSync(`${proj}-old-sub-git`, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 
