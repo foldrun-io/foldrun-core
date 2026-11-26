@@ -271,7 +271,7 @@ export function linkHops(file: string): string[] {
   // parent, so nothing is normalised before the links are followed.
   let todo = parts(path.isAbsolute(file) ? file : `${process.cwd()}${path.sep}${file}`);
   let cur: string = path.sep;
-  for (let n = 0; todo.length && n < 40; ) {
+  for (let n = 0; todo.length; ) {
     const c = todo.shift()!;
     if (c === ".") continue;
     if (c === "..") {
@@ -290,12 +290,19 @@ export function linkHops(file: string): string[] {
       cur = next;
       continue;
     }
-    n++;
+    // A 41st link: a loop, or as good as one to the kernel (ELOOP). Ordinary folders after the 40th still go on.
+    // The 41st is kept as a spelling too, never followed: replaced by a real folder it would lead on (Codex).
+    if (++n > 40) {
+      hops.push(next);
+      return hops;
+    }
     hops.push(next);
     const target = fs.readlinkSync(next);
     todo = [...parts(target), ...todo];
     if (path.isAbsolute(target)) cur = path.sep;
   }
+  // A loop returns above with the links walked as its spellings, never the folder it got to — for a link to
+  // itself that is its parent, or `/`, and a deny there would cover far more than the link (Codex on FOL-334).
   hops.push(cur);
   return hops;
 }
@@ -516,6 +523,10 @@ export function gitProtected(cwd: string, pathVar = trustedPath(process.env.PATH
     // someone named .git, the report): git runs nothing from it and would answer for the repository
     // around it. Its paths are still kept from writes (above); there is nothing to ask git.
     if (dir !== cwd && inertGit(dir)) continue;
+    // A nested .git link that leads nowhere (FOL-334): nothing there for git to read now; its paths, and
+    // those at the link's target by the link's text, are kept from writes above.
+    // Not when the folder is a bare repository itself: git takes it as one once the .git lookup fails (Codex).
+    if (dir !== cwd && danglingGit(dir) && !looksBare(dir)) continue;
     // A repository asked before, none of whose files changed since: the same answer (FOL-214 follow-up —
     // asking git is ~20 programs a repository, seconds a launch in a folder of repositories).
     // Which repository git takes this folder for is asked of git every time, in one or two programs: a
@@ -870,10 +881,62 @@ export function remoteHelper(key: string, value: string): string | null {
 const PROGRAM_KEY =
   /(command|cmd|program|helper|driver|textconv|editor|pager|askpass|hook|proxy|process|clean|smudge|fsmonitor|difffilter|browser|external|variant|receivepack|uploadpack|smtpserver|httpd)$|^submodule\..+\.update$|^(core\.(fsmonitor|pager|editor|sshcommand|askpass|gitproxy)|sequence\.editor|diff\.external|diff\..+\.(textconv|command)|merge\..+\.driver|filter\..+\.(clean|smudge|process)|credential(\..+)?\.helper|gpg(\..+)?\.program|alias\..+|uploadpack\.packobjectshook|interactive\.difffilter|pager\..+|web\.browser|browser\..+\.(cmd|path)|man\..+\.(cmd|path)|(merge|diff)tool\..+\.(cmd|path))$/;
 
-/** A bare repository: HEAD, objects/ and refs/ with no work tree. */
+/** A bare repository: HEAD, objects/ and refs/ with no work tree. HEAD by lstat, as git takes it: a file,
+ *  or a link (git's old symbolic HEAD, `HEAD -> refs/heads/main`) even when the branch it names has no
+ *  commit yet and the link leads nowhere (FOL-334: a dangling HEAD hid the repository). */
 function looksBare(dir: string): boolean {
   try {
-    return fs.statSync(path.join(dir, "HEAD")).isFile() && fs.statSync(path.join(dir, "objects")).isDirectory() && fs.statSync(path.join(dir, "refs")).isDirectory();
+    if (!headLike(path.join(dir, "HEAD"))) return false;
+    // objects/ and refs/ where git looks for them: beside HEAD, or in the folder `commondir` names (a linked
+    // worktree's git folder), as git's own is_git_directory checks (Codex on FOL-334).
+    let common = dir;
+    const cd = path.join(dir, "commondir");
+    let fd = -1;
+    try {
+      // Opened once, never through a link and never waiting on a FIFO; checked and read on that one descriptor,
+      // so a swap or a file that grows between a look and a read changes nothing (Codex).
+      fd = fs.openSync(cd, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    } catch (err) {
+      // None: objects/ and refs/ beside HEAD. Anything else (a link, no access) cannot be inspected: a repository.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return true;
+    }
+    if (fd >= 0) {
+      let raw: Buffer;
+      try {
+        // Read only as a small regular file: a FIFO or a huge file would stall the scan (Codex). Anything else
+        // cannot be inspected, so the folder is counted as a repository and git is asked about it.
+        if (!fs.fstatSync(fd).isFile()) return true;
+        const buf = Buffer.alloc(4097);
+        const got = fs.readSync(fd, buf, 0, buf.length, 0);
+        if (got > 4096) return true;
+        raw = buf.subarray(0, got);
+      } finally {
+        fs.closeSync(fd);
+      }
+      // Git takes the path's bytes as they are: one that is not UTF-8 cannot be followed here, so a repository (Codex).
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+      } catch {
+        return true;
+      }
+      // Trimmed and resolved as git does: every trailing CR/LF off, `..` taken through the file system (Codex).
+      const named = text.replace(/[\r\n]+$/, "");
+      if (named) common = realish(path.isAbsolute(named) ? named : `${dir}${path.sep}${named}`);
+    }
+    return fs.statSync(path.join(common, "objects")).isDirectory() && fs.statSync(path.join(common, "refs")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** A HEAD as git takes one: a file, or git's old symbolic link into refs/ — leading nowhere too, as on a
+ *  branch with no commit yet (FOL-334). A link anywhere else is no HEAD to git. */
+function headLike(p: string): boolean {
+  try {
+    const st = fs.lstatSync(p);
+    if (st.isFile()) return true;
+    return st.isSymbolicLink() && fs.readlinkSync(p).startsWith("refs/");
   } catch {
     return false;
   }
@@ -884,9 +947,26 @@ function inertGit(dir: string): boolean {
   try {
     const st = fs.lstatSync(path.join(dir, ".git"));
     if (!st.isDirectory()) return false;
-    return !fs.existsSync(path.join(dir, ".git", "HEAD")) && !looksBare(dir);
+    // A HEAD that is a link into refs/ leading nowhere is still a HEAD to git (FOL-334).
+    return !headLike(path.join(dir, ".git", "HEAD")) && !looksBare(dir);
   } catch {
     return false;
+  }
+}
+
+/** A `.git` here that is a link leading nowhere (its target not there, or a loop). */
+function danglingGit(dir: string): boolean {
+  const g = path.join(dir, ".git");
+  try {
+    if (!fs.lstatSync(g).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  try {
+    fs.statSync(g);
+    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -958,7 +1038,8 @@ function nestedRepos(cwd: string): string[] {
         continue;
       }
       const sub = path.join(dir, e.name);
-      if (fs.existsSync(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
+      // lstat: a .git link that leads nowhere yet is a repository-to-be (FOL-334), as hasGitAbove counts it.
+      if (lexists(path.join(sub, ".git")) || looksBare(sub)) found.push(sub);
       if (depth + 1 >= GIT_SEARCH_DEPTH) {
         // Counted like any folder read (Codex): the cap is on every read, the boundary's too.
         if (++count.seen > GIT_SEARCH_DIRS) throw new Error(`the project has more than ${GIT_SEARCH_DIRS} folders to search for nested git repositories`);

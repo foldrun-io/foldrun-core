@@ -1102,6 +1102,71 @@ test("git: an empty .git in a project that is no repository — what the Linux m
   }
 });
 
+test("git: repositories behind a dangling link are found — a nested .git link, a bare one's HEAD, a HEAD inside a nested .git (FOL-334)", () => {
+  const proj = tmpProject();
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", proj]).status, 0);
+    // A nested repository whose HEAD is git's old symbolic link to a branch with no commit yet: git reads it,
+    // and its own hooks path must be asked of git, not passed over as an inert .git.
+    const sub = path.join(proj, "sub");
+    assert.equal(spawnSync("git", ["init", "-q", sub]).status, 0);
+    assert.equal(spawnSync("git", ["-C", sub, "config", "core.hooksPath", "custom-hooks"]).status, 0);
+    fs.rmSync(path.join(sub, ".git", "HEAD"));
+    fs.symlinkSync("refs/heads/main", path.join(sub, ".git", "HEAD"));
+    // A bare repository whose HEAD is such a link.
+    const bare = path.join(proj, "vendor", "bare.git");
+    assert.equal(spawnSync("git", ["init", "-q", "--bare", bare]).status, 0);
+    fs.rmSync(path.join(bare, "HEAD"));
+    fs.symlinkSync("refs/heads/main", path.join(bare, "HEAD"));
+    // A folder whose .git is a link to where a repository is not (yet).
+    const later = path.join(proj, "later");
+    fs.mkdirSync(later);
+    fs.symlinkSync(path.join(proj, "elsewhere", "repo.git"), path.join(later, ".git"));
+    const got = gitProtected(proj);
+    assert.ok(got.includes(realish(path.join(sub, "custom-hooks"))), `the nested repository's hooks path, asked of git: ${got.join(", ")}`);
+    assert.ok(got.some((p) => p === path.join(realish(bare), "hooks") || p === realish(path.join(bare, "hooks"))), `the bare repository's hooks: ${got.join(", ")}`);
+    assert.ok(got.includes(path.join(later, ".git", "hooks")), "the dangling link's own spelling");
+    assert.ok(got.includes(path.join(proj, "elsewhere", "repo.git", "hooks")) || got.includes(path.join(realish(proj), "elsewhere", "repo.git", "hooks")), `where the link leads, by its text: ${got.join(", ")}`);
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("git: a bare repository holding a dangling .git link, a worktree's git folder by commondir, a HEAD link out of refs/, a .git link loop (FOL-334, Codex)", () => {
+  const proj = tmpProject();
+  try {
+    assert.equal(spawnSync("git", ["init", "-q", proj]).status, 0);
+    // A bare repository that also has a .git link leading nowhere: git takes the folder itself.
+    const bare = path.join(proj, "b.git");
+    assert.equal(spawnSync("git", ["init", "-q", "--bare", bare]).status, 0);
+    assert.equal(spawnSync("git", ["--git-dir", bare, "config", "core.hooksPath", "bare-hooks"]).status, 0);
+    fs.symlinkSync(path.join(proj, "nowhere"), path.join(bare, ".git"));
+    // A git folder laid out as a linked worktree's: HEAD and commondir, objects/ and refs/ in the common folder.
+    const wt = path.join(proj, "wt-gitdir");
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, "HEAD"), "ref: refs/heads/main\n");
+    const common = path.join(proj, "common.git");
+    assert.equal(spawnSync("git", ["init", "-q", "--bare", common]).status, 0);
+    // A relative path, with CRLF and an extra line end, as git reads it.
+    fs.writeFileSync(path.join(wt, "commondir"), "../common.git\r\n\n");
+    // A .git whose HEAD is a link out of refs/: no HEAD to git, an inert folder, not a refused launch.
+    const odd = path.join(proj, "odd");
+    fs.mkdirSync(path.join(odd, ".git"), { recursive: true });
+    fs.symlinkSync("../README", path.join(odd, ".git", "HEAD"));
+    // A .git link to itself.
+    const loop = path.join(proj, "loop");
+    fs.mkdirSync(loop);
+    fs.symlinkSync(".git", path.join(loop, ".git"));
+    const got = gitProtected(proj);
+    assert.ok(got.some((p) => p === path.join(realish(bare), "bare-hooks") || p === path.join(bare, "bare-hooks")), `the bare repository's own hooks path: ${got.join(", ")}`);
+    // Only the worktree git folder's own hooks: common.git, a bare repository in the project, is found by the scan anyway (Codex).
+    assert.ok(got.some((p) => p === path.join(realish(wt), "hooks") || p === path.join(wt, "hooks")), `the worktree git folder is a repository: ${got.join(", ")}`);
+    for (const p of got) assert.ok(p !== "/" && p !== loop && p !== realish(loop) && p !== proj && p !== realish(proj), `no folder denied whole for a loop: ${p}`);
+  } finally {
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("linux: two launches in a project that is no repository both run (FOL-333)", { skip: process.platform !== "linux" }, async (t) => {
   const proj = tmpProject();
   const got = await openLocalSandbox({ cwd: proj, sites: [] });
