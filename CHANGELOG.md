@@ -13,6 +13,16 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.6.0] — 2026-11-26
+
+### New in the public API
+
+- `INSIDE_NODE_ENV` from `@foldrun/core/local-sandbox`
+- `INSIDE_NO_PROXY_LINES` from `@foldrun/core/local-sandbox`
+
+- fix(local-sandbox): [::1] kept off the proxy inside the walls; the FOL-353 test proves routing through the walls' proxy (Codex review) ([0dc7f55](https://github.com/foldrun-io/foldrun-core/commit/0dc7f55))
+- fix(local-sandbox): Node's own fetch goes through the walls' proxy — NODE_USE_ENV_PROXY=1 inside, as the cloud sets it (FOL-353) ([d04ce12](https://github.com/foldrun-io/foldrun-core/commit/d04ce12))
+
 ## [29.5.1] — 2026-11-26
 
 - fix(runner): the driver's last line reaches the log whole, and is kept in done.json (FOL-374) ([408d157](https://github.com/foldrun-io/foldrun-core/commit/408d157))
