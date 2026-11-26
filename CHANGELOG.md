@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.7.0] — 2026-11-26
+
+- feat(ops-log): country and reqBytes fields for gateway call lines ([9879c66](https://github.com/foldrun-io/foldrun-core/commit/9879c66))
+
 ## [29.6.1] — 2026-11-26
 
 - test(local-sandbox): the git-cache test keeps its files in a folder of its own ([08feb80](https://github.com/foldrun-io/foldrun-core/commit/08feb80))
