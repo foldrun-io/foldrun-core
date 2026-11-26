@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.3.0] — 2026-11-26
+
+- feat(ops-log): a beta field — a provider beta name the gateway did not send on (FOL-337) ([a34045e](https://github.com/foldrun-io/foldrun-core/commit/a34045e))
+
 ## [29.2.2] — 2026-11-26
 
 - build(deps): Bump the minor-and-patch group across 1 directory with 2 updates (#153) ([1e7d254](https://github.com/foldrun-io/foldrun-core/commit/1e7d254))
