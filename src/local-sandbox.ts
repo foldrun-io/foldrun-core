@@ -159,6 +159,14 @@ export function packageCacheEnv(cache: string): Record<string, string> {
  *  sandboxes set the same (`proxyEnv`, network.ts). */
 export const INSIDE_NODE_ENV: Readonly<Record<string, string>> = { NODE_USE_ENV_PROXY: "1" };
 
+/** Run inside, after the runtime set its proxy: its NO_PROXY lists `::1`
+ *  bare, and Node 22.21's fetch matches `[::1]` with its brackets, so with
+ *  NODE_USE_ENV_PROXY on, a request to http://[::1]:port went to the proxy
+ *  (Codex, FOL-353). Both spellings get `[::1]` once. */
+export const INSIDE_NO_PROXY_LINES = ["NO_PROXY", "no_proxy"]
+  .map((k) => `case ",\${${k}-}," in *",[::1],"*) ;; *) export ${k}="\${${k}:+\$${k},}[::1]" ;; esac`)
+  .join("\n");
+
 export interface LocalSandbox {
   backend: SandboxBackend;
   /** The private temp folder: a command's TMPDIR. */
@@ -1308,7 +1316,7 @@ function handleOf(w: Walls): LocalSandbox {
       // usual folders in the home are not writable inside.
       const withCache = { ...env, ...packageCacheEnv(w.cache), ...INSIDE_NODE_ENV };
       const { inner, outer } = carry(withCache.PATH === w.hostEnv.PATH ? { ...withCache, PATH: w.personPath } : withCache);
-      const { line, token } = await w.wrapRaw(inner ? `${inner}\n${command}` : command);
+      const { line, token } = await w.wrapRaw(`${inner ? `${inner}\n` : ""}${INSIDE_NO_PROXY_LINES}\n${command}`);
       // Made under this handle's walls, still up: a line from a later
       // policy, or for a handle given back meanwhile, is not handed out.
       if (!live() || w.gen !== gen || walls !== w) throw new Error("the sandbox closed while the command was being wrapped");
