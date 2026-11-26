@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.5.0] — 2026-11-26
+
+- fix(local-sandbox): git folders the scan missed or refused — dangling .git links, bare repositories, linked worktrees (commondir), link loops (FOL-334) ([8d62a03](https://github.com/foldrun-io/foldrun-core/commit/8d62a03))
+- feat(engine): jobs option — the caller's map of Bash background jobs, so a host can show them (FOL-343) ([b1cc6a2](https://github.com/foldrun-io/foldrun-core/commit/b1cc6a2))
+
 ## [29.4.0] — 2026-11-26
 
 ### New in the public API
