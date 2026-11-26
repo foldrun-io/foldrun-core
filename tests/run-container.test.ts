@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawnSync as spawnSh } from "node:child_process";
+import { spawn, spawnSync as spawnSh } from "node:child_process";
 import {
   DOCKERFILE,
   RUNNER_OS_DOCKERFILE,
@@ -840,6 +840,64 @@ test("the driver written into the runner image is plain JS node can load (a TS c
   const r = spawnSh(process.execPath, ["--check", file], { encoding: "utf8" });
   fs.rmSync(dir, { recursive: true, force: true });
   assert.equal(r.status, 0, r.stderr);
+});
+
+// FOL-374, 26 Nov 2026: the driver wrote its done line and called
+// process.exit at once; on a pipe a long line was cut, and a finished job was
+// marked failed. finishWith keeps the outcome in done.json and exits only once
+// stdout has taken the whole line. Run the driver's own helper, as written into
+// the image, against a reader that is slow to drain the pipe.
+test("FOL-374: the driver's last line reaches a slow pipe whole, and done.json holds the same outcome", { timeout: 30_000 }, async () => {
+  const { DRIVER } = await import("../src/run-container.ts");
+  const start = DRIVER.indexOf('const DONE_FILE = "/opt/runner/job/done.json";');
+  const end = DRIVER.indexOf("\n};\n", start);
+  assert.ok(start > 0 && end > start, "the driver defines finishWith");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-finish-"));
+  try {
+    const doneFile = path.join(dir, "done.json");
+    const helper = DRIVER.slice(start, end + 3).replace("/opt/runner/job/done.json", doneFile);
+    const result = "x".repeat(4_000_000);
+    const file = path.join(dir, "finish.mjs");
+    fs.writeFileSync(file, `import fs from "node:fs";\n${helper}\nfinishWith({ e: "done", status: "completed", result: ${JSON.stringify(result)} });\n`);
+    const child = spawn(process.execPath, [file], { stdio: ["ignore", "pipe", "inherit"] });
+    const closed = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+    child.stdout.pause();
+    await new Promise((r) => setTimeout(r, 300)); // the pipe fills while nobody reads
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (c: Buffer) => chunks.push(c));
+    child.stdout.resume();
+    const code = await closed;
+    const out = Buffer.concat(chunks).toString("utf8");
+    assert.equal(code, 0);
+    assert.ok(out.endsWith("\n"), `the line ends (${out.length} bytes arrived)`);
+    assert.equal(JSON.parse(out).result.length, result.length, "the whole result arrived on stdout");
+    assert.equal(JSON.parse(fs.readFileSync(doneFile, "utf8")).result.length, result.length, "done.json holds it too");
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp")), [], "written whole, then renamed into place");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FOL-374: a link the step left at done.json is replaced, never written through", { timeout: 30_000 }, async () => {
+  const { DRIVER } = await import("../src/run-container.ts");
+  const start = DRIVER.indexOf('const DONE_FILE = "/opt/runner/job/done.json";');
+  const end = DRIVER.indexOf("\n};\n", start);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-finish-link-"));
+  try {
+    const doneFile = path.join(dir, "done.json");
+    const victim = path.join(dir, "victim.txt");
+    fs.writeFileSync(victim, "keep me");
+    fs.symlinkSync(victim, doneFile);
+    const file = path.join(dir, "finish.mjs");
+    fs.writeFileSync(file, `import fs from "node:fs";\n${DRIVER.slice(start, end + 3).replace("/opt/runner/job/done.json", doneFile)}\nfinishWith({ e: "done", status: "completed", result: "ok" });\n`);
+    const r = spawnSh(process.execPath, [file], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(r.status, 0);
+    assert.equal(fs.readFileSync(victim, "utf8"), "keep me", "the link's target is untouched");
+    assert.ok(fs.lstatSync(doneFile).isFile(), "done.json is now a file of its own");
+    assert.equal(JSON.parse(fs.readFileSync(doneFile, "utf8")).result, "ok");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("buildFailureSummary names a full Docker disk first, with apt's own E: line", () => {

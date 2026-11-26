@@ -864,6 +864,29 @@ const input = JSON.parse(fs.readFileSync("/opt/runner/job/input.json", "utf8"));
 // on the sandbox's clock. A worker that does not know a mark skips the line.
 const mark = (name) => process.stdout.write(JSON.stringify({ e: "mark", name, at: Date.now() }) + "\\n");
 mark("driver");
+// The step's outcome, said twice: kept in the job folder first (written
+// whole, then renamed into place), then as the log's last line — and the
+// process ends only once that line has been handed on. Ending at once after
+// the write cut a long done line on 26 Nov 2026 (FOL-374): a finished job
+// was marked failed. The platform reads the file when the line is cut.
+const DONE_FILE = "/opt/runner/job/done.json";
+const finishWith = (outcome) => {
+  const line = JSON.stringify(outcome);
+  // A stdout that never drains must not hold the step forever.
+  const stuck = setTimeout(() => process.exit(0), 30000);
+  // A fresh name, made exclusively: the step's own commands can write this
+  // folder, and a link or a FIFO left at a fixed name would redirect the
+  // write or block it (Codex). Made or not, the log line still goes out.
+  const tmp = DONE_FILE + "." + process.pid + "." + Date.now() + ".tmp";
+  try {
+    const fd = fs.openSync(tmp, "wx", 0o600);
+    try { fs.writeFileSync(fd, line); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, DONE_FILE);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch { /* never made */ }
+  }
+  process.stdout.write(line + "\\n", () => { clearTimeout(stuck); process.exit(0); });
+};
 let modelSpoke = false;
 const emit = (type, text, extra) => {
   // The model's first text or tool call is where start-up ends and the
@@ -1150,8 +1173,7 @@ try {
   const consultCost = consult.drainCost();
   if (consultCost > 0) outcome.costUsd = (outcome.costUsd ?? 0) + consultCost;
   if (consultCost > 0 && typeof outcome.turnsCostUsd === "number") outcome.turnsCostUsd += consultCost;
-  process.stdout.write(JSON.stringify({ e: "done", ...outcome, res: readActuals() }) + "\\n");
-  process.exit(0);
+  finishWith({ e: "done", ...outcome, res: readActuals() });
 } catch (err) {
   emit("error", err instanceof Error ? err.message : String(err));
   // The failure path reports actuals too — a step that died eleven minutes
@@ -1159,8 +1181,7 @@ try {
   // exactly the ones whose resource story gets read.
   let res = null;
   try { res = readActuals(); } catch { /* the reading must never mask the error */ }
-  process.stdout.write(JSON.stringify({ e: "done", status: "failed", result: null, costUsd: null, res }) + "\\n");
-  process.exit(0);
+  finishWith({ e: "done", status: "failed", result: null, costUsd: null, res });
 }
 `;
 
@@ -2446,6 +2467,7 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
           }, backstopMs)
         : null;
 
+      let cutDone = false;
       child.stdout.on("data", (chunk: Buffer) => {
         buffer += chunk.toString();
         for (;;) {
@@ -2459,7 +2481,10 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
             continue;
           }
           const parsed = parseDriverLine(line);
-          if (!parsed) continue;
+          if (!parsed) {
+            if (line.trim().startsWith('{"e":"done"')) cutDone = true;
+            continue;
+          }
           firstOutputAt ??= Date.now();
           if (parsed.e === "event") {
             const { e: _e, type, text, ...extra } = parsed;
@@ -2474,6 +2499,17 @@ export async function runStepInContainer(args: RunInContainerArgs): Promise<Cont
       });
       child.on("close", () => {
         if (backstop) clearTimeout(backstop);
+        // The last line may have lost only its newline (FOL-374, Codex).
+        if (!done && buffer.trim()) {
+          const last = parseDriverLine(buffer);
+          if (last?.e === "done") done = last;
+          else if (buffer.trim().startsWith('{"e":"done"')) cutDone = true;
+        }
+        // The driver now waits for its last line to drain (finishWith), so a
+        // cut one here is rare; it is named rather than read from the
+        // container's done.json (a copy-out the platform's k8s path does
+        // bounded; kept out of the Docker path, FOL-374).
+        if (!done && cutDone) args.emit("error", "the step's result line was cut off in the log");
         if (!done && stderrTail.trim()) args.emit("error", stderrTail.trim().slice(0, 1000));
         resolve(done ?? { status: "failed", result: null, costUsd: null });
       });
