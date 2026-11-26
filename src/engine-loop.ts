@@ -87,7 +87,7 @@ function requestHeaders(env: Record<string, string | undefined>, userAgent: stri
  *  a finish, the way the SDK's error results do. */
 /** What this engine can do that a caller may ask about before relying on
  *  it: `steer` — messages sent while a turn runs (FOL-213). */
-export const ENGINE_FEATURES = { steer: true, thinking: true, effort: true } as const;
+export const ENGINE_FEATURES = { steer: true, thinking: true, effort: true, jobs: true } as const;
 
 export function endOf(stopReason: string | null, calls: number): { subtype: string; error?: string } {
   switch (stopReason) {
@@ -369,7 +369,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
       .filter((t): t is string => typeof t === "string" && t.trim() !== "")
       .map((t) => ({ type: "text", text: t.slice(0, 20_000) }));
   };
-  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set(), sandbox: o.localSandbox, programs: o.programs, ...(o.toolsDir ? { toolsDir: o.toolsDir } : {}), ...(o.readable ? { readable: o.readable } : {}) };
+  const ctx: ToolContext = { cwd: o.cwd, env: o.shellEnv, signal, reads: new Map(), groups: new Set(), sandbox: o.localSandbox, programs: o.programs, ...(o.toolsDir ? { toolsDir: o.toolsDir } : {}), ...(o.readable ? { readable: o.readable } : {}), ...(o.jobs ? { jobs: o.jobs } : {}) };
   // Inside the walls, what a command left running (a server in the
   // background) holds the rules it started under: when a later launch finds
   // them changed, it is ended before that launch goes ahead.

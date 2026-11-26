@@ -80,6 +80,9 @@ export interface LoopOptions {
    *  web_search_* / web_fetch_* / foldrun_web_browse_* types; their blocks come back in the reply. */
   serverTools?: { type: string; name: string; [k: string]: unknown }[];
   readable?: (file: string) => boolean;
+  /** The caller's own list for Bash's background jobs (FOL-343): it sees them as they run — foldrun code draws
+   *  a row for each under the working line. Absent: the step keeps its own. */
+  jobs?: Map<string, import("./engine-tools.ts").BgJob>;
   /** The User-Agent the model calls carry: the caller's own name
    *  (`userAgent`, e.g. foldrun-cli/27.8.0), else foldrun-engine. An option,
    *  never an environment name — a step's env holds the tenant's secrets
@@ -265,6 +268,7 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     ...(typeof options.toolsDir === "string" && path.isAbsolute(options.toolsDir) ? { toolsDir: options.toolsDir } : {}),
     ...(Array.isArray(options.serverTools) ? { serverTools: serverToolsOf(options.serverTools) } : {}),
     ...(typeof options.readable === "function" ? { readable: options.readable as (file: string) => boolean } : {}),
+    ...(options.jobs instanceof Map ? { jobs: options.jobs as Map<string, import("./engine-tools.ts").BgJob> } : {}),
     userAgent: typeof options.userAgent === "string" && /^[!-~]{1,100}$/.test(options.userAgent) && !/^claude[-_/]/i.test(options.userAgent) ? options.userAgent : "foldrun-engine",
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
