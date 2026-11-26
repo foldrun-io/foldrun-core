@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.4.0] — 2026-11-26
+
+### New in the public API
+
+- `MODEL_RUNTIME_ENV` from `@foldrun/core`
+- `declaredEnv` from `@foldrun/core`
+
+- feat(runner): the model process reserves every name it reads — ANTHROPIC_*, CLAUDE_*, OTEL_* and its request switches — in the sandbox and in-process alike (FOL-338) ([8b27eda](https://github.com/foldrun-io/foldrun-core/commit/8b27eda))
+
 ## [29.3.0] — 2026-11-26
 
 - feat(ops-log): a beta field — a provider beta name the gateway did not send on (FOL-337) ([a34045e](https://github.com/foldrun-io/foldrun-core/commit/a34045e))
