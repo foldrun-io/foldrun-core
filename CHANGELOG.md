@@ -13,6 +13,11 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.2.2] — 2026-11-26
+
+- build(deps): Bump the minor-and-patch group across 1 directory with 2 updates (#153) ([1e7d254](https://github.com/foldrun-io/foldrun-core/commit/1e7d254))
+- chore(deps): bump actions/create-github-app-token (#152) ([70e6a8e](https://github.com/foldrun-io/foldrun-core/commit/70e6a8e))
+
 ## [29.2.1] — 2026-11-25
 
 - fix(local-sandbox): a project that is no git repository runs commands on Linux (FOL-333) ([7a4721f](https://github.com/foldrun-io/foldrun-core/commit/7a4721f))
