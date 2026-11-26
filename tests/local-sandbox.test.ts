@@ -308,6 +308,31 @@ test("package managers keep their downloads in the project's cache, not the home
   }
 });
 
+test("Node's own fetch inside the walls goes to the proxy, not to DNS (FOL-353)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  const box = await openLocalSandbox({ cwd: proj, sites: [] });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    // The person's own shell turning it off does not reach inside: the proxy is the only way out there.
+    const ctx = ctxFor(proj, box, { ...process.env, TMPDIR: box.tmp, NODE_USE_ENV_PROXY: "0" });
+    const bash = (command: string) => ENGINE_TOOLS.Bash!.run({ command, timeout: 30_000 }, ctx);
+    const script = "fetch('https://foldrun-sbx-probe.example.com/').then(r=>console.log('status='+r.status),e=>console.log('error='+(e.cause?.code||e.cause?.message||e.message)))";
+    const r = await bash(`echo "flag=$NODE_USE_ENV_PROXY"; node -e "${script}"`);
+    assert.match(r.text, /flag=1\b/, r.text);
+    // No site is allowed: the proxy refuses it. What must not happen is Node asking DNS itself.
+    assert.doesNotMatch(r.text, /ENOTFOUND|EAI_AGAIN/, r.text);
+    assert.match(r.text, /status=|error=/, r.text);
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("a package cache inside a credential folder is refused", async () => {
   const proj = tmpProject();
   try {

@@ -153,6 +153,12 @@ export function packageCacheEnv(cache: string): Record<string, string> {
   };
 }
 
+/** Node's own fetch and http read the proxy variables only with this on
+ *  (Node 22.21 and later). Without it, a Node script inside the walls tried
+ *  DNS itself, failed ENOTFOUND, and no site was asked (FOL-353). The cloud's
+ *  sandboxes set the same (`proxyEnv`, network.ts). */
+export const INSIDE_NODE_ENV: Readonly<Record<string, string>> = { NODE_USE_ENV_PROXY: "1" };
+
 export interface LocalSandbox {
   backend: SandboxBackend;
   /** The private temp folder: a command's TMPDIR. */
@@ -1300,7 +1306,7 @@ function handleOf(w: Walls): LocalSandbox {
       // has the helper folder for PATH: the person's own goes inside.
       // Package managers keep their downloads in the sandbox's cache: their
       // usual folders in the home are not writable inside.
-      const withCache = { ...env, ...packageCacheEnv(w.cache) };
+      const withCache = { ...env, ...packageCacheEnv(w.cache), ...INSIDE_NODE_ENV };
       const { inner, outer } = carry(withCache.PATH === w.hostEnv.PATH ? { ...withCache, PATH: w.personPath } : withCache);
       const { line, token } = await w.wrapRaw(inner ? `${inner}\n${command}` : command);
       // Made under this handle's walls, still up: a line from a later
