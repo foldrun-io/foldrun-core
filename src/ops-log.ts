@@ -109,6 +109,9 @@ export const FIELDS: Record<string, Kind> = {
   // 12 Nov 2026): a member's id and an API key's id (never an email — `@`
   // does not fit an id, so one cannot slip in), and the request's own id.
   user: "id", key: "id", requestId: "id",
+  // A beta feature name a caller asked for and the gateway did not send on
+  // (FOL-337): the provider's own identifier, e.g. files-api-2025-04-14.
+  beta: "id",
   // How many, how long, how much.
   count: "num", ms: "num", secs: "num", bytes: "num", usd: "num", attempt: "num",
   step: "num", port: "num", status: "num", exitCode: "num", percent: "num", tries: "num",
