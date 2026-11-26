@@ -308,6 +308,50 @@ test("package managers keep their downloads in the project's cache, not the home
   }
 });
 
+test("Node's own fetch inside the walls goes to the proxy, not to DNS (FOL-353)", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return t.skip("no local sandbox on this OS");
+  const proj = tmpProject();
+  /** Every site the walls' proxy asked about: the proof a request went through it. */
+  const asked: string[] = [];
+  const box = await openLocalSandbox({ cwd: proj, sites: [] }, {}, async (host, port) => {
+    asked.push(`${host}:${port}`);
+    return false;
+  });
+  if (isRefusal(box)) {
+    fs.rmSync(proj, { recursive: true, force: true });
+    if (process.env.FOLDRUN_REQUIRE_SANDBOX === "1") assert.fail(`the sandbox must start here: ${box.refused}`);
+    return t.skip(`the sandbox cannot start here: ${box.refused}`);
+  }
+  try {
+    // The person's own shell turning it off does not reach inside: the proxy is the only way out there.
+    const ctx = ctxFor(proj, box, { ...process.env, TMPDIR: box.tmp, NODE_USE_ENV_PROXY: "0" });
+    const bash = (command: string) => ENGINE_TOOLS.Bash!.run({ command, timeout: 30_000 }, ctx);
+    const probe = (url: string) => `fetch('${url}').then(r=>console.log('status='+r.status),e=>console.log('error='+(e.cause?.code||e.cause?.message||e.message)))`;
+    // Node's fetch reads the proxy variables from 22.21 (and 24.0) on — asked of the node the probes run, the one
+    // on the walls' PATH, not the test runner's (Codex).
+    const ver = (await bash("node -p process.versions.node")).text.trim().split("\n").pop() ?? "";
+    const [major = 0, minor = 0] = ver.split(".").map(Number);
+    if (major < 22 || (major === 22 && minor < 21) || major === 23) return t.skip(`Node ${ver}'s fetch has no NODE_USE_ENV_PROXY`);
+    const r = await bash(`echo "flag=$NODE_USE_ENV_PROXY"; node -e "${probe("https://foldrun-sbx-probe.example.com/")}"`);
+    assert.match(r.text, /flag=1\b/, r.text);
+    assert.doesNotMatch(r.text, /ENOTFOUND|EAI_AGAIN/, r.text);
+    // The walls' proxy was asked about the site (and refused it): Node went through it, not around it.
+    assert.ok(asked.includes("foldrun-sbx-probe.example.com:443"), `the proxy was asked: ${JSON.stringify(asked)} — ${r.text}`);
+    // Loopback stays off the proxy in both spellings, IPv6 with brackets too (Codex: Node 22.21 matches "[::1]").
+    // A port fetch allows (9 is one it refuses before any routing — Codex).
+    const loop = await bash(`echo "np=$NO_PROXY"; node -e "${probe("http://[::1]:59999/")}"; node -e "${probe("http://127.0.0.1:59999/")}"`);
+    // The list is what catches a missing fix on every Node: 26 keeps [::1] off the proxy by itself, 22.21 does not.
+    assert.match(loop.text, /np=.*\[::1\]/, loop.text);
+    assert.ok(!asked.some((a) => /:59999$/.test(a)), `loopback went to the proxy: ${JSON.stringify(asked)} — ${loop.text}`);
+    // The control: with the exclusions cleared, the same request does reach the proxy — so the check above can fail.
+    const control = await bash(`NO_PROXY=none no_proxy=none node -e "${probe("http://[::1]:59999/")}"`);
+    assert.ok(asked.some((a) => /:59999$/.test(a)), `without NO_PROXY the proxy is asked: ${JSON.stringify(asked)} — ${control.text}`);
+  } finally {
+    await box.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});
+
 test("a package cache inside a credential folder is refused", async () => {
   const proj = tmpProject();
   try {
