@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.7.1] — 2026-11-26
+
+- chore(hooks): hooks synced from foldrun-infra — CircleCI removed (FOL-404) ([a14b5ec](https://github.com/foldrun-io/foldrun-core/commit/a14b5ec))
+
 ## [29.7.0] — 2026-11-26
 
 - feat(ops-log): country and reqBytes fields for gateway call lines ([9879c66](https://github.com/foldrun-io/foldrun-core/commit/9879c66))
