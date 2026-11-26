@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.5.1] — 2026-11-26
+
+- fix(runner): the driver's last line reaches the log whole, and is kept in done.json (FOL-374) ([408d157](https://github.com/foldrun-io/foldrun-core/commit/408d157))
+
 ## [29.5.0] — 2026-11-26
 
 - fix(local-sandbox): git folders the scan missed or refused — dangling .git links, bare repositories, linked worktrees (commondir), link loops (FOL-334) ([8d62a03](https://github.com/foldrun-io/foldrun-core/commit/8d62a03))
