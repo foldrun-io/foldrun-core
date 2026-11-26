@@ -1476,7 +1476,14 @@ export function sdkEnv(base: Record<string, string | undefined> | undefined, ext
   // the model process: none of it is the step, and it held back the SDK's
   // start by ~0.85 s a step on an open network (FOL-49: init median 1.4 s →
   // 0.56 s, 9 runs each); behind the egress filter those hosts are refused.
-  return { ...(base ?? process.env), ...extra, ENABLE_CLAUDEAI_MCP_SERVERS: "false", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
+  // Nor does it publish, schedule, sync skills or install plugins on its own
+  // (FOL-338): a step's work is its reply and its files.
+  return {
+    ...(base ?? process.env), ...extra,
+    ENABLE_CLAUDEAI_MCP_SERVERS: "false", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_DISABLE_ARTIFACT: "1", CLAUDE_CODE_DISABLE_CRON: "1", CLAUDE_CODE_SYNC_SKILLS: "0",
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1",
+  };
 }
 
 /** The text of a tool result, whichever shape it came in: a string, or a

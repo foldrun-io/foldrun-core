@@ -141,8 +141,61 @@ export const MODEL_ENV_NAMES: readonly string[] = [
  *  back for the agent's own tools (run-container.ts). */
 export const DECLARED_ENV_PREFIX = "FOLDRUN_DECLARED_";
 
+/** Names the model process (the Agent SDK, Claude Code's runtime) reads to
+ * decide where its calls go, what goes into them, and where it reports:
+ * every `ANTHROPIC_*` and `CLAUDE_*` name, its OpenTelemetry exporters, and
+ * the switches that add betas, body fields, caching or thinking to a request
+ * (FOL-338; the full sort is foldrun-infra docs/claude-code-env-vars.md). A
+ * secret named after one would steer the step's model process, so it goes in
+ * under the declared prefix like the names above: the agent's scripts and
+ * tools still get it, its model process never does. Prefixes end in `*`. */
+export const MODEL_RUNTIME_ENV: readonly string[] = [
+  "ANTHROPIC_*",
+  "CLAUDE_*",
+  "CLAUDECODE",
+  "OTEL_*",
+  "BETA_TRACING_ENDPOINT",
+  "ENABLE_BETA_TRACING_DETAILED",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "VERTEX_REGION_*",
+  "MAX_THINKING_TOKENS",
+  "DISABLE_PROMPT_CACHING*",
+  "ENABLE_PROMPT_CACHING_1H*",
+  "FORCE_PROMPT_CACHING_5M",
+  "DISABLE_INTERLEAVED_THINKING",
+  "ENABLE_TOOL_SEARCH",
+  "ENABLE_CLAUDEAI_MCP_SERVERS",
+  "DISABLE_TELEMETRY",
+  "DISABLE_ERROR_REPORTING",
+  "DISABLE_AUTOUPDATER",
+  "DISABLE_UPDATES",
+  "DO_NOT_TRACK",
+  "API_TIMEOUT_MS",
+];
+
 export function isModelEnvName(name: string): boolean {
-  return MODEL_ENV_NAMES.includes(name.trim());
+  const n = name.trim();
+  if (MODEL_ENV_NAMES.includes(n)) return true;
+  return MODEL_RUNTIME_ENV.some((p) => (p.endsWith("*") ? n.startsWith(p.slice(0, -1)) : n === p));
+}
+
+/** Declared secrets as the step's model process may see them: a name the
+ * model process reads (isModelEnvName, or `alsoReserved`, e.g. the egress
+ * proxy's) crosses as FOLDRUN_DECLARED_<NAME>; scripts and API tools get it
+ * back under its own name. A secret the list already spells with the prefix
+ * keeps its own value, so two declarations never fold into one (FOL-338,
+ * Codex). Used for the sandbox and for in-process steps alike, so a local run
+ * keeps the same rule as the cloud. */
+export function declaredEnv(secrets: Record<string, string>, alsoReserved: (name: string) => boolean = () => false): Record<string, string> {
+  const reserved = (n: string) => isModelEnvName(n) || alsoReserved(n);
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(secrets)) if (!reserved(name)) out[name] = value;
+  for (const [name, value] of Object.entries(secrets)) {
+    if (!reserved(name)) continue;
+    const as = `${DECLARED_ENV_PREFIX}${name}`;
+    if (!(as in out)) out[as] = value;
+  }
+  return out;
 }
 
 /** Why a `secrets:` list names a model variable, or null. */
@@ -153,9 +206,12 @@ export function modelSecretCollision(names: unknown): string | null {
     .filter(isModelEnvName);
   if (!list.length) return null;
   const which = list.map((n) => `\`${n}\``).join(", ");
-  return (
-    `${which} ${list.length === 1 ? "is a name" : "are names"} the step's own model call uses, so the model keeps its own value: ` +
-    "its script and API tools and `verify:` get the declared one, but its own shell sees the model's — " +
-    "give the secret another name (MY_ANTHROPIC_KEY), or run the model on it with `provider:` or `foldrun account model set`"
-  );
+  const credential = list.every((n) => MODEL_ENV_NAMES.includes(n));
+  return credential
+    ? `${which} ${list.length === 1 ? "is a name" : "are names"} the step's own model call uses, so the model keeps its own value: ` +
+        "its script and API tools and `verify:` get the declared one, but its own shell sees the model's — " +
+        "give the secret another name (MY_ANTHROPIC_KEY), or run the model on it with `provider:` or `foldrun account model set`"
+    : `${which} ${list.length === 1 ? "is in" : "are in"} the names the step's model process reserves (ANTHROPIC_*, CLAUDE_*, OTEL_* and the switches it reads), ` +
+        "so the secret goes in as FOLDRUN_DECLARED_<name>: its script and API tools and `verify:` get it under its own name, the agent's own shell does not — " +
+        "give the secret another name if the shell needs it";
 }

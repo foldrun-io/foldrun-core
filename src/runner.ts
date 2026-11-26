@@ -24,7 +24,7 @@ import { eventUrl } from "./webhook.ts";
 import { runStepInContainer, resolveResources, memoryGiB, heldCores, killRunSandboxes, classDisk, type StepTiming } from "./run-container.ts";
 import { readResources, hasOverride, anyMemoryMi } from "./resources.ts";
 import { hostSafeEnv, platformApiUrl } from "./host-env.ts";
-import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvName, DECLARED_ENV_PREFIX, OWN_KEYS_OFF } from "./model-credential.ts";
+import { resolveModelCredential, credentialLine, accountModelBlock, isModelEnvName, declaredEnv, OWN_KEYS_OFF } from "./model-credential.ts";
 import { isProxyEnvName } from "./env-names.ts";
 import { parseJudge } from "./judge-verdict.ts";
 import { validateSchema, describeSchemaErrors, looksLikeSchema } from "./json-schema.ts";
@@ -3557,11 +3557,9 @@ async function runStepBody(
             "its script and API tools and verify: get the declared value, its own shell the model's. Give the secret another name, or run the model on it with provider:",
         );
       }
-      const sandboxEnvSecrets = Object.fromEntries(
-        // A model key's name, or one the platform sets for the egress proxy
-        // (FOL-215), would replace the platform's own: under the prefix instead.
-        Object.entries(sandboxSecrets).map(([name, value]) => [isModelEnvName(name) || isProxyEnvName(name) ? `${DECLARED_ENV_PREFIX}${name}` : name, value]),
-      );
+      // A model key's name, or one the platform sets for the egress proxy
+      // (FOL-215), would replace the platform's own: under the prefix instead.
+      const sandboxEnvSecrets = declaredEnv(sandboxSecrets, isProxyEnvName);
       const substitutedApis = apiSpecs.map((api) => ({
         ...api,
         headers: Object.fromEntries(
@@ -4116,7 +4114,7 @@ async function runStepBody(
       const localModelEnv: Record<string, string> = Object.keys(providerEnv).length ? providerEnv : resolveModelCredential().env;
       const consultTools = buildConsultTools(
         consults,
-        { ...hostSafeEnv(), ...stepSecrets, ...localModelEnv },
+        { ...hostSafeEnv(), ...declaredEnv(stepSecrets), ...localModelEnv },
         (type, text) => push(type, text),
       );
       // On this machine nobody can write in and there is no proxy: the
@@ -4216,7 +4214,9 @@ async function runStepBody(
         // the allowlisted host environment, not process.env: the SDK's
         // Bash tool runs with this, and on a platform process.env holds
         // every tenant's root key and the datastore credentials.
-        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...mat.env, ...installEnv, ...modelEnv, ...outputEnv },
+        // The model process keeps the same reserved names as in a sandbox
+        // (FOL-338): a declared CLAUDE_CODE_USE_VERTEX does not steer it here either.
+        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...declaredEnv(mat.env), ...installEnv, ...modelEnv, ...outputEnv },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
         budgetNote: stepBudgetNote,

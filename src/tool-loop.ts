@@ -169,6 +169,12 @@ export function loopSession(o: LoopOptions, abort: AbortController): { options: 
       // where the network allows only the model API it would hang on a
       // blocked host.
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      // Nothing the model process publishes, schedules, syncs or installs
+      // on its own: a step's work is its reply and its files (FOL-338).
+      CLAUDE_CODE_DISABLE_ARTIFACT: "1",
+      CLAUDE_CODE_DISABLE_CRON: "1",
+      CLAUDE_CODE_SYNC_SKILLS: "0",
+      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1",
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(o.maxOutputTokens),
     },
   };
