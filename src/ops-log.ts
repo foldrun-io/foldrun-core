@@ -74,6 +74,10 @@ const WORD = /^[a-z][a-z0-9_-]{0,31}$/;
 /** An id or a name: no whitespace, quotes, `/`, `:` or `@` — nothing a
  *  sentence, a URL, a path or an email address fits in. */
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+/** A country, as the edge names it: two letters, lower-cased. The edge's own
+ *  "XX" (unknown) and "T1" (Tor) are not countries and are left out by the
+ *  caller; this shape takes neither a name nor a number. */
+const COUNTRY = /^[a-z]{2}$/;
 /** A code, as the field holds it: errno, SQLSTATE, an undici or Node code. */
 const CODE = /^[A-Z0-9_]{2,40}$/;
 /** A code an error may hand over. Not any upper-case word — an error's
@@ -94,7 +98,7 @@ const BUILTIN_NAMES = new Set(["Error", "TypeError", "RangeError", "SyntaxError"
 const FRAME = /^[A-Za-z0-9_.-]{1,60}\.(ts|tsx|mts|js|mjs|cjs):\d{1,6}$/;
 const EVENT = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){0,3}$/;
 
-type Kind = "id" | "num" | "word" | "code" | "class" | "cause" | "errorName" | "frame" | "frames" | "bool";
+type Kind = "id" | "country" | "num" | "word" | "code" | "class" | "cause" | "errorName" | "frame" | "frames" | "bool";
 
 /** Every field a platform log line may carry, and its shape. Adding one is
  *  a decision that its values can never be an account's content. */
@@ -139,6 +143,11 @@ export const FIELDS: Record<string, Kind> = {
   // request's stream flag; `stream` stays the word it was (stdout/stderr).
   client: "id", clientVersion: "id", answered: "bool", maxTokens: "num", messages: "num",
   tools: "num", streaming: "bool", json: "bool",
+  // Where a gateway call came from and how it ended (26 Nov 2026): the
+  // caller's country as two letters (counts per country, never a person),
+  // the ms until its request body was in, and the bytes it sent. How it ended
+  // is `outcome` and `phase`, words of ours.
+  country: "country", reqBytes: "num",
 };
 
 export type OpsValue = string | number | boolean | null | undefined | readonly string[];
@@ -151,6 +160,7 @@ function fits(kind: Kind, v: unknown): boolean {
     case "num": return typeof v === "number" && Number.isFinite(v);
     case "bool": return typeof v === "boolean";
     case "id": return typeof v === "string" && ID.test(v);
+    case "country": return typeof v === "string" && COUNTRY.test(v);
     case "word": return typeof v === "string" && WORD.test(v);
     case "code": return typeof v === "string" && CODE.test(v);
     case "class": return isErrorClass(v);

@@ -214,3 +214,13 @@ test("the gateway's request shape fits whole: client and version, counts, flags 
   for (const k of ["client", "clientVersion", "answered", "maxTokens", "messages", "streaming", "json"]) assert.equal(bad[k], undefined, k);
   assert.equal(bad.dropped, 7);
 });
+
+test("a gateway call's country is two lower-case letters and its size is a number; a name, a code or a header's raw text does not fit (26 Nov 2026)", () => {
+  const line = opsLine("info", "gateway.call_end", { country: "ir", reqBytes: 2048, bytes: 9000, ms: 61000, outcome: "client_closed", phase: "stream" });
+  assert.deepEqual([line.country, line.reqBytes, line.outcome, line.phase], ["ir", 2048, "client_closed", "stream"]);
+  const bad = opsLine("info", "gateway.call_end", { country: "IR", reqBytes: "840" as unknown as number });
+  for (const c of ["IR", "iran", "i", "t1", "xx1", "ir ", "ir,de", "::1"]) assert.equal(opsLine("info", "gateway.call_end", { country: c }).country, c === "ir" ? "ir" : undefined, c);
+  assert.equal(bad.country, undefined);
+  assert.equal(bad.reqBytes, undefined);
+  assert.equal(bad.dropped, 2);
+});
