@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [29.6.1] — 2026-11-26
+
+- test(local-sandbox): the git-cache test keeps its files in a folder of its own ([08feb80](https://github.com/foldrun-io/foldrun-core/commit/08feb80))
+
 ## [29.6.0] — 2026-11-26
 
 ### New in the public API
