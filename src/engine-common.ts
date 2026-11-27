@@ -86,8 +86,12 @@ export interface LoopOptions {
   /** The User-Agent the model calls carry: the caller's own name
    *  (`userAgent`, e.g. foldrun-cli/27.8.0), else foldrun-engine. An option,
    *  never an environment name — a step's env holds the tenant's secrets
-   *  under names it chose. Never another product's name (claude-…). */
+   *  under names it chose. Never another product's name (claude-…).
+   *  Printable ASCII, spaces allowed (a product and its comment, FOL-415). */
   userAgent: string;
+  /** The name this engine gives itself to MCP servers (clientInfo, FOL-415): the caller's product, e.g.
+   *  { name: "koder", title: "koder from foldrun.io" }; else foldrun-engine. Never another product's name. */
+  mcpClient?: { name: string; version: string; title?: string };
   model: string;
   systemPrompt: string;
   tools: EngineTool[];
@@ -269,7 +273,8 @@ export function readOptions(options: Json, engine = "foldrun"): LoopOptions {
     ...(Array.isArray(options.serverTools) ? { serverTools: serverToolsOf(options.serverTools) } : {}),
     ...(typeof options.readable === "function" ? { readable: options.readable as (file: string) => boolean } : {}),
     ...(options.jobs instanceof Map ? { jobs: options.jobs as Map<string, import("./engine-tools.ts").BgJob> } : {}),
-    userAgent: typeof options.userAgent === "string" && /^[!-~]{1,100}$/.test(options.userAgent) && !/^claude[-_/]/i.test(options.userAgent) ? options.userAgent : "foldrun-engine",
+    userAgent: typeof options.userAgent === "string" && /^[!-~][ -~]{0,199}$/.test(options.userAgent) && !/claude|anthropic/i.test(options.userAgent) ? options.userAgent : "foldrun-engine",
+    ...mcpClientOf(options.mcpClient),
     model: env[`ANTHROPIC_DEFAULT_${model.toUpperCase()}_MODEL`] || TIER_DEFAULTS[model] || model,
     systemPrompt: typeof options.systemPrompt === "string" ? options.systemPrompt : "",
     tools: [...names.map((n) => ENGINE_TOOLS[n]), ...extra],
@@ -355,4 +360,13 @@ export function serverToolsOf(raw: unknown[]): { type: string; name: string; [k:
     const x = t as { type?: unknown; name?: unknown };
     return typeof x.name === "string" && typeof x.type === "string" && ok[x.name]?.test(x.type) === true;
   });
+}
+
+/** A caller's MCP client name, checked: short printable names, never another product's (FOL-415). */
+export function mcpClientOf(v: unknown): { mcpClient?: { name: string; version: string; title?: string } } {
+  if (!v || typeof v !== "object") return {};
+  const o = v as Record<string, unknown>;
+  const ok = (s: unknown, max: number) => typeof s === "string" && new RegExp(`^[!-~][ -~]{0,${max - 1}}$`).test(s) && !/claude|anthropic/i.test(s);
+  if (!ok(o.name, 64) || !ok(o.version, 32)) return {};
+  return { mcpClient: { name: o.name as string, version: o.version as string, ...(ok(o.title, 100) ? { title: o.title as string } : {}) } };
 }

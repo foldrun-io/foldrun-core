@@ -404,7 +404,7 @@ async function* run(prompt: string, o: LoopOptions, signal: AbortSignal, interru
   if (Object.keys(o.mcpServers).length) {
     // Loaded here, not at the top: a step with no server never loads the MCP library (FOL-265).
     const { connectMcp } = await import("./engine-mcp.ts");
-    mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal, sandbox: o.localSandbox });
+    mcp = await connectMcp(o.mcpServers, { env: o.env, toolEnv: o.shellEnv, cwd: o.cwd, signal, sandbox: o.localSandbox, ...(o.mcpClient ? { client: o.mcpClient } : {}) });
     for (const t of mcp.tools) {
       if (byName.has(t.name)) throw new Error(`the MCP tool ${t.name} has the name of a tool the step already has`);
       byName.set(t.name, t);
