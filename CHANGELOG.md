@@ -13,6 +13,15 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [30.0.0] — 2026-11-27
+
+### Breaking changes
+
+- `connectMcp` from `@foldrun/core/engine-mcp` — parameter 2 changed
+
+- feat(engine): the caller's name as the User-Agent of remote MCP requests (FOL-415, Codex) ([228770d](https://github.com/foldrun-io/foldrun-core/commit/228770d))
+- feat(engine): a caller's MCP client name, and a User-Agent with a comment (FOL-415) ([a900e01](https://github.com/foldrun-io/foldrun-core/commit/a900e01))
+
 ## [29.7.1] — 2026-11-26
 
 - chore(hooks): hooks synced from foldrun-infra — CircleCI removed (FOL-404) ([a14b5ec](https://github.com/foldrun-io/foldrun-core/commit/a14b5ec))
