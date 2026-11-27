@@ -469,7 +469,7 @@ Indented under a step, any of:
 | \`case: <value>\` / \`else: true\` | branch on the previous step's result |
 | \`retry: 2\` | re-run on failure, up to 5 |
 | \`timeout: 900\` | seconds before the step is cut off |
-| \`verify: <shell>\` | the step fails unless the command exits 0; the reply is in \`$FOLDRUN_REPLY_FILE\` |
+| \`verify: <shell>\` | the step fails unless the command exits 0; the reply is in \`$FOLDRUN_REPLY_FILE\`, this attempt's id in \`$FOLDRUN_STEP_ATTEMPT_ID\` (stamp proof with it: a retry must not pass on an earlier attempt's); one line written to \`$FOLDRUN_FAIL_RUN_FILE\` with a non-zero exit ends the whole run, no retry or rescue |
 | \`verify: judge: <claim>\` | a model grades the claim against the output |
 | \`verify: contains:\` / \`not-contains:\` / \`matches:\` / \`file:\` | the cheap checks, no shell |
 | \`model:\` / \`effort:\` | override the flow's default for this step |
