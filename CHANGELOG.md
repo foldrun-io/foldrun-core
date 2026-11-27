@@ -13,6 +13,28 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.0.0] — 2026-11-27
+
+### Breaking changes
+
+- `buildSubagentSpecs` from `@foldrun/core` — parameter 1 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+
+### New in the public API
+
+- `FAIL_RUN_REASON_MAX` from `@foldrun/core`
+- `runEndedByCheck` from `@foldrun/core`
+- `secondSpentOf` from `@foldrun/core`
+- `paidSecondRan` from `@foldrun/core`
+
+- feat(second): tools: [debate, review] in cloud steps (FOL-444) ([8cecb17](https://github.com/foldrun-io/foldrun-core/commit/8cecb17))
+- feat(verify): a shell check can end the whole run (FOL-450) ([25d353a](https://github.com/foldrun-io/foldrun-core/commit/25d353a))
+
 ## [31.0.0] — 2026-11-27
 
 ### Breaking changes
