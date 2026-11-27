@@ -13,6 +13,21 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.1.0] — 2026-11-27
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `PlatformHooks` from `@foldrun/core`
+
+### New in the public API
+
+- `priceWithoutCatalogue` from `@foldrun/core`
+- `subagentPrices` from `@foldrun/core`
+
+- fix(steps): a step on the platform's credential is priced from the platform's price list (FOL-460) ([8b28351](https://github.com/foldrun-io/foldrun-core/commit/8b28351))
+
 ## [32.0.2] — 2026-11-27
 
 - fix(second): debate and review on the platform's operator door, and the prompt names only what was granted (FOL-444) ([e6a1819](https://github.com/foldrun-io/foldrun-core/commit/e6a1819))
