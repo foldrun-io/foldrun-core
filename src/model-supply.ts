@@ -14,6 +14,7 @@
 // environment), the operator lists it, and the price list names the model.
 
 import { providerPreset, type WireFormat } from "./providers.ts";
+import { PROVIDER_NAME_ALIASES } from "./model-names.ts";
 import { fitEffort, EFFORT_ORDER } from "./effort-fit.ts";
 
 export type SupplyProviderName = "anthropic" | "openai" | "gemini" | "deepseek" | "moonshot" | "zai" | "qwen" | "minimax" | "mimo";
@@ -236,25 +237,7 @@ export function isSupplyProvider(name: unknown): name is SupplyProviderName {
 /** A provider name as a caller may write it in `provider/model`. One list
  *  for the gateway (foldrun-platform gateway-door.ts) and a step's own
  *  `model:` (runner.ts), so a name routes the same everywhere. */
-export const PROVIDER_ALIASES: Readonly<Record<string, SupplyProviderName>> = {
-  anthropic: "anthropic",
-  claude: "anthropic",
-  deepseek: "deepseek",
-  moonshot: "moonshot",
-  kimi: "moonshot",
-  openai: "openai",
-  gemini: "gemini",
-  google: "gemini",
-  zai: "zai",
-  "z-ai": "zai",
-  glm: "zai",
-  zhipu: "zai",
-  qwen: "qwen",
-  alibaba: "qwen",
-  minimax: "minimax",
-  mimo: "mimo",
-  xiaomi: "mimo",
-};
+export const PROVIDER_ALIASES = PROVIDER_NAME_ALIASES as Readonly<Record<string, SupplyProviderName>>;
 
 /** A bare model name's provider by its prefix, or null when the name says
  *  none (a Claude id, or one this list does not know). */

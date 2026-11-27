@@ -36,6 +36,7 @@ test("foldrun check: second_model and the two tools, as warnings", () => {
   assert.match(secondModelProblems({ tools: ["review"], second_model: "gpt-x" })[0]!, /written provider\/model/);
   assert.match(secondModelProblems({ tools: ["review"], second_model: "anthropic/claude-x", model: "anthropic/claude-y" })[0]!, /same provider as model:/);
   assert.match(secondModelProblems({ tools: ["read"], second_model: "openai/gpt-x" })[0]!, /does nothing/);
+  assert.match(secondModelProblems({ tools: ["review"], second_model: "kimi/kimi-k2", model: "moonshot/kimi-k1" })[0]!, /same provider as model:/, "an alias is its provider");
   assert.deepEqual(secondModelProblems({ tools: ["[[review]]"] }), [], "the author's own review tool asks for nothing");
   const w = deployWarnings([{ path: "agents/a/agent.md", content: "---\nname: a\ntools: [debate]\n---\n\nHi.\n" }]);
   assert.ok(w.some((x) => x.where === "agents/a/agent.md" && /needs second_model:/.test(x.message)), JSON.stringify(w));
@@ -47,4 +48,5 @@ test("builtinToolNames / linkedToolNames read a tools: value as the runtime does
   assert.deepEqual(builtinToolNames("Bash, review"), ["Bash", "review"]);
   assert.deepEqual(builtinToolNames("review"), ["review"]);
   assert.deepEqual(builtinToolNames(undefined), []);
+  assert.deepEqual(builtinToolNames([{ review: "ask" }, "debate"], true), ["debate"], "ask before each use is not a grant to act unasked");
 });

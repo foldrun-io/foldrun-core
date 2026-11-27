@@ -11,6 +11,7 @@
 // naming the rewrite, and scripts/migrate-use-to-tools.mjs makes it.
 
 import { refList, refNames, type Ref } from "./refs.ts";
+import { providerOfName } from "./model-names.ts";
 
 /** Groups: one word an author can hold in their head, expanded to SDK names. */
 export const TOOL_MAP: Record<string, string[]> = {
@@ -66,8 +67,9 @@ export const SECOND_MODEL_RE = /^[a-z0-9-]{2,32}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,1
 
 /** The built-in names a tools:/disallowedTools: value grants or takes away, read as the runtime reads it: a list, one
  *  name, Claude Code's comma string or the `{Bash: ask}` map form; a `[[link]]` (the author's own tool) is not one. */
-export function builtinToolNames(raw: unknown): string[] {
-  return refList(raw).filter((r) => !r.linked).map((r) => r.name);
+export function builtinToolNames(raw: unknown, grant = false): string[] {
+  // `grant`: a tools: list's, where `{review: ask}` asks before each use — not a grant to act without asking.
+  return refList(raw).filter((r) => !r.linked && !(grant && r.mode === "ask")).map((r) => r.name);
 }
 /** The `[[link]]` entries of such a value: the author's own tools, by name. */
 export function linkedToolNames(raw: unknown): string[] {
@@ -80,7 +82,7 @@ export function secondModelProblems(front: { tools?: unknown; second_model?: unk
   const want = front.second_model;
   const out: string[] = [];
   if (want !== undefined && (typeof want !== "string" || !SECOND_MODEL_RE.test(want.trim()))) out.push(`second_model: is written provider/model (a model of another provider than model:), e.g. openai/<model>`);
-  else if (typeof want === "string" && typeof front.model === "string" && front.model.includes("/") && front.model.split("/")[0] === want.trim().split("/")[0]) out.push(`second_model: ${want} is the same provider as model: — debate and review are answered by ANOTHER provider's model`);
+  else if (typeof want === "string" && typeof front.model === "string" && front.model.includes("/") && (providerOfName(front.model) ?? front.model.split("/")[0]) === (providerOfName(want.trim()) ?? want.trim().split("/")[0])) out.push(`second_model: ${want} is the same provider as model: — debate and review are answered by ANOTHER provider's model`);
   if (tools.length && want === undefined) out.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — until it is set they are not offered`);
   if (want !== undefined && !tools.length) out.push(`second_model: is set but tools: has neither debate nor review — it does nothing`);
   return out;
