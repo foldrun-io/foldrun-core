@@ -161,6 +161,10 @@ export interface ExecOptions {
    *  can be counted turn by turn instead of learned at the end. Without it
    *  the step prices its turns from the SDK's own running total. */
   price?: TokenPrice | null;
+  /** The same for a sub-agent that runs on another model than the step's:
+   *  by the id a model is sent as, and by the word its file declares
+   *  (runner.ts subagentPrices). Absent: the model's name is the only guide. */
+  modelPrices?: Record<string, TokenPrice>;
   /** A check the step must pass to count as done: a shell command that must
    *  exit 0, or an eval-style assertion (`contains: x`, `not-contains: x`,
    *  `matches: re`, `file: path`, `judge: sentence`) — see checkVerify. */
@@ -772,7 +776,9 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     const declared = specByName.get(delegations.get(parent) ?? "")?.model;
     if (declared === undefined || declared === "inherit" || declared === opts.model) return opts.price ?? null;
     const model = (message as { message?: { model?: unknown } }).message?.model;
-    return knownPrice(typeof model === "string" ? model : undefined) ?? knownPrice(declared);
+    // The model the turn reports first: one chosen at the call is priced as itself.
+    const reported = typeof model === "string" ? model : undefined;
+    return (reported ? opts.modelPrices?.[reported] : undefined) ?? knownPrice(reported) ?? opts.modelPrices?.[declared] ?? knownPrice(declared);
   };
   const turnsTotal = () => [...turns.values()].reduce((sum, t) => sum + priceTurn(t.u, t.price), 0);
   // Against the ceiling: the turns and what the second model cost beside them.

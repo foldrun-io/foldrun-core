@@ -18,6 +18,7 @@ import type { RunInContainerArgs, ContainerStepOutcome } from "./run-container.t
 import type { EgressHooks } from "./egress.ts";
 import { matchFilter } from "./trigger-filter.ts";
 import type { RecordsPort } from "./records.ts";
+import type { TokenPrice } from "./catalog.ts";
 
 export type IsolatedStepRunner = (args: RunInContainerArgs) => Promise<ContainerStepOutcome>;
 
@@ -91,6 +92,18 @@ export interface PlatformHooks {
    * prices no compute.
    */
   runSpend(run: RunRecord): number;
+  /**
+   * What a token of `model` costs on the platform's own price list (the
+   * operator's console settings), per token, or null when the list does not
+   * name it. Asked for a step on the platform's credential, which has no
+   * gateway catalogue to read a price from: without it the runner could only
+   * guess from the model's name, and a model the guess did not know was
+   * priced at the fallback rate — a claude-fable-5-2 planner was stopped
+   * "over budget" at $4.33 of a $4 ceiling having spent about $3 (FOL-460).
+   *
+   * Default: absent — an install with no price list keeps the name's price.
+   */
+  modelPrice?(provider: string, model: string): TokenPrice | null;
   /**
    * Should a trigger become a run? The flow file's `idempotency:`,
    * `throttle:`, `debounce:` and `disable_after:` are all answered here,
@@ -418,4 +431,5 @@ export function resetPlatform(): void {
   Object.assign(platform, local, { isolation: {} });
   delete platform.records;
   delete platform.extractText;
+  delete platform.modelPrice;
 }

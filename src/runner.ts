@@ -2240,6 +2240,45 @@ async function publishPublicDir(
   }
 }
 
+/**
+ * What a token of `model` costs for a step with no gateway catalogue to ask:
+ * the platform's price list when the step is on the platform's credential
+ * (`provider` set) and the list names the model — under the id as written,
+ * or as the platform's models name it — else what the model's name says,
+ * else null (the caller's fallback rate).
+ */
+export function priceWithoutCatalogue(provider: string | null, model: string): TokenPrice | null {
+  if (provider && platform.modelPrice) {
+    const listed = platform.modelPrice(provider, model) ?? platform.modelPrice(provider, supplyModelId(model));
+    if (listed && Number.isFinite(listed.input) && Number.isFinite(listed.output) && listed.input >= 0 && listed.output >= 0) return listed;
+  }
+  return knownPrice(model);
+}
+
+/**
+ * Prices for the sub-agents of a step that run on another model than it,
+ * for the in-step meter: keyed by the id a model is sent as, and by the
+ * word a sub-agent's file declares (an alias, or an id). The meter reads the
+ * model a turn reports first, so a model chosen at the call is priced as
+ * itself; the declared word is only for a turn that names no model.
+ */
+export function subagentPrices(
+  provider: string | null,
+  aliases: Record<string, string | undefined>,
+  declared: readonly string[],
+): Record<string, TokenPrice> {
+  const out: Record<string, TokenPrice> = {};
+  for (const word of new Set(["haiku", "sonnet", "opus", ...declared])) {
+    if (!word || word === "inherit") continue;
+    const wire = aliases[word] ?? word;
+    const p = priceWithoutCatalogue(provider, wire);
+    if (!p) continue;
+    out[wire] = p;
+    out[word] = p;
+  }
+  return out;
+}
+
 export function repriced(
   catalog: Catalog | null,
   model: string,
@@ -3085,7 +3124,15 @@ async function runStepBody(
     // publishes no prices — but the model's NAME is often enough. Without
     // this the in-pod meter priced haiku and sonnet at Opus rates and a
     // step was stopped at up to fifteen times what it had spent.
-    tokenPrice ??= knownPrice(wireModel);
+    // The platform's own price list first, where the step rides the
+    // platform's credential: the name table knows three model families and
+    // prices every other at the fallback rate (FOL-460).
+    const listProvider = step.supply === "own" ? null : onSupply ? supply.provider : "anthropic";
+    tokenPrice ??= priceWithoutCatalogue(listProvider, wireModel);
+    // A sub-agent on another model: the list's price for the id it is sent
+    // as, by that id and by what its file declares (subagentPrices).
+    const subPrices = (declared: readonly string[]) =>
+      subagentPrices(listProvider, { haiku: rideEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL, sonnet: rideEnv.ANTHROPIC_DEFAULT_SONNET_MODEL, opus: rideEnv.ANTHROPIC_DEFAULT_OPUS_MODEL }, declared);
 
     // `max_output_tokens:` — the step's own (or its flow's, snapshotted on
     // the run), else the agent's; on foldrun's models never above the price
@@ -3858,6 +3905,7 @@ async function runStepBody(
           budgetUsd: stepBudgetUsd,
           budgetNote: stepBudgetNote,
           price: tokenPrice,
+          modelPrices: subPrices(subagents.map((a) => a.model)),
           verify: step.verify,
           ...(judgeModel ? { judgeModel } : {}),
           ...(judgeEffort ? { judgeEffort } : {}),
@@ -4502,6 +4550,7 @@ async function runStepBody(
         budgetNote: stepBudgetNote,
         ...(secondTools ? { sideSpend } : {}),
         price: tokenPrice,
+          modelPrices: subPrices(subagents.map((a) => a.model)),
         verify: step.verify,
         ...(judgeModel ? { judgeModel } : {}),
         ...(judgeEffort ? { judgeEffort } : {}),

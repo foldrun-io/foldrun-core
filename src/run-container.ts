@@ -94,6 +94,7 @@ export interface ContainerStepInput {
   budgetUsd?: number | null;
   budgetNote?: string;
   price?: TokenPrice | null;
+  modelPrices?: Record<string, TokenPrice>;
   verify?: string;
   /** The model `verify: judge:` grades with (the workspace's `judge:`). */
   judgeModel?: string;
@@ -1162,6 +1163,7 @@ try {
     budgetNote: input.budgetNote,
     ...(second.server ? { sideSpend } : {}),
     price: input.price,
+    ...(input.modelPrices ? { modelPrices: input.modelPrices } : {}),
     verify: input.verify,
     verifyEnv: toolEnv,
     ...(typeof input.judgeModel === "string" ? { judgeModel: input.judgeModel } : {}),
