@@ -21,7 +21,7 @@ import { supplyProviderOfToken, supplyToken, supplyViaOfToken } from "../src/mod
 import type { EgressGrant, EgressLease } from "../src/egress.ts";
 import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-container.ts";
 
-type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[] };
+type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[]; leases: Record<string, unknown>[] };
 
 async function withAccount(
   opts: { supply: SupplyAnswer; noDoor?: boolean; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
@@ -32,7 +32,7 @@ async function withAccount(
   process.env.FOLDRUN_DATA = root;
   process.env.FOLDRUN_RUN_ISOLATION = "fake";
   process.env.ANTHROPIC_API_KEY = "sk-ant-api03-the-operators-own-key-000000";
-  const c: Captured = { calls: [], grants: [] };
+  const c: Captured = { calls: [], grants: [], leases: [] };
   const fake = async (args: RunInContainerArgs): Promise<ContainerStepOutcome> => {
     c.calls.push(args);
     return { status: "completed", result: "done", costUsd: 0.25 };
@@ -40,6 +40,7 @@ async function withAccount(
   const lease = async (args: { grant: EgressGrant }): Promise<EgressLease | null> => {
     if (opts.lease === false) return null;
     c.grants.push(args.grant);
+    c.leases.push(args as unknown as Record<string, unknown>);
     return { url: "http://egress.test/e/tok", commit: async () => {}, drainLog: async () => [], release: async () => {} } as unknown as EgressLease;
   };
   const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
@@ -661,4 +662,25 @@ test("the metered operator marker: read as the operator's, metered; the plain on
   assert.equal(supplyViaOfToken("foldrun-supply:anthropic+operator+metered"), "operator");
   assert.equal(supplyProviderOfToken("foldrun-supply:deepseek+operator+metered"), null);
   assert.equal(supplyProviderOfToken("foldrun-supply:anthropic+metered"), null);
+});
+
+// ------------------------------------------------------------ tools: [debate, review] (FOL-418)
+
+const SECOND = "tools: [read, debate, review]\nsecond_model: openai/gpt-x\n";
+
+test("tools: [debate, review] in a cloud step (FOL-418): not offered yet, said, and no grant on the lease (FOL-444)", async () => {
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: SECOND }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(c.leases[0]!.secondModel, undefined);
+    assert.match(events(done.steps[0]), /tools: \[debate, review\] \(a second opinion from openai\/gpt-x\) work in foldrun code on your computer; a cloud step does not offer them yet \(FOL-444\)/);
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async () => {
+    const done = await run();
+    assert.match(events(done.steps[0]), /tools: \[debate\] \(a second opinion/);
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, debate]\n" }, async () => {
+    const done = await run();
+    assert.match(events(done.steps[0]), /needs second_model:/);
+  });
 });

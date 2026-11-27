@@ -122,3 +122,33 @@ export function resolveEffort(value: unknown): Effort | null {
 export function isEffortWord(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0 && resolveEffort(value) === null;
 }
+
+/** A provider name as a caller may write it in `provider/model`, to the
+ *  provider it is (`kimi` → `moonshot`). The one list: the gateway, a step's
+ *  own `model:` (model-supply.ts PROVIDER_ALIASES) and `second_model:`. */
+export const PROVIDER_NAME_ALIASES: Readonly<Record<string, string>> = {
+  anthropic: "anthropic",
+  claude: "anthropic",
+  deepseek: "deepseek",
+  moonshot: "moonshot",
+  kimi: "moonshot",
+  openai: "openai",
+  gemini: "gemini",
+  google: "gemini",
+  zai: "zai",
+  "z-ai": "zai",
+  glm: "zai",
+  zhipu: "zai",
+  qwen: "qwen",
+  alibaba: "qwen",
+  minimax: "minimax",
+  mimo: "mimo",
+  xiaomi: "mimo",
+};
+
+/** The provider a `provider/model` name is, by the list above; null when it
+ *  names none, or one the list does not know. */
+export function providerOfName(name: string): string | null {
+  const slash = name.indexOf("/");
+  return slash > 0 ? (PROVIDER_NAME_ALIASES[name.slice(0, slash).toLowerCase()] ?? null) : null;
+}

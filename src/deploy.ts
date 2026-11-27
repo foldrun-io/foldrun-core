@@ -41,6 +41,7 @@ import { libraryTools } from "./library.ts";
 import { lintFlow, regexProblem } from "./flow-lint.ts";
 import { parseEval } from "./evals.ts";
 import { refNames } from "./refs.ts";
+import { secondModelProblems } from "./tool-names.ts";
 import { SUBAGENT_IMPORT_DIRS } from "./kinds.ts";
 import matter, { configMatter } from "./matter.ts";
 import { frontmatterProblems, schemaKindOf } from "./frontmatter-schema.ts";
@@ -465,6 +466,8 @@ function structuralWarnings(files: DeployFile[], extraOutward: Iterable<string> 
     const data = front(f.content);
     if (refNames(data.tools).some((t: string) => outwardTools.has(t))) outwardAgents.push(m[1]);
     for (const w of webWarnings(data, { chrome, chromium })) out.push({ where: f.path, message: w });
+    // tools: [debate, review] and second_model: (FOL-418) — warnings, a new rule.
+    for (const w of secondModelProblems(data)) out.push({ where: f.path, message: w });
   }
   // An eval's `matches:` is the same JavaScript RegExp as a verify's; one
   // that does not compile fails its case on every run. Read through

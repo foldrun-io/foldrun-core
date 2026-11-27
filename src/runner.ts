@@ -52,7 +52,7 @@ import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-t
 import { SYMBOLS_SERVER, SYMBOLS_TOOL, buildSymbolsTools, symbolsPromptLine } from "./symbols-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
-import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, SECOND_MODEL_TOOLS, SECOND_MODEL_RE, type SecondModelTool, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
   type RoomLevel,
@@ -1887,6 +1887,7 @@ export function agentContext(
   let wantAsk = false;
   let wantPeers = false;
   let wantText = false;
+  const wantSecond: SecondModelTool[] = [];
   let wantSymbols = false;
 
   for (const ref of toolRefs(front)) {
@@ -1920,6 +1921,9 @@ export function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
+    } else if (toolName === "debate" || toolName === "review") {
+      // Served by foldrun's gateway, answered by second_model: — decided below, once the supply is known.
+      wantSecond.push(toolName);
     } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text" || toolName === "symbols") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
@@ -2002,6 +2006,20 @@ export function agentContext(
     parts.add("text", `# Files as text\n\n${textPromptLine()}`);
   }
   // tools: [symbols] (FOL-297) — a language server in the step's own boundary; the server is the step's.
+  // tools: [debate, review] (FOL-418): a second opinion from another
+  // provider's model, served by foldrun's gateway to `foldrun code` on a
+  // laptop. A cloud step runs on the Agent SDK, which cannot declare
+  // foldrun's server tools: not offered here until FOL-444, and said.
+  {
+    const deniedSecond = new Set(refNames(front.disallowedTools));
+    const tools = [...new Set(wantSecond)].filter((t) => !deniedSecond.has(t) && !deniedSecond.has(SECOND_MODEL_TOOLS[t].name));
+    const want = typeof front.second_model === "string" ? front.second_model.trim() : "";
+    if (tools.length) {
+      if (!want) providerWarnings.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — not offered`);
+      else if (!SECOND_MODEL_RE.test(want)) providerWarnings.push(`second_model: "${want}" is written provider/model — tools: [${tools.join(", ")}] not offered`);
+      else providerWarnings.push(`tools: [${tools.join(", ")}] (a second opinion from ${want}) work in foldrun code on your computer; a cloud step does not offer them yet (FOL-444)`);
+    }
+  }
   const symbolsTool = wantSymbols;
   if (symbolsTool) {
     allowed.push(SYMBOLS_TOOL);
