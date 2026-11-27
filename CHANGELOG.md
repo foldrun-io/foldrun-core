@@ -13,6 +13,37 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [30.1.0] — 2026-11-27
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+
+### New in the public API
+
+- `SECOND_MODEL_TOOLS` from `@foldrun/core`
+- `SecondModelTool` from `@foldrun/core`
+- `SECOND_MODEL_RE` from `@foldrun/core`
+- `builtinToolNames` from `@foldrun/core`
+- `linkedToolNames` from `@foldrun/core`
+- `secondModelProblems` from `@foldrun/core`
+- `SECOND_MODEL_TOOLS` from `@foldrun/core/tool-names`
+- `SecondModelTool` from `@foldrun/core/tool-names`
+- `SECOND_MODEL_RE` from `@foldrun/core/tool-names`
+- `builtinToolNames` from `@foldrun/core/tool-names`
+- `linkedToolNames` from `@foldrun/core/tool-names`
+- `secondModelProblems` from `@foldrun/core/tool-names`
+- `PROVIDER_NAME_ALIASES` from `@foldrun/core/model-names`
+- `providerOfName` from `@foldrun/core/model-names`
+
+- feat(delegate): a job ended for want of memory says why, and the next asks a size class up (FOL-438) ([97e0ba3](https://github.com/foldrun-io/foldrun-core/commit/97e0ba3))
+
+### FOL-418
+
+- second_model: and tools: [debate, review] (#197) ([ca39091](https://github.com/foldrun-io/foldrun-core/commit/ca39091))
+
 ## [30.0.0] — 2026-11-27
 
 ### Breaking changes
