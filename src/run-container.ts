@@ -1118,6 +1118,7 @@ try {
     effort: input.effort ?? null,
     systemPrompt: input.systemPrompt,
     allowed: input.allowed,
+    ...(Array.isArray(input.serverTools) && input.serverTools.length ? { serverTools: input.serverTools } : {}),
     mcpNames: input.mcpNames,
     mcpServers: {
       ...(api.server ? { foldrun_apis: api.server } : {}),

@@ -352,14 +352,23 @@ export async function after(o: LoopOptions, name: string, id: string, input: Jso
 }
 
 
-/** The server tools a caller may ask for, each a known dated type and its one name; anything else dropped. */
+/** The server tools a caller may ask for, each a known dated type and its one name; anything else dropped.
+ *  foldrun_debate and foldrun_review (FOL-418) are sent only with a `model:` (the second model the person
+ *  picked), rebuilt from their known fields so nothing else rides along. */
 export function serverToolsOf(raw: unknown[]): { type: string; name: string; [k: string]: unknown }[] {
   const ok: Record<string, RegExp> = { web_search: /^web_search_\d{8}$/, web_fetch: /^web_fetch_\d{8}$/, web_browse: /^foldrun_web_browse_\d{8}$/ };
-  return raw.filter((t): t is { type: string; name: string } => {
-    if (!t || typeof t !== "object") return false;
-    const x = t as { type?: unknown; name?: unknown };
-    return typeof x.name === "string" && typeof x.type === "string" && ok[x.name]?.test(x.type) === true;
-  });
+  const second: Record<string, RegExp> = { foldrun_debate: /^foldrun_debate_\d{8}$/, foldrun_review: /^foldrun_review_\d{8}$/ };
+  const out: { type: string; name: string; [k: string]: unknown }[] = [];
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    const x = t as { type?: unknown; name?: unknown; model?: unknown; max_tokens?: unknown; max_uses?: unknown };
+    if (typeof x.name !== "string" || typeof x.type !== "string") continue;
+    if (ok[x.name]?.test(x.type)) out.push(t as { type: string; name: string });
+    else if (second[x.name]?.test(x.type) && typeof x.model === "string" && x.model.includes("/")) {
+      out.push({ type: x.type, name: x.name, model: x.model, ...(typeof x.max_tokens === "number" ? { max_tokens: x.max_tokens } : {}), ...(typeof x.max_uses === "number" ? { max_uses: x.max_uses } : {}) });
+    }
+  }
+  return out;
 }
 
 /** A caller's MCP client name, checked: short printable names, never another product's (FOL-415). */

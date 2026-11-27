@@ -215,7 +215,7 @@ export interface EgressHooks {
   /** `job` — a lease for a host-side model call (an eval's judge, a
    *  grader, a draft, the assistant) rather than a step: what the model
    *  gateway records the call against. */
-  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[]; text?: boolean; job?: { kind: "grade" | "judge" | "draft" | "assistant"; name?: string } }): Promise<EgressLease | null>;
+  lease(args: { tenant: string; runId: string; grant: EgressGrant; test?: boolean; step?: number; agent?: string; peers?: PeerInfo[]; who?: LeaseWho; delegates?: string[]; text?: boolean; secondModel?: { tools: ("debate" | "review")[]; model: string }; job?: { kind: "grade" | "judge" | "draft" | "assistant"; name?: string } }): Promise<EgressLease | null>;
   /** The run is still being driven: renew its leases' heartbeat. Optional —
    *  an install without leases has nothing to renew. */
   renew?(runId: string): Promise<number>;

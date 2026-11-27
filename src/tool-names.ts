@@ -54,7 +54,27 @@ export const BUILTIN_TOOLS = new Set([
  *  accepted so a file that says so is not flagged. `text` is extract_text
  *  (text-tool.ts) — named `text`, not `extract`, because `extract` is
  *  already one of the web tool's actions (`limits: {web.extract: 5}`). */
-export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install", "text", "symbols"]);
+export const PLATFORM_GROUPS = new Set(["search", "history", "desks", "ask", "peers", "install", "text", "symbols", "debate", "review"]);
+
+/** tools: [debate, review] (FOL-418): served by foldrun's gateway as server
+ *  tools, answered by `second_model:` — a model of another provider. Their
+ *  dated types, as the gateway announces them. */
+export const SECOND_MODEL_TOOLS = { debate: { type: "foldrun_debate_20261127", name: "foldrun_debate" }, review: { type: "foldrun_review_20261127", name: "foldrun_review" } } as const;
+export type SecondModelTool = keyof typeof SECOND_MODEL_TOOLS;
+/** `second_model:` is written provider/model, as the gateway takes it. */
+export const SECOND_MODEL_RE = /^[a-z0-9-]{2,32}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** What `foldrun check` says about tools: [debate, review] and second_model: (warnings: a new rule). */
+export function secondModelProblems(front: { tools?: unknown; second_model?: unknown; model?: unknown }): string[] {
+  const tools = toolRefs(front).filter((r) => !r.linked && (r.name === "debate" || r.name === "review")).map((r) => r.name);
+  const want = front.second_model;
+  const out: string[] = [];
+  if (want !== undefined && (typeof want !== "string" || !SECOND_MODEL_RE.test(want.trim()))) out.push(`second_model: is written provider/model (a model of another provider than model:), e.g. openai/<model>`);
+  else if (typeof want === "string" && typeof front.model === "string" && front.model.includes("/") && front.model.split("/")[0] === want.trim().split("/")[0]) out.push(`second_model: ${want} is the same provider as model: — debate and review are answered by ANOTHER provider's model`);
+  if (tools.length && want === undefined) out.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — until it is set they are not offered`);
+  if (want !== undefined && !tools.length) out.push(`second_model: is set but tools: has neither debate nor review — it does nothing`);
+  return out;
+}
 
 /** Would this name resolve to something the runtime provides? Built-ins win a
  *  clash, so a tool file of the same name is shadowed rather than granted. */

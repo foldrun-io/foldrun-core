@@ -84,6 +84,7 @@ const AGENT: FieldSpec[] = [
   { key: "resources", type: "object", help: "{cpu, memory, disk} in numbers, over the size class's figures key by key — cpu 0.5–8, memory 256Mi–16Gi, disk 1–40Gi" },
   { key: "permissionMode", type: "string", values: ["plan"], help: "plan = read-only; no other mode changes anything here" },
   { key: "tools", type: ["list", "string"], help: "the one grant list" },
+  { key: "second_model", type: "string", help: "provider/model of ANOTHER provider than model:, who answers tools: [debate, review]; on foldrun's models only" },
   { key: "disallowedTools", type: ["list", "string"], help: "subtract from what it would otherwise have" },
   { key: "skills", type: ["list", "string"], help: "an allowlist; absent inherits every skill" },
   { key: "hooks", type: ["list", "string", "object"], help: "hook names; a Claude Code hooks: object is read as none" },

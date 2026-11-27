@@ -52,7 +52,7 @@ import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-t
 import { SYMBOLS_SERVER, SYMBOLS_TOOL, buildSymbolsTools, symbolsPromptLine } from "./symbols-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
-import { TOOL_MAP, BUILTIN_TOOLS, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, SECOND_MODEL_TOOLS, SECOND_MODEL_RE, type SecondModelTool, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
   type RoomLevel,
@@ -1054,6 +1054,11 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
   });
 }
 
+/** The server tools a step on foldrun's models sends for tools: [debate, review]. */
+function secondServerTools(g: { tools: SecondModelTool[]; model: string }): { type: string; name: string; model: string }[] {
+  return g.tools.map((t) => ({ ...SECOND_MODEL_TOOLS[t], model: g.model }));
+}
+
 export function agentContext(
   agentDir: string,
   tenant: string,
@@ -1887,6 +1892,7 @@ export function agentContext(
   let wantAsk = false;
   let wantPeers = false;
   let wantText = false;
+  const wantSecond: SecondModelTool[] = [];
   let wantSymbols = false;
 
   for (const ref of toolRefs(front)) {
@@ -1920,6 +1926,9 @@ export function agentContext(
     } else if (TOOL_MAP[toolName]) {
       allowed.push(...TOOL_MAP[toolName]);
       if (available[toolName]) shadowed.push(toolName);
+    } else if (toolName === "debate" || toolName === "review") {
+      // Served by foldrun's gateway, answered by second_model: — decided below, once the supply is known.
+      wantSecond.push(toolName);
     } else if (toolName === "search" || toolName === "history" || toolName === "desks" || toolName === "ask" || toolName === "peers" || toolName === "text" || toolName === "symbols") {
       // The platform's own groups, served in-process — built below, once
       // the roots and the records are known.
@@ -2002,6 +2011,23 @@ export function agentContext(
     parts.add("text", `# Files as text\n\n${textPromptLine()}`);
   }
   // tools: [symbols] (FOL-297) — a language server in the step's own boundary; the server is the step's.
+  // tools: [debate, review] (FOL-418): server tools on foldrun's gateway,
+  // answered by `second_model:` — a model of another provider. Offered only
+  // where the step's calls go through foldrun's door (the gateway runs
+  // them); the lease carries the grant, and the gateway refuses any other
+  // tool or model asked through it. Anywhere else: said, and none offered.
+  let secondModel: { tools: SecondModelTool[]; model: string } | null = null;
+  {
+    const deniedSecond = new Set(refNames(front.disallowedTools));
+    const tools = [...new Set(wantSecond)].filter((t) => !deniedSecond.has(t) && !deniedSecond.has(SECOND_MODEL_TOOLS[t].name));
+    const want = typeof front.second_model === "string" ? front.second_model.trim() : "";
+    if (tools.length) {
+      if (!want) providerWarnings.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — not offered`);
+      else if (!SECOND_MODEL_RE.test(want)) providerWarnings.push(`second_model: "${want}" is written provider/model — tools: [${tools.join(", ")}] not offered`);
+      else if (supply.kind !== "foldrun") providerWarnings.push(`tools: [${tools.join(", ")}] run on foldrun's models only (its gateway calls the second model) — this step's model is not on them, so they are not offered`);
+      else secondModel = { tools, model: want };
+    }
+  }
   const symbolsTool = wantSymbols;
   if (symbolsTool) {
     allowed.push(SYMBOLS_TOOL);
@@ -2084,6 +2110,7 @@ export function agentContext(
     peers,
     textTool,
     symbolsTool,
+    secondModel,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2628,6 +2655,7 @@ async function runStepBody(
       peers,
       textTool,
       symbolsTool,
+      secondModel,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -3378,6 +3406,8 @@ async function runStepBody(
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
         // tools: [text] — the only leases the proxy serves the /text door on.
         ...(textTool ? { text: true } : {}),
+        // tools: [debate, review] — the only tools and the one model the gateway serves through this lease.
+        ...(secondModel ? { secondModel } : {}),
       });
       // foldrun's models need the proxy: it holds the platform's key and
       // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and
@@ -3682,6 +3712,7 @@ async function runStepBody(
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
           ...(textTool ? { text: true } : {}),
           ...(symbolsTool ? { symbols: true } : {}),
+          ...(secondModel ? { serverTools: secondServerTools(secondModel) } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -4229,6 +4260,7 @@ async function runStepBody(
         effort,
         systemPrompt,
         allowed,
+        ...(secondModel ? { serverTools: secondServerTools(secondModel) } : {}),
         mcpNames: consultNames,
         mcpServers: {
           ...(apiTools.server ? { foldrun_apis: apiTools.server } : {}),
