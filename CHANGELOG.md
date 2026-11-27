@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.0.2] — 2026-11-27
+
+- fix(second): debate and review on the platform's operator door, and the prompt names only what was granted (FOL-444) ([e6a1819](https://github.com/foldrun-io/foldrun-core/commit/e6a1819))
+
 ## [32.0.1] — 2026-11-27
 
 - docs(starter): the guide foldrun init writes names FOLDRUN_STEP_ATTEMPT_ID and FOLDRUN_FAIL_RUN_FILE (FOL-449, FOL-450) ([a455ea9](https://github.com/foldrun-io/foldrun-core/commit/a455ea9))
