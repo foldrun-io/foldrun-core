@@ -165,6 +165,8 @@ export function classifyCall(tool: string, input: Record<string, unknown> | unde
   // tools: [text] — reading a file out as text changes nothing, unless it
   // was asked to save that text beside the file.
   if (server === "foldrun_text") return args.save === true ? write(`${String(args.path ?? "a file")}.txt (extract_text)`) : { write: false };
+  // tools: [debate, review] — a paid call to another provider's model: done again, paid again.
+  if (server === "foldrun_second") return write(`a paid second opinion (${name})`);
   // remotes: — reading where a request got to changes nothing; a send, a
   // reply or a cancel acts on an outside agent's system.
   if (server === "foldrun_a2a") return name === "a2a_status" ? { write: false } : write(`${name.replace(/^a2a_/, "")} to an outside agent`);

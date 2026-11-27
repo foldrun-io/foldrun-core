@@ -507,7 +507,7 @@ size: large                 # small | large | heavy — the sandbox it rents
 media: text                 # text | as-is — an image handed to it: read into text (no image tokens) or looked at itself
 resources: { memory: 4Gi }  # optional: cpu, memory, disk in numbers, over the size class
 tools: [web, read, ask, peers, text, my-folder-tool]  # built-ins and your own tools/, one list; \`ask\` lets it ask you mid-step, \`peers\` lets it message the steps running beside it, \`text\` reads images, PDFs, office files and recordings as text, \`docs\` reads a library's current docs, \`video\` renders Remotion video
-second_model: openai/gpt-5.5  # with tools: [debate, review]: another provider's model argues an idea or reviews code, in foldrun code (cloud steps: FOL-444); only what the agent sends it leaves
+second_model: openai/gpt-5.5  # with tools: [debate, review]: another provider's model argues an idea or reviews code, in foldrun code and cloud steps; only what the agent sends it leaves
 disallowedTools: [Bash]     # subtract from what it would otherwise have
 skills: [house-style]       # from skills/, the library, or the platform's gallery (modern-website, motion-video, cloudhost-deploy — by name only)
 hooks: [no-force-push]      # from hooks/ or the library: code at every tool call

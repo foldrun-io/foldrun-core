@@ -201,6 +201,7 @@ export function limitKeysFor(toolName: string, input: Record<string, unknown> | 
       ? mcp[1] === "foldrun_scripts" ? mcp[2]
         : mcp[1] === "foldrun_apis" ? mcp[2].replace(/^call_/, "")
         : mcp[1] === "foldrun_agents" ? mcp[2].replace(/^consult_/, "")
+        : mcp[1] === "foldrun_second" ? mcp[2]
         : PLATFORM_SERVERS[mcp[1]] ?? mcp[1]
       : null);
   if (name !== null) {

@@ -49,10 +49,12 @@ import { DELEGATE_SERVER, buildDelegateTools, delegatePromptLine, delegateToolNa
 import type { DelegationResult, OperatorEvent } from "./operator.ts";
 import type { StepDelegation } from "./store.ts";
 import { TEXT_SERVER, TEXT_TOOL, buildTextTools, textPromptLine } from "./text-tool.ts";
+import { SECOND_SERVER, SECOND_TOOL_NAMES, buildSecondTools, secondPromptLine, type SideSpend } from "./second-tool.ts";
+import { providerOfName } from "./model-names.ts";
 import { SYMBOLS_SERVER, SYMBOLS_TOOL, buildSymbolsTools, symbolsPromptLine } from "./symbols-tool.ts";
 import { ASK_TOOL, PEER_TOOLS, applyOperatorEvent, askPromptLine, askTimeoutSec, buildAskTool, buildPeerTools, inboxReader, localPeerBus, peersPromptLine, type PeerInfo } from "./operator.ts";
 import { sendPlainNotification } from "./notify.ts";
-import { TOOL_MAP, BUILTIN_TOOLS, SECOND_MODEL_TOOLS, SECOND_MODEL_RE, type SecondModelTool, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
+import { TOOL_MAP, BUILTIN_TOOLS, SECOND_MODEL_TOOLS, SECOND_MODEL_RE, builtinToolNames, type SecondModelTool, ownToolNames, toolRefs, legacyUseNames, legacyUseError, retiredToolNames, retiredToolError } from "./tool-names.ts";
 import { refNames } from "./refs.ts";
 import {
   type RoomLevel,
@@ -782,6 +784,8 @@ export function buildSubagentSpecs(o: {
   attempt?: AttemptRef;
   flowTimezone?: string | null;
   parentAllowed: string[];
+  /** The step's own second_model: when it was granted debate or review; a sub-agent shares them only for the same one. */
+  parentSecondModel?: string | null;
   push: (type: "info" | "error", text: string) => void;
   /** The provider of foldrun's models this step runs on, or null when it
    *  runs on an own key: a sub-agent runs inside it, on its provider. */
@@ -806,7 +810,14 @@ export function buildSubagentSpecs(o: {
         o.push("error", `subagents: "${sub.name}" has no description — the model picks a sub-agent by it; not delegated to`);
         continue;
       }
-      const tools = subagentTools(own.allowed, o.parentAllowed);
+      let tools = subagentTools(own.allowed, o.parentAllowed);
+      // tools: [debate, review] — the step's lease names one second model: a sub-agent that names another
+      // would have its review answered by the parent's (Codex). Only the same one is shared.
+      const seconds = Object.values(SECOND_TOOL_NAMES) as string[];
+      if (tools.some((t) => seconds.includes(t)) && own.second?.model !== o.parentSecondModel) {
+        tools = tools.filter((t) => !seconds.includes(t));
+        o.push("info", `subagents: "${sub.name}" names second_model: ${own.second?.model ?? "(none)"}, not this step's — its debate and review are not offered inside this step`);
+      }
       // remotes: are the parent's server and credentials; withheld here
       // (subagents.ts isA2aTool), and the sub-agent and the step are told.
       const remotesWithheld = own.remotes.length > 0;
@@ -2039,19 +2050,36 @@ export function agentContext(
     parts.add("text", `# Files as text\n\n${textPromptLine()}`);
   }
   // tools: [symbols] (FOL-297) — a language server in the step's own boundary; the server is the step's.
-  // tools: [debate, review] (FOL-418): a second opinion from another
-  // provider's model, served by foldrun's gateway to `foldrun code` on a
-  // laptop. A cloud step runs on the Agent SDK, which cannot declare
-  // foldrun's server tools: not offered here until FOL-444, and said.
+  // tools: [debate, review] (FOL-418, FOL-444): a second opinion from
+  // another provider's model (second_model:). In `foldrun code` foldrun's
+  // server tools; in a step, tools in the sandbox that reach the model
+  // through the lease's /second door (second-tool.ts), granted on the lease
+  // for these tools and this model only. `{review: ask}` is not a grant to
+  // ask without asking: skipped, as in foldrun code.
+  let second: { tools: ("debate" | "review")[]; model: string } | null = null;
   {
     const deniedSecond = new Set(refNames(front.disallowedTools));
-    const tools = [...new Set(wantSecond)].filter((t) => !deniedSecond.has(t) && !deniedSecond.has(SECOND_MODEL_TOOLS[t].name));
+    const granting = builtinToolNames(front.tools, true);
+    const asking = new Set(builtinToolNames(front.tools).filter((t): t is "debate" | "review" => (t === "debate" || t === "review") && !granting.includes(t)));
+    const tools = [...new Set(wantSecond)].filter((t) => !asking.has(t) && !deniedSecond.has(t) && !deniedSecond.has(SECOND_MODEL_TOOLS[t].name) && !deniedSecond.has(SECOND_TOOL_NAMES[t]));
     const want = typeof front.second_model === "string" ? front.second_model.trim() : "";
+    // The built-in server's name is not the author's to take: one of theirs by it would receive the review (Codex).
+    if (Object.prototype.hasOwnProperty.call(mcpServers, SECOND_SERVER)) {
+      delete mcpServers[SECOND_SERVER];
+      mcpNames.splice(0, mcpNames.length, ...mcpNames.filter((n) => n !== SECOND_SERVER));
+      providerWarnings.push(`an MCP server named ${SECOND_SERVER} is foldrun's own (debate, review) — yours by that name is not started; rename it`);
+    }
     if (tools.length) {
+      // Whether it is another provider than the step's own is decided at launch, for the model actually sent.
       if (!want) providerWarnings.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — not offered`);
       else if (!SECOND_MODEL_RE.test(want)) providerWarnings.push(`second_model: "${want}" is written provider/model — tools: [${tools.join(", ")}] not offered`);
-      else providerWarnings.push(`tools: [${tools.join(", ")}] (a second opinion from ${want}) work in foldrun code on your computer; a cloud step does not offer them yet (FOL-444)`);
+      else {
+        second = { tools, model: want };
+        allowed.push(...tools.map((t) => SECOND_TOOL_NAMES[t]));
+        parts.add("second", `# A second opinion\n\n${secondPromptLine(tools, want)}`);
+      }
     }
+    for (const t of asking) providerWarnings.push(`tools: {${t}: ask} — a second opinion is a tool the agent calls itself; write tools: [${t}] to grant it`);
   }
   const symbolsTool = wantSymbols;
   if (symbolsTool) {
@@ -2124,7 +2152,7 @@ export function agentContext(
     // an outward tool: a retry after a failed check could have the same work
     // done twice, reworded past a2a_send's same-request guard. Granted only
     // (permissionMode: plan withholds the tools), so only then.
-    outward: outward || scriptSpecs.some((sc) => sc.outward) || (remotes.length > 0 && finalAllowed.some((t) => A2A_TOOLS.includes(t))),
+    outward: outward || scriptSpecs.some((sc) => sc.outward) || (remotes.length > 0 && finalAllowed.some((t) => A2A_TOOLS.includes(t))) || (second !== null && finalAllowed.some((t) => (Object.values(SECOND_TOOL_NAMES) as string[]).includes(t))),
     searchRoots,
     historyDigest,
     deskDigest,
@@ -2135,6 +2163,7 @@ export function agentContext(
     peers,
     textTool,
     symbolsTool,
+    second,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2709,6 +2738,7 @@ async function runStepBody(
       peers,
       textTool,
       symbolsTool,
+      second,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -3148,6 +3178,28 @@ async function runStepBody(
       prompt += `\n\n<item>\nOf everything above, this instance of the step handles exactly one item — this one:\n${step.item}\n</item>`;
     }
 
+    // tools: [debate, review] — another provider than the one this step's model is actually on (a tier, a
+    // step's model:, the account's), or none: decided here, where that model is known (Codex). The door holds
+    // the lease's figure too, and refuses when it is not known.
+    let secondGrant: { tools: ("debate" | "review")[]; model: string; firstProvider: string } | null = null;
+    if (second) {
+      // foldrun's models: the provider the platform routes to. An own key: only a provider/model name says it;
+      // a bare id or an alias on a custom endpoint is not proof of a provider, so it is not offered (Codex).
+      const firstProvider = supply.kind === "foldrun" ? supply.provider : providerOfName(wireModel);
+      const target = providerOfName(second.model) ?? second.model.split("/")[0];
+      const off = !firstProvider
+        ? `the provider of this step's model (${wireModel}) is not known here`
+        : firstProvider === target ? `second_model: ${second.model} is the provider this step's model (${wireModel}) is on` : null;
+      if (off) {
+        push("info", `${off} — tools: [${second.tools.join(", ")}] not offered`);
+        const names = Object.values(SECOND_TOOL_NAMES) as string[];
+        allowed.splice(0, allowed.length, ...allowed.filter((t) => !names.includes(t)));
+      } else {
+        // Only what the step may call (plan mode, disallowedTools): never a lease or server for a tool it lacks (Codex).
+        const tools = second.tools.filter((t) => allowed.includes(SECOND_TOOL_NAMES[t]));
+        if (tools.length) secondGrant = { tools, model: second.model, firstProvider: firstProvider as string };
+      }
+    }
     // Colleagues this agent may consult mid-turn — declared, like every
     // other capability.
     const { consults, missing: missingConsults } = gatherConsults(workspaceRoot, front.agents);
@@ -3161,6 +3213,7 @@ async function runStepBody(
       ...(peers ? ["foldrun_peers"] : []),
       ...(textTool ? [TEXT_SERVER] : []),
       ...(symbolsTool ? [SYMBOLS_SERVER] : []),
+      ...(secondGrant ? [SECOND_SERVER] : []),
     ];
     if (peers) {
       // The colleagues' contract, in the prompt the step reads: who runs
@@ -3179,7 +3232,7 @@ async function runStepBody(
     }
     const subagents = buildSubagentSpecs({
       names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, attempt, flowTimezone,
-      parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], push,
+      parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], parentSecondModel: secondGrant?.model ?? null, push,
       parentProvider: supply.kind === "foldrun" ? supply.provider : null,
     });
     if (subagents.length) {
@@ -3459,6 +3512,17 @@ async function runStepBody(
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
         // tools: [text] — the only leases the proxy serves the /text door on.
         ...(textTool ? { text: true } : {}),
+        // tools: [debate, review] — the only leases the /second door answers: these tools, this model, the
+        // step's own provider, and the step's ceiling and limits, held at the door (Codex).
+        ...(secondGrant
+          ? {
+              secondModel: {
+                ...secondGrant,
+                maxUsd: typeof stepBudgetUsd === "number" && stepBudgetUsd > 0 ? stepBudgetUsd : null,
+                uses: Object.fromEntries(secondGrant.tools.filter((t) => typeof stepLimits[t] === "number").map((t) => [t, stepLimits[t] as number])),
+              },
+            }
+          : {}),
       });
       // foldrun's models need the proxy: it holds the platform's key and
       // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and
@@ -3763,6 +3827,7 @@ async function runStepBody(
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
           ...(textTool ? { text: true } : {}),
           ...(symbolsTool ? { symbols: true } : {}),
+          ...(secondGrant ? { second: { tools: secondGrant.tools, model: secondGrant.model } } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -3993,7 +4058,16 @@ async function runStepBody(
       // A 401 from a token that rotated mid-step is not a broken key: the
       // replacement is already on its way to the mounted file. Wait for it
       // once, then fall into the same retry the busy case uses.
-      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal)) {
+      // A paid second opinion already answered: a whole-step retry would ask (and pay) again. Asked before every
+      // retry, since a retry itself may be the attempt that paid (Codex).
+      const paidRan = () => secondGrant !== null && paidSecondRan(step.events.slice(attemptFrom));
+      const stopForPaid = () => {
+        if (!lastRefusal || !paidRan()) return false;
+        push("info", `the model refused mid-step (${lastRefusal.slice(0, 60)}) after a paid debate or review answered — not run again, which would ask and pay for it twice`);
+        lastRefusal = "";
+        return true;
+      };
+      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal) && !stopForPaid()) {
         push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
         const rotated = await awaitRotatedCredential(credentialUsed);
         if (rotated) {
@@ -4001,18 +4075,19 @@ async function runStepBody(
           credentialUsed = rotated;
           lastRefusal = "";
           const previous = outcome.timing;
+        const previousSide = outcome.sideCostUsd;
           // Build first: isolatedArgs is what re-grants the model key, and
           // commit() is what publishes the grant to Redis, where the proxy
           // reads it. Committing first sent the revoked token again — every
           // rotation retry on 2026-09-22/23 401'd this way.
           const retry = isolatedArgs(platformModelEnv());
           await lease?.commit();
-          outcome = withEarlierTiming(await runTracked(retry), previous);
+          outcome = withEarlierTiming(await runTracked(retry), previous, previousSide);
         } else {
           push("info", "the credential did not change — this is the key itself, not a rotation");
         }
       }
-      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal); n++) {
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal) && !stopForPaid(); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
         await sleep(wait);
@@ -4020,10 +4095,11 @@ async function runStepBody(
         // next, not the one that sent us here.
         lastRefusal = "";
         const previous = outcome.timing;
+        const previousSide = outcome.sideCostUsd;
         const again = isolatedArgs(platformModelEnv());
         await lease?.commit();
         outcome = await runTracked(again);
-        outcome = withEarlierTiming(outcome, previous);
+        outcome = withEarlierTiming(outcome, previous, previousSide);
       }
       // The model connection was cut under the step — the egress proxy or the
       // worker went away (6 Oct 2026: a worker restarted every 4.5 minutes and
@@ -4043,9 +4119,10 @@ async function runStepBody(
         lastRefusal = "";
         attemptFrom = step.events.length;
         const previous = outcome.timing;
+        const previousSide = outcome.sideCostUsd;
         const again = isolatedArgs(platformModelEnv());
         await lease?.commit();
-        outcome = withEarlierTiming(await runTracked(again), previous);
+        outcome = withEarlierTiming(await runTracked(again), previous, previousSide);
       }
       // The model wrote its tool call out as text — `<invoke name="…">` in
       // its last message — and stopped. Nothing ran, so nothing was done:
@@ -4062,10 +4139,11 @@ async function runStepBody(
         attemptFrom = step.events.length;
         lastRefusal = "";
         const previous = outcome.timing;
+        const previousSide = outcome.sideCostUsd;
         const base = isolatedArgs(platformModelEnv());
         const again = { ...base, input: { ...base.input, prompt: `${base.input.prompt}\n\n${TEXT_CALL_NOTE}` } };
         await lease?.commit();
-        outcome = withEarlierTiming(await runTracked(again), previous);
+        outcome = withEarlierTiming(await runTracked(again), previous, previousSide);
       }
       // The second supply, tried exactly once, and only when the primary
       // refused over money/auth/limits rather than the work failing. The
@@ -4073,19 +4151,29 @@ async function runStepBody(
       // whole contract is that re-driving is safe. A declared fallback
       // replaces the provider block's env wholesale, so the spread order in
       // isolatedArgs (providerEnv last) has to be overridden here.
-      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply) {
+      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply && !stopForPaid()) {
         push(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
         );
         const first = outcome.timing;
+        const firstSide = outcome.sideCostUsd;
         const fallbackName = `${MODEL_KEY_NAME}_FALLBACK`;
         const retryArgs = isolatedArgs(secondSupply, fallbackName);
         // The fallback's own translator, or none: a fallback that speaks
         // Anthropic must not inherit the primary's Chat-Completions door.
+        // tools: [debate, review] were checked against the primary's provider: not offered on the fallback (Codex).
+        const secondNames = Object.values(SECOND_TOOL_NAMES) as string[];
+        if (secondGrant) push("info", "the fallback provider is not the one debate and review were checked against — they are not offered on this attempt");
         const fallbackArgs = {
           ...retryArgs,
-          input: { ...retryArgs.input, translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null },
+          input: {
+            ...retryArgs.input,
+            translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null,
+            ...(secondGrant
+              ? { second: undefined, allowed: retryArgs.input.allowed.filter((t: string) => !secondNames.includes(t)), mcpNames: retryArgs.input.mcpNames.filter((n: string) => n !== SECOND_SERVER) }
+              : {}),
+          },
           env: Object.fromEntries(
             Object.entries({ ...retryArgs.env, ...proxied(secondSupply, fallbackName) })
               .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -4097,7 +4185,7 @@ async function runStepBody(
         // Both attempts held sandboxes; the meter owes the sum. The first
         // try's pod ran, was billed for by the platform, and must not
         // vanish from the record because a second try replaced its outcome.
-        outcome = withEarlierTiming(outcome, first);
+        outcome = withEarlierTiming(outcome, first, firstSide);
       }
       // Slim browsing (browser-pod.ts): the step ran on the slim image and
       // the account's browser pod went away under it, past the web tool's
@@ -4167,11 +4255,14 @@ async function runStepBody(
       // field, saved before the cleanup, so a worker that dies there leaves
       // a step the next driver fails instead of running again.
       keepFailRun(outcome);
+      // What the /second door counted for this step (tools: [debate, review]), read from its lines below.
+      let doorSideUsd = 0;
       if (lease) {
         for (const line of await lease.drainLog()) {
           // pushWatching, not push: a line the proxy wrote may carry the
           // refusal mark, and that sentence is the whole reason the proxy
           // reads response headers at all.
+          if (typeof line === "string") doorSideUsd += secondSpentOf(line);
           if (typeof line === "string") pushWatching("info", line);
           else pushWatching("info", line.text, { effect: line.effect });
         }
@@ -4192,6 +4283,9 @@ async function runStepBody(
       if (outcome.status === "failed" && outcome.reason) push("error", `sandbox ended: ${outcome.reason}`);
       if (outcome.data !== undefined) step.data = redactData(outcome.data);
       step.costUsd = repriced(catalog, wireModel, outcome.usage ?? null, outcome.costUsd, push, outcome.turnsCostUsd);
+      // The larger of what the sandbox counted and what the door did: a reply lost on its way back is still spent (Codex).
+      const sideUsd = Math.max(outcome.sideCostUsd ?? 0, doorSideUsd);
+      if (sideUsd > 0) step.sideCostUsd = (step.sideCostUsd ?? 0) + sideUsd;
       step.tokens = tokensOf(outcome.usage);
       step.turns = typeof outcome.turns === "number" ? outcome.turns : null;
       step.stopReason = outcome.stopReason ?? null;
@@ -4286,6 +4380,11 @@ async function runStepBody(
       const textTools = textTool
         ? buildTextTools({ egress: null, agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), emit: (type, t) => push(type, t) })
         : null;
+      // tools: [debate, review] — no proxy here either: the tools say so.
+      const sideSpend: SideSpend = { usd: 0 };
+      const secondTools = secondGrant
+        ? buildSecondTools({ egress: null, tools: secondGrant.tools, model: secondGrant.model, agentDir, workspaceRoot, libraryRoot: libraryDir(tenant), spend: sideSpend, emit: (type, t) => push(type, t) })
+        : null;
       // sandbox: own sub-agents, here: no proxy between the step and this
       // process, so the job is handed to the drive loop directly.
       const delegateTools = delegates.length && delegateJob
@@ -4358,6 +4457,7 @@ async function runStepBody(
           ...(a2aTools?.server ? { foldrun_a2a: a2aTools.server } : {}),
           ...(installTools ? { foldrun_install: installTools.server } : {}),
           ...mcpServers,
+          ...(secondTools?.server ? { [SECOND_SERVER]: secondTools.server } : {}),
         },
         // Declared secrets reach the agent's scripts as env vars; the model
         // only ever sees the variable names, not the values. The base is
@@ -4370,6 +4470,7 @@ async function runStepBody(
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
         budgetNote: stepBudgetNote,
+        ...(secondTools ? { sideSpend } : {}),
         price: tokenPrice,
         verify: step.verify,
         ...(judgeModel ? { judgeModel } : {}),
@@ -4433,10 +4534,19 @@ async function runStepBody(
         }
       };
       let credentialUsed = platformModelCredential();
+      const firstFrom = step.events.length;
       let outcome = await attemptThrough(localModelEnv, translator);
       // Same rule as the isolated path: a credential that rotated under the
       // step is waited out and retried before anything else is considered.
-      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal)) {
+      // A paid second opinion already answered in this attempt: a whole-step retry would ask (and pay) again (Codex).
+      const paidRan = () => secondGrant !== null && paidSecondRan(step.events.slice(firstFrom));
+      const stopForPaid = () => {
+        if (!lastRefusal || !paidRan()) return false;
+        push("info", `the model refused mid-step (${lastRefusal.slice(0, 60)}) after a paid debate or review answered — not run again, which would ask and pay for it twice`);
+        lastRefusal = "";
+        return true;
+      };
+      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal) && !stopForPaid()) {
         push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
         const rotated = await awaitRotatedCredential(credentialUsed);
         if (rotated) {
@@ -4450,7 +4560,7 @@ async function runStepBody(
       }
       // Same rule as the isolated path: a busy provider is waited out on
       // the supply it refused from, before any fallback is considered.
-      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal); n++) {
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal) && !stopForPaid(); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
         await sleep(wait);
@@ -4459,7 +4569,7 @@ async function runStepBody(
       }
       // Same rule as the isolated path: one retry, on a refusal, on the
       // declared or platform second supply.
-      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply) {
+      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply && !stopForPaid()) {
         push(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
@@ -4478,6 +4588,9 @@ async function runStepBody(
       const consultCost = consultTools.drainCost();
       const stepCost = repriced(catalog, wireModel, outcome.usage, outcome.costUsd, push, outcome.turnsCostUsd);
       step.costUsd = stepCost === null && consultCost === 0 ? null : (stepCost ?? 0) + consultCost;
+      // The larger of what the sandbox counted and what the door did: a reply lost on its way back is still spent (Codex).
+      const sideUsd = outcome.sideCostUsd ?? 0; // in-process: no door, the tools count it themselves
+      if (sideUsd > 0) step.sideCostUsd = (step.sideCostUsd ?? 0) + sideUsd;
       step.tokens = tokensOf(outcome.usage);
       step.turns = typeof outcome.turns === "number" ? outcome.turns : null;
       step.stopReason = outcome.stopReason ?? null;
@@ -4782,6 +4895,18 @@ export const DROP_RETRIES = 2;
 
 /** May a step whose connection dropped run again? Yes, unless its tools can
  *  act outward and one ran in this attempt (actedThenFailedCheck's rule). */
+/** A debate or review answered in these events (tools: [debate, review], FOL-444): a paid call a retry must not repeat. */
+/** What one of the /second door's spend lines says the step spent (egress-proxy SECOND_SPENT_LINE), else 0. */
+export function secondSpentOf(line: string): number {
+  const m = /^second opinion spent: (?:debate|review) \$(\d+(?:\.\d+)?)$/.exec(line);
+  return m ? Number(m[1]) : 0;
+}
+
+export function paidSecondRan(attemptEvents: { type: string; text?: string }[]): boolean {
+  const names = Object.values(SECOND_TOOL_NAMES) as string[];
+  return attemptEvents.some((e) => e.type === "tool" && typeof e.text === "string" && names.includes(e.text));
+}
+
 export function dropRetrySafe(canActOutward: boolean, attemptEvents: { type: string }[]): boolean {
   return !(canActOutward && attemptEvents.some((e) => e.type === "tool"));
 }
@@ -4828,7 +4953,9 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * that shows only the last one under-bills the platform and lies to the
  * customer about how long their step actually took.
  */
-function withEarlierTiming<T extends { timing?: StepTiming | null }>(outcome: T, earlier: StepTiming | null | undefined): T {
+function withEarlierTiming<T extends { timing?: StepTiming | null; sideCostUsd?: number }>(outcome: T, earlier: StepTiming | null | undefined, earlierSide?: number): T {
+  // What an earlier attempt spent on the second model stays spent (Codex): carried onto the outcome that replaces it.
+  if (typeof earlierSide === "number" && earlierSide > 0) outcome = { ...outcome, sideCostUsd: (outcome.sideCostUsd ?? 0) + earlierSide };
   if (!earlier) return outcome;
   if (!outcome.timing) return { ...outcome, timing: earlier };
   return { ...outcome, timing: { ...outcome.timing, totalMs: outcome.timing.totalMs + earlier.totalMs } };
@@ -6159,7 +6286,7 @@ function driveRunInner(
             agentBudgets.get(agent),
             run.steps
               .filter((s) => s.agent === agent)
-              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s !== child && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
+              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s.sideCostUsd ?? 0) + (s !== child && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
             agent,
             1,
           );
@@ -6284,7 +6411,7 @@ function driveRunInner(
             agentBudgets.get(step.agent),
             run.steps
               .filter((s) => s.agent === step.agent)
-              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s !== step && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
+              .reduce((sum, s) => sum + (s.costUsd ?? 0) + (s.sideCostUsd ?? 0) + (s !== step && s.status === "running" ? (reserved.get(s) ?? 0) : 0), 0),
             step.agent,
             1 + launching.filter((s) => s !== step && s.agent === step.agent && s.status === "pending" && !reserved.has(s)).length,
           );

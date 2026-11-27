@@ -80,6 +80,9 @@ export interface ExecOutcome {
    *  step's model without charging the sub-agent's turns at the wrong rate;
    *  the runner reads this instead (repriced in runner.ts). */
   turnsCostUsd?: number;
+  /** What the second model's calls cost (tools: [debate, review]): metered where they were made, so never in
+   *  costUsd; kept so the next step's budget sees it. */
+  sideCostUsd?: number;
   /** Why the model's last turn ended, as the SDK's result message says:
    *  end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal or
    *  model_context_window_exceeded. Null when no result arrived. */
@@ -149,6 +152,11 @@ export interface ExecOptions {
   /** Which line set the ceiling, for the error that names it — "budget: in
    *  the flow file" or "budget: on the <agent> agent". */
   budgetNote?: string;
+  /** Spend beside the step's own turns that counts against its ceiling:
+   *  the second model's calls (tools: [debate, review], second-tool.ts).
+   *  Already metered where they were made, so never added to costUsd. Its
+   *  `left` is set here, to what the ceiling has left. */
+  sideSpend?: { usd: number; left?: () => number | null };
   /** Price per token for the model, when the catalogue knows it, so spend
    *  can be counted turn by turn instead of learned at the end. Without it
    *  the step prices its turns from the SDK's own running total. */
@@ -767,6 +775,9 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     return knownPrice(typeof model === "string" ? model : undefined) ?? knownPrice(declared);
   };
   const turnsTotal = () => [...turns.values()].reduce((sum, t) => sum + priceTurn(t.u, t.price), 0);
+  // Against the ceiling: the turns and what the second model cost beside them.
+  const spentNow = () => turnsTotal() + (opts.sideSpend?.usd ?? 0);
+  if (opts.sideSpend) opts.sideSpend.left = () => (ceiling === null ? null : Math.max(0, ceiling - spentNow()));
   const mixedModels = () => [...turns.values()].some((t) => t.price !== (opts.price ?? null));
 
   // Open tool calls, by the provider's id, so the result can be paired with
@@ -853,7 +864,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     if (compactUsage) {
       turns.set(`compaction-${anonymousTurns++}`, { u: compactUsage, price: priceOf(message) });
       if (ceiling) {
-        spentUsd = turnsTotal();
+        spentUsd = spentNow();
         if (spentUsd >= ceiling) {
           emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
           status = "failed";
@@ -915,7 +926,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
         emit("info", "", { turn: final });
       }
       if (ceiling && u) {
-        spentUsd = turnsTotal();
+        spentUsd = spentNow();
         if (spentUsd >= ceiling) {
           emit("error", `over budget — this step reached $${spentUsd.toFixed(4)} of its $${ceiling.toFixed(4)} ceiling mid-turn and was stopped (${opts.budgetNote ?? "budget: in the flow file"})`);
           status = "failed";
@@ -1180,6 +1191,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
   return {
     status, result, conclusion, ...(opts.output ? { data } : {}), costUsd, usage,
     ...(mixedModels() ? { turnsCostUsd: turnsTotal() } : {}),
+    ...(opts.sideSpend && opts.sideSpend.usd > 0 ? { sideCostUsd: opts.sideSpend.usd } : {}),
     stopReason,
     turns: numTurns ?? turns.size,
     ...(pod ? { browserPod: podState } : {}),
