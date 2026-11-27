@@ -825,6 +825,10 @@ test("the driver gives the agent's tools the declared value under its own name, 
   assert.equal(tools.ANTHROPIC_API_KEY, "${ANTHROPIC_API_KEY}", "the tools get the declared secret (here its proxy placeholder)");
   assert.equal(env.ANTHROPIC_API_KEY, "${FOLDRUN_MODEL_KEY}", "the env the model runs with is untouched");
   assert.equal(tools.CRM, "x");
+  // The step's own identifiers are the platform's: nothing maps over them (FOL-449).
+  const stamped = run({ FOLDRUN_STEP_ATTEMPT_ID: "att_real", FOLDRUN_DECLARED_FOLDRUN_STEP_ATTEMPT_ID: "att_forged", FOLDRUN_RUN_ID: "run-real", FOLDRUN_DECLARED_FOLDRUN_RUN_ID: "run-forged" });
+  assert.equal(stamped.FOLDRUN_STEP_ATTEMPT_ID, "att_real");
+  assert.equal(stamped.FOLDRUN_RUN_ID, "run-real");
   assert.match(src, /buildApiTools\("", input\.apis, undefined, \{ env: toolEnv, missing: \[\] \}, keepIn\)/);
   assert.match(src, /input\.scripts,\n    toolEnv,/);
   assert.match(src, /verifyEnv: toolEnv,/, "verify: gets the declared value too");

@@ -1023,8 +1023,11 @@ try {
   // settings, and the agent's API and script tools and verify: get the value
   // back under the name it declared. Built here, after the runtime and any
   // mid-step install have added their paths to env.
+  // Never over what the runner stamps on the step (its run, its attempt,
+  // FOL-449): a check compares evidence with those, so they are the
+  // platform's alone.
   const toolEnv = { ...env };
-  for (const [k, v] of Object.entries(env)) if (k.startsWith("FOLDRUN_DECLARED_")) toolEnv[k.slice("FOLDRUN_DECLARED_".length)] = v;
+  for (const [k, v] of Object.entries(env)) if (k.startsWith("FOLDRUN_DECLARED_") && !/^FOLDRUN_DECLARED_FOLDRUN_(RUN|STEP)_/.test(k)) toolEnv[k.slice("FOLDRUN_DECLARED_".length)] = v;
   const api = buildApiTools("", input.apis, undefined, { env: toolEnv, missing: [] }, keepIn);
   // remotes: — the four a2a tools, rebuilt from values. Each token crossed in
   // its spec (a placeholder the proxy fills for the card's origin alone), so

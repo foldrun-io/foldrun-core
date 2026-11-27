@@ -3614,6 +3614,10 @@ export interface StepRecord {
    *  executor's own word, never read back from an error's text. What a
    *  delegated job's next ask is sized from (FOL-438). */
   roomEndedAt?: "small" | "large" | "heavy";
+  /** The id of the attempt in hand, or of the last one: what its scripts,
+   *  shell and `verify:` read as FOLDRUN_STEP_ATTEMPT_ID (FOL-449). New each
+   *  time the step's work starts over; kept when a drive re-attaches. */
+  attemptId?: string;
   /** Which runner image the step's sandbox ran: `full` (browsers in it) or
    *  `slim`, why, and `pod` when a browsing step ran slim and browsed
    *  through the account's browser pod. The last attempt's; absent where

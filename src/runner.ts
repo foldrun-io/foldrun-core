@@ -527,6 +527,24 @@ const endedForRoom = (step: Pick<StepRecord, "events">): boolean =>
 /** The size class above the one a step ran at; null at the largest. */
 const sizeAbove = (step: Pick<StepRecord, "size" | "sizeUp">): "large" | "heavy" | null =>
   step.sizeUp === "large" || (!step.sizeUp && step.size === "large") ? "heavy" : step.sizeUp === "heavy" || step.size === "heavy" ? null : "large";
+/** What a step's scripts, shell and `verify:` read to know WHICH attempt of
+ *  which step they belong to (FOL-449). A run's copy-back never carries a
+ *  deletion, so a file an earlier attempt or step left is still on disk when
+ *  a later one is checked: evidence stamped with this id is this attempt's. */
+export const ATTEMPT_ID_ENV = "FOLDRUN_STEP_ATTEMPT_ID";
+const newAttemptId = () => `att_${crypto.randomBytes(9).toString("hex")}`;
+/** The attempt in hand, shared by reference: a step's work can start over
+ *  inside one call of the runner (another model supply, a busy provider
+ *  waited out), and tools built once must read the id of the go they run in. */
+type AttemptRef = { id: string | undefined };
+/** Puts the attempt's id on an environment a tool spreads at each call, read
+ *  then and not when the tool was built. Last, so no declared secret of the
+ *  same name stands in for it. */
+export function withAttemptId<T extends Record<string, string>>(env: T, attempt: AttemptRef | undefined): T {
+  if (attempt) Object.defineProperty(env, ATTEMPT_ID_ENV, { enumerable: true, configurable: true, get: () => attempt.id ?? "" });
+  return env;
+}
+
 const SIZE_RANK = { small: 0, large: 1, heavy: 2 } as const;
 type SizeClass = keyof typeof SIZE_RANK;
 /** The class the next job for a colleague asks for, from every job this
@@ -749,6 +767,8 @@ export function buildSubagentSpecs(o: {
   tenant: string;
   tags?: string[];
   runId?: string;
+  /** The parent step's attempt: an in-process sub-agent works inside it. */
+  attempt?: AttemptRef;
   flowTimezone?: string | null;
   parentAllowed: string[];
   push: (type: "info" | "error", text: string) => void;
@@ -766,7 +786,7 @@ export function buildSubagentSpecs(o: {
     }
     try {
       const tags = o.tags ?? [];
-      const own = agentContext(sub.dir, o.tenant, tags, { runId: o.runId, agent: sub.name }, o.flowTimezone, true);
+      const own = agentContext(sub.dir, o.tenant, tags, { runId: o.runId, agent: sub.name, attempt: o.attempt }, o.flowTimezone, true);
       // sandbox: own — delegated to as a step of its own, not inside this
       // one (buildDelegateSpecs).
       if (ownSandbox(own.front)) continue;
@@ -1059,7 +1079,7 @@ export function agentContext(
   tenant: string,
   tags: string[] = [],
   /** Who is running, so scripts can stamp what they write with its provenance. */
-  identity: { runId?: string; agent?: string } = {},
+  identity: { runId?: string; agent?: string; attempt?: AttemptRef } = {},
   /** The flow's own `timezone:`, when this step belongs to one. Between the
    *  agent's frontmatter and the workspace's AGENTS.md in the cascade. */
   flowTimezone?: string | null,
@@ -1769,7 +1789,9 @@ export function agentContext(
     // tool writes into another system lands anonymous: you can see 100 new
     // contacts and have no way back to the run that made them. The run id,
     // the agent, and the date the platform believes it is.
-    {
+    // Which attempt of which step, read at each call: evidence a script
+    // stamps with it cannot be taken for an earlier attempt's (FOL-449).
+    withAttemptId({
       ...runtime.env,
       // An unexported client certificate is the proxy's, never a script's.
       ...withoutHeldCerts(secretEnv),
@@ -1780,7 +1802,7 @@ export function agentContext(
       // (/workspace/agents/<agent>) do not carry the name.
       FOLDRUN_WORKSPACE: workspace,
       ...clockEnv,
-    },
+    }, identity.attempt),
     libraryDir(tenant, "scripts"),
     runtime.interpreters,
     exec,
@@ -2627,6 +2649,25 @@ async function runStepBody(
     return;
   }
 
+  // The attempt's id (FOL-449). Not chosen here: each go of the work takes a
+  // new one as it starts, and a drive re-attaching to a sandbox an earlier
+  // one left keeps the id that sandbox was started with. A sandboxed go
+  // writes its id on the record only once its sandbox exists (sandboxGoId):
+  // one still waiting for room, or sent back to the queue, has run nothing,
+  // and the record stays on the attempt that last did.
+  // step.sandbox is never touched for the id's sake: it is what recovery
+  // re-attaches by. So where a driver of another executor kind took a step
+  // over and one of the first kind takes it back, the record can name the
+  // later go while the sandbox re-attached to holds its own id; inside any
+  // one sandbox the scripts, the shell and verify always read the same one.
+  const attempt: AttemptRef = { id: step.attemptId };
+  let sandboxGoId: string | undefined;
+  const nextAttemptId = () => {
+    attempt.id = newAttemptId();
+    step.attemptId = attempt.id;
+    return attempt.id;
+  };
+
   try {
     // An `openapi:` URL is fetched (and cached a day) before the context is
     // assembled, because assembling it is synchronous and the document has
@@ -2650,7 +2691,7 @@ async function runStepBody(
       outward,
       supply,
       modelRoute,
-    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent }, flowTimezone, false, step.model ?? modelOverride ?? null);
+    } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent, attempt }, flowTimezone, false, step.model ?? modelOverride ?? null);
     disposeRuntime = runtime.dispose;
     canActOutward = outward;
     // A step moved to another provider by its model (modelRoute): a judge
@@ -3115,7 +3156,7 @@ async function runStepBody(
       push("info", `subagents: not offered — ${step.agent} is running a job for ${step.subagentOf}, and a sub-agent does not delegate again`);
     }
     const subagents = buildSubagentSpecs({
-      names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, flowTimezone,
+      names: step.subagentOf ? [] : front.subagents, self: step.agent, workspaceRoot, tenant, tags, runId, attempt, flowTimezone,
       parentAllowed: [...allowed, ...consultNames.map((n) => `mcp__${n}`)], push,
       parentProvider: supply.kind === "foldrun" ? supply.provider : null,
     });
@@ -3815,6 +3856,9 @@ async function runStepBody(
         // saves the record, so this only updates the fields.
         checkpoint: (ref: string, consumed: number) => {
           step.sandbox = { kind: isolation!, ref, consumed, since: step.sandbox?.since ?? new Date().toISOString() };
+          // With the sandbox, the id it was started with: what a driver that
+          // inherits this run keeps when it re-attaches.
+          if (sandboxGoId) step.attemptId = sandboxGoId;
           // The sandbox exists: past the room gate, it now holds its figures.
           if (consumed === 0) step.holding = held;
           if (consumed === 0) step.roomWait = null;
@@ -3847,7 +3891,21 @@ async function runStepBody(
       // The arguments of the attempt whose outcome is current — what a
       // re-run on the full image repeats, on the same model supply.
       let lastArgs: typeof firstArgs = firstArgs;
+      let firstGo = true;
       const runTracked = async (a: typeof firstArgs) => {
+        // The work starting over in a fresh sandbox (another model supply,
+        // a lost browser pod, a size up) is another attempt to whatever
+        // checks its evidence: a new id, so what the go before left on disk
+        // cannot pass for this one's (FOL-449). Only the first go of a drive
+        // may re-attach, and it keeps the id its sandbox holds: a later one
+        // is never handed a reference an earlier go's checkpoint left, which
+        // would be the sandbox that just ended.
+        if (!firstGo && a.resume) a = { ...a, resume: null };
+        firstGo = false;
+        // Last in the environment: no declared secret stands in for it.
+        const goId = a.resume ? undefined : newAttemptId();
+        if (goId) a = { ...a, env: { ...a.env, [ATTEMPT_ID_ENV]: goId } };
+        sandboxGoId = goId;
         lastArgs = a;
         // An executor that cannot report its sandbox (Docker: no room gate,
         // it starts at once) holds from the call; one that can says so at
@@ -3857,6 +3915,9 @@ async function runStepBody(
           // Started: no longer waiting for room (an executor that can
           // report its sandbox clears this at its first checkpoint).
           step.roomWait = null;
+          // And its id is on the record from here, as a checkpoint would
+          // put it: the step may stamp its evidence before the go returns.
+          if (goId) step.attemptId = goId;
           save();
         }
         let out: Awaited<ReturnType<typeof runIsolated>> | undefined;
@@ -3875,6 +3936,11 @@ async function runStepBody(
           // A call that ran, or failed, is past waiting; only a step sent
           // back to the queue keeps its place in line.
           if (!out?.deferred) step.roomWait = null;
+          // It ran: the record names it, whether or not a checkpoint said
+          // so first. Sent back for room, or an executor that threw before
+          // anything started, nothing did.
+          if (out && !out.deferred && goId) step.attemptId = goId;
+          sandboxGoId = undefined;
           save();
           // Last, after the bookkeeping: not caught — a step whose writes were
           // not kept fails (Codex review).
@@ -4271,7 +4337,7 @@ async function runStepBody(
         // every tenant's root key and the datastore credentials.
         // The model process keeps the same reserved names as in a sandbox
         // (FOL-338): a declared CLAUDE_CODE_USE_VERTEX does not steer it here either.
-        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...declaredEnv(mat.env), ...installEnv, ...modelEnv, ...outputEnv },
+        env: { ...hostSafeEnv(), ...clockEnv, ...(testRun ? testModeEnv() : {}), ...declaredEnv(mat.env), ...installEnv, ...modelEnv, ...outputEnv, ...(attempt.id ? { [ATTEMPT_ID_ENV]: attempt.id } : {}) },
         timeoutSec: step.timeout,
         budgetUsd: stepBudgetUsd,
         budgetNote: stepBudgetNote,
@@ -4297,6 +4363,7 @@ async function runStepBody(
           FOLDRUN_WORKSPACE: path.basename(path.resolve(agentDir, "..", "..")),
           ...(testRun ? testModeEnv() : {}),
           ...stepSecrets,
+          ...(attempt.id ? { [ATTEMPT_ID_ENV]: attempt.id } : {}),
         },
         emit: pushWatching,
       });
@@ -4315,6 +4382,9 @@ async function runStepBody(
           before && runId && overlayTestWrites(workspaceRoot, divertFor(runId).to).length ? snapshotDivertedDirs(workspaceRoot) : before;
         const t = spec ? await startTranslator(spec) : null;
         try {
+          // Each go of the work is its own attempt to whatever checks its
+          // evidence: the options below are built after the id is taken.
+          nextAttemptId();
           return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
         } finally {
           // The attempt's language servers end with it (a retry starts them again).
