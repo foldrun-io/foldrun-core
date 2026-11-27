@@ -132,8 +132,6 @@ export interface ExecOptions {
   systemPrompt: string;
   /** Exact SDK tool names the agent may use. */
   allowed: string[];
-  /** Server tools foldrun's gateway runs for this step (tools: [debate, review], FOL-418). */
-  serverTools?: { type: string; name: string; model: string }[];
   /** MCP server names the agent was granted — tools from these pass. */
   mcpNames: string[];
   mcpServers: Record<string, McpServerConfig>;
@@ -490,7 +488,6 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       // declares no tools gets none, instead of seeing the full Claude
       // Code toolset and burning turns on denied calls.
       tools: opts.allowed,
-      ...(opts.serverTools?.length ? { serverTools: opts.serverTools } : {}),
       // Stated, never left to the SDK. Unset, it chose its own mode for the
       // login it ran under, and in auto mode its classifier refused a granted
       // script before canUseTool saw it: "denied by the Claude Code auto mode

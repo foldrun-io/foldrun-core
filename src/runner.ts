@@ -1054,11 +1054,6 @@ export function resolveDocLinks(text: string, workspaceRoot: string): string {
   });
 }
 
-/** The server tools a step on foldrun's models sends for tools: [debate, review]. */
-function secondServerTools(g: { tools: SecondModelTool[]; model: string }): { type: string; name: string; model: string }[] {
-  return g.tools.map((t) => ({ ...SECOND_MODEL_TOOLS[t], model: g.model }));
-}
-
 export function agentContext(
   agentDir: string,
   tenant: string,
@@ -2024,7 +2019,8 @@ export function agentContext(
     if (tools.length) {
       if (!want) providerWarnings.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — not offered`);
       else if (!SECOND_MODEL_RE.test(want)) providerWarnings.push(`second_model: "${want}" is written provider/model — tools: [${tools.join(", ")}] not offered`);
-      else if (supply.kind !== "foldrun") providerWarnings.push(`tools: [${tools.join(", ")}] run on foldrun's models only (its gateway calls the second model) — this step's model is not on them, so they are not offered`);
+      else if (supply.kind !== "foldrun" || !supply.door) providerWarnings.push(`tools: [${tools.join(", ")}] run on foldrun's models only (its gateway calls the second model) — this step's model is not on them, so they are not offered`);
+      else if (want.split("/")[0] === supply.provider) providerWarnings.push(`second_model: ${want} is this step's own provider (${supply.provider}) — a second opinion comes from another; tools: [${tools.join(", ")}] not offered`);
       else secondModel = { tools, model: want };
     }
   }
@@ -3712,7 +3708,6 @@ async function runStepBody(
           ...(peers ? { peers: { self: step.agent, siblings } } : {}),
           ...(textTool ? { text: true } : {}),
           ...(symbolsTool ? { symbols: true } : {}),
-          ...(secondModel ? { serverTools: secondServerTools(secondModel) } : {}),
           ...(subagents.length ? { subagents } : {}),
           ...(delegates.length ? { delegates } : {}),
           timeoutSec: step.timeout,
@@ -4260,7 +4255,6 @@ async function runStepBody(
         effort,
         systemPrompt,
         allowed,
-        ...(secondModel ? { serverTools: secondServerTools(secondModel) } : {}),
         mcpNames: consultNames,
         mcpServers: {
           ...(apiTools.server ? { foldrun_apis: apiTools.server } : {}),
