@@ -122,3 +122,14 @@ test("agentContext puts the agent's prose, knowledge and rules before the bounda
     fs.rmSync(data, { recursive: true, force: true });
   }
 });
+
+test("assemble({set}): a layer replaced or left out by name, never by searching the text (FOL-444)", () => {
+  const p = new PromptLayers();
+  p.add("agent", "quotes it: # A second opinion\n\nsee below");
+  p.add("second", "# A second opinion\n\nfull");
+  p.add("tail", "end");
+  assert.equal(p.assemble({ set: { second: null } }).text, "quotes it: # A second opinion\n\nsee below\n\nend");
+  assert.deepEqual(p.assemble({ set: { second: null } }).layers.map((l) => l.name), ["agent", "tail"]);
+  assert.equal(p.assemble({ set: { second: "# A second opinion\n\nless" } }).text.split("\n\n").at(-2), "less");
+  assert.equal(p.assemble().text, p.assemble({}).text);
+});

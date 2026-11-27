@@ -24,7 +24,7 @@ import type { RunInContainerArgs, ContainerStepOutcome } from "../src/run-contai
 type Captured = { calls: RunInContainerArgs[]; grants: EgressGrant[]; leases: Record<string, unknown>[] };
 
 async function withAccount(
-  opts: { supply: SupplyAnswer; noDoor?: boolean; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
+  opts: { supply: SupplyAnswer; platformKey?: boolean; operatorDoor?: boolean; firstRefused?: boolean; noDoor?: boolean; lease?: boolean; agentProvider?: string; ownKeys?: boolean; agentModel?: string; wsFront?: string; supplyFor?: (want: { provider: string; model?: string }) => SupplyAnswer; asked?: unknown[] },
   body: (c: Captured) => Promise<void>,
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "foldrun-supply-"));
@@ -35,6 +35,10 @@ async function withAccount(
   const c: Captured = { calls: [], grants: [], leases: [] };
   const fake = async (args: RunInContainerArgs): Promise<ContainerStepOutcome> => {
     c.calls.push(args);
+    if (opts.firstRefused && c.calls.length === 1) {
+      args.emit("error", "API Error: 402 credit balance is too low");
+      return { status: "failed", result: "", costUsd: 0 };
+    }
     return { status: "completed", result: "done", costUsd: 0.25 };
   };
   const lease = async (args: { grant: EgressGrant }): Promise<EgressLease | null> => {
@@ -43,11 +47,11 @@ async function withAccount(
     c.leases.push(args as unknown as Record<string, unknown>);
     return { url: "http://egress.test/e/tok", commit: async () => {}, drainLog: async () => [], release: async () => {} } as unknown as EgressLease;
   };
-  const prevHooks = { isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
+  const prevHooks = { door: platform.operatorDoor, isolation: platform.isolation, allowed: platform.platformKeyAllowed, supply: platform.modelSupply, egress: platform.egress, own: platform.ownModelKeys };
   // The platform's egress proxy answers foldrun's door (one door, 23 Nov
   // 2026) unless a test says it does not.
   const withDoor = (a: SupplyAnswer): SupplyAnswer => (a.kind === "foldrun" && !opts.noDoor ? { ...a, door: true } : a);
-  registerPlatform({ isolation: { fake }, platformKeyAllowed: () => false, modelSupply: (_t, want) => {
+  registerPlatform({ operatorDoor: opts.operatorDoor ? () => true : undefined, isolation: { fake }, platformKeyAllowed: () => opts.platformKey ?? false, modelSupply: (_t, want) => {
     if (!want) return withDoor(opts.supply);
     opts.asked?.push(want);
     return withDoor(opts.supplyFor?.(want) ?? { kind: "refused", reason: "not asked for in this test" });
@@ -60,7 +64,7 @@ async function withAccount(
     fs.writeFileSync(path.join(ws, "agents/worker/agent.md"), `---\nname: worker\ndescription: works\n${opts.agentModel ? `model: ${opts.agentModel}\n` : ""}${opts.agentProvider ?? ""}---\n\nWork.\n`);
     await body(c);
   } finally {
-    registerPlatform({ isolation: prevHooks.isolation, platformKeyAllowed: prevHooks.allowed, modelSupply: prevHooks.supply, egress: prevHooks.egress, ownModelKeys: prevHooks.own });
+    registerPlatform({ operatorDoor: prevHooks.door, isolation: prevHooks.isolation, platformKeyAllowed: prevHooks.allowed, modelSupply: prevHooks.supply, egress: prevHooks.egress, ownModelKeys: prevHooks.own });
     for (const [k, v] of [["FOLDRUN_DATA", prev.data], ["FOLDRUN_RUN_ISOLATION", prev.iso], ["ANTHROPIC_API_KEY", prev.key]] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -695,4 +699,67 @@ test("tools: [debate, review] in a cloud step (FOL-444): the lease is granted th
     assert.match(events(done.steps[0]), /needs second_model:/);
     assert.equal(c.leases[0]!.secondModel, undefined, "no grant without second_model:");
   });
+});
+
+test("tools: [debate, review] on the platform's operator door: the step is on Anthropic (dev, 27 Nov 2026)", async () => {
+  // No foldrun supply, no key of the account's, the operator door on: it holds an Anthropic lease and refuses
+  // any other route. Before: "the provider of this step's model (sonnet) is not known here".
+  await withAccount({ supply: { kind: "none" }, platformKey: true, operatorDoor: true, agentProvider: SECOND }, async (c) => {
+    const done = await run();
+    assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.equal(done.steps[0]!.meteredAtDoor, true);
+    assert.deepEqual(c.grants[0]!.secrets.FOLDRUN_MODEL_KEY?.supply, { provider: "anthropic", via: "operator", metered: true });
+    assert.equal(c.leases[0]!.secondModel?.firstProvider, "anthropic");
+    assert.match(c.calls[0]!.input.systemPrompt, /# A second opinion/);
+  });
+  // The same empty env without the door may be a custom ANTHROPIC_BASE_URL: a tier word is no proof (Codex).
+  await withAccount({ supply: { kind: "none" }, platformKey: true, agentProvider: SECOND }, async (c) => {
+    const done = await run();
+    assert.match(events(done.steps[0]), /is not known here — tools: \[debate, review\] not offered/);
+    assert.equal(c.leases[0]?.secondModel, undefined);
+    assert.doesNotMatch(c.calls[0]!.input.systemPrompt, /A second opinion/);
+  });
+});
+
+test("tools: [debate, review]: the prompt names only what the attempt was granted (dev, 27 Nov 2026)", async () => {
+  const has = (c: Captured, n = 0) => c.calls[n]!.input.systemPrompt as string;
+  // Withdrawn for the same provider: no section, and the record says so.
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, review]\nsecond_model: anthropic/claude-y\n" }, async (c) => {
+    const done = await run();
+    assert.match(events(done.steps[0]), /not offered/);
+    assert.doesNotMatch(has(c), /A second opinion/);
+    assert.ok(!(done.steps[0]!.promptLayers ?? []).some((l) => l.name === "second"));
+    assert.equal(done.steps[0]!.systemPromptChars, has(c).length);
+  });
+  // Plan mode leaves neither: no section either.
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}permissionMode: plan\n` }, async (c) => {
+    await run();
+    assert.doesNotMatch(has(c), /A second opinion/);
+  });
+  // disallowedTools: [review] leaves debate: the section names debate alone.
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async (c) => {
+    await run();
+    assert.match(has(c), /\*\*debate\(/);
+    assert.doesNotMatch(has(c), /\*\*review\(/);
+  });
+  // The fallback attempt runs without the tools, and without the section.
+  const prev = { b: process.env.FOLDRUN_FALLBACK_BASE_URL, t: process.env.FOLDRUN_FALLBACK_TOKEN };
+  process.env.FOLDRUN_FALLBACK_BASE_URL = "https://fallback.test";
+  process.env.FOLDRUN_FALLBACK_TOKEN = "fallback-token";
+  try {
+    await withAccount({ supply: { kind: "none" }, platformKey: true, operatorDoor: true, firstRefused: true, agentProvider: SECOND }, async (c) => {
+      const done = await run();
+      assert.equal(c.calls.length, 2, events(done.steps[0]));
+      assert.match(has(c, 0), /# A second opinion/);
+      assert.doesNotMatch(has(c, 1), /A second opinion/);
+      assert.ok(!c.calls[1]!.input.allowed.some((t: string) => /second/.test(t)));
+      assert.equal(done.steps[0]!.systemPromptChars, has(c, 1).length, "the record describes the fallback's prompt");
+      assert.ok(!(done.steps[0]!.promptLayers ?? []).some((l) => l.name === "second"));
+    });
+  } finally {
+    for (const [k, v] of [["FOLDRUN_FALLBACK_BASE_URL", prev.b], ["FOLDRUN_FALLBACK_TOKEN", prev.t]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
