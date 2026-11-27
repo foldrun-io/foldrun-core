@@ -13,6 +13,26 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [31.0.0] — 2026-11-27
+
+### Breaking changes
+
+- `buildSubagentSpecs` from `@foldrun/core` — parameter 1 changed
+- `agentContext` from `@foldrun/core` — parameter 4 changed
+
+### Widened in the public API
+
+Declarations that only widened — optional members or trailing parameters added, nothing removed or retyped. Any other change to a declaration is counted as a break (scripts/surface-change.mjs).
+
+- `StepRecord` from `@foldrun/core`
+
+### New in the public API
+
+- `ATTEMPT_ID_ENV` from `@foldrun/core`
+- `withAttemptId` from `@foldrun/core`
+
+- feat(steps): FOLDRUN_STEP_ATTEMPT_ID, new for each attempt of each step (FOL-449) ([73db257](https://github.com/foldrun-io/foldrun-core/commit/73db257))
+
 ## [30.1.0] — 2026-11-27
 
 ### Widened in the public API
