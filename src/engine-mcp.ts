@@ -65,7 +65,7 @@ export function shellLine(command: string, args: string[]): string {
   return [command, ...args].map((w) => `'${w.replaceAll("'", `'\\''`)}'`).join(" ");
 }
 
-function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string, wrapped?: string, viaProxy?: typeof fetch): { client: Transport; server?: Transport } {
+function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: string, wrapped?: string, viaProxy?: typeof fetch, userAgent?: string): { client: Transport; server?: Transport } {
   if (s.type === "sdk") {
     const [client, server] = InMemoryTransport.createLinkedPair();
     return { client, server };
@@ -90,7 +90,9 @@ function transportFor(s: McpSpec, env: Record<string, string | undefined>, cwd: 
     return { client: new StdioClientTransport({ command: s.command!, args: s.args ?? [], env: { ...base, ...(s.env ?? {}) }, cwd, stderr: "ignore" }) };
   }
   const url = new URL(s.url!);
-  const requestInit: RequestInit = { headers: s.headers ?? {}, ...(s.redirect === "error" ? { redirect: "error" as const } : {}) };
+  // The caller's name on the HTTP requests too (FOL-415), unless the server's own headers say one.
+  const named: Record<string, string> = userAgent && !Object.keys(s.headers ?? {}).some((h) => h.toLowerCase() === "user-agent") ? { "user-agent": userAgent } : {};
+  const requestInit: RequestInit = { headers: { ...named, ...(s.headers ?? {}) }, ...(s.redirect === "error" ? { redirect: "error" as const } : {}) };
   // SSE is the older MCP transport (deprecated in the SDK); still accepted,
   // because an agent may name a server that has nothing newer.
   // Inside the walls, every request (the SSE stream too) goes through their
@@ -222,9 +224,11 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
         throw new Error(`MCP server ${name}: a server over ${s.type === "sse" ? "SSE" : "HTTP"} needs the sandbox's site proxy, which this sandbox does not offer — run this in the cloud, or use a stdio server`);
       }
       const remoteInWalls = ctx.sandbox && (s.type === "http" || s.type === "sse") ? wallsFetch(ctx.sandbox) : undefined;
-      const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd, undefined, remoteInWalls);
+      const named = mcpClientOf(ctx.client).mcpClient;
+      const clientAgent = named ? `${named.name}/${named.version}` : undefined;
+      const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd, undefined, remoteInWalls, clientAgent);
       // The caller's name, checked here too: connectMcp is exported (FOL-415, Codex).
-      const client = new Client(mcpClientOf(ctx.client).mcpClient ?? { name: "foldrun-engine", version: "1.0.0" });
+      const client = new Client(named ?? { name: "foldrun-engine", version: "1.0.0" });
       open.push({ client, transport: t.client, server: t.server });
       const sandboxToken = wrapped?.token;
       // Any launch that finds the protections changed stops this server at

@@ -950,10 +950,12 @@ both("a streamable HTTP server's session is ended (DELETE) when the step ends", 
   const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
   const methods: string[] = [];
   const transports = new Map<string, InstanceType<typeof StreamableHTTPServerTransport>>();
+  const agents: string[] = [];
   const web = http.createServer(async (req, res) => {
     methods.push(req.method!);
     let raw = "";
     for await (const c of req) raw += c;
+    agents.push(String(req.headers["user-agent"]));
     const sid = req.headers["mcp-session-id"] as string | undefined;
     let t = sid ? transports.get(sid) : undefined;
     if (!t) {
@@ -969,6 +971,11 @@ both("a streamable HTTP server's session is ended (DELETE) when the step ends", 
     const url = `http://127.0.0.1:${(web.address() as AddressInfo).port}/mcp`;
     const r = await step([{ content: [use("t1", "mcp__web__ping", {})] }, { content: [say("ok")] }], { mcpServers: { web: { type: "http", url } } as never, mcpNames: ["web"] });
     assert.equal(r.out!.status, "completed", JSON.stringify(r.events.filter((e) => e.type === "error")));
+    const { connectMcp } = await import("../src/engine-mcp.ts");
+    agents.length = 0;
+    const c = await connectMcp({ web: { type: "http", url } as never }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal, client: { name: "koder", version: "9.9.9" } });
+    await c.close();
+    assert.ok(agents.length > 0 && agents.every((a) => a === "koder/9.9.9"), `the caller's name on every HTTP request (FOL-415): ${agents.join(", ")}`);
     assert.equal(r.requests[1].body.messages.at(-1).content[0].content, "pong");
     assert.ok(methods.includes("DELETE"), `the session was ended: ${methods.join(",")}`);
   } finally {
