@@ -106,7 +106,7 @@ import {
   stoppedByText,
 } from "./store.ts";
 import { canReadBack } from "./tool-output.ts";
-import { PromptLayers, promptCacheKey } from "./prompt-layers.ts";
+import { PromptLayers, promptCacheKey, type AssembledPrompt } from "./prompt-layers.ts";
 import { loadCatalog, checkModel, clampEffort, catalogCost, findModel, tokenPriceOf, type Catalog, type TokenPrice } from "./catalog.ts";
 import { resolveSecrets, getSecret, materializeSecrets, secretSites, isClientCertValue, clientCertOf, withoutHeldCerts, isIdentityValue, identityOf } from "./secrets.ts";
 import { resolveNetwork, networkLine, networkEnforceWanted, proxyEnv, siteCovers, EGRESS_CA_ENV } from "./network.ts";
@@ -2076,7 +2076,7 @@ export function agentContext(
       else {
         second = { tools, model: want };
         allowed.push(...tools.map((t) => SECOND_TOOL_NAMES[t]));
-        parts.add("second", `# A second opinion\n\n${secondPromptLine(tools, want)}`);
+        parts.add("second", secondSection(tools, want));
       }
     }
     for (const t of asking) providerWarnings.push(`tools: {${t}: ask} — a second opinion is a tool the agent calls itself; write tools: [${t}] to grant it`);
@@ -2125,6 +2125,10 @@ export function agentContext(
      *  reported by the step, not here, so it lands in the run's trace. */
     clock,
     systemPrompt: prompt.text,
+    /** The same prompt for the second-opinion tools one attempt is actually granted (decided at launch,
+     *  for the model sent): its section names those, or is left out when none are (dev, 27 Nov 2026). */
+    promptForSecond: (granted: { tools: readonly ("debate" | "review")[]; model: string } | null): AssembledPrompt =>
+      parts.assemble({ set: { second: granted && granted.tools.length ? secondSection(granted.tools, granted.model) : null } }),
     /** What the record keeps of each layer of that prompt. */
     promptLayers: prompt.layers,
     allowed: finalAllowed,
@@ -2726,7 +2730,7 @@ async function runStepBody(
     // step: the generic HTTP tool still works without the typed ones.
     for (const w of await prefetchOpenApi(tenant, openApiSources(agentDir, tenant))) push("error", `openapi: ${w}`);
     const {
-      front, clockEnv, clock, systemPrompt, promptLayers, allowed, disabled, apiTools, scriptTools,
+      front, clockEnv, clock, systemPrompt: contextPrompt, promptForSecond, promptLayers, allowed, disabled, apiTools, scriptTools,
       secretEnv, secretScopes, missingSecrets, missingTools, runtime,
       unknownTools, shadowed, legacyUse, retiredTools, mcpServers, mcpNames,
       apiSpecs, scriptSpecs, brokenTools, size: agentSize,
@@ -2746,6 +2750,8 @@ async function runStepBody(
     } = agentContext(agentDir, tenant, tags, { runId, agent: step.agent, attempt }, flowTimezone, false, step.model ?? modelOverride ?? null);
     disposeRuntime = runtime.dispose;
     canActOutward = outward;
+    // Not const: tools: [debate, review] are decided at launch, and the prompt then names only those granted (below).
+    let systemPrompt = contextPrompt;
     // A step moved to another provider by its model (modelRoute): a judge
     // pinned to a full id of another provider would go to this step's
     // endpoint and fail as a FAIL verdict — it grades with the step's own
@@ -3185,7 +3191,17 @@ async function runStepBody(
     if (second) {
       // foldrun's models: the provider the platform routes to. An own key: only a provider/model name says it;
       // a bare id or an alias on a custom endpoint is not proof of a provider, so it is not offered (Codex).
-      const firstProvider = supply.kind === "foldrun" ? supply.provider : providerOfName(wireModel);
+      // The platform's operator door (no key of the account's, and the platform says the door is on) holds an
+      // Anthropic lease and refuses any other route, so the step is on Anthropic (dev, 27 Nov 2026: the default
+      // model there was "not known" and nothing was offered). An empty env without the door may still be a
+      // custom ANTHROPIC_BASE_URL: only a provider/model name says what that is (Codex).
+      const onOperatorDoor = primaryOnPlatform && Boolean(platform.operatorDoor?.(tenant));
+      const firstProvider =
+        supply.kind === "foldrun" && !primaryOnPlatform
+          ? supply.provider
+          : onOperatorDoor
+            ? "anthropic"
+            : providerOfName(wireModel);
       const target = providerOfName(second.model) ?? second.model.split("/")[0];
       const off = !firstProvider
         ? `the provider of this step's model (${wireModel}) is not known here`
@@ -3199,6 +3215,14 @@ async function runStepBody(
         const tools = second.tools.filter((t) => allowed.includes(SECOND_TOOL_NAMES[t]));
         if (tools.length) secondGrant = { tools, model: second.model, firstProvider: firstProvider as string };
       }
+    }
+    if (second) {
+      // Told only about what it may call: the agent read "A second opinion" for tools it did not have (dev,
+      // 27 Nov 2026); plan mode or disallowedTools may leave one of the two, or none (Codex).
+      const assembled = promptForSecond(secondGrant);
+      systemPrompt = assembled.text;
+      step.systemPromptChars = systemPrompt.length;
+      step.promptLayers = assembled.layers;
     }
     // Colleagues this agent may consult mid-turn — declared, like every
     // other capability.
@@ -4164,14 +4188,20 @@ async function runStepBody(
         // Anthropic must not inherit the primary's Chat-Completions door.
         // tools: [debate, review] were checked against the primary's provider: not offered on the fallback (Codex).
         const secondNames = Object.values(SECOND_TOOL_NAMES) as string[];
-        if (secondGrant) push("info", "the fallback provider is not the one debate and review were checked against — they are not offered on this attempt");
+        const fallbackPrompt = secondGrant ? promptForSecond(null) : null;
+        if (fallbackPrompt) {
+          push("info", "the fallback provider is not the one debate and review were checked against — they are not offered on this attempt");
+          // The record describes the prompt this attempt is sent, not the primary's (Codex).
+          step.systemPromptChars = fallbackPrompt.text.length;
+          step.promptLayers = fallbackPrompt.layers;
+        }
         const fallbackArgs = {
           ...retryArgs,
           input: {
             ...retryArgs.input,
             translator: fallbackEnv && secondSupply === fallbackEnv ? secondTranslator : null,
             ...(secondGrant
-              ? { second: undefined, allowed: retryArgs.input.allowed.filter((t: string) => !secondNames.includes(t)), mcpNames: retryArgs.input.mcpNames.filter((n: string) => n !== SECOND_SERVER) }
+              ? { second: undefined, systemPrompt: fallbackPrompt!.text, allowed: retryArgs.input.allowed.filter((t: string) => !secondNames.includes(t)), mcpNames: retryArgs.input.mcpNames.filter((n: string) => n !== SECOND_SERVER) }
               : {}),
           },
           env: Object.fromEntries(
@@ -7562,4 +7592,10 @@ export function scriptLanguages(scripts: ScriptSpec[]): RuntimeSpec | null {
   const kinds = new Set(scripts.map(kind));
   if (!kinds.has("node")) return null;
   return { node: true, ...(kinds.has("python") ? { python: true } : {}), packages: [], npm: [] };
+}
+
+
+/** The "A second opinion" section of an agent's prompt, for the tools it names. */
+function secondSection(tools: readonly ("debate" | "review")[], model: string): string {
+  return `# A second opinion\n\n${secondPromptLine(tools, model)}`;
 }

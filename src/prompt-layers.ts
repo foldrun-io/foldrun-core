@@ -62,12 +62,16 @@ export class PromptLayers {
     if (opts.dynamic) this.dynamic.add(name);
   }
 
-  assemble(): AssembledPrompt {
+  /** `set`: a layer's text for this prompt only, by name — `null` leaves the layer out (a tool withdrawn at
+   *  launch takes its section with it), never a search through the text, which may quote it. */
+  assemble(opts: { set?: Record<string, string | null> } = {}): AssembledPrompt {
     const parts: string[] = [];
     const layers: PromptLayerRecord[] = [];
     const take = (names: string[], isDynamic: boolean) => {
       for (const name of names) {
-        const joined = this.text.get(name)!.join(SEP);
+        const over = opts.set && Object.prototype.hasOwnProperty.call(opts.set, name) ? opts.set[name] : undefined;
+        if (over === null || over === "") continue;
+        const joined = over ?? this.text.get(name)!.join(SEP);
         parts.push(joined);
         layers.push({ name, chars: joined.length, hash: hashLayer(joined), ...(isDynamic ? { stable: false } : {}) });
       }
