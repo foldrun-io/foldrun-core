@@ -166,6 +166,152 @@ test("a failed job comes back as a failed reply; the parent decides, the group d
   });
 });
 
+test("a job ended for want of memory says so, and the next job for that colleague runs a size class up (FOL-438)", async () => {
+  let serve: Serve | null = null;
+  const got: DelegationResult[] = [];
+  let readerRuns = 0;
+  const sizes: string[] = [];
+  const fake: Fake = async (args) => {
+    if (agentOf(args) === "reader") {
+      readerRuns++;
+      sizes.push(String(args.size));
+      // The first sandbox is ended by the cluster; the second, a class up, finishes.
+      if (readerRuns === 1) return { status: "failed", result: null, reason: "OOMKilled (exit 128)", costUsd: 0 };
+      return { status: "completed", result: "read it", costUsd: 0 };
+    }
+    got.push(await serve!({ id: "j1", agent: "reader", job: "read" }));
+    got.push(await serve!({ id: "j2", agent: "reader", job: "read" }));
+    got.push(await serve!({ id: "j3", agent: "reader", job: "read again" }));
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  await withDesk(fake, { lease: async () => lease(), delegations: (_a, run) => ((serve = run), { close: async () => {} }) }, async () => {
+    const run = createFlowRun("acme", "desk", [step("writer")], "f", "running");
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const done = readRun("acme", "desk", run.id)!;
+    const jobs = done.steps.filter((s) => s.subagentOf === "writer");
+    assert.equal(jobs.length, 3, "a job is never run twice by itself: three asks, three records");
+    // The first: failed, at the agent's own size, and the reply names the cause and the way on.
+    assert.equal(got[0].status, "failed");
+    assert.equal(jobs[0].sizeUp, undefined);
+    assert.match(got[0].result ?? "", /^reader's sandbox was ended for want of memory or disk at size: large/, "the cause comes first, where a long reply is not cut");
+    assert.match(got[0].result ?? "", /already done outside .* still stands/);
+    assert.match(got[0].result ?? "", /asks for size: heavy/);
+    assert.match(got[0].result ?? "", /agent\.md needs `size: heavy`, and a `resources:` memory or disk figure there, if any, raised or removed/);
+    const next = "heavy";
+    assert.deepEqual(sizes, ["large", "heavy", "heavy"], "what the executor was asked for");
+    // The second: one class up, said once on its record, and it finishes.
+    assert.equal(got[1].status, "completed");
+    assert.equal(jobs[1].sizeUp, next);
+    assert.equal(jobs[1].events.filter((e) => /asks for a size class up/.test(e.text)).length, 1);
+    assert.doesNotMatch(got[1].result ?? "", /want of memory/);
+    // The third keeps the class that worked, and does not say it again.
+    assert.equal(jobs[2].sizeUp, next);
+    assert.equal(jobs[2].events.filter((e) => /asks for a size class up/.test(e.text)).length, 0);
+  });
+});
+
+test("an ended job is not hidden by one that finished beside it, and a tool's own 'out of memory' moves nothing (FOL-438, Codex)", async () => {
+  let serve: Serve | null = null;
+  const got: DelegationResult[] = [];
+  let n = 0;
+  const sizes: string[] = [];
+  const fake: Fake = async (args) => {
+    if (agentOf(args) === "reader") {
+      const mine = ++n;
+      sizes.push(String(args.size));
+      // 1 is ended by the cluster, with an error written after the verdict's cause; 2 finishes beside it.
+      if (mine === 1) return { status: "failed", result: null, reason: "OOMKilled (exit 137)", costUsd: 0 };
+      if (mine === 2) return (await new Promise((r) => setTimeout(r, 150)), { status: "completed", result: "ok", costUsd: 0 });
+      return { status: "completed", result: "ok", costUsd: 0 };
+    }
+    if (agentOf(args) === "talker") {
+      // Words alone, even the executor's own, with no reason from the executor.
+      args.emit("error", "sandbox ended: OOMKilled (exit 137)");
+      return { status: "failed", result: null, costUsd: 0 };
+    }
+    const [a, b] = await Promise.all([serve!({ id: "j1", agent: "reader", job: "a" }), serve!({ id: "j2", agent: "reader", job: "b" })]);
+    got.push(a, b, await serve!({ id: "j3", agent: "reader", job: "c" }));
+    got.push(await serve!({ id: "j4", agent: "talker", job: "t" }), await serve!({ id: "j5", agent: "talker", job: "t" }));
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  const agents = {
+    ...AGENTS,
+    writer: AGENTS.writer.replace("subagents: [reader]", "subagents: [reader, talker]"),
+    talker: AGENTS.reader.replace("name: reader", "name: talker"),
+  };
+  await withDesk(fake, { lease: async () => lease(), delegations: (_a, run) => ((serve = run), { close: async () => {} }) }, async () => {
+    const run = createFlowRun("acme", "desk", [step("writer")], "f", "running");
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const jobs = readRun("acme", "desk", run.id)!.steps.filter((s) => s.subagentOf === "writer");
+    assert.equal(got[0].status, "failed");
+    assert.equal(got[1].status, "completed");
+    assert.deepEqual(sizes, ["large", "large", "heavy"], "the job after an ended one asks a class up, though the last to finish was fine");
+    const talkers = jobs.filter((s) => s.agent === "talker");
+    assert.doesNotMatch(got[3].result ?? "", /want of memory or disk/);
+    assert.equal(talkers[1].sizeUp, undefined);
+  }, agents);
+});
+
+test("a cleanup that throws after the sandbox was ended does not lose the verdict (FOL-438, Codex)", async () => {
+  let serve: Serve | null = null;
+  const got: DelegationResult[] = [];
+  const sizes: string[] = [];
+  let leases = 0;
+  const fake: Fake = async (args) => {
+    if (agentOf(args) === "reader") {
+      sizes.push(String(args.size));
+      return sizes.length === 1 ? { status: "failed", result: null, reason: "OOMKilled (exit 137)", costUsd: 0 } : { status: "completed", result: "ok", costUsd: 0 };
+    }
+    got.push(await serve!({ id: "j1", agent: "reader", job: "a" }));
+    got.push(await serve!({ id: "j2", agent: "reader", job: "a" }));
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  // Leases in order: the writer's, then the first reader's, whose log drain fails.
+  const leaseFor = async () => (++leases === 2 ? { ...lease(), drainLog: async () => { throw new Error("proxy gone"); } } : lease());
+  await withDesk(fake, { lease: leaseFor, delegations: (_a, run) => ((serve = run), { close: async () => {} }) }, async () => {
+    const run = createFlowRun("acme", "desk", [step("writer")], "f", "running");
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    assert.equal(got[0].status, "failed");
+    assert.match(got[0].result ?? "", /^reader's sandbox was ended for want of memory or disk at size: large/);
+    assert.deepEqual(sizes, ["large", "heavy"]);
+    const first = readRun("acme", "desk", run.id)!.steps.find((s) => s.subagentOf === "writer")!;
+    assert.ok(first.events.some((e) => /proxy gone/.test(e.text)), "the drain did throw on this job: " + first.events.map((e) => e.text).join(" | "));
+  });
+});
+
+test("a job that failed for another reason is not moved up a size, and one at the largest class is told so (FOL-438)", async () => {
+  let serve: Serve | null = null;
+  const got: DelegationResult[] = [];
+  const fake: Fake = async (args) => {
+    if (agentOf(args) === "reader") return { status: "failed", result: null, reason: "Error (exit 1)", costUsd: 0 };
+    if (agentOf(args) === "big") return { status: "failed", result: null, reason: "OOMKilled (exit 137)", costUsd: 0 };
+    got.push(await serve!({ id: "j1", agent: "reader", job: "read" }));
+    got.push(await serve!({ id: "j2", agent: "reader", job: "read" }));
+    got.push(await serve!({ id: "j3", agent: "big", job: "crunch" }));
+    got.push(await serve!({ id: "j4", agent: "big", job: "crunch" }));
+    return { status: "completed", result: "done", costUsd: 0 };
+  };
+  const agents = {
+    ...AGENTS,
+    writer: AGENTS.writer.replace("subagents: [reader]", "subagents: [reader, big]"),
+    big: "---\nname: big\ndescription: Crunches.\ntools: [code]\nsandbox: own\nsize: heavy\n---\n\nCrunch it.\n",
+  };
+  await withDesk(fake, { lease: async () => lease(), delegations: (_a, run) => ((serve = run), { close: async () => {} }) }, async () => {
+    const run = createFlowRun("acme", "desk", [step("writer")], "f", "running");
+    writeRun("acme", "desk", run);
+    await driveRun("acme", "desk", readRun("acme", "desk", run.id)!);
+    const jobs = readRun("acme", "desk", run.id)!.steps.filter((s) => s.subagentOf === "writer");
+    assert.equal(jobs.length, 4);
+    assert.doesNotMatch(got[0].result ?? "", /want of memory/);
+    assert.equal(jobs[1].sizeUp, undefined, "a plain failure moves nothing");
+    assert.match(got[2].result ?? "", /at size: heavy.*Size: heavy, the largest class, has been tried: its agent\.md needs `resources:`/s);
+    assert.equal(jobs[3].sizeUp, undefined, "nothing above heavy");
+  }, agents);
+});
+
 test("specs: sandbox: own goes to the delegate list, never into the SDK's sub-agents", () => {
   const root = workspaceDir("default", `delegate-ws-${process.pid}`);
   try {

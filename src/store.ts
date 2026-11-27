@@ -3609,6 +3609,11 @@ export interface StepRecord {
   /** A size class a retry moved the step up to (an evicted or OOM-killed
    *  attempt), overriding the agent's own `size:` for the attempts after. */
   sizeUp?: "large" | "heavy";
+  /** The size class this step's sandbox was running at when the executor
+   *  said it ended for want of memory or disk (OOMKilled, Evicted): the
+   *  executor's own word, never read back from an error's text. What a
+   *  delegated job's next ask is sized from (FOL-438). */
+  roomEndedAt?: "small" | "large" | "heavy";
   /** Which runner image the step's sandbox ran: `full` (browsers in it) or
    *  `slim`, why, and `pod` when a browsing step ran slim and browsed
    *  through the account's browser pod. The last attempt's; absent where

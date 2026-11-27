@@ -520,6 +520,33 @@ export function readAgentsMd(dir: string): { data: Record<string, unknown>; body
   return null;
 }
 
+/** Did the cluster end this step's last attempt for want of memory or disk
+ *  (OOMKilled, Evicted)? Read from its last error, as the retry policy does. */
+const endedForRoom = (step: Pick<StepRecord, "events">): boolean =>
+  /OOMKilled|Evicted|ephemeral-storage|out of memory/i.test([...step.events].reverse().find((e) => e.type === "error")?.text ?? "");
+/** The size class above the one a step ran at; null at the largest. */
+const sizeAbove = (step: Pick<StepRecord, "size" | "sizeUp">): "large" | "heavy" | null =>
+  step.sizeUp === "large" || (!step.sizeUp && step.size === "large") ? "heavy" : step.sizeUp === "heavy" || step.size === "heavy" ? null : "large";
+const SIZE_RANK = { small: 0, large: 1, heavy: 2 } as const;
+type SizeClass = keyof typeof SIZE_RANK;
+/** The class the next job for a colleague asks for, from every job this
+ *  step gave it: one above the largest class the executor ended one at for
+ *  want of memory or disk (`roomEndedAt`, the executor's own word, never an
+ *  error's text), or the class an earlier job was already moved to. Null
+ *  when nothing moves it. `ceiling` is true when one was ended at heavy. */
+function delegateSizeFloor(jobs: Pick<StepRecord, "roomEndedAt" | "sizeUp">[]): { up: "large" | "heavy" | null; ceiling: boolean } {
+  let rank = 0;
+  let ceiling = false;
+  for (const j of jobs) {
+    if (j.roomEndedAt) {
+      if (j.roomEndedAt === "heavy") ceiling = true;
+      else rank = Math.max(rank, SIZE_RANK[j.roomEndedAt] + 1);
+    }
+    if (j.sizeUp) rank = Math.max(rank, SIZE_RANK[j.sizeUp]);
+  }
+  return { up: rank === 2 ? "heavy" : rank === 1 ? "large" : null, ceiling };
+}
+
 const workspaceRootOf = (agentDir: string) => path.join(agentDir, "..", "..");
 
 /** What a snapshot step is told (Part B3). */
@@ -4017,6 +4044,16 @@ async function runStepBody(
           step.browserPod = { ...outcome.browserPod, failure: decision.message };
         }
       }
+      // The executor's verdict on a sandbox ended for want of memory or disk,
+      // kept with the class it ran at as soon as the last outcome is known
+      // and saved before the cleanup below: a drain or release that throws,
+      // or a worker that dies there, must not lose it (Codex, FOL-438).
+      if (outcome.status === "failed" && outcome.reason && /OOMKilled|Evicted|ephemeral-storage/i.test(outcome.reason)) {
+        step.roomEndedAt = size;
+        save();
+      } else if (step.roomEndedAt) {
+        delete step.roomEndedAt;
+      }
       if (lease) {
         for (const line of await lease.drainLog()) {
           // pushWatching, not push: a line the proxy wrote may carry the
@@ -5928,12 +5965,29 @@ function driveRunInner(
           // A stable id on both records: an index into run.steps moves when a
           // rescue or a fan-out is spliced in before the child.
           const id = `d_${crypto.randomBytes(5).toString("hex")}`;
+          // The colleague's last job for this step, when the cluster ended it
+          // for want of memory or disk: the same size would end the same
+          // way, and the step that asks cannot change a colleague's size. So
+          // the next job it hands the same colleague runs one class up
+          // (FOL-438). Asking again is the delegating step's own choice: a
+          // job is never run twice by itself, since its tools may have acted.
+          // Read over ALL of this step's jobs for the colleague, not the
+          // last: two may overlap, and the one that finished fine must not
+          // hide the one that was ended (Codex).
+          const jobsFor = () => {
+            const mine = new Set((parent.delegations ?? []).map((d) => d.id));
+            return run.steps.filter((s) => s.agent === agent && s.subagentOf === parent.agent && !!s.delegation && mine.has(s.delegation));
+          };
+          const earlier = jobsFor();
+          const up = delegateSizeFloor(earlier).up ?? undefined;
+          const said = !!up && earlier.some((e) => e.sizeUp === up);
           const child: StepRecord = {
             agent,
             subagentOf: parent.agent,
             delegation: id,
             instruction: job,
             group: parent.group,
+            ...(up ? { sizeUp: up } : {}),
             // A job done for a step is held to that step's output limit.
             ...(parent.maxOutputTokens ? { maxOutputTokens: parent.maxOutputTokens } : {}),
             optional: true,
@@ -5944,6 +5998,9 @@ function driveRunInner(
             result: null,
             costUsd: null,
           };
+          if (up && !said) {
+            child.events.push({ t: new Date().toISOString(), type: "info", text: `size: ${up} asked — a job this step gave ${agent} was ended for want of memory or disk, so this one asks for a size class up` });
+          }
           run.steps.push(child);
           const at = run.steps.length - 1;
           const entry: StepDelegation = { id, agent, status: "running" };
@@ -6039,9 +6096,30 @@ function driveRunInner(
             }
             save();
           }
+          // A job the cluster ended for want of memory or disk says so in
+          // words the delegating agent can act on, and its author can fix.
+          // It goes FIRST: the tool keeps only the head of a long reply. It
+          // does not say the work is lost: what the job did outside (a form
+          // sent) stands, and files it wrote may have come back (Codex).
+          let room = "";
+          if (status === "failed" && child.roomEndedAt) {
+            const ran: SizeClass = child.roomEndedAt;
+            const held = child.reserved?.memGiB ? ` (${child.reserved.memGiB} GiB of memory)` : "";
+            // From the same history the next job is sized from, so a job
+            // that ends late never promises a class another already failed at.
+            const floor = delegateSizeFloor(jobsFor());
+            const next = floor.up && !floor.ceiling && SIZE_RANK[floor.up] > SIZE_RANK[ran] ? floor.up : null;
+            room =
+              `${agent}'s sandbox was ended for want of memory or disk at size: ${ran}${held}, before the job finished. ` +
+              `Anything it had already done outside (a form sent, a message posted) still stands, and only the files listed with this reply came back: check what was done before asking for it again. ` +
+              (next
+                ? `A job handed to ${agent} again in this step asks for size: ${next} (refused if the account's limits do not allow it). To make it lasting, its agent.md needs \`size: ${next}\`, and a \`resources:\` memory or disk figure there, if any, raised or removed.`
+                : `Size: heavy, the largest class, has been tried: its agent.md needs \`resources:\` with more memory or disk, or the job must be smaller.`) +
+              "\n";
+          }
           return {
             status,
-            result: child.result ?? (errors || "(no reply)"),
+            result: room + (child.result ?? (errors || "(no reply)")),
             wrote: child.wrote ?? [],
             files: back.files,
             filesOmitted: back.omitted,
@@ -6345,10 +6423,9 @@ function driveRunInner(
                 // a sandbox — nothing is rented while it waits — and a stop
                 // ends it. The step is `pending` meanwhile, so a driver that
                 // inherits the run mid-wait simply runs the attempt.
-                const last = [...step.events].reverse().find((e) => e.type === "error")?.text ?? "";
                 let sizeNote = "";
-                if (/OOMKilled|Evicted|ephemeral-storage|out of memory/i.test(last)) {
-                  const up = step.sizeUp === "large" || (!step.sizeUp && step.size === "large") ? "heavy" : step.sizeUp === "heavy" || step.size === "heavy" ? null : "large";
+                if (endedForRoom(step)) {
+                  const up = sizeAbove(step);
                   if (up) {
                     step.sizeUp = up;
                     sizeNote = ` at size: ${up}`;
