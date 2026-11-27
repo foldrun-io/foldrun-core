@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.0.1] — 2026-11-27
+
+- docs(starter): the guide foldrun init writes names FOLDRUN_STEP_ATTEMPT_ID and FOLDRUN_FAIL_RUN_FILE (FOL-449, FOL-450) ([a455ea9](https://github.com/foldrun-io/foldrun-core/commit/a455ea9))
+
 ## [32.0.0] — 2026-11-27
 
 ### Breaking changes
