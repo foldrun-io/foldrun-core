@@ -210,6 +210,9 @@ export interface ContainerStepOutcome {
   /** The model's final text block — see StepRecord.conclusion. Crosses the
    *  boundary with the rest of the outcome; the driver spreads it. */
   conclusion?: string | null;
+  /** The step's shell `verify:` said the whole run must end, and why
+   *  (ExecOutcome.failRun, FOL-450). */
+  failRun?: string;
   /** The parsed JSON of an `output: json` step, crossing back as a value. */
   data?: unknown;
   costUsd: number | null;
@@ -1827,6 +1830,7 @@ export function parseDriverLine(
         ...(typeof parsed.turns === "number" && parsed.turns >= 0 ? { turns: parsed.turns } : {}),
         ...(typeof parsed.stopReason === "string" ? { stopReason: parsed.stopReason.slice(0, 64) } : {}),
         ...(parseBrowserPod(parsed.browserPod) ? { browserPod: parseBrowserPod(parsed.browserPod)! } : {}),
+        ...(parsed.status === "failed" && typeof parsed.failRun === "string" && parsed.failRun.trim() ? { failRun: parsed.failRun.trim().slice(0, 1000) } : {}),
         usage:
           parsed.usage &&
           typeof parsed.usage.inputTokens === "number" &&

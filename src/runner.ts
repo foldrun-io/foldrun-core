@@ -545,6 +545,17 @@ export function withAttemptId<T extends Record<string, string>>(env: T, attempt:
   return env;
 }
 
+/** The longest reason a check's "end the run" keeps on the record. */
+export const FAIL_RUN_REASON_MAX = 300;
+/** Has a step of this run been told by its check that the run must end
+ *  (FOL-450)? Only a step that ran: a pending or skipped record's word is
+ *  another run's (a re-run copies the record it starts from). A word a
+ *  carried record came with is dropped when a drive starts, so one it holds
+ *  after that is this run's: its rescuer's. */
+export function runEndedByCheck(steps: Pick<StepRecord, "status" | "failRun">[]): string | null {
+  return steps.find((s) => !!s.failRun && (s.status === "running" || s.status === "failed"))?.failRun ?? null;
+}
+
 const SIZE_RANK = { small: 0, large: 1, heavy: 2 } as const;
 type SizeClass = keyof typeof SIZE_RANK;
 /** The class the next job for a colleague asks for, from every job this
@@ -2661,6 +2672,17 @@ async function runStepBody(
   // later go while the sandbox re-attached to holds its own id; inside any
   // one sandbox the scripts, the shell and verify always read the same one.
   const attempt: AttemptRef = { id: step.attemptId };
+  // The check's word that the whole run must end (FOL-450), as a field on
+  // the record: what ends the run reads this, never the wording of an
+  // event. Masked here as an event's text is (the step's secret values,
+  // then anything shaped like a credential), then cut to the one short line
+  // the record keeps.
+  const keepFailRun = (outcome: { status: string; failRun?: string }) => {
+    const reason = outcome.status === "failed" && outcome.failRun ? mask(outcome.failRun).trim().slice(0, FAIL_RUN_REASON_MAX) : "";
+    if (reason) step.failRun = reason;
+    else delete step.failRun;
+    save();
+  };
   let sandboxGoId: string | undefined;
   const nextAttemptId = () => {
     attempt.id = newAttemptId();
@@ -3928,6 +3950,9 @@ async function runStepBody(
         const twStart = testRun && runId && tenant ? (await restoreTestWrites(tenant, workspaceName, runId, divertFor(runId).to)).start : undefined;
         try {
           out = await runIsolated(a);
+          // The check's word that the run must end, on the record before any
+          // clean-up can fail or the worker can die (no go follows one).
+          if (out.status === "failed" && out.failRun) keepFailRun(out);
           return out;
         } finally {
           // Saved now: the clean-up after an attempt (the log drain, the
@@ -3968,7 +3993,7 @@ async function runStepBody(
       // A 401 from a token that rotated mid-step is not a broken key: the
       // replacement is already on its way to the mounted file. Wait for it
       // once, then fall into the same retry the busy case uses.
-      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal)) {
         push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
         const rotated = await awaitRotatedCredential(credentialUsed);
         if (rotated) {
@@ -3987,7 +4012,7 @@ async function runStepBody(
           push("info", "the credential did not change — this is the key itself, not a rotation");
         }
       }
-      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
         await sleep(wait);
@@ -4006,7 +4031,7 @@ async function runStepBody(
       // platform's fault, so the step runs again, whatever its `retry:` —
       // unless it can act outside the workspace and its tools already ran:
       // the post may be up, and a second attempt would post it again.
-      for (let n = 1; n <= DROP_RETRIES && outcome.status === "failed" && lastDrop; n++) {
+      for (let n = 1; n <= DROP_RETRIES && outcome.status === "failed" && !outcome.failRun && lastDrop; n++) {
         if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
           push("info", `the model connection dropped after this step's tools ran — not retried: they can act outside the workspace, and another attempt could repeat what they did`);
           break;
@@ -4028,7 +4053,7 @@ async function runStepBody(
       // retry included, because the retry asked the same way. Run it once
       // more with that said plainly, on the same safety rule as a dropped
       // connection: never again after an outward tool already ran.
-      for (let n = 1; n <= TEXT_CALL_RETRIES && wroteToolCallAsText(attemptText(outcome.result, step.events.slice(attemptFrom))); n++) {
+      for (let n = 1; n <= TEXT_CALL_RETRIES && !outcome.failRun && wroteToolCallAsText(attemptText(outcome.result, step.events.slice(attemptFrom))); n++) {
         if (!dropRetrySafe(canActOutward, step.events.slice(attemptFrom))) {
           push("info", "the model wrote a tool call as text instead of making it — not run again: this step's tools can act outside the workspace and already ran");
           break;
@@ -4048,7 +4073,7 @@ async function runStepBody(
       // whole contract is that re-driving is safe. A declared fallback
       // replaces the provider block's env wholesale, so the spread order in
       // isolatedArgs (providerEnv last) has to be overridden here.
-      if (outcome.status === "failed" && lastRefusal && secondSupply) {
+      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply) {
         push(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
@@ -4088,7 +4113,7 @@ async function runStepBody(
         for (const r of outcome.refused) seen.set(r.path, r);
         step.refused = [...seen.values()];
       }
-      if (outcome.status === "failed" && outcome.browserPod?.lost) {
+      if (outcome.status === "failed" && !outcome.failRun && outcome.browserPod?.lost) {
         const decision = podLossDecision(outcome.browserPod);
         if (decision.rerun) {
           push("info", decision.note);
@@ -4138,6 +4163,10 @@ async function runStepBody(
       } else if (step.roomEndedAt) {
         delete step.roomEndedAt;
       }
+      // The same for the check's word that the run must end (FOL-450): a
+      // field, saved before the cleanup, so a worker that dies there leaves
+      // a step the next driver fails instead of running again.
+      keepFailRun(outcome);
       if (lease) {
         for (const line of await lease.drainLog()) {
           // pushWatching, not push: a line the proxy wrote may carry the
@@ -4385,7 +4414,10 @@ async function runStepBody(
           // Each go of the work is its own attempt to whatever checks its
           // evidence: the options below are built after the id is taken.
           nextAttemptId();
-          return await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
+          const out = await attemptInProcess(t ? { ...modelEnv, ...t.env } : modelEnv);
+          // On the record before the clean-up below can fail (FOL-450).
+          if (out.status === "failed" && out.failRun) keepFailRun(out);
+          return out;
         } finally {
           // The attempt's language servers end with it (a retry starts them again).
           symbolsTools?.close();
@@ -4404,7 +4436,7 @@ async function runStepBody(
       let outcome = await attemptThrough(localModelEnv, translator);
       // Same rule as the isolated path: a credential that rotated under the
       // step is waited out and retried before anything else is considered.
-      if (outcome.status === "failed" && isAuthRefusal(lastRefusal)) {
+      if (outcome.status === "failed" && !outcome.failRun && isAuthRefusal(lastRefusal)) {
         push("info", `the model credential was refused mid-step — waiting for the refreshed one`);
         const rotated = await awaitRotatedCredential(credentialUsed);
         if (rotated) {
@@ -4418,7 +4450,7 @@ async function runStepBody(
       }
       // Same rule as the isolated path: a busy provider is waited out on
       // the supply it refused from, before any fallback is considered.
-      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && isTransientOverload(lastRefusal); n++) {
+      for (let n = 1; n <= OVERLOAD_RETRIES && outcome.status === "failed" && !outcome.failRun && isTransientOverload(lastRefusal); n++) {
         const wait = backoffMs(n, lastRefusal);
         push("info", `provider busy (${lastRefusal.slice(0, 60)}) — waiting ${(wait / 1000).toFixed(1)}s, attempt ${n} of ${OVERLOAD_RETRIES}`);
         await sleep(wait);
@@ -4427,7 +4459,7 @@ async function runStepBody(
       }
       // Same rule as the isolated path: one retry, on a refusal, on the
       // declared or platform second supply.
-      if (outcome.status === "failed" && lastRefusal && secondSupply) {
+      if (outcome.status === "failed" && !outcome.failRun && lastRefusal && secondSupply) {
         push(
           "info",
           `primary model supply refused (${lastRefusal.slice(0, 80)}) — retrying this step on the fallback provider`,
@@ -4435,6 +4467,7 @@ async function runStepBody(
         supplyState = "exhausted";
         outcome = await attemptThrough(secondSupply, fallbackEnv && secondSupply === fallbackEnv ? fallbackTranslator : null);
       }
+      keepFailRun(outcome);
       if (!testRun) await publishPublicDir(tenant, path.basename(workspaceRoot), push);
       sayWhy(outcome.status);
       step.status = outcome.status;
@@ -5417,6 +5450,13 @@ function driveRunInner(
       // last driver got, runStep passes that as `resume`, and the step
       // carries on from where it was — a deploy no longer costs the run.
       let orphaned = false;
+      // A record that has not run here holds no verdict of this run: a
+      // re-run copies the record it starts from, and with it a word an
+      // earlier run's check left. Cleared before anything reads it.
+      // A carried step failed in the run it came from, whatever its status
+      // says here; a rescue record that failed in THIS run keeps its word,
+      // and gives it back to the step it rescued (rescueStep).
+      for (const step of run.steps) if (step.failRun && (step.carriedFrom || (step.status !== "running" && step.status !== "failed"))) delete step.failRun;
       // A sandbox: own job whose driver went away is over: the reply it was
       // making went to a process that no longer exists, and the step that
       // asked is told it failed (the platform settles the door's side), so
@@ -5446,6 +5486,16 @@ function driveRunInner(
       const reattaching: string[] = [];
       for (const step of run.steps) {
         if (step.status !== "running") continue;
+        // Its check had already said the run must end when the worker went
+        // away (the verdict is saved before the cleanup): the step is over,
+        // failed, and is neither re-attached to nor run again (FOL-450).
+        if (step.failRun) {
+          step.status = "failed";
+          step.sandbox = null;
+          step.finishedAt ??= new Date().toISOString();
+          step.events.push({ t: new Date().toISOString(), type: "error", text: `verify ends the run: ${step.failRun} (the worker driving this step restarted after its check; it is not run again)` });
+          continue;
+        }
         const resumable = !!step.sandbox && platform.sandboxResumable(step.sandbox.kind);
         if (!resumable) {
           orphaned = true;
@@ -6012,7 +6062,7 @@ function driveRunInner(
           save();
           if (freshGroup.every((s) => s.status !== "pending")) {
             // everything in this group was rejected
-            if (freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s))) {
+            if (runEndedByCheck(freshGroup) || freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s))) {
               run.status = "failed";
               break;
             }
@@ -6344,6 +6394,18 @@ function driveRunInner(
                 // and save() is what carries the flag in from the record.
                 {
                   save();
+                  // A sibling's check ended the run while this one waited
+                  // for its turn: it does not start. (One whose sandbox an
+                  // earlier driver left running has started: it is
+                  // re-attached to and finishes, never abandoned.)
+                  if (!run.stopRequested && !step.sandbox && runEndedByCheck(run.steps)) {
+                    step.status = "skipped";
+                    step.skipReason = "run ended by a check";
+                    step.events.push({ t: new Date().toISOString(), type: "info", text: "a step's verify: ended the run while this step waited to start — skipped" });
+                    save();
+                    gate.release(step);
+                    return;
+                  }
                   if (run.stopRequested) {
                     step.status = "skipped";
                     step.skipReason = "run stopped";
@@ -6367,6 +6429,11 @@ function driveRunInner(
             }),
         );
         async function launchStep(step: StepRecord) {
+              // A re-run copies the record it starts from, and with it a
+              // word an earlier run's check left: not this run's. (A step
+              // whose check spoke in THIS run is failed on resume, above,
+              // and never comes here.)
+              delete step.failRun;
               const attempts = (step.retry ?? 0) + 1;
               // A step re-attaching to its sandbox is still on the attempt
               // that started it; a step re-run after a backoff picks up the
@@ -6470,6 +6537,19 @@ function driveRunInner(
                   save();
                   break;
                 }
+                // The check said the run must end: no further attempt is
+                // made, of this step or of one running beside it.
+                if (outcome === "failed" && attempt < attempts && runEndedByCheck(run.steps)) {
+                  step.events.push({
+                    t: new Date().toISOString(),
+                    type: "info",
+                    text: step.failRun
+                      ? `not retried — its verify: ended the run (${attempts - attempt} left unused)`
+                      : `not retried — another step's verify: ended the run (${attempts - attempt} left unused)`,
+                  });
+                  save();
+                  break;
+                }
                 if (outcome !== "failed" || attempt === attempts) break;
                 // An outward step whose tools ran and whose check then failed
                 // is not retried: the check cannot say the send did not
@@ -6531,9 +6611,9 @@ function driveRunInner(
                 while (Date.now() < until) {
                   await sleep(Math.min(1000, until - Date.now()));
                   save();
-                  if (run.stopRequested) break;
+                  if (run.stopRequested || runEndedByCheck(run.steps)) break;
                 }
-                if (run.stopRequested) {
+                if (run.stopRequested || runEndedByCheck(run.steps)) {
                   step.status = "failed";
                   break;
                 }
@@ -6543,7 +6623,20 @@ function driveRunInner(
         // Steps sent back for want of room: the run waits in the queue — its
         // row keeps its place — and comes back to this group when it is
         // claimed again. Nothing after the group runs meanwhile.
-        if (opts.parkOnApproval && launching.some((s) => s.status === "pending" && s.roomWait)) {
+        // Not when a check ended the run: there is nothing to come back for.
+        // A step still waiting for room then never starts.
+        const endedByCheck = runEndedByCheck(run.steps);
+        if (endedByCheck) {
+          for (const s of launching) {
+            if (s.status !== "pending" || s.sandbox) continue;
+            s.status = "skipped";
+            s.skipReason = "run ended by a check";
+            s.roomWait = null;
+            s.events.push({ t: new Date().toISOString(), type: "info", text: "a step's verify: ended the run before this step started — skipped" });
+          }
+          save();
+        }
+        if (!endedByCheck && opts.parkOnApproval && launching.some((s) => s.status === "pending" && s.roomWait)) {
           await harvestQuietly(tenant, workspace, run);
           run.status = "queued";
           run.parkedAt = new Date().toISOString();
@@ -6573,6 +6666,23 @@ function driveRunInner(
         };
         const rescueStep = async (step: StepRecord): Promise<void> => {
           if (!step.onFail) return;
+          // The check said no attempt can mend this: a rescuer is one more.
+          // Nor is a step that failed beside it rescued: the run is over.
+          if (runEndedByCheck(run.steps)) {
+            // Its own rescue's word, left unsettled by a worker that went
+            // away: it is this step's now.
+            for (let j = run.steps.indexOf(step) + 1; !step.failRun && j < run.steps.length && isSplicedRecord(run.steps[j]); j++) {
+              const r = run.steps[j];
+              if (!r.subagentOf && r.agent === step.onFail && (r.rescueOf === undefined || r.rescueOf === step.agent) && r.status === "failed" && r.failRun) step.failRun = r.failRun;
+            }
+            step.events.push({
+              t: new Date().toISOString(),
+              type: "info",
+              text: `not handing to [[${step.onFail}]] (on-fail): ${step.failRun ? "its" : "another step's"} verify: ended the run`,
+            });
+            save();
+            return;
+          }
           const rescuerDir = isOneSegment(step.onFail) ? path.join(pDir, "agents", step.onFail) : null;
           if (!rescuerDir || !fs.existsSync(path.join(rescuerDir, "agent.md"))) {
             step.events.push({
@@ -6707,6 +6817,8 @@ function driveRunInner(
               type: "error",
               text: `on-fail: [[${step.onFail}]] also failed`,
             });
+            // The rescuer owes the step's verify:, and its word counts the same.
+            if (rescue.failRun) step.failRun = rescue.failRun;
           }
           save();
         };
@@ -6724,7 +6836,15 @@ function driveRunInner(
         // ("also failed"); counted here it would fail a group whose step a
         // later rescue completed.
         const requiredFailed = freshGroup.some((s) => s.status === "failed" && !s.optional && !s.carriedFrom && !isSplicedRecord(s));
-        if (requiredFailed) {
+        // This group's own: on a resume the driver walks the earlier groups
+        // first, and a later group's verdict is that group's to act on, once
+        // its steps that were still running have been re-attached to.
+        const ender = freshGroup.find((s) => !!s.failRun && s.status === "failed" && !isSplicedRecord(s));
+        if (requiredFailed || ender) {
+          if (ender) {
+            ender.events.push({ t: new Date().toISOString(), type: "error", text: `the run ends here: ${ender.failRun}` });
+            save();
+          }
           run.status = "failed";
           break;
         }
@@ -6839,7 +6959,7 @@ function driveRunInner(
               save();
             }
           }
-          if ((looper.status as string) === "failed" && !looper.optional) {
+          if ((looper.status as string) === "failed" && (!looper.optional || !!runEndedByCheck(run.steps))) {
             run.status = "failed";
             break;
           }

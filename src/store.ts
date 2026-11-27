@@ -3614,6 +3614,11 @@ export interface StepRecord {
    *  executor's own word, never read back from an error's text. What a
    *  delegated job's next ask is sized from (FOL-438). */
   roomEndedAt?: "small" | "large" | "heavy";
+  /** Its shell `verify:` said no further attempt can mend this, and why: it
+   *  wrote the reason to $FOLDRUN_FAIL_RUN_FILE and exited non-zero
+   *  (FOL-450). The run ends failed: the step is not retried, not handed to
+   *  `on-fail:`, and being optional does not let the run go on. */
+  failRun?: string;
   /** The id of the attempt in hand, or of the last one: what its scripts,
    *  shell and `verify:` read as FOLDRUN_STEP_ATTEMPT_ID (FOL-449). New each
    *  time the step's work starts over; kept when a drive re-attaches. */

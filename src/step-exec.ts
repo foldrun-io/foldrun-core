@@ -12,6 +12,7 @@ import { opsError } from "./ops-log.ts";
 import { judgeVerdict, JUDGE_VERDICT_INSTRUCTION } from "./judge-verdict.ts";
 import { runHook, runToolCallHooks, matchesTool, hookLine, resolveHooks, type HookDef, type HookRecord } from "./hooks.ts";
 import fs from "node:fs";
+import { openPlain } from "./safe-open.ts";
 import os from "node:os";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -52,6 +53,9 @@ export function usageFromSdk(u: Record<string, number | undefined>): ExecUsage {
 
 export interface ExecOutcome {
   status: "completed" | "failed";
+  /** The step's shell `verify:` said the whole run must end, and why
+   *  (VerifyVerdict.failRun). Only ever beside `failed`. */
+  failRun?: string;
   result: string | null;
   /** The LAST text block, which is the model's answer. `result` is every
    *  block joined, and the first of those is usually narration before a tool
@@ -388,6 +392,8 @@ export async function executeStep(
 async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<ExecOutcome> {
   const { agentDir, workspaceRoot, libraryRoot, emit } = opts;
   let status: "running" | "completed" | "failed" = "running";
+  /** A shell verify:'s word that the run must end (FOL-450). */
+  let failRun: string | undefined;
   let costUsd: number | null = null;
   let usage: ExecOutcome["usage"] = null;
   let stopReason: string | null = null;
@@ -1164,6 +1170,10 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
       emit(verdict.ok ? "info" : "error", `verify \`${opts.verify}\` → ${verdict.headline}`, verdict.ok ? undefined : CHECK);
       if (verdict.detail.trim()) emit(verdict.ok ? "info" : "error", verdict.detail.slice(0, 1000), verdict.ok ? undefined : CHECK);
       if (!verdict.ok) status = "failed";
+      if (!verdict.ok && verdict.failRun) {
+        failRun = verdict.failRun;
+        emit("error", `verify ends the run: ${failRun.slice(0, 300)}`, CHECK);
+      }
     }
   }
 
@@ -1173,6 +1183,7 @@ async function executeStepInner(opts: ExecOptions, runQuery: QueryFn): Promise<E
     stopReason,
     turns: numTurns ?? turns.size,
     ...(pod ? { browserPod: podState } : {}),
+    ...(failRun ? { failRun } : {}),
   };
 }
 
@@ -1228,6 +1239,33 @@ export interface VerifyVerdict {
   /** One line for the trace: "exit 0", "found", "PASS"… */
   headline: string;
   detail: string;
+  /** The shell check said no further attempt can mend this: it wrote a
+   *  reason to the file named in FOLDRUN_FAIL_RUN_FILE and exited non-zero
+   *  (FOL-450). The run ends failed: no retry, no rescue. */
+  failRun?: string;
+}
+
+/** The name a shell `verify:` reads for where to write the reason the whole
+ *  run must end (FOL-450). */
+export const FAIL_RUN_FILE_ENV = "FOLDRUN_FAIL_RUN_FILE";
+/** The reason a shell check left, as one line; null when it left none. */
+function failRunReason(file: string): string | null {
+  let fd: number | null = null;
+  try {
+    // A regular file of our own making only (openPlain: never through a
+    // link, never waiting on a pipe put in its place), and no more of it
+    // than a reason needs, whatever its size.
+    fd = openPlain(file).fd;
+    const buf = Buffer.alloc(4096);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const line = buf.subarray(0, n).toString("utf8").split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+    // Longer than the record keeps: the runner masks it first, then cuts it.
+    return line ? line.slice(0, 1000) : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
 }
 
 /**
@@ -1273,10 +1311,24 @@ export async function checkVerify(
     const replyFile = path.join(dir, "reply.md");
     fs.writeFileSync(replyFile, ctx.conclusion ?? ctx.result ?? "");
     try {
-      const { code, out } = await runVerify(agentDir, verify, { ...ctx.env, FOLDRUN_REPLY_FILE: replyFile }, ctx.data, ctx.signal);
-      return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out };
+      // Where the check says "end the run": a path made for this check, in a
+      // folder that did not exist while the step worked, so nothing the step
+      // left can be there. Only read when the check itself failed: a check
+      // that passes ends nothing.
+      const failRunFile = path.join(dir, "fail-run");
+      const { code, out } = await runVerify(agentDir, verify, { ...ctx.env, FOLDRUN_REPLY_FILE: replyFile, [FAIL_RUN_FILE_ENV]: failRunFile }, ctx.data, ctx.signal);
+      // A real non-zero exit only: a check killed by a signal, or cut off by
+      // the step's clock or a stop, did not finish saying anything.
+      const failRun = typeof code === "number" && code !== 0 && !ctx.signal?.aborted ? failRunReason(failRunFile) : null;
+      return { ok: code === 0, headline: `exit ${code ?? "error"}`, detail: out, ...(failRun ? { failRun } : {}) };
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      // Best effort: a folder the check left unremovable must not replace
+      // its verdict with an error.
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // swept with the temp folder
+      }
     }
   }
   const [, kind, rawValue] = m;
