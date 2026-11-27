@@ -58,6 +58,7 @@ export interface McpConnection {
 
 import { LAUNCHER, killTree, treePids } from "./local-sandbox.ts";
 import type { SandboxWalls } from "./engine-common.ts";
+import { mcpClientOf } from "./engine-common.ts";
 
 /** A program and its arguments as one shell line, each word quoted. */
 export function shellLine(command: string, args: string[]): string {
@@ -175,7 +176,7 @@ function wallsFetch(sandbox: object): typeof fetch | undefined {
   return typeof f === "function" ? (f as typeof fetch) : undefined;
 }
 
-export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null }): Promise<McpConnection> {
+export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: Record<string, string | undefined>; toolEnv: Record<string, string | undefined>; cwd: string; signal: AbortSignal; killOnClose?: boolean; maxTools?: number; sandbox?: Pick<SandboxWalls, "launch" | "fresh" | "onChange"> | null; client?: { name: string; version: string; title?: string } }): Promise<McpConnection> {
   const open: { client: Client; transport: Transport; server?: Transport }[] = [];
   const close = async () => {
     await Promise.all(open.map(async (o) => {
@@ -222,7 +223,8 @@ export async function connectMcp(servers: Record<string, McpSpec>, ctx: { env: R
       }
       const remoteInWalls = ctx.sandbox && (s.type === "http" || s.type === "sse") ? wallsFetch(ctx.sandbox) : undefined;
       const t = wrapped ? transportFor(s, wrapped.env, ctx.cwd, wrapped.line) : transportFor(s, ctx.toolEnv, ctx.cwd, undefined, remoteInWalls);
-      const client = new Client({ name: "foldrun-engine", version: "1.0.0" });
+      // The caller's name, checked here too: connectMcp is exported (FOL-415, Codex).
+      const client = new Client(mcpClientOf(ctx.client).mcpClient ?? { name: "foldrun-engine", version: "1.0.0" });
       open.push({ client, transport: t.client, server: t.server });
       const sandboxToken = wrapped?.token;
       // Any launch that finds the protections changed stops this server at

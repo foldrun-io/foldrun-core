@@ -390,6 +390,13 @@ test("x-should-retry is believed (23 Nov 2026): false stops at the first answer,
   const custom = await run([{ content: [say("hi")] }], { userAgent: "foldrun-cli/9.9.9" }, { ANTHROPIC_CUSTOM_HEADERS: "User-Agent: claude-cli/2.0.0\nx-team: blue" });
   assert.equal(custom.requests[0].headers["user-agent"], "foldrun-cli/9.9.9", "a custom header does not replace the caller's name");
   assert.equal(custom.requests[0].headers["x-team"], "blue", "other custom headers still go");
+  // A product and its comment, with spaces, as a User-Agent is written (FOL-415).
+  const spaced = await run([{ content: [say("hi")] }], { userAgent: "foldrun-cli/9.9.9 (koder from foldrun.io; +https://foldrun.io)" });
+  assert.equal(spaced.requests[0].headers["user-agent"], "foldrun-cli/9.9.9 (koder from foldrun.io; +https://foldrun.io)");
+  const broken = await run([{ content: [say("hi")] }], { userAgent: "koder/1\r\nx-evil: 1" });
+  assert.equal(broken.requests[0].headers["user-agent"], "foldrun-engine", "no control characters");
+  const inside = await run([{ content: [say("hi")] }], { userAgent: "koder/1 (Claude Code from Anthropic)" });
+  assert.equal(inside.requests[0].headers["user-agent"], "foldrun-engine", "no other product's name anywhere in it");
 });
 
 both("an overloaded endpoint is retried; a refused request is not", async ({ engine, step, loop }) => {
@@ -1077,13 +1084,29 @@ test("MCP round three: no server starts for a stopped step; a long timeout is he
   await assert.rejects(connectMcp({ kit: counted }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: AbortSignal.abort() }), /connect: stopped/);
   assert.equal(connects, 0);
 
-  const c = await connectMcp({ kit: { type: "sdk", instance: echoServer().instance } }, { env: { MCP_TOOL_TIMEOUT: "2592000000" }, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal });
+  // The caller's name to the server (clientInfo, FOL-415); else foldrun-engine.
+  const named = echoServer();
+  const c = await connectMcp({ kit: { type: "sdk", instance: named.instance } }, { env: { MCP_TOOL_TIMEOUT: "2592000000" }, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal, client: { name: "koder", version: "9.9.9", title: "koder from foldrun.io" } });
   try {
+    assert.deepEqual((named.instance as unknown as { server: { getClientVersion(): unknown } }).server.getClientVersion(), { name: "koder", version: "9.9.9", title: "koder from foldrun.io" });
     const echo = c.tools.find((t) => t.name === "mcp__kit__echo")!;
     const out = await echo.run({ words: "x" }, { signal: new AbortController().signal } as never);
     assert.equal(out.text, "echo: x");
   } finally {
     await c.close();
+  }
+
+  const { mcpClientOf } = await import("../src/engine-common.ts");
+  assert.deepEqual(mcpClientOf({ name: "koder", version: "1.2.3", title: "koder from foldrun.io" }), { mcpClient: { name: "koder", version: "1.2.3", title: "koder from foldrun.io" } });
+  assert.deepEqual(mcpClientOf({ name: "claude-code", version: "1" }), {}, "never another product's name");
+  assert.deepEqual(mcpClientOf({ name: "koder", version: "1", title: "Anthropic" }), { mcpClient: { name: "koder", version: "1" } });
+  assert.deepEqual(mcpClientOf({ name: "a\nb", version: "1" }), {});
+  const posing = echoServer();
+  const p = await connectMcp({ kit: { type: "sdk", instance: posing.instance } }, { env: {}, toolEnv: {}, cwd: "/tmp", signal: new AbortController().signal, client: { name: "claude-code", version: "2.0.0" } });
+  try {
+    assert.equal((posing.instance as unknown as { server: { getClientVersion(): { name: string } } }).server.getClientVersion().name, "foldrun-engine", "connectMcp checks the name itself");
+  } finally {
+    await p.close();
   }
 
   const lead = outcomeOf({ content: [{ type: "text", text: "" }, { type: "text", text: "a".repeat(100_000) }] });
