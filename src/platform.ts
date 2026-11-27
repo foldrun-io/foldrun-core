@@ -332,7 +332,7 @@ const local: PlatformHooks = {
     return v.match ? { admit: true } : { admit: false, reason: "filtered", detail: `filter: ${v.reason} — no run started` };
   },
   async rollbackTrigger() {},
-  runSpend: (run) => run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0),
+  runSpend: (run) => run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0) + (s.sideCostUsd ?? 0), 0),
   isolation: {},
   killRunSandboxes() {},
   syncPublicShares: async () => ({ added: [] }),

@@ -130,6 +130,8 @@ export interface ContainerStepInput {
   text?: boolean;
   /** tools: [symbols] (FOL-297): definitions and references by a language server, run in this container. */
   symbols?: boolean;
+  /** tools: [debate, review] (FOL-444): rebuilt in here over the lease's /second door (second-tool.ts). */
+  second?: { tools: ("debate" | "review")[]; model: string };
   /** A Chat-Completions provider: the driver starts the runtime's translator
    *  on loopback and points the SDK at it. Null or absent: the env's
    *  ANTHROPIC_BASE_URL is spoken to directly. */
@@ -223,6 +225,8 @@ export interface ContainerStepOutcome {
   /** Every turn priced at its own model, when sub-agents ran on others —
    *  see ExecOutcome.turnsCostUsd. */
   turnsCostUsd?: number;
+  /** The second model's calls (tools: [debate, review]), apart from costUsd: see ExecOutcome.sideCostUsd. */
+  sideCostUsd?: number;
   /** What the sandbox actually touched — see the driver's readActuals. */
   res?: StepActuals | null;
   /** Set by the isolated executors only — an in-process step rents no
@@ -944,6 +948,8 @@ function readActuals() {
   };
 }
 
+// The second model's spend, kept outside the try: a failed step reports it too.
+const sideSpend = { usd: 0 };
 try {
   // Runtime state (venvs, npm prefixes) lands in the agent user's real home
   // — writable, inside the container, gone with it.
@@ -957,6 +963,7 @@ try {
   const { httpChannel, buildAskTool, buildPeerTools, inboxReader } = await import("@foldrun/core/operator");
   const { buildDelegateTools } = await import("@foldrun/core/delegate-tools");
   const { buildTextTools } = await import("@foldrun/core/text-tool");
+  const { buildSecondTools, SECOND_SERVER } = await import("@foldrun/core/second-tool");
   const { buildSymbolsTools } = await import("@foldrun/core/symbols-tool");
   const { startTranslator } = await import("@foldrun/core/translator");
   const { prepareRuntime } = await import("@foldrun/core/runtime");
@@ -1078,6 +1085,10 @@ try {
   // the same proxy; the lease was granted the door only for this tool.
   const textTool = input.text ? buildTextTools({ egress: env.FOLDRUN_EGRESS || null, agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", emit }) : { server: null };
   // tools: [symbols] — the container is the boundary its language servers run in; they end with it.
+  // tools: [debate, review] — a second opinion through the same proxy; the lease was granted the door for these alone.
+  const second = input.second?.tools?.length
+    ? buildSecondTools({ egress: env.FOLDRUN_EGRESS || null, tools: input.second.tools, model: input.second.model, agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", spend: sideSpend, emit })
+    : { server: null };
   const symbolsTool = input.symbols ? buildSymbolsTools({ agentDir, workspaceRoot: "/workspace", libraryRoot: "/library", env, emit }) : { server: null };
   // sandbox: own sub-agents: a tool each, whose job runs in its own sandbox
   // on the worker, reached over the same proxy door.
@@ -1140,6 +1151,8 @@ try {
       ...(delegate.server ? { foldrun_delegate: delegate.server } : {}),
       ...(install.server ? { foldrun_install: install.server } : {}),
       ...input.mcpServers,
+      // After the author's: the built-in is never replaced by a server of its name (Codex).
+      ...(second.server ? { [SECOND_SERVER]: second.server } : {}),
     },
     ...(inbox ? { inbox } : {}),
     ...(input.subagents?.length ? { subagents: input.subagents } : {}),
@@ -1147,6 +1160,7 @@ try {
     timeoutSec: input.timeoutSec,
     budgetUsd: input.budgetUsd,
     budgetNote: input.budgetNote,
+    ...(second.server ? { sideSpend } : {}),
     price: input.price,
     verify: input.verify,
     verifyEnv: toolEnv,
@@ -1187,7 +1201,7 @@ try {
   // exactly the ones whose resource story gets read.
   let res = null;
   try { res = readActuals(); } catch { /* the reading must never mask the error */ }
-  finishWith({ e: "done", status: "failed", result: null, costUsd: null, res });
+  finishWith({ e: "done", status: "failed", result: null, costUsd: null, ...(sideSpend.usd > 0 ? { sideCostUsd: sideSpend.usd } : {}), res });
 }
 `;
 
@@ -1827,6 +1841,7 @@ export function parseDriverLine(
         ...("data" in parsed ? { data: parsed.data } : {}),
         costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : null,
         ...(typeof parsed.turnsCostUsd === "number" ? { turnsCostUsd: parsed.turnsCostUsd } : {}),
+        ...(typeof parsed.sideCostUsd === "number" && parsed.sideCostUsd > 0 ? { sideCostUsd: parsed.sideCostUsd } : {}),
         ...(typeof parsed.turns === "number" && parsed.turns >= 0 ? { turns: parsed.turns } : {}),
         ...(typeof parsed.stopReason === "string" ? { stopReason: parsed.stopReason.slice(0, 64) } : {}),
         ...(parseBrowserPod(parsed.browserPod) ? { browserPod: parseBrowserPod(parsed.browserPod)! } : {}),

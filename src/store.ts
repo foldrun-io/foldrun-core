@@ -3741,6 +3741,9 @@ export interface StepRecord {
    *  which is why every reader falls back to `result`. */
   conclusion?: string | null;
   costUsd: number | null;
+  /** What the second model's calls cost (tools: [debate, review], FOL-444). Metered where they were made, so
+   *  never billed from here; counted against budgets beside costUsd. */
+  sideCostUsd?: number;
   /** Set on steps copied into a re-run from an earlier run: the run they
    *  actually executed in. Carried steps provide context and are never
    *  billed again — the original run's ledger line already paid for them. */

@@ -668,19 +668,31 @@ test("the metered operator marker: read as the operator's, metered; the plain on
 
 const SECOND = "tools: [read, debate, review]\nsecond_model: openai/gpt-x\n";
 
-test("tools: [debate, review] in a cloud step (FOL-418): not offered yet, said, and no grant on the lease (FOL-444)", async () => {
+test("tools: [debate, review] in a cloud step (FOL-444): the lease is granted the second door for those tools and that model only", async () => {
   await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: SECOND }, async (c) => {
     const done = await run();
     assert.equal(done.status, "completed", events(done.steps[0]));
+    assert.deepEqual(c.leases[0]!.secondModel, { tools: ["debate", "review"], model: "openai/gpt-x", firstProvider: "anthropic", maxUsd: null, uses: {} });
+    assert.doesNotMatch(events(done.steps[0]), /FOL-444|not offered/);
+  });
+  // Plan mode is read-only: no lease, no server, for tools it cannot call.
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, review]\nsecond_model: openai/gpt-x\npermissionMode: plan\n" }, async (c) => {
+    await run();
     assert.equal(c.leases[0]!.secondModel, undefined);
-    assert.match(events(done.steps[0]), /tools: \[debate, review\] \(a second opinion from openai\/gpt-x\) work in foldrun code on your computer; a cloud step does not offer them yet \(FOL-444\)/);
   });
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async () => {
+  // The step's own provider, for the model actually sent: the account's supply here, so anthropic/ is the same one.
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, review]\nsecond_model: anthropic/claude-y\n" }, async (c) => {
     const done = await run();
-    assert.match(events(done.steps[0]), /tools: \[debate\] \(a second opinion/);
+    assert.equal(c.leases[0]!.secondModel, undefined);
+    assert.match(events(done.steps[0]), /second_model: anthropic\/claude-y is the provider this step's model .* is on — tools: \[review\] not offered/);
   });
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, debate]\n" }, async () => {
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async (c) => {
+    await run();
+    assert.deepEqual(c.leases[0]!.secondModel?.tools, ["debate"]);
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, debate]\n" }, async (c) => {
     const done = await run();
     assert.match(events(done.steps[0]), /needs second_model:/);
+    assert.equal(c.leases[0]!.secondModel, undefined, "no grant without second_model:");
   });
 });
