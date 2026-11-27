@@ -64,6 +64,16 @@ export type SecondModelTool = keyof typeof SECOND_MODEL_TOOLS;
 /** `second_model:` is written provider/model, as the gateway takes it. */
 export const SECOND_MODEL_RE = /^[a-z0-9-]{2,32}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
+/** The built-in names a tools:/disallowedTools: value grants or takes away, read as the runtime reads it: a list, one
+ *  name, Claude Code's comma string or the `{Bash: ask}` map form; a `[[link]]` (the author's own tool) is not one. */
+export function builtinToolNames(raw: unknown): string[] {
+  return refList(raw).filter((r) => !r.linked).map((r) => r.name);
+}
+/** The `[[link]]` entries of such a value: the author's own tools, by name. */
+export function linkedToolNames(raw: unknown): string[] {
+  return refList(raw).filter((r) => r.linked).map((r) => r.name);
+}
+
 /** What `foldrun check` says about tools: [debate, review] and second_model: (warnings: a new rule). */
 export function secondModelProblems(front: { tools?: unknown; second_model?: unknown; model?: unknown }): string[] {
   const tools = toolRefs(front).filter((r) => !r.linked && (r.name === "debate" || r.name === "review")).map((r) => r.name);

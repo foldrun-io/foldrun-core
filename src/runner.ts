@@ -2006,12 +2006,10 @@ export function agentContext(
     parts.add("text", `# Files as text\n\n${textPromptLine()}`);
   }
   // tools: [symbols] (FOL-297) — a language server in the step's own boundary; the server is the step's.
-  // tools: [debate, review] (FOL-418): server tools on foldrun's gateway,
-  // answered by `second_model:` — a model of another provider. Offered only
-  // where the step's calls go through foldrun's door (the gateway runs
-  // them); the lease carries the grant, and the gateway refuses any other
-  // tool or model asked through it. Anywhere else: said, and none offered.
-  let secondModel: { tools: SecondModelTool[]; model: string } | null = null;
+  // tools: [debate, review] (FOL-418): a second opinion from another
+  // provider's model, served by foldrun's gateway to `foldrun code` on a
+  // laptop. A cloud step runs on the Agent SDK, which cannot declare
+  // foldrun's server tools: not offered here until FOL-444, and said.
   {
     const deniedSecond = new Set(refNames(front.disallowedTools));
     const tools = [...new Set(wantSecond)].filter((t) => !deniedSecond.has(t) && !deniedSecond.has(SECOND_MODEL_TOOLS[t].name));
@@ -2019,9 +2017,7 @@ export function agentContext(
     if (tools.length) {
       if (!want) providerWarnings.push(`tools: [${tools.join(", ")}] needs second_model: (provider/model of another provider) — not offered`);
       else if (!SECOND_MODEL_RE.test(want)) providerWarnings.push(`second_model: "${want}" is written provider/model — tools: [${tools.join(", ")}] not offered`);
-      else if (supply.kind !== "foldrun" || !supply.door) providerWarnings.push(`tools: [${tools.join(", ")}] run on foldrun's models only (its gateway calls the second model) — this step's model is not on them, so they are not offered`);
-      else if (want.split("/")[0] === supply.provider) providerWarnings.push(`second_model: ${want} is this step's own provider (${supply.provider}) — a second opinion comes from another; tools: [${tools.join(", ")}] not offered`);
-      else secondModel = { tools, model: want };
+      else providerWarnings.push(`tools: [${tools.join(", ")}] (a second opinion from ${want}) work in foldrun code on your computer; a cloud step does not offer them yet (FOL-444)`);
     }
   }
   const symbolsTool = wantSymbols;
@@ -2106,7 +2102,6 @@ export function agentContext(
     peers,
     textTool,
     symbolsTool,
-    secondModel,
     // `spec` is the MERGED declaration — the agent's own block or its
     // workspace's, plus every granted tool's. The isolated path builds its
     // runtime from this; passing the agent's frontmatter alone silently drops
@@ -2651,7 +2646,6 @@ async function runStepBody(
       peers,
       textTool,
       symbolsTool,
-      secondModel,
       translator, fallbackTranslator,
       outward,
       supply,
@@ -3402,8 +3396,6 @@ async function runStepBody(
         ...(delegates.length ? { delegates: delegates.map((d) => d.name) } : {}),
         // tools: [text] — the only leases the proxy serves the /text door on.
         ...(textTool ? { text: true } : {}),
-        // tools: [debate, review] — the only tools and the one model the gateway serves through this lease.
-        ...(secondModel ? { secondModel } : {}),
       });
       // foldrun's models need the proxy: it holds the platform's key and
       // meters each call. No lease (no FOLDRUN_EGRESS_URL) — refused, and

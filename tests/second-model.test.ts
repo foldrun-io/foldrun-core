@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { serverToolsOf } from "../src/engine-common.ts";
-import { secondModelProblems, isRuntimeTool, isOwnToolRef, toolRefs } from "../src/tool-names.ts";
+import { secondModelProblems, isRuntimeTool, isOwnToolRef, toolRefs, builtinToolNames, linkedToolNames } from "../src/tool-names.ts";
 import { deployWarnings } from "../src/deploy.ts";
 
 test("serverToolsOf: debate and review go only with a model, rebuilt from their known fields; the web tools as before", () => {
@@ -39,4 +39,12 @@ test("foldrun check: second_model and the two tools, as warnings", () => {
   assert.deepEqual(secondModelProblems({ tools: ["[[review]]"] }), [], "the author's own review tool asks for nothing");
   const w = deployWarnings([{ path: "agents/a/agent.md", content: "---\nname: a\ntools: [debate]\n---\n\nHi.\n" }]);
   assert.ok(w.some((x) => x.where === "agents/a/agent.md" && /needs second_model:/.test(x.message)), JSON.stringify(w));
+});
+
+test("builtinToolNames / linkedToolNames read a tools: value as the runtime does", () => {
+  assert.deepEqual(builtinToolNames(["read", [["review"]], { Bash: "ask" }]), ["read", "Bash"]);
+  assert.deepEqual(linkedToolNames(["read", [["review"]], "review"]), ["review"]);
+  assert.deepEqual(builtinToolNames("Bash, review"), ["Bash", "review"]);
+  assert.deepEqual(builtinToolNames("review"), ["review"]);
+  assert.deepEqual(builtinToolNames(undefined), []);
 });

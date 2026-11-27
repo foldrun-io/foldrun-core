@@ -668,42 +668,19 @@ test("the metered operator marker: read as the operator's, metered; the plain on
 
 const SECOND = "tools: [read, debate, review]\nsecond_model: openai/gpt-x\n";
 
-test("tools: [debate, review] on foldrun's door: the lease carries the grant (the gateway adds the tools from it); the step's own request declares none", async () => {
+test("tools: [debate, review] in a cloud step (FOL-418): not offered yet, said, and no grant on the lease (FOL-444)", async () => {
   await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: SECOND }, async (c) => {
     const done = await run();
     assert.equal(done.status, "completed", events(done.steps[0]));
-    assert.deepEqual(c.leases[0]!.secondModel, { tools: ["debate", "review"], model: "openai/gpt-x" });
-    assert.equal((c.calls[0]!.input as { serverTools?: unknown }).serverTools, undefined);
-  });
-});
-
-test("tools: [debate, review]: disallowedTools takes one away; no second_model or not on foldrun's models offers none and says why", async () => {
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async (c) => {
-    await run();
-    assert.deepEqual(c.leases[0]!.secondModel, { tools: ["debate"], model: "openai/gpt-x" });
-  });
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, debate]\n" }, async (c) => {
-    const done = await run();
     assert.equal(c.leases[0]!.secondModel, undefined);
+    assert.match(events(done.steps[0]), /tools: \[debate, review\] \(a second opinion from openai\/gpt-x\) work in foldrun code on your computer; a cloud step does not offer them yet \(FOL-444\)/);
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: `${SECOND}disallowedTools: [review]\n` }, async () => {
+    const done = await run();
+    assert.match(events(done.steps[0]), /tools: \[debate\] \(a second opinion/);
+  });
+  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, debate]\n" }, async () => {
+    const done = await run();
     assert.match(events(done.steps[0]), /needs second_model:/);
-  });
-  // foldrun's models but not through its door (a proxy that does not know it): the provider's own endpoint, no gateway to run them.
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, noDoor: true, agentProvider: SECOND }, async (c) => {
-    const done = await run();
-    assert.equal(c.leases[0]?.secondModel, undefined);
-    assert.match(events(done.steps[0]), /run on foldrun's models only/);
-  });
-  // second_model: of the step's own provider: none offered, said.
-  await withAccount({ supply: { kind: "foldrun", provider: "anthropic", tiers: {} }, agentProvider: "tools: [read, review]\nsecond_model: anthropic/claude-y\n" }, async (c) => {
-    const done = await run();
-    assert.equal(c.leases[0]!.secondModel, undefined);
-    assert.match(events(done.steps[0]), /this step's own provider \(anthropic\)/);
-  });
-  await withAccount({ supply: { kind: "none" }, ownKeys: true, agentProvider: SECOND }, async (c) => {
-    setSecret("acme", ACCOUNT_MODEL_SECRETS.provider, "anthropic");
-    setSecret("acme", ACCOUNT_MODEL_SECRETS.key, "sk-ant-api03-the-customers-own-key-111111");
-    const done = await run();
-    assert.equal(c.leases[0]?.secondModel, undefined);
-    assert.match(events(done.steps[0]), /run on foldrun's models only/);
   });
 });
