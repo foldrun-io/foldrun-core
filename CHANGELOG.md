@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.1.1] — 2026-11-28
+
+- ci(security): ask the registry again on any answer that is not a verdict ([5a59bb3](https://github.com/foldrun-io/foldrun-core/commit/5a59bb3))
+
 ## [32.1.0] — 2026-11-27
 
 ### Widened in the public API
