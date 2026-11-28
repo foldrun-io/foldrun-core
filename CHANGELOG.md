@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.1.5] — 2026-11-28
+
+- fix(ci): a wrong attestations answer at registry.npmjs.org is checked through registry.npmjs.com ([bacb79d](https://github.com/foldrun-io/foldrun-core/commit/bacb79d))
+
 ## [32.1.4] — 2026-11-28
 
 - fix(ci): the signature check keeps no shared cache, and says what a wrong registry answer is ([9ed7bf9](https://github.com/foldrun-io/foldrun-core/commit/9ed7bf9))
