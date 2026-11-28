@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.1.3] — 2026-11-28
+
+- fix(ci): the pinned npm in a folder of the run's own, its bytes pinned ([5291d71](https://github.com/foldrun-io/foldrun-core/commit/5291d71))
+
 ## [32.1.2] — 2026-11-28
 
 - fix(ci): verify registry signatures with a pinned npm that has the missing-key fix ([99ff622](https://github.com/foldrun-io/foldrun-core/commit/99ff622))
