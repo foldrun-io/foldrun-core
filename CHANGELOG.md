@@ -13,6 +13,10 @@ description of a change anyone is going to write, so they are the source.
 
 <!-- releases -->
 
+## [32.1.4] — 2026-11-28
+
+- fix(ci): the signature check keeps no shared cache, and says what a wrong registry answer is ([9ed7bf9](https://github.com/foldrun-io/foldrun-core/commit/9ed7bf9))
+
 ## [32.1.3] — 2026-11-28
 
 - fix(ci): the pinned npm in a folder of the run's own, its bytes pinned ([5291d71](https://github.com/foldrun-io/foldrun-core/commit/5291d71))
